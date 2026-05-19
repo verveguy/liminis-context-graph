@@ -4,7 +4,7 @@ use crate::{db::Conn, error::Error};
 ///
 /// `embedding_dim` controls the `FLOAT[N]` column width — use `768` for bge-base-en-v1.5
 /// or override for other models (AD-5).
-pub fn init(conn: &Conn, embedding_dim: usize) -> Result<(), Error> {
+pub fn init(conn: &Conn<'_>, embedding_dim: usize) -> Result<(), Error> {
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
