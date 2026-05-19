@@ -82,12 +82,12 @@ The LadybugDB Rust crate version is pinned in `Cargo.toml` and a passing integra
 
 ### In scope
 
-- `Cargo.toml` workspace root declaring two members: `crates/liminis-graph-core` (lib) and `crates/liminis-graph` (bin).
-- `crates/liminis-graph` depends on `crates/liminis-graph-core`; `crates/liminis-graph-core` depends on no Liminis-internal code.
+- `Cargo.toml` workspace root declaring two members: `liminis-graph-core` (lib) and `liminis-graph` (bin).
+- `liminis-graph` depends on `liminis-graph-core`; `liminis-graph-core` depends on no Liminis-internal code.
 - LadybugDB Rust crate pinned to a specific version (Research stage determines which crate and version).
-- `examples/basic_ingest.rs` — fewer than 50 lines, no external services required, ingests three hardcoded sample documents and runs a search.
+- `liminis-graph-core/examples/basic_ingest/main.rs` — fewer than 50 lines, no external services required, ingests three hardcoded sample documents and runs a search. Run with `cargo run --example basic_ingest -p liminis-graph-core`.
 - GitHub Actions workflow: `build-test` job (cargo build + test + clippy + fmt, Linux + macOS matrix) and `bench` job (stub, runs `cargo bench --no-run` so it can be extended later).
-- `benches/` directory with a placeholder bench file (e.g., `benches/placeholder.rs`) that compiles but contains no real benches.
+- `liminis-graph-core/benches/` directory with a placeholder bench file that compiles but contains no real benches.
 - `docs/adr/0001-record-architecture-decisions.md` — the meta-ADR explaining the ADR practice.
 - `.github/` — issue templates (bug, feature) and a pull request template that references the constitution and asks for principle compliance.
 - Constitution gates validated: Principle II (library API is the source of truth), Principle III (LadybugDB pinned, no abstraction), Principle V (zero ML-runtime deps).
@@ -107,8 +107,8 @@ The LadybugDB Rust crate version is pinned in `Cargo.toml` and a passing integra
 
 - **FR-001**: Workspace MUST contain at least a `liminis-graph-core` library crate and a `liminis-graph` binary crate; binary depends on library; library has no Liminis-internal dependencies.
 - **FR-002**: LadybugDB Rust crate version MUST be pinned (exact version) in the workspace `Cargo.toml`.
-- **FR-003**: A passing integration test MUST demonstrate: open a LadybugDB file, create Entity and Episodic nodes each with a vector property, run a Cypher read-back query, and verify HNSW + full-text index creation and query round-trip.
-- **FR-004**: `examples/basic_ingest.rs` MUST compile and run successfully, ingesting three documents and returning search results, in under 50 lines, requiring no setup beyond the documented quickstart.
+- **FR-003**: A passing integration test MUST demonstrate: open a LadybugDB file, create Entity and Episodic nodes each with a vector property, run a Cypher read-back query, and verify HNSW vector index creation and query round-trip. (FTS extension is loaded per connection; FTS index creation is out of scope for this spike.)
+- **FR-004**: `liminis-graph-core/examples/basic_ingest/main.rs` MUST compile and run successfully, ingesting three documents and returning search results, in under 50 lines, requiring no setup beyond the documented quickstart.
 - **FR-005**: GitHub Actions CI MUST run `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check` on both Linux and macOS runners.
 - **FR-006**: A bench CI job MUST exist and pass (stub acceptable; must compile `benches/`).
 - **FR-007**: `benches/` directory MUST exist with at least one placeholder bench file that compiles.

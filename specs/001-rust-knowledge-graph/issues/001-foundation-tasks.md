@@ -16,7 +16,7 @@
 - [ ] T001 Create workspace `Cargo.toml` with `[workspace]` members `["liminis-graph-core", "liminis-graph"]` and `[workspace.dependencies]` for `lbug = "=0.16.1"`, `tempfile`, `thiserror`
 - [ ] T002 [P] Create `liminis-graph-core/Cargo.toml` (lib crate, workspace dep `lbug`) and `liminis-graph-core/src/lib.rs` (empty pub mod stubs)
 - [ ] T003 [P] Create `liminis-graph/Cargo.toml` (bin crate, depends on `liminis-graph-core`) and `liminis-graph/src/main.rs` (prints `"liminis-graph starting"` stub)
-- [ ] T004 [P] Create `benches/placeholder.rs` with a single commented-out bench stub and a workspace `Cargo.toml` bench entry
+- [ ] T004 [P] Create `liminis-graph-core/benches/placeholder.rs` with a bench stub and a `[[bench]]` entry in `liminis-graph-core/Cargo.toml`
 - [ ] T005 [P] Create `docs/adr/0001-record-architecture-decisions.md` — meta-ADR explaining why ADRs are used in this project
 - [ ] T006 [P] Create `.github/ISSUE_TEMPLATE/bug_report.md`, `.github/ISSUE_TEMPLATE/feature_request.md`, and `.github/PULL_REQUEST_TEMPLATE.md` referencing the constitution at `.specify/memory/constitution.md`
 
