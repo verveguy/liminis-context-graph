@@ -91,6 +91,9 @@ impl Extractor {
 
     fn emit_token_usage(&self, resp: &Value) {
         let usage = &resp["usage"];
+        if !usage.is_object() {
+            return; // Absent on error responses — don't emit zero-count event
+        }
         let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
         let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
         let cache_read_tokens = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
