@@ -364,8 +364,7 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "CALL db.index.fulltext.queryNodes('entity_name_fts', '{}') \
-             YIELD node, score \
+            "CALL QUERY_FTS_INDEX('Entity', 'entity_name_fts', '{}') \
              WITH node, score WHERE node.group_id IN {gid_list} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT {limit}",
@@ -383,8 +382,7 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "CALL db.index.fulltext.queryNodes('relates_to_fact_fts', '{}') \
-             YIELD node, score \
+            "CALL QUERY_FTS_INDEX('RelatesToNode_', 'relates_to_fact_fts', '{}') \
              WITH node, score WHERE node.group_id IN {gid_list} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT {limit}",
