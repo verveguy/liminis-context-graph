@@ -17,12 +17,16 @@ A `tokio::sync::RwLock<()>` is carried in `AppState` alongside `Arc<Db>`.
 
 1. All async HTTP work (extraction, embedding, DedupAdapter verification) runs first, with **no lock held**.
 2. The write guard is acquired (`write_lock.write().await`) immediately before the DB commit `spawn_blocking` closure.
-3. The guard is moved into the closure and dropped when the closure returns.
+3. The guard is **not** moved into the closure (`RwLockWriteGuard` is not `Send`); it stays alive in the enclosing async stack frame while `spawn_blocking` executes and is dropped after `.await` returns.
 
-**Read path** (all search and retrieval handlers):
+**Read path**:
+
+*Hot search handlers* (`find_entities`, `find_relationships`): no lock is held. These are on the critical latency path and lbug supports concurrent reads natively; holding a read guard here would cause them to queue behind in-progress writes unnecessarily.
+
+*Other retrieval handlers* (`get_episodes`, `get_nodes_by_group`, `get_edges_by_group`, `get_edges_by_uuids`, `query_cypher`):
 
 1. A shared read guard is acquired (`write_lock.read().await`) before the DB query `spawn_blocking` closure.
-2. The guard is moved into the closure and dropped when the closure returns.
+2. The guard stays alive in the enclosing async stack frame while `spawn_blocking` executes and is dropped after `.await` returns.
 
 This means:
 - Concurrent search reads are never blocked by in-flight LLM calls (30 s). They are blocked only by the brief DB commit window (< 10 ms typical for lbug mutations).
