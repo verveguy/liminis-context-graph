@@ -128,7 +128,7 @@ liminis-graph-core/
 ├── Cargo.toml                               # opt in to serde, serde_json, chrono, uuid
 └── src/
     ├── lib.rs                               # add pub mod wal; pub mod replay; re-exports
-    ├── error.rs                             # add WalIo(std::io::Error), WalParse(String) variants
+    ├── error.rs                             # add WalIo(std::io::Error), WalJson(String) variants
     ├── db.rs                                # add Db::open_or_rebuild()
     ├── wal.rs                               # WalLine, WalWriter (NEW)
     └── replay.rs                            # WalReplayer, ReplayStats (NEW)

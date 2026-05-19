@@ -146,7 +146,7 @@ impl WalWriter {
         let mut writer = BufWriter::new(file);
         for line in &self.pending_lines {
             let json =
-                serde_json::to_string(line).map_err(|e| Error::WalParse(e.to_string()))?;
+                serde_json::to_string(line).map_err(|e| Error::WalJson(e.to_string()))?;
             writer.write_all(json.as_bytes())?;
             writer.write_all(b"\n")?;
         }
