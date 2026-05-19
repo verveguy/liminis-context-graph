@@ -567,7 +567,15 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns the count of nodes with the given label.
+    ///
+    /// Returns `Err` if `label` contains characters that are not alphanumeric or `_`
+    /// (labels cannot be parameterized in Cypher, so we validate before interpolation).
     pub fn count_nodes(&self, label: &str) -> Result<u64, Error> {
+        if !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(Error::QueryFailed(format!(
+                "invalid label identifier: {label}"
+            )));
+        }
         let sql = format!("MATCH (n:{label}) RETURN count(*)");
         let result = self.inner.query(&sql)?;
         for row in result {
