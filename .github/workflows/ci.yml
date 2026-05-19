@@ -82,8 +82,11 @@ jobs:
       - name: dedup decision-overlap check (R-007, always runs)
         run: cargo bench --bench search -- dedup_overlap_check
 
-      - name: dedup bench 1k and 10k (always runs)
-        run: cargo bench --bench search -- "1k|10k" --measurement-time 30
+      - name: dedup bench 1k (always runs)
+        run: cargo bench --bench search -- 1k --measurement-time 30
+
+      - name: dedup bench 10k (always runs)
+        run: cargo bench --bench search -- 10k --measurement-time 30
 
       - name: dedup bench 50k (main push only)
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
