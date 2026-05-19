@@ -1,0 +1,15 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 12,
+    "method": "knowledge_query_cypher",
+    "params": {
+      "query": "MATCH (n:Entity) RETURN n.uuid, n.name LIMIT 5"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 12,
+    "result": {"rows": []}
+  }
+}

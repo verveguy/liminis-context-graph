@@ -1,0 +1,15 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "method": "knowledge_get_edges_by_group",
+    "params": {
+      "group_ids": ["parity_group"]
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 10,
+    "result": []
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "request":  {"jsonrpc":"2.0","id":1,"method":"knowledge_build_indices","params":{}},
+  "response": {"jsonrpc":"2.0","id":1,"result":{"status":"ok"}}
+}

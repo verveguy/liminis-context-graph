@@ -1,0 +1,16 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "method": "knowledge_get_episodes",
+    "params": {
+      "group_id": "parity_group",
+      "last_n": 10
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "result": []
+  }
+}

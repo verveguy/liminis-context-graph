@@ -1,0 +1,4 @@
+{
+  "_comment": "50-query golden set for rank-correlation (SC-002). Captured from Python graphiti_service.py against baseline_db/liminis.db. Set PARITY_GOLDEN=1 to enable the rank-correlation test.",
+  "queries": []
+}
