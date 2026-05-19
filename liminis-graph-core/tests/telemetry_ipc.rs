@@ -1,22 +1,25 @@
 // Telemetry integration tests (T012).
 //
-// Injects a CaptureSink into dispatch() and verifies that IpcCall events
-// are emitted with the correct shape for each IPC call, covering acceptance
+// Injects a CaptureSink into dispatch() via AppState and verifies that IpcCall
+// events are emitted with the correct shape for each IPC call, covering acceptance
 // scenario 1: timing events emitted per IPC call with field shapes matching
 // docs/telemetry.md.
 
 use std::sync::Arc;
 
 use liminis_graph_core::{
+    app_state::AppState,
     db::Db,
-    embedder::Embedder,
-    extractor::Extractor,
+    dedup_adapter::PassthroughDedupAdapter,
+    embedder::HttpEmbedder,
+    extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
-    telemetry::{CaptureSink, NoopSink, TelemetryEvent},
+    telemetry::{CaptureSink, TelemetryEvent, TelemetrySink},
 };
 use serde_json::json;
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
@@ -28,6 +31,17 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
         conn.init_schema(dim).unwrap();
     }
     (db, dir)
+}
+
+fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppState> {
+    Arc::new(AppState {
+        db,
+        embedder: Arc::new(HttpEmbedder::from_env()),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+    })
 }
 
 fn req(id: i64, method: &str, params: serde_json::Value) -> IpcRequest {
@@ -42,16 +56,12 @@ fn req(id: i64, method: &str, params: serde_json::Value) -> IpcRequest {
 #[tokio::test]
 async fn ipc_call_event_emitted_on_successful_dispatch() {
     let (db, _dir) = make_db(8);
-    let embedder = Arc::new(Embedder::from_env());
-    let extractor = Arc::new(Extractor::from_env(Arc::new(NoopSink)));
     let sink = Arc::new(CaptureSink::new());
+    let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
     let _resp = handlers::dispatch(
         req(1, "knowledge_build_indices", json!({})),
-        db,
-        embedder,
-        extractor,
-        Arc::clone(&sink) as Arc<dyn liminis_graph_core::TelemetrySink>,
+        state,
     )
     .await;
 
@@ -70,17 +80,13 @@ async fn ipc_call_event_emitted_on_successful_dispatch() {
 #[tokio::test]
 async fn ipc_call_event_emitted_on_error_dispatch() {
     let (db, _dir) = make_db(8);
-    let embedder = Arc::new(Embedder::from_env());
-    let extractor = Arc::new(Extractor::from_env(Arc::new(NoopSink)));
     let sink = Arc::new(CaptureSink::new());
+    let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
-    // knowledge_close always succeeds; use an unknown method to get success=false
+    // Use an unknown method to get success=false
     let _resp = handlers::dispatch(
         req(2, "no_such_method", json!({})),
-        db,
-        embedder,
-        extractor,
-        Arc::clone(&sink) as Arc<dyn liminis_graph_core::TelemetrySink>,
+        state,
     )
     .await;
 

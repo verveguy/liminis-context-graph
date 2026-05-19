@@ -1,18 +1,33 @@
-use crate::{error::Error, types::EmbeddingResult};
+use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::json;
 
-/// Out-of-process embedding adapter (AD-5).
+use crate::{error::Error, types::EmbeddingResult};
+
+// ── Embedder trait ────────────────────────────────────────────────────────────
+
+pub trait Embedder: Send + Sync {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>>;
+
+    /// Embedding dimension. Used when pre-populating DB rows in tests/benches.
+    fn dim(&self) -> usize {
+        768
+    }
+}
+
+// ── HttpEmbedder ──────────────────────────────────────────────────────────────
+
+/// Out-of-process embedding adapter (Principle V).
 ///
-/// Calls an HTTP embedding service — no ML runtime in this crate (Principle V).
-pub struct Embedder {
+/// Calls an HTTP embedding service — no ML runtime in this crate.
+pub struct HttpEmbedder {
     url: String,
     model: String,
     pub dim: usize,
     client: Client,
 }
 
-impl Embedder {
+impl HttpEmbedder {
     /// Constructs from environment variables with sensible defaults.
     ///
     /// - `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`)
@@ -27,16 +42,10 @@ impl Embedder {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
-        Self {
-            url,
-            model,
-            dim,
-            client: Client::new(),
-        }
+        Self { url, model, dim, client: Client::new() }
     }
 
-    /// Embeds `text` and returns the embedding vector.
-    pub async fn embed(&self, text: &str) -> Result<Vec<f32>, Error> {
+    async fn do_embed(&self, text: &str) -> Result<Vec<f32>, Error> {
         let body = json!({ "text": text, "model": &self.model });
         let resp: EmbeddingResult = self
             .client
@@ -48,5 +57,39 @@ impl Embedder {
             .json()
             .await?;
         Ok(resp.embedding)
+    }
+}
+
+impl Embedder for HttpEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(self.do_embed(text))
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+// ── MockEmbedder ──────────────────────────────────────────────────────────────
+
+/// Zero-latency embedder for tests and benches. Returns a fixed zero vector.
+pub struct MockEmbedder {
+    pub dim: usize,
+}
+
+impl MockEmbedder {
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+}
+
+impl Embedder for MockEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        let v = vec![0.0f32; self.dim];
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
     }
 }

@@ -18,7 +18,7 @@ pub mod wal;
 pub use app_state::AppState;
 pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
-pub use embedder::Embedder;
+pub use embedder::{Embedder, HttpEmbedder, MockEmbedder};
 pub use error::Error;
 pub use extractor::{AnthropicExtractor, Extractor, MockExtractor};
 pub use ipc::{IpcRequest, IpcResponse};

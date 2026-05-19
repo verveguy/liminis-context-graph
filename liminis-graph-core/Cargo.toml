@@ -25,6 +25,10 @@ lbug = { workspace = true }
 regex = { workspace = true }
 
 [[bench]]
+name = "concurrent_rw"
+harness = false
+
+[[bench]]
 name = "placeholder"
 harness = false
 
