@@ -23,13 +23,13 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 **Purpose**: Core refactors and new types that all user stories depend on. No story work can begin until this phase is complete.
 
-- [ ] T001 Author `docs/adr/0042-reader-writer-split.md` documenting the `tokio::sync::RwLock` design (write guard only around DB commit spawn_blocking, not HTTP calls), SC-003 deferral rationale, and follow-up issue reference for the quantitative cache-hit baseline
+- [x] T001 Author `docs/adr/0042-reader-writer-split.md` documenting the `tokio::sync::RwLock` design (write guard only around DB commit spawn_blocking, not HTTP calls), SC-003 deferral rationale, and follow-up issue reference for the quantitative cache-hit baseline
 
-- [ ] T002 [P] File a follow-up GitHub issue titled "Establish prompt-caching baseline measurement in-repo" referencing SC-003 deferral in ADR-042; note the issue number in the ADR
+- [x] T002 [P] File a follow-up GitHub issue titled "Establish prompt-caching baseline measurement in-repo" referencing SC-003 deferral in ADR-042; note the issue number in the ADR
 
-- [ ] T003 Complete `TelemetryEvent::LlmFallback` variant in `liminis-graph-core/src/telemetry.rs`: add `ts_ms: u64, role: String, primary_model: String, fallback_model: String, error_reason: String` fields; ensure `serde_json` serialization matches existing event shapes
+- [x] T003 Complete `TelemetryEvent::LlmFallback` variant in `liminis-graph-core/src/telemetry.rs`: add `ts_ms: u64, role: String, primary_model: String, fallback_model: String, error_reason: String` fields; ensure `serde_json` serialization matches existing event shapes
 
-- [ ] T004 Refactor `liminis-graph-core/src/extractor.rs` [ADAPTER]:
+- [x] T004 Refactor `liminis-graph-core/src/extractor.rs` [ADAPTER]:
   - Extract the `Extractor` trait with `fn extract<'a>(&'a self, body: &'a str, group_id: &'a str) -> futures::future::BoxFuture<'a, Result<ExtractionResult, Error>>`
   - Rename existing `Extractor` struct to `AnthropicExtractor`
   - Implement `Extractor` for `AnthropicExtractor`
@@ -37,19 +37,19 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
   - Re-export `Extractor` trait from `lib.rs`
   - Update `lib.rs` exports: `pub use extractor::{Extractor, AnthropicExtractor, MockExtractor}`
 
-- [ ] T005 Create `liminis-graph-core/src/dedup_adapter.rs` [ADAPTER]:
+- [x] T005 Create `liminis-graph-core/src/dedup_adapter.rs` [ADAPTER]:
   - Define `DedupAdapter` trait with `fn is_duplicate<'a>(&'a self, candidate: &'a EntityRow, incoming: &'a ExtractedEntity) -> futures::future::BoxFuture<'a, Result<bool, Error>>`
   - Implement `PassthroughDedupAdapter` (always returns `Ok(true)`)
   - Implement `LocalDedupAdapter { url: String, client: reqwest::Client }` with `from_env()` reading `GRAPHITI_DEDUP_ADAPTER_URL` (default `http://127.0.0.1:8767`)
   - `LocalDedupAdapter::is_duplicate` POSTs `{"candidate": {...}, "incoming": {...}}` and parses `{"is_duplicate": bool}`
   - Add `pub mod dedup_adapter` and re-exports to `lib.rs`
 
-- [ ] T006 Create `liminis-graph-core/src/app_state.rs`:
+- [x] T006 Create `liminis-graph-core/src/app_state.rs`:
   - `AppState { db: Arc<Db>, embedder: Arc<Embedder>, extractor: Arc<dyn Extractor>, dedup: Arc<dyn DedupAdapter>, write_lock: Arc<tokio::sync::RwLock<()>>, sink: Arc<dyn TelemetrySink> }`
   - `AppState::from_env(sink, db)`: reads `GRAPHITI_DEDUP_LLM` to choose `PassthroughDedupAdapter` vs `LocalDedupAdapter`; always builds `LlmRouter` for extraction
   - Add `pub mod app_state` to `lib.rs`
 
-- [ ] T007 Create `liminis-graph-core/src/llm_router.rs` [ADAPTER]:
+- [x] T007 Create `liminis-graph-core/src/llm_router.rs` [ADAPTER]:
   - `LlmRouter { primary: AnthropicExtractor, fallback: Option<AnthropicExtractor>, primary_failed: AtomicBool, sink: Arc<dyn TelemetrySink> }`
   - `LlmRouter::from_env(sink)`: parses `GRAPHITI_EXTRACTION_LLM` on `:` to get primary and optional fallback model names; builds two `AnthropicExtractor` instances (same key, different models)
   - Implement `Extractor for LlmRouter`: try primary; on any error and `primary_failed` CAS from false→true, emit `TelemetryEvent::LlmFallback` + `eprintln!` exactly once; on subsequent calls with `primary_failed=true`, skip primary; if no fallback, propagate error
@@ -67,7 +67,7 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 ### Implementation
 
-- [ ] T008 [US1] [IPC] Refactor `liminis-graph-core/src/handlers.rs` to take `Arc<AppState>` instead of four `Arc` args:
+- [x] T008 [US1] [IPC] Refactor `liminis-graph-core/src/handlers.rs` to take `Arc<AppState>` instead of four `Arc` args:
   - Update `dispatch(req: IpcRequest, state: Arc<AppState>) -> IpcResponse`
   - Internal `handle()` receives `&Arc<AppState>`
   - Write methods (`handle_add_episode`, `handle_delete_episode`, `handle_build_indices`): acquire `state.write_lock.write().await` before spawning `spawn_blocking`; move guard into closure
@@ -75,23 +75,23 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
   - `knowledge_close` handler: no lock needed (returns immediately without DB access)
   - Pass `state.sink` where `sink` was previously a separate arg
 
-- [ ] T009 [US1] Refactor `liminis-graph-core/src/episode.rs` to split into three phases (AD-4):
+- [x] T009 [US1] Refactor `liminis-graph-core/src/episode.rs` to split into three phases (AD-4):
   - Signature: `add_episode(state: Arc<AppState>, name, body, source, source_description, reference_time, group_id) -> Result<String, Error>`
   - Phase A: concurrent embed + extract, sequential name/fact embeddings (no lock)
   - Phase B: spawn_blocking for candidate fetching; async `DedupAdapter::is_duplicate` loop; build `Vec<DedupDecision>` (no lock)
   - Phase C: acquire `state.write_lock.write().await`; spawn_blocking for all DB commits (merge or insert entities, insert edges, episodic, MENTIONS); guard moved into closure
 
-- [ ] T010 [US1] [IPC] Update `liminis-graph/src/main.rs`:
+- [x] T010 [US1] [IPC] Update `liminis-graph/src/main.rs`:
   - Build `AppState::from_env(sink, db)` 
   - Thread `Arc<AppState>` into each spawned connection handler
   - Call `handlers::dispatch(req, Arc::clone(&state))` instead of the four-arg form
 
-- [ ] T011 [US1] [IPC] Update `liminis-graph-core/tests/ipc_parity.rs`:
+- [x] T011 [US1] [IPC] Update `liminis-graph-core/tests/ipc_parity.rs`:
   - Construct `AppState` directly (with `MockExtractor`, `PassthroughDedupAdapter`, test embedder/db)
   - All 11 IPC method assertions unchanged; only the `dispatch` call site changes
   - Verify: `cargo test --test ipc_parity` passes
 
-- [ ] T012 [US1] [HOT] Create `liminis-graph-core/benches/concurrent_rw.rs`:
+- [x] T012 [US1] [HOT] Create `liminis-graph-core/benches/concurrent_rw.rs`:
   - Use `criterion::async_executor::TokioExecutor`
   - Setup: temp LadybugDB, init schema, insert ~100 `Entity` rows, build `AppState` with `MockExtractor` + `PassthroughDedupAdapter` + `MockEmbedder`
   - `MockEmbedder`: returns `vec![0.0f32; 768]` (zero-latency; lives in `benches/` not `src/`, or in `src/` as a `#[cfg(test)]` / `#[cfg(feature = "bench")]` type — prefer `benches/` local helper)
@@ -110,12 +110,12 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 ### Implementation
 
-- [ ] T013 [US2] [ADAPTER] Wire `AnthropicExtractor` 529/429 backoff (AD-7):
+- [x] T013 [US2] [ADAPTER] Wire `AnthropicExtractor` 529/429 backoff (AD-7):
   - In `AnthropicExtractor::extract()`, after receiving a response with status 429 or 529, sleep `1s * 2^attempt` and retry up to 3 times total
   - Use `tokio::time::sleep` for delay
   - On 4th failure, return `Error::Http(...)` — no partial WAL write occurs since Phase C has not started
 
-- [ ] T014 [US2] [ADAPTER] Write integration tests in `liminis-graph-core/tests/concurrent_rw_integration.rs`:
+- [x] T014 [US2] [ADAPTER] Write integration tests in `liminis-graph-core/tests/concurrent_rw_integration.rs`:
   - Test 1 — **fallback once-per-session**: construct `LlmRouter` with a primary `AnthropicExtractor` pointing at an invalid URL; call `extract()` twice; assert `TelemetryEvent::LlmFallback` emitted exactly once (use `CaptureSink`); assert fallback `AnthropicExtractor` is called both times after first failure (can use a second invalid URL to force a known error shape and verify error propagation)
   - Test 2 — **PassthroughDedupAdapter default**: verify `AppState::from_env` with `GRAPHITI_DEDUP_LLM` unset produces `PassthroughDedupAdapter` behavior (is_duplicate always returns true for any candidate)
   - Test 3 — **write serialization**: two concurrent `add_episode` calls on the same `AppState` with `MockExtractor` complete without error (no lbug `-32000`); verify both episodes inserted
@@ -132,7 +132,7 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 ### Implementation
 
-- [ ] T015 [US3] [ADAPTER] Add prompt-caching to `AnthropicExtractor::extract()` (AD-6):
+- [x] T015 [US3] [ADAPTER] Add prompt-caching to `AnthropicExtractor::extract()` (AD-6):
   - Detect Sonnet path: `self.model.to_lowercase().contains("sonnet")`
   - When Sonnet: add `anthropic-beta: prompt-caching-2024-07-31` request header; serialize `system` as `[{"type": "text", "text": "<prompt>", "cache_control": {"type": "ephemeral"}}]` instead of a bare string
   - When non-Sonnet: keep existing bare-string `system` field; no caching header
@@ -147,15 +147,15 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 **Purpose**: Ensure all constitution tags satisfied, CI gates pass, follow-up artifacts filed.
 
-- [ ] T016 [P] Verify `cargo tree | grep -E "tch|candle|onnxruntime|mlx"` output is empty; document in PR description (Principle V SC-005)
+- [x] T016 [P] Verify `cargo tree | grep -E "tch|candle|onnxruntime|mlx"` output is empty; document in PR description (Principle V SC-005)
 
-- [ ] T017 [P] Run full test suite: `cargo test --workspace` — all tests pass
+- [x] T017 [P] Run full test suite: `cargo test --workspace` — all tests pass
 
-- [ ] T018 [P] Run `cargo bench --bench concurrent_rw` — p95 assertion passes; note bench output in PR description
+- [x] T018 [P] Run `cargo bench --bench concurrent_rw` — p95 assertion passes; note bench output in PR description
 
-- [ ] T019 [P] Run `cargo bench --bench telemetry_overhead` — no regression vs. prior run; HOT-path compliance maintained
+- [x] T019 [P] Run `cargo bench --bench telemetry_overhead` — no regression vs. prior run; HOT-path compliance maintained
 
-- [ ] T020 [P] Confirm ADR-042 follow-up issue number is recorded in `docs/adr/0042-reader-writer-split.md` (from T002)
+- [x] T020 [P] Confirm ADR-042 follow-up issue number is recorded in `docs/adr/0042-reader-writer-split.md` (from T002)
 
 ---
 
