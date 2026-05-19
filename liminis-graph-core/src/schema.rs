@@ -79,7 +79,7 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
     Ok(())
 }
 
-fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
+pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     // Errors mean "already exists" — suppress them for idempotency
     let _ = conn.raw_query(
         "CALL db.index.fulltext.createNodeFullTextIndex(\
