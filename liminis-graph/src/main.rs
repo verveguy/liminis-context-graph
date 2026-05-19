@@ -27,12 +27,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Open database and initialise schema (idempotent)
+    // Open database and initialise schema (idempotent).
+    // Vector indexes are NOT created here — HNSW blocks in-place writes.
+    // The caller must issue knowledge_build_indices after bulk ingestion.
     let db = Arc::new(Db::open(&db_path)?);
     {
         let conn = db.connect()?;
         conn.init_schema(embedding_dim)?;
-        conn.create_vector_indexes()?;
     }
 
     let embedder = Arc::new(Embedder::from_env());
@@ -68,7 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let json = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
                         if is_close {
-                            return;
+                            // Exit process cleanly — matches Python service behaviour.
+                            std::process::exit(0);
                         }
                         continue;
                     }
