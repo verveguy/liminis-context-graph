@@ -175,8 +175,7 @@ pub async fn add_episode(
             })?;
         }
 
-        // Step 7: TODO issue #3: append WAL line
-        // TODO: issue #3 — emit TelemetryEvent::WalAppend { duration_us, bytes } via sink
+        // Step 7: TODO issue #3 — append WAL line and emit TelemetryEvent::WalAppend { duration_us, bytes } via sink
 
         Ok(())
     })
