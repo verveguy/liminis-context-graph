@@ -1,10 +1,3 @@
-// Baseline wall-time nanoseconds from benches/python_baseline_ns.json
-// Measured on Apple M2 (2026-05-19) using graphiti_service.py brute-force cosine path
-// against a deterministic 8-dim synthetic corpus.
-const PYTHON_BASELINE_NS_1K: u128 = 2_000_000;
-const PYTHON_BASELINE_NS_10K: u128 = 20_000_000;
-const PYTHON_BASELINE_NS_50K: u128 = 100_000_000;
-
 use criterion::{criterion_group, criterion_main, Criterion};
 use liminis_graph_core::{Db, EntityRow};
 use std::sync::Arc;
@@ -38,6 +31,22 @@ fn setup_bench_db_n(n: usize, dim: usize) -> (Arc<Db>, tempfile::TempDir) {
         conn.build_indices_and_constraints().unwrap();
     }
     (db, dir)
+}
+
+/// Measures average brute-force dedup wall-time over `samples` iterations.
+/// Used as the in-CI baseline for hybrid dedup ratio assertions.
+fn measure_brute_force_ns(db: &Arc<Db>, query_emb: &[f32], samples: usize) -> u128 {
+    let total: u128 = (0..samples)
+        .map(|_| {
+            let conn = db.connect().unwrap();
+            let t = std::time::Instant::now();
+            let _ = conn
+                .brute_force_similar_entity(query_emb, "bench", 0.85)
+                .unwrap();
+            t.elapsed().as_nanos()
+        })
+        .sum();
+    total / samples as u128
 }
 
 fn bench_hybrid_entity_search(c: &mut Criterion) {
@@ -96,6 +105,10 @@ fn bench_dedup_hybrid_1k(c: &mut Criterion) {
     let (db, _dir) = setup_bench_db_n(1000, dim);
     let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
 
+    // Measure Rust brute-force baseline in-CI (5 warm samples) so the ratio assertion
+    // is environment-agnostic rather than tied to an Apple M2 measurement.
+    let brute_ns = measure_brute_force_ns(&db, &query_emb, 5);
+
     c.bench_function("bench_dedup_hybrid_1k", |b| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
@@ -107,13 +120,12 @@ fn bench_dedup_hybrid_1k(c: &mut Criterion) {
                     .unwrap();
                 total += start.elapsed();
             }
-            // Assert ≤ 30% of Python baseline at 1k
             let rust_ns = total.as_nanos() / iters as u128;
             assert!(
-                rust_ns <= PYTHON_BASELINE_NS_1K * 30 / 100,
-                "hybrid dedup 1k: {}ns > 30% of Python baseline {}ns",
+                rust_ns <= brute_ns * 30 / 100,
+                "hybrid dedup 1k: {}ns > 30% of Rust brute-force {}ns",
                 rust_ns,
-                PYTHON_BASELINE_NS_1K
+                brute_ns
             );
             total
         });
@@ -146,6 +158,8 @@ fn bench_dedup_hybrid_10k(c: &mut Criterion) {
     let (db, _dir) = setup_bench_db_n(10_000, dim);
     let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
 
+    let brute_ns = measure_brute_force_ns(&db, &query_emb, 5);
+
     c.bench_function("bench_dedup_hybrid_10k", |b| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
@@ -157,13 +171,12 @@ fn bench_dedup_hybrid_10k(c: &mut Criterion) {
                     .unwrap();
                 total += start.elapsed();
             }
-            // Assert ≤ 30% of Python baseline at 10k
             let rust_ns = total.as_nanos() / iters as u128;
             assert!(
-                rust_ns <= PYTHON_BASELINE_NS_10K * 30 / 100,
-                "hybrid dedup 10k: {}ns > 30% of Python baseline {}ns",
+                rust_ns <= brute_ns * 30 / 100,
+                "hybrid dedup 10k: {}ns > 30% of Rust brute-force {}ns",
                 rust_ns,
-                PYTHON_BASELINE_NS_10K
+                brute_ns
             );
             total
         });
@@ -196,6 +209,9 @@ fn bench_dedup_hybrid_50k(c: &mut Criterion) {
     let (db, _dir) = setup_bench_db_n(50_000, dim);
     let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
 
+    // 3 samples for 50k to keep setup time reasonable.
+    let brute_ns = measure_brute_force_ns(&db, &query_emb, 3);
+
     c.bench_function("bench_dedup_hybrid_50k", |b| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
@@ -207,13 +223,13 @@ fn bench_dedup_hybrid_50k(c: &mut Criterion) {
                     .unwrap();
                 total += start.elapsed();
             }
-            // Assert ≤ 30% of Python baseline at 50k (R-007 performance gate)
+            // R-007 performance gate: hybrid must be ≤ 30% of brute-force wall time.
             let rust_ns = total.as_nanos() / iters as u128;
             assert!(
-                rust_ns <= PYTHON_BASELINE_NS_50K * 30 / 100,
-                "hybrid dedup 50k: {}ns > 30% of Python baseline {}ns",
+                rust_ns <= brute_ns * 30 / 100,
+                "hybrid dedup 50k: {}ns > 30% of Rust brute-force {}ns",
                 rust_ns,
-                PYTHON_BASELINE_NS_50K
+                brute_ns
             );
             total
         });
@@ -221,49 +237,56 @@ fn bench_dedup_hybrid_50k(c: &mut Criterion) {
 }
 
 /// Runs 100 probe queries against a 1k-entity corpus with both brute-force and hybrid dedup,
-/// then asserts decision overlap ≥ 95%. Registered as a non-timed Criterion bench so it
+/// then asserts decision overlap ≥ 95%. Registered as a Criterion bench so it
 /// integrates with the CI bench runner (`cargo bench -- dedup_overlap_check`).
+///
+/// The probe loop is inside the bench_function closure so it only executes when this
+/// specific bench is selected — not when other benches in the same group are run.
 fn bench_dedup_overlap_check(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(1000, dim);
     let n_probes = 100;
 
-    let conn = db.connect().unwrap();
-    let mut brute_decisions: Vec<Option<String>> = Vec::with_capacity(n_probes);
-    let mut hybrid_decisions: Vec<Option<String>> = Vec::with_capacity(n_probes);
+    c.bench_function("dedup_overlap_check", |b| {
+        b.iter_custom(|_iters| {
+            let start = std::time::Instant::now();
+            let conn = db.connect().unwrap();
+            let mut brute_decisions: Vec<Option<String>> = Vec::with_capacity(n_probes);
+            let mut hybrid_decisions: Vec<Option<String>> = Vec::with_capacity(n_probes);
 
-    for i in 0..n_probes {
-        let axis = i % dim;
-        let query_emb: Vec<f32> = (0..dim)
-            .map(|j| if j == axis { 1.0f32 } else { 0.0 })
-            .collect();
-        let query_name = format!("Entity {i}");
+            for i in 0..n_probes {
+                let axis = i % dim;
+                let query_emb: Vec<f32> = (0..dim)
+                    .map(|j| if j == axis { 1.0f32 } else { 0.0 })
+                    .collect();
+                let query_name = format!("Entity {i}");
 
-        let brute = conn
-            .brute_force_similar_entity(&query_emb, "bench", 0.85)
-            .unwrap();
-        let hybrid = conn
-            .hybrid_dedup_similar_entity(&query_emb, &query_name, "bench", 0.85)
-            .unwrap();
+                let brute = conn
+                    .brute_force_similar_entity(&query_emb, "bench", 0.85)
+                    .unwrap();
+                let hybrid = conn
+                    .hybrid_dedup_similar_entity(&query_emb, &query_name, "bench", 0.85)
+                    .unwrap();
 
-        brute_decisions.push(brute.map(|e| e.uuid));
-        hybrid_decisions.push(hybrid.map(|e| e.uuid));
-    }
+                brute_decisions.push(brute.map(|e| e.uuid));
+                hybrid_decisions.push(hybrid.map(|e| e.uuid));
+            }
 
-    let matching = brute_decisions
-        .iter()
-        .zip(hybrid_decisions.iter())
-        .filter(|(b, h)| b == h)
-        .count();
-    let overlap = matching as f64 / n_probes as f64;
-    assert!(
-        overlap >= 0.95,
-        "decision overlap {:.1}% < 95% required (R-003/acceptance scenario 2)",
-        overlap * 100.0
-    );
+            let matching = brute_decisions
+                .iter()
+                .zip(hybrid_decisions.iter())
+                .filter(|(b, h)| b == h)
+                .count();
+            let overlap = matching as f64 / n_probes as f64;
+            assert!(
+                overlap >= 0.95,
+                "decision overlap {:.1}% < 95% required (R-003/acceptance scenario 2)",
+                overlap * 100.0
+            );
 
-    // Register trivial timed bench so Criterion is satisfied
-    c.bench_function("dedup_overlap_check", |b| b.iter(|| overlap));
+            start.elapsed()
+        });
+    });
 }
 
 criterion_group!(benches, bench_hybrid_entity_search, bench_hybrid_edge_search);
