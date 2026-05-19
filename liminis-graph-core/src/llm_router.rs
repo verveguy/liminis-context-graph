@@ -26,6 +26,24 @@ pub struct LlmRouter {
 }
 
 impl LlmRouter {
+    /// Constructs directly from extractor instances — for tests.
+    pub fn new(
+        primary: AnthropicExtractor,
+        fallback: Option<AnthropicExtractor>,
+        sink: Arc<dyn TelemetrySink>,
+    ) -> Self {
+        let primary_model_name = primary.model_name().to_string();
+        let fallback_model_name = fallback.as_ref().map(|f| f.model_name().to_string()).unwrap_or_default();
+        Self {
+            primary,
+            primary_model_name,
+            fallback,
+            fallback_model_name,
+            primary_failed: AtomicBool::new(false),
+            sink,
+        }
+    }
+
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         let spec = std::env::var("GRAPHITI_EXTRACTION_LLM")
