@@ -1,3 +1,5 @@
+mod sink;
+
 use std::sync::Arc;
 
 use liminis_graph_core::{
@@ -36,8 +38,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         conn.init_schema(embedding_dim)?;
     }
 
+    // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
+    let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
+
     let embedder = Arc::new(Embedder::from_env());
-    let extractor = Arc::new(Extractor::from_env());
+    let extractor = Arc::new(Extractor::from_env(Arc::clone(&telemetry_sink)));
 
     // Remove stale socket file
     let _ = std::fs::remove_file(&socket_path);
@@ -49,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let db = Arc::clone(&db);
         let embedder = Arc::clone(&embedder);
         let extractor = Arc::clone(&extractor);
+        let sink = Arc::clone(&telemetry_sink);
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
@@ -63,9 +69,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = match serde_json::from_str::<IpcRequest>(&line) {
                     Ok(req) => {
                         let is_close = req.method == "knowledge_close";
-                        let resp =
-                            handlers::dispatch(req, Arc::clone(&db), Arc::clone(&embedder), Arc::clone(&extractor))
-                                .await;
+                        let resp = handlers::dispatch(
+                            req,
+                            Arc::clone(&db),
+                            Arc::clone(&embedder),
+                            Arc::clone(&extractor),
+                            Arc::clone(&sink),
+                        )
+                        .await;
                         let json = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
                         if is_close {
