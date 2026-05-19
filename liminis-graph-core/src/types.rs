@@ -4,7 +4,7 @@ pub struct EntityRow {
     pub name: String,
     pub group_id: String,
     pub labels: Vec<String>,
-    /// ISO-8601 timestamp string.
+    /// LadybugDB TIMESTAMP string, e.g. `"2026-01-01 00:00:00"`.
     pub created_at: String,
     /// Fixed-length embedding vector; length must match the schema dimension.
     pub name_embedding: Vec<f32>,
@@ -17,14 +17,14 @@ pub struct EpisodicRow {
     pub uuid: String,
     pub name: String,
     pub group_id: String,
-    /// ISO-8601 timestamp string.
+    /// LadybugDB TIMESTAMP string, e.g. `"2026-01-01 00:00:00"`.
     pub created_at: String,
     pub source: String,
     pub source_description: String,
     pub content: String,
     /// Fixed-length embedding vector; length must match the schema dimension.
     pub content_embedding: Vec<f32>,
-    /// ISO-8601 timestamp string.
+    /// LadybugDB TIMESTAMP string, e.g. `"2026-01-01 00:00:00"`.
     pub valid_at: String,
     pub entity_edges: Vec<String>,
 }
