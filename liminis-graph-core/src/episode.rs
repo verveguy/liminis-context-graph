@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::{
     db::Db,
@@ -9,6 +9,20 @@ use crate::{
 };
 
 const DEDUP_THRESHOLD: f32 = 0.85;
+
+/// Minimum entity count in a group before the hybrid HNSW+BM25 dedup path is used.
+/// Below this threshold the brute-force cosine path is used instead.
+/// Override with the `LIMINIS_DEDUP_HYBRID_THRESHOLD` environment variable (default: 1000).
+static HYBRID_THRESHOLD: OnceLock<usize> = OnceLock::new();
+
+fn hybrid_threshold() -> usize {
+    *HYBRID_THRESHOLD.get_or_init(|| {
+        std::env::var("LIMINIS_DEDUP_HYBRID_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1_000)
+    })
+}
 
 /// Runs the full add_episode pipeline (US1 FR-001).
 ///
@@ -58,11 +72,23 @@ pub async fn add_episode(
         let conn = db.connect()?;
 
         // Step 3: dedup entities
+        // Determine dedup strategy once per episode (count query is cheap relative to dedup).
+        let entity_count = conn.entity_count_in_group(&gid_owned)?;
+        let use_hybrid = entity_count >= hybrid_threshold();
         let mut entity_uuids: Vec<String> = Vec::new();
 
         for (i, extracted) in extraction.entities.iter().enumerate() {
             let name_emb = &name_embeddings[i];
-            let existing = conn.brute_force_similar_entity(name_emb, &gid_owned, DEDUP_THRESHOLD)?;
+            let existing = if use_hybrid {
+                conn.hybrid_dedup_similar_entity(
+                    name_emb,
+                    &extracted.name,
+                    &gid_owned,
+                    DEDUP_THRESHOLD,
+                )?
+            } else {
+                conn.brute_force_similar_entity(name_emb, &gid_owned, DEDUP_THRESHOLD)?
+            };
 
             let entity_uuid = if let Some(existing_row) = existing {
                 let merged_summary = format!("{} {}", existing_row.summary, extracted.summary);
