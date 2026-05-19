@@ -65,3 +65,26 @@ jobs:
 
       - name: cargo bench --no-run
         run: cargo bench --no-run
+
+  bench-dedup:
+    name: bench-dedup
+    runs-on: ubuntu-latest
+    env:
+      LBUG_BUILD_FROM_SOURCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cmake
+        run: sudo apt-get install -y cmake
+
+      - name: dedup decision-overlap check (R-007, always runs)
+        run: cargo bench --bench search -- dedup_overlap_check
+
+      - name: dedup bench 1k and 10k (always runs)
+        run: cargo bench --bench search -- "1k|10k" --measurement-time 30
+
+      - name: dedup bench 50k (main push only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: cargo bench --bench search -- dedup_50k
