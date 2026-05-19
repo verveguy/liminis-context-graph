@@ -15,7 +15,7 @@
 **Purpose**: Add new Cargo dependencies and extend the error type. Blocks all WAL code.
 
 - [ ] T001 Add `serde = { version = "1", features = ["derive"] }`, `serde_json = "1"`, `chrono = { version = "0.4", features = ["serde"] }`, `uuid = { version = "1", features = ["v4"] }` to `Cargo.toml` workspace `[workspace.dependencies]` and opt all four into `liminis-graph-core/Cargo.toml`
-- [ ] T002 Extend `liminis-graph-core/src/error.rs` with two new variants: `WalIo(#[from] std::io::Error)` (wrapping `std::io::Error`) and `WalParse(String)` (for JSON parse errors during replay)
+- [ ] T002 Extend `liminis-graph-core/src/error.rs` with two new variants: `WalIo(#[from] std::io::Error)` (wrapping `std::io::Error`) and `WalJson(String)` (for JSON encode/decode errors in WAL)
 
 **Checkpoint**: `cargo build -p liminis-graph-core` succeeds with new deps; `cargo clippy -- -D warnings` clean
 

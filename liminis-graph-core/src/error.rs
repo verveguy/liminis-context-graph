@@ -24,8 +24,8 @@ pub enum Error {
     #[error("WAL I/O error: {0}")]
     WalIo(#[from] std::io::Error),
 
-    #[error("WAL parse error: {0}")]
-    WalParse(String),
+    #[error("WAL JSON error: {0}")]
+    WalJson(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
