@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -74,78 +74,84 @@ fn setup_db() -> (Arc<Db>, TempDir) {
 }
 
 fn bench_concurrent_rw(c: &mut Criterion) {
-    let (db, _dir) = setup_db();
-    let state = build_state(Arc::clone(&db));
     let rt = Runtime::new().unwrap();
 
     c.bench_function("concurrent_rw_p95_search", |b| {
-        b.iter(|| {
-            rt.block_on(async {
-                let state = Arc::clone(&state);
-
-                // Launch N_WRITERS concurrent add_episode tasks (zero-latency mock)
-                let write_handles: Vec<_> = (0..N_WRITERS)
-                    .map(|i| {
-                        let s = Arc::clone(&state);
-                        tokio::spawn(async move {
-                            let _ = episode::add_episode(
-                                s,
-                                &format!("ep-{i}"),
-                                &format!("body-{i}"),
-                                "bench",
-                                "bench source",
-                                "2026-01-01 00:00:00",
-                                "bench",
-                            )
-                            .await;
+        // Use iter_batched so each sample starts with a fresh DB and clean state,
+        // preventing episodic row accumulation from making later iterations slower.
+        b.iter_batched(
+            || {
+                let (db, dir) = setup_db();
+                let state = build_state(Arc::clone(&db));
+                (state, dir) // dir kept alive to prevent TempDir deletion during the sample
+            },
+            |(state, _dir)| {
+                rt.block_on(async {
+                    // Launch N_WRITERS concurrent add_episode tasks (zero-latency mock)
+                    let write_handles: Vec<_> = (0..N_WRITERS)
+                        .map(|i| {
+                            let s = Arc::clone(&state);
+                            tokio::spawn(async move {
+                                let _ = episode::add_episode(
+                                    s,
+                                    &format!("ep-{i}"),
+                                    &format!("body-{i}"),
+                                    "bench",
+                                    "bench source",
+                                    "2026-01-01 00:00:00",
+                                    "bench",
+                                )
+                                .await;
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
 
-                // Launch N_READERS concurrent search queries and record latencies
-                let search_handles: Vec<_> = (0..N_READERS)
-                    .map(|_| {
-                        let s = Arc::clone(&state);
-                        tokio::spawn(async move {
-                            let t = Instant::now();
-                            let _ = search::hybrid_entity_search(
-                                Arc::clone(&s.db),
-                                Arc::clone(&s.embedder),
-                                "Alice",
-                                vec!["bench".to_string()],
-                                10,
-                            )
-                            .await;
-                            t.elapsed()
+                    // Launch N_READERS concurrent search queries and record latencies
+                    let search_handles: Vec<_> = (0..N_READERS)
+                        .map(|_| {
+                            let s = Arc::clone(&state);
+                            tokio::spawn(async move {
+                                let t = Instant::now();
+                                let _ = search::hybrid_entity_search(
+                                    Arc::clone(&s.db),
+                                    Arc::clone(&s.embedder),
+                                    "Alice",
+                                    vec!["bench".to_string()],
+                                    10,
+                                )
+                                .await;
+                                t.elapsed()
+                            })
                         })
-                    })
-                    .collect();
+                        .collect();
 
-                // Wait for all tasks to complete
-                for h in write_handles {
-                    let _ = h.await;
-                }
-
-                let mut latencies: Vec<Duration> = Vec::with_capacity(N_READERS);
-                for h in search_handles {
-                    if let Ok(d) = h.await {
-                        latencies.push(d);
+                    // Wait for all tasks to complete
+                    for h in write_handles {
+                        let _ = h.await;
                     }
-                }
 
-                // Assert p95 ≤ P95_BUDGET_MS
-                if !latencies.is_empty() {
-                    latencies.sort_unstable();
-                    let p95_idx = ((latencies.len() as f64 * 0.95) as usize)
-                        .min(latencies.len() - 1);
-                    let p95 = latencies[p95_idx];
-                    assert!(
-                        p95 <= Duration::from_millis(P95_BUDGET_MS),
-                        "p95 search latency {p95:?} exceeds {P95_BUDGET_MS} ms budget"
-                    );
-                }
-            });
-        });
+                    let mut latencies: Vec<Duration> = Vec::with_capacity(N_READERS);
+                    for h in search_handles {
+                        if let Ok(d) = h.await {
+                            latencies.push(d);
+                        }
+                    }
+
+                    // Assert p95 ≤ P95_BUDGET_MS
+                    if !latencies.is_empty() {
+                        latencies.sort_unstable();
+                        let p95_idx = ((latencies.len() as f64 * 0.95) as usize)
+                            .min(latencies.len() - 1);
+                        let p95 = latencies[p95_idx];
+                        assert!(
+                            p95 <= Duration::from_millis(P95_BUDGET_MS),
+                            "p95 search latency {p95:?} exceeds {P95_BUDGET_MS} ms budget"
+                        );
+                    }
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
