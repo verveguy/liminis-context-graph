@@ -42,8 +42,14 @@ impl AnthropicExtractor {
     /// - `GRAPHITI_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`)
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        // GRAPHITI_EXTRACTION_LLM may be "primary:fallback" format (consumed by LlmRouter).
+        // AnthropicExtractor::from_env only needs the primary token.
         let model = std::env::var("GRAPHITI_EXTRACTION_LLM")
-            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
+            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string())
+            .splitn(2, ':')
+            .next()
+            .unwrap_or("claude-haiku-4-5-20251001")
+            .to_string();
         Self { api_key, model, url: ANTHROPIC_API_URL.to_string(), client: Client::new(), sink }
     }
 
