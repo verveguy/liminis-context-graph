@@ -8,11 +8,28 @@ license = "MIT"
 [dependencies]
 lbug = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+time = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+tokio = { workspace = true }
+lbug = { workspace = true }
 
 [[bench]]
 name = "placeholder"
 harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[example]]
+name = "basic_ingest"
