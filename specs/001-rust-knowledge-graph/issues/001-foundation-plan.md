@@ -4,7 +4,7 @@
 
 ## Summary
 
-Stand up the Cargo workspace (`liminis-graph-core` lib + `liminis-graph` bin), prove the `lbug 0.16.1` Rust bindings can open a DB, write Entity/Episodic nodes with 768-dim vector properties, and round-trip HNSW + full-text indexes. Lay the repo skeleton (benches/, docs/adr/, .github/ templates) and green-field CI so all subsequent issues have somewhere to land.
+Stand up the Cargo workspace (`liminis-graph-core` lib + `liminis-graph` bin), prove the `lbug 0.16.1` Rust bindings can open a DB, write Entity/Episodic nodes with 768-dim vector properties, and round-trip HNSW vector indexes. FTS extension is loaded per connection; FTS index creation/queries are deferred to a future issue. Lay the repo skeleton (liminis-graph-core/benches/, docs/adr/, .github/ templates) and green-field CI so all subsequent issues have somewhere to land.
 
 ## Technical Context
 
@@ -85,7 +85,7 @@ liminis-graph/
 examples/
 └── basic_ingest/
     └── main.rs                         # < 50 lines, no Liminis-internal deps
-benches/
+liminis-graph-core/benches/
 └── placeholder.rs                      # stub; no real benches
 docs/
 └── adr/
