@@ -1,0 +1,15 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 8,
+    "method": "knowledge_delete_episode",
+    "params": {
+      "episode_uuid": "00000000-0000-0000-0000-000000000001"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 8,
+    "result": {"status": "deleted"}
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "knowledge_add_episode",
+    "params": {
+      "name": "team-intro",
+      "episode_body": "Alice works at Acme Corp as a software engineer.",
+      "source": "test",
+      "source_description": "parity fixture",
+      "reference_time": "2026-01-01T00:00:00Z",
+      "group_id": "parity_group"
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {"episode_uuid": "CAPTURED_FROM_PYTHON_SERVICE"}
+  }
+}

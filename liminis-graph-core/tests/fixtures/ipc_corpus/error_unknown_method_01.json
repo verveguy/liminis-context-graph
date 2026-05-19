@@ -1,0 +1,4 @@
+{
+  "request":  {"jsonrpc":"2.0","id":14,"method":"no_such_method","params":{}},
+  "response": {"jsonrpc":"2.0","id":14,"error":{"code":-32000,"message":"Method not found: no_such_method"}}
+}

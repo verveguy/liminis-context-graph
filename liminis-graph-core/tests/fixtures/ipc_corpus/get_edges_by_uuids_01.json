@@ -1,0 +1,15 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 11,
+    "method": "knowledge_get_edges_by_uuids",
+    "params": {
+      "uuids": ["00000000-0000-0000-0000-000000000002"]
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 11,
+    "result": []
+  }
+}

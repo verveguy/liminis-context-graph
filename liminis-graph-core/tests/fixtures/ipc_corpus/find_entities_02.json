@@ -1,0 +1,17 @@
+{
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "method": "knowledge_find_entities",
+    "params": {
+      "query": "nonexistent entity xyz123",
+      "group_ids": ["parity_group"],
+      "num_results": 5
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 4,
+    "result": []
+  }
+}

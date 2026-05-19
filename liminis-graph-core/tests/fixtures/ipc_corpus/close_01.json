@@ -1,0 +1,4 @@
+{
+  "request":  {"jsonrpc":"2.0","id":13,"method":"knowledge_close","params":{}},
+  "response": {"jsonrpc":"2.0","id":13,"result":{"status":"closed"}}
+}
