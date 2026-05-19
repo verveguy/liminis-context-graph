@@ -82,12 +82,10 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     // Errors mean "already exists" — suppress them for idempotency
     let _ = conn.raw_query(
-        "CALL db.index.fulltext.createNodeFullTextIndex(\
-         'entity_name_fts', ['Entity'], ['name'])",
+        "CALL CREATE_FTS_INDEX('Entity', 'entity_name_fts', ['name'])",
     );
     let _ = conn.raw_query(
-        "CALL db.index.fulltext.createNodeFullTextIndex(\
-         'relates_to_fact_fts', ['RelatesToNode_'], ['fact'])",
+        "CALL CREATE_FTS_INDEX('RelatesToNode_', 'relates_to_fact_fts', ['fact'])",
     );
     Ok(())
 }
