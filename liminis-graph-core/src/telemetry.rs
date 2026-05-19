@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -100,15 +100,23 @@ impl TelemetrySink for CaptureSink {
 
 const COMPILED_PRICING: &str = include_str!("../../assets/llm_pricing.json");
 
-fn load_pricing() -> Value {
-    if let Ok(path) = std::env::var("LIMINIS_LLM_COST_TABLE_PATH") {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                return v;
+fn load_pricing() -> &'static Value {
+    static PRICING: OnceLock<Value> = OnceLock::new();
+    PRICING.get_or_init(|| {
+        if let Ok(path) = std::env::var("LIMINIS_LLM_COST_TABLE_PATH") {
+            match std::fs::read_to_string(&path)
+                .and_then(|s| serde_json::from_str::<Value>(&s)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+            {
+                Ok(v) => return v,
+                Err(e) => eprintln!(
+                    "liminis-graph: LIMINIS_LLM_COST_TABLE_PATH={path} unreadable or invalid JSON, \
+                     using built-in pricing: {e}"
+                ),
             }
         }
-    }
-    serde_json::from_str(COMPILED_PRICING).unwrap_or(Value::Object(Default::default()))
+        serde_json::from_str(COMPILED_PRICING).unwrap_or(Value::Object(Default::default()))
+    })
 }
 
 /// Returns estimated cost in USD, or `None` if the model is not in the pricing table.
