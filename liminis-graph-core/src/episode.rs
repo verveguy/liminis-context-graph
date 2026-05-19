@@ -1,18 +1,14 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    db::Db,
-    embedder::Embedder,
+    app_state::AppState,
+    db::escape_pub,
     error::Error,
-    extractor::Extractor,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
 };
 
 const DEDUP_THRESHOLD: f32 = 0.85;
 
-/// Minimum entity count in a group before the hybrid HNSW+BM25 dedup path is used.
-/// Below this threshold the brute-force cosine path is used instead.
-/// Override with the `LIMINIS_DEDUP_HYBRID_THRESHOLD` environment variable (default: 1000).
 static HYBRID_THRESHOLD: OnceLock<usize> = OnceLock::new();
 
 fn hybrid_threshold() -> usize {
@@ -24,13 +20,25 @@ fn hybrid_threshold() -> usize {
     })
 }
 
-/// Runs the full add_episode pipeline (US1 FR-001).
+enum DedupDecision {
+    Merge {
+        existing_uuid: String,
+        merged_summary: String,
+    },
+    Insert {
+        row: EntityRow,
+    },
+}
+
+/// Runs the full add_episode pipeline in three async phases (AD-4).
+///
+/// Phase A: concurrent HTTP (no lock) — embed body, extract entities/edges, embed names/facts.
+/// Phase B: async dedup (no lock) — fetch cosine candidates, call DedupAdapter per candidate.
+/// Phase C: commit (exclusive write lock) — apply dedup decisions, insert edges, episodic, MENTIONS.
 ///
 /// Returns the episode UUID.
 pub async fn add_episode(
-    db: Arc<Db>,
-    embedder: Arc<Embedder>,
-    extractor: Arc<Extractor>,
+    state: Arc<AppState>,
     name: &str,
     body: &str,
     source: &str,
@@ -38,27 +46,114 @@ pub async fn add_episode(
     reference_time: &str,
     group_id: &str,
 ) -> Result<String, Error> {
-    // 1+2: concurrent — embed body and extract entities/edges
+    // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::try_join!(
-        embedder.embed(body),
-        extractor.extract(body, group_id),
+        state.embedder.embed(body),
+        state.extractor.extract(body, group_id),
     )?;
 
-    // Collect names and facts as owned Strings so they outlive the futures
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
     let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
 
-    // Embed all entity names sequentially (parallel embed is issue #4 optimisation)
     let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
     for n in &entity_names {
-        name_embeddings.push(embedder.embed(n).await?);
+        name_embeddings.push(state.embedder.embed(n).await?);
     }
     let mut fact_embeddings: Vec<Vec<f32>> = Vec::with_capacity(edge_facts.len());
     for f in &edge_facts {
-        fact_embeddings.push(embedder.embed(f).await?);
+        fact_embeddings.push(state.embedder.embed(f).await?);
     }
 
-    // 3-6: all DB work in one spawn_blocking
+    // ── Phase B: async dedup (no lock) ────────────────────────────────────────
+    // Fetch cosine candidates in a blocking pass, then verify each with DedupAdapter.
+    let db_b = Arc::clone(&state.db);
+    let gid_b = group_id.to_string();
+    let name_embs_b = name_embeddings.clone();
+    let entity_count = tokio::task::spawn_blocking(move || {
+        let conn = db_b.connect()?;
+        conn.entity_count_in_group(&gid_b)
+    })
+    .await??;
+
+    let use_hybrid = entity_count >= hybrid_threshold();
+    let db_b = Arc::clone(&state.db);
+    let gid_b = group_id.to_string();
+    let entity_names_b = entity_names.clone();
+    let candidates: Vec<Option<EntityRow>> = tokio::task::spawn_blocking(move || {
+        let conn = db_b.connect()?;
+        let mut out = Vec::with_capacity(entity_names_b.len());
+        for (i, _name) in entity_names_b.iter().enumerate() {
+            let emb = &name_embs_b[i];
+            let candidate = if use_hybrid {
+                conn.hybrid_dedup_similar_entity(emb, _name, &gid_b, DEDUP_THRESHOLD)?
+            } else {
+                conn.brute_force_similar_entity(emb, &gid_b, DEDUP_THRESHOLD)?
+            };
+            out.push(candidate);
+        }
+        Ok::<_, Error>(out)
+    })
+    .await??;
+
+    // Async dedup verification loop (no lock)
+    let mut decisions: Vec<DedupDecision> = Vec::with_capacity(extraction.entities.len());
+    let ref_time_owned = reference_time.to_string();
+    let gid_owned = group_id.to_string();
+    for (i, extracted) in extraction.entities.iter().enumerate() {
+        let decision = if let Some(existing) = &candidates[i] {
+            if state.dedup.is_duplicate(existing, extracted).await? {
+                DedupDecision::Merge {
+                    existing_uuid: existing.uuid.clone(),
+                    merged_summary: format!("{} {}", existing.summary, extracted.summary),
+                }
+            } else {
+                DedupDecision::Insert {
+                    row: EntityRow {
+                        uuid: uuid::Uuid::new_v4().to_string(),
+                        name: extracted.name.clone(),
+                        group_id: gid_owned.clone(),
+                        labels: {
+                            let mut labels = vec!["Entity".to_string()];
+                            if !extracted.entity_type.is_empty()
+                                && extracted.entity_type != "Entity"
+                            {
+                                labels.push(extracted.entity_type.clone());
+                            }
+                            labels
+                        },
+                        created_at: ref_time_owned.clone(),
+                        name_embedding: name_embeddings[i].clone(),
+                        summary: extracted.summary.clone(),
+                        attributes: "{}".to_string(),
+                    },
+                }
+            }
+        } else {
+            DedupDecision::Insert {
+                row: EntityRow {
+                    uuid: uuid::Uuid::new_v4().to_string(),
+                    name: extracted.name.clone(),
+                    group_id: gid_owned.clone(),
+                    labels: {
+                        let mut labels = vec!["Entity".to_string()];
+                        if !extracted.entity_type.is_empty()
+                            && extracted.entity_type != "Entity"
+                        {
+                            labels.push(extracted.entity_type.clone());
+                        }
+                        labels
+                    },
+                    created_at: ref_time_owned.clone(),
+                    name_embedding: name_embeddings[i].clone(),
+                    summary: extracted.summary.clone(),
+                    attributes: "{}".to_string(),
+                },
+            }
+        };
+        decisions.push(decision);
+    }
+
+    // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
     let ep_uuid = episode_uuid.clone();
     let name_owned = name.to_string();
@@ -67,56 +162,32 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    let db_c = Arc::clone(&state.db);
 
+    // Guard stays in async scope; spawn_blocking completes while it is held.
+    // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
+    let _write_guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
-        let conn = db.connect()?;
+        let conn = db_c.connect()?;
 
-        // Step 3: dedup entities
-        // Determine dedup strategy once per episode (count query is cheap relative to dedup).
-        let entity_count = conn.entity_count_in_group(&gid_owned)?;
-        let use_hybrid = entity_count >= hybrid_threshold();
-        let mut entity_uuids: Vec<String> = Vec::new();
-
-        for (i, extracted) in extraction.entities.iter().enumerate() {
-            let name_emb = &name_embeddings[i];
-            let existing = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(
-                    name_emb,
-                    &extracted.name,
-                    &gid_owned,
-                    DEDUP_THRESHOLD,
-                )?
-            } else {
-                conn.brute_force_similar_entity(name_emb, &gid_owned, DEDUP_THRESHOLD)?
-            };
-
-            let entity_uuid = if let Some(existing_row) = existing {
-                let merged_summary = format!("{} {}", existing_row.summary, extracted.summary);
-                conn.run_cypher(&format!(
-                    "MATCH (e:Entity {{uuid: '{}'}}) SET e.summary = '{}'",
-                    crate::db::escape_pub(&existing_row.uuid),
-                    crate::db::escape_pub(&merged_summary),
-                ))?;
-                existing_row.uuid
-            } else {
-                let new_uuid = uuid::Uuid::new_v4().to_string();
-                let mut labels = vec!["Entity".to_string()];
-                if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                    labels.push(extracted.entity_type.clone());
+        // Apply dedup decisions → collect entity UUIDs
+        let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
+        for decision in decisions {
+            match decision {
+                DedupDecision::Merge { existing_uuid, merged_summary } => {
+                    conn.run_cypher(&format!(
+                        "MATCH (e:Entity {{uuid: '{}'}}) SET e.summary = '{}'",
+                        escape_pub(&existing_uuid),
+                        escape_pub(&merged_summary),
+                    ))?;
+                    entity_uuids.push(existing_uuid);
                 }
-                conn.insert_entity(&EntityRow {
-                    uuid: new_uuid.clone(),
-                    name: extracted.name.clone(),
-                    group_id: gid_owned.clone(),
-                    labels,
-                    created_at: ref_time_owned.clone(),
-                    name_embedding: name_emb.clone(),
-                    summary: extracted.summary.clone(),
-                    attributes: "{}".to_string(),
-                })?;
-                new_uuid
-            };
-            entity_uuids.push(entity_uuid);
+                DedupDecision::Insert { row } => {
+                    let uuid = row.uuid.clone();
+                    conn.insert_entity(&row)?;
+                    entity_uuids.push(uuid);
+                }
+            }
         }
 
         // name→uuid map for edge endpoint resolution
@@ -127,7 +198,7 @@ pub async fn add_episode(
             .map(|(i, e)| (e.name.clone(), entity_uuids[i].clone()))
             .collect();
 
-        // Step 4: insert relationship edges
+        // Insert relationship edges
         for (i, edge) in extraction.edges.iter().enumerate() {
             let src_uuid = match name_to_uuid.get(&edge.source_name) {
                 Some(u) => u.clone(),
@@ -152,7 +223,7 @@ pub async fn add_episode(
             })?;
         }
 
-        // Step 5: insert episodic node
+        // Insert episodic node
         conn.insert_episodic(&EpisodicRow {
             uuid: ep_uuid.clone(),
             name: name_owned,
@@ -166,7 +237,7 @@ pub async fn add_episode(
             entity_edges: entity_uuids.clone(),
         })?;
 
-        // Step 6: insert MENTIONS edges
+        // Insert MENTIONS edges
         for entity_uuid in &entity_uuids {
             conn.insert_mentions_edge(&MentionsEdge {
                 episodic_uuid: ep_uuid.clone(),
@@ -180,6 +251,7 @@ pub async fn add_episode(
         Ok(())
     })
     .await??;
+    drop(_write_guard);
 
     Ok(episode_uuid)
 }
