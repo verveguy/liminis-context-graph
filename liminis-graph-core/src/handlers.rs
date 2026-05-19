@@ -70,11 +70,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
     Ok(json!({ "episode_uuid": episode_uuid }))
 }
 
-// ── Read handlers — hold shared read guard across spawn_blocking ──────────────
-//
-// The guard stays in the async scope while spawn_blocking executes.
-// tokio::sync::RwLockReadGuard is not 'static so it cannot be moved into the closure;
-// instead we keep it alive in the enclosing async stack frame.
+// ── Search handlers — no lock (hot read path, never blocked by writes) ────────
 
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
@@ -99,6 +95,11 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
             .await?;
     Ok(serde_json::to_value(edges)?)
 }
+
+// ── Other read handlers — hold shared read guard across spawn_blocking ────────
+//
+// Guard stays in the async scope while spawn_blocking executes.
+// RwLockReadGuard is not 'static so it cannot move into the closure.
 
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
