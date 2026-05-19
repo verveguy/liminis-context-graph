@@ -14,8 +14,14 @@ use crate::{
 ///
 /// Parses `GRAPHITI_EXTRACTION_LLM` on `:` — first token is the primary model,
 /// second (optional) is the fallback model. Both use the same `ANTHROPIC_API_KEY`.
-/// On primary failure, emits `TelemetryEvent::LlmFallback` exactly once per process
-/// lifetime and routes all subsequent calls to the fallback.
+///
+/// When a fallback is configured: on the first primary failure, emits
+/// `TelemetryEvent::LlmFallback` once and routes all subsequent calls to the
+/// fallback for the rest of the process lifetime.
+///
+/// When no fallback is configured: primary errors are returned to the caller
+/// without latching `primary_failed`, so transient failures do not permanently
+/// disable extraction.
 pub struct LlmRouter {
     primary: AnthropicExtractor,
     primary_model_name: String,
@@ -73,44 +79,46 @@ impl LlmRouter {
     }
 
     async fn do_extract(&self, body: &str, group_id: &str) -> Result<ExtractionResult, Error> {
+        // primary_failed is only ever set to true when a fallback is configured, so if it is
+        // true here there must be a fallback to try.
         if !self.primary_failed.load(Ordering::Acquire) {
             match self.primary.extract(body, group_id).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
-                    // Emit fallback event and log exactly once per session
-                    if self
-                        .primary_failed
-                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                    {
-                        self.sink.emit(TelemetryEvent::LlmFallback {
-                            ts_ms: now_ms(),
-                            role: "extraction".to_string(),
-                            primary_model: self.primary_model_name.clone(),
-                            fallback_model: self.fallback_model_name.clone(),
-                            error_reason: err.to_string(),
-                        });
-                        eprintln!(
-                            "liminis-graph: extraction primary '{}' failed ({}); switching to fallback for this session",
-                            self.primary_model_name, err
-                        );
-                    }
-
                     if let Some(fb) = &self.fallback {
+                        // Redirect to fallback and log the transition exactly once per session.
+                        if self
+                            .primary_failed
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            self.sink.emit(TelemetryEvent::LlmFallback {
+                                ts_ms: now_ms(),
+                                role: "extraction".to_string(),
+                                primary_model: self.primary_model_name.clone(),
+                                fallback_model: self.fallback_model_name.clone(),
+                                error_reason: err.to_string(),
+                            });
+                            eprintln!(
+                                "liminis-graph: extraction primary '{}' failed ({}); switching to fallback '{}' for this session",
+                                self.primary_model_name, err, self.fallback_model_name
+                            );
+                        }
                         return fb.extract(body, group_id).await;
                     }
+                    // No fallback — return the error without setting primary_failed so that
+                    // transient failures do not permanently disable the primary.
                     return Err(err);
                 }
             }
         }
 
-        // primary_failed is true — skip primary entirely
+        // primary_failed is true, which means a fallback is configured.
         if let Some(fb) = &self.fallback {
             fb.extract(body, group_id).await
         } else {
-            Err(Error::Ipc(
-                "extraction primary failed and no fallback configured".to_string(),
-            ))
+            // Unreachable: primary_failed is only set when fallback.is_some().
+            Err(Error::Ipc("BUG: primary_failed set without fallback".to_string()))
         }
     }
 }
