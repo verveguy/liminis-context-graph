@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::{
     error::Error,
     types::{EntityRow, EpisodicRow, MentionsEdge, RelatesToEdge},
@@ -17,7 +19,38 @@ impl Db {
         Ok(Self { inner })
     }
 
-    /// Opens a connection and loads vector + FTS extensions.
+    /// If `db_path` is absent but `wal_dir` contains `.jsonl` files, creates a fresh DB and
+    /// replays the WAL to rebuild it (R-06). Otherwise behaves like `Db::open`.
+    pub fn open_or_rebuild(
+        db_path:       &str,
+        wal_dir:       &str,
+        embedding_dim: usize,
+    ) -> Result<Self, Error> {
+        let db_exists = Path::new(db_path).exists();
+        let wal_dir_path = Path::new(wal_dir);
+
+        let has_wal = wal_dir_path.exists()
+            && wal_dir_path
+                .read_dir()
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok()).any(|e| {
+                        e.path().extension().and_then(|x| x.to_str()) == Some("jsonl")
+                    })
+                })
+                .unwrap_or(false);
+
+        let db = Self::open(db_path)?;
+
+        if !db_exists && has_wal {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            crate::replay::WalReplayer::new(wal_dir).replay(&conn)?;
+        }
+
+        Ok(db)
+    }
+
+    /// Opens a connection and loads vector + FTS extensions (AD-2).
     pub fn connect(&self) -> Result<Conn<'_>, Error> {
         let conn = lbug::Connection::new(&self.inner)?;
         let _ = conn.query("INSTALL vector")?;
@@ -189,6 +222,7 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
+<<<<<<< HEAD
     // ── Retrieval ─────────────────────────────────────────────────────────────
 
     /// Returns the last `last_n` episodic nodes for a given group, newest first.
@@ -532,7 +566,26 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
-    /// Simple name-prefix search (existing method, unchanged).
+    /// Returns the count of nodes with the given label.
+    pub fn count_nodes(&self, label: &str) -> Result<u64, Error> {
+        let sql = format!("MATCH (n:{label}) RETURN count(*)");
+        let result = self.inner.query(&sql)?;
+        for row in result {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
+    /// Returns entities whose name starts with `name_prefix`.
+    /// Pass `""` to return all entities.
+    ///
+    /// NOTE: `name_prefix` is single-quote–escaped but not parameterised; use only
+    /// trusted input until lbug exposes a parameterised-query API.
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
         let sql = format!(
             "MATCH (e:Entity) WHERE e.name STARTS WITH '{}' \
