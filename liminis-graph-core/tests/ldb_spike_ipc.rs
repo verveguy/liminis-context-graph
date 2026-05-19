@@ -80,7 +80,7 @@ fn test_rel_table_creation_and_query() {
     assert_eq!(first[1], "Alice knows Bob", "fact mismatch");
 }
 
-/// T003 [P] [LDB] — FTS index creation and queryNodes round-trip.
+/// T003 [P] [LDB] — FTS index creation and QUERY_FTS_INDEX round-trip.
 #[test]
 fn test_fts_index_creation_and_query() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -102,18 +102,17 @@ fn test_fts_index_creation_and_query() {
         .unwrap();
     }
 
-    // Create FTS index on Entity.name
+    // Create FTS index on Entity.name using lbug-native syntax
     conn.run_cypher(
-        "CALL db.index.fulltext.createNodeFullTextIndex('entity_name_fts', ['Entity'], ['name'])",
+        "CALL CREATE_FTS_INDEX('Entity', 'entity_name_fts', ['name'])",
     )
     .unwrap();
 
-    // Query FTS index for 'Alice' — validate YIELD syntax works
+    // Query FTS index for 'Alice' using lbug-native syntax (no YIELD)
     let rows = conn
         .cypher_query(
-            "CALL db.index.fulltext.queryNodes('entity_name_fts', 'Alice') \
-             YIELD node, score \
-             RETURN node.uuid, score",
+            "CALL QUERY_FTS_INDEX('Entity', 'entity_name_fts', 'Alice') \
+             WITH node, score RETURN node.uuid, score",
         )
         .unwrap();
 
