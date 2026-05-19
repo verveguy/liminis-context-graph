@@ -1,24 +1,40 @@
 use std::sync::Arc;
+use std::time::Duration;
+
+use futures::future::BoxFuture;
+use reqwest::Client;
+use serde_json::{json, Value};
+use tokio::time::sleep;
 
 use crate::{
     error::Error,
     telemetry::{cost_for_usage, now_ms, TelemetryEvent, TelemetrySink},
     types::ExtractionResult,
 };
-use reqwest::Client;
-use serde_json::{json, Value};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 
-/// Out-of-process entity/relationship extraction adapter (AD-5, Principle V).
-pub struct Extractor {
+// ── Extractor trait ───────────────────────────────────────────────────────────
+
+pub trait Extractor: Send + Sync {
+    fn extract<'a>(
+        &'a self,
+        episode_body: &'a str,
+        group_id: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
+}
+
+// ── AnthropicExtractor ────────────────────────────────────────────────────────
+
+/// Out-of-process entity/relationship extraction adapter (Principle V).
+pub struct AnthropicExtractor {
     api_key: String,
     model: String,
     client: Client,
     sink: Arc<dyn TelemetrySink>,
 }
 
-impl Extractor {
+impl AnthropicExtractor {
     /// Constructs from environment variables.
     ///
     /// - `ANTHROPIC_API_KEY` (required)
@@ -27,33 +43,34 @@ impl Extractor {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         let model = std::env::var("GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
-        Self {
-            api_key,
-            model,
-            client: Client::new(),
-            sink,
-        }
+        Self { api_key, model, client: Client::new(), sink }
     }
 
-    /// Extracts entities and relationships from `episode_body`. [HOT]
-    ///
-    /// Uses a structured JSON output prompt; the system prompt is placed in the
-    /// `system` field for prompt-cache eligibility (FR-015).
-    pub async fn extract(
-        &self,
-        episode_body: &str,
-        _group_id: &str,
-    ) -> Result<ExtractionResult, Error> {
-        let system = "You are a knowledge graph extraction assistant. \
+    pub fn with_model(model: String, api_key: String, sink: Arc<dyn TelemetrySink>) -> Self {
+        Self { api_key, model, client: Client::new(), sink }
+    }
+
+    fn is_sonnet(&self) -> bool {
+        self.model.to_lowercase().contains("sonnet")
+    }
+
+    async fn do_extract(&self, episode_body: &str, _group_id: &str) -> Result<ExtractionResult, Error> {
+        let system_text = "You are a knowledge graph extraction assistant. \
             Extract named entities and relationships from the given text. \
             Return ONLY valid JSON matching this schema exactly:\n\
             {\"entities\":[{\"name\":\"string\",\"entity_type\":\"string\",\"summary\":\"string\"}],\
             \"edges\":[{\"source_name\":\"string\",\"target_name\":\"string\",\"fact\":\"string\"}]}";
 
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+
         let body = json!({
             "model": &self.model,
             "max_tokens": 1024,
-            "system": system,
+            "system": system_value,
             "messages": [
                 {
                     "role": "user",
@@ -62,45 +79,59 @@ impl Extractor {
             ]
         });
 
-        let resp: Value = self
-            .client
-            .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(ANTHROPIC_API_URL)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
 
-        self.emit_token_usage(&resp);
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
 
-        // Parse the assistant message content
-        let content = resp["content"]
-            .as_array()
-            .and_then(|arr| arr.first())
-            .and_then(|block| block["text"].as_str())
-            .ok_or_else(|| Error::Ipc("extraction response missing content text".to_string()))?;
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
 
-        // Extract JSON from the content (may be wrapped in markdown code fences)
-        let json_str = extract_json_block(content);
-        let result: ExtractionResult = serde_json::from_str(json_str)?;
-        Ok(result)
+            if (status == 429 || status == 529) && attempt < 3 {
+                let delay = Duration::from_secs(1u64 << attempt);
+                sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| Error::Ipc("extraction response missing content text".to_string()))?;
+
+            let json_str = extract_json_block(content);
+            let result: ExtractionResult = serde_json::from_str(json_str)?;
+            return Ok(result);
+        }
     }
 
     fn emit_token_usage(&self, resp: &Value) {
         let usage = &resp["usage"];
         if !usage.is_object() {
-            return; // Absent on error responses — don't emit zero-count event
+            return;
         }
         let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
         let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
         let cache_read_tokens = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
         let cache_creation_tokens = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
-        let estimated_cost_usd =
-            cost_for_usage(&self.model, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens);
-
+        let estimated_cost_usd = cost_for_usage(
+            &self.model,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        );
         self.sink.emit(TelemetryEvent::TokenUsage {
             ts_ms: now_ms(),
             role: "extraction".to_string(),
@@ -114,8 +145,55 @@ impl Extractor {
     }
 }
 
+impl Extractor for AnthropicExtractor {
+    fn extract<'a>(
+        &'a self,
+        episode_body: &'a str,
+        group_id: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        Box::pin(self.do_extract(episode_body, group_id))
+    }
+}
+
+// ── MockExtractor ─────────────────────────────────────────────────────────────
+
+/// Zero-latency extractor for tests and benches. Returns a fixed 2-entity, 1-edge result.
+pub struct MockExtractor;
+
+impl Extractor for MockExtractor {
+    fn extract<'a>(
+        &'a self,
+        _episode_body: &'a str,
+        _group_id: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        use crate::types::{ExtractedEdge, ExtractedEntity};
+        Box::pin(async {
+            Ok(ExtractionResult {
+                entities: vec![
+                    ExtractedEntity {
+                        name: "Alice".to_string(),
+                        entity_type: "Person".to_string(),
+                        summary: "A person named Alice".to_string(),
+                    },
+                    ExtractedEntity {
+                        name: "Acme Corp".to_string(),
+                        entity_type: "Organization".to_string(),
+                        summary: "A company called Acme Corp".to_string(),
+                    },
+                ],
+                edges: vec![ExtractedEdge {
+                    source_name: "Alice".to_string(),
+                    target_name: "Acme Corp".to_string(),
+                    fact: "Alice works at Acme Corp".to_string(),
+                }],
+            })
+        })
+    }
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
 fn extract_json_block(s: &str) -> &str {
-    // Strip ```json ... ``` fences if present
     if let Some(start) = s.find("```json") {
         let after = &s[start + 7..];
         if let Some(end) = after.find("```") {
@@ -128,7 +206,6 @@ fn extract_json_block(s: &str) -> &str {
             return after[..end].trim();
         }
     }
-    // Find first '{' and last '}' as fallback
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
         return &s[start..=end];
     }

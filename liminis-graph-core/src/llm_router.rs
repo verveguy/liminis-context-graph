@@ -1,0 +1,108 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use futures::future::BoxFuture;
+
+use crate::{
+    error::Error,
+    extractor::{AnthropicExtractor, Extractor},
+    telemetry::{now_ms, TelemetryEvent, TelemetrySink},
+    types::ExtractionResult,
+};
+
+/// Routes extraction calls to a primary LLM with optional fallback (AD-5).
+///
+/// Parses `GRAPHITI_EXTRACTION_LLM` on `:` — first token is the primary model,
+/// second (optional) is the fallback model. Both use the same `ANTHROPIC_API_KEY`.
+/// On primary failure, emits `TelemetryEvent::LlmFallback` exactly once per process
+/// lifetime and routes all subsequent calls to the fallback.
+pub struct LlmRouter {
+    primary: AnthropicExtractor,
+    primary_model_name: String,
+    fallback: Option<AnthropicExtractor>,
+    fallback_model_name: String,
+    primary_failed: AtomicBool,
+    sink: Arc<dyn TelemetrySink>,
+}
+
+impl LlmRouter {
+    pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
+        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        let spec = std::env::var("GRAPHITI_EXTRACTION_LLM")
+            .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
+
+        let mut parts = spec.splitn(2, ':');
+        let primary_model = parts.next().unwrap_or("claude-haiku-4-5-20251001").to_string();
+        let fallback_model = parts.next().map(str::to_string);
+
+        let primary = AnthropicExtractor::with_model(
+            primary_model.clone(),
+            api_key.clone(),
+            Arc::clone(&sink),
+        );
+        let fallback_model_name = fallback_model.clone().unwrap_or_default();
+        let fallback = fallback_model
+            .map(|m| AnthropicExtractor::with_model(m, api_key, Arc::clone(&sink)));
+
+        Self {
+            primary,
+            primary_model_name: primary_model,
+            fallback,
+            fallback_model_name,
+            primary_failed: AtomicBool::new(false),
+            sink,
+        }
+    }
+
+    async fn do_extract(&self, body: &str, group_id: &str) -> Result<ExtractionResult, Error> {
+        if !self.primary_failed.load(Ordering::Acquire) {
+            match self.primary.extract(body, group_id).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    // Emit fallback event and log exactly once per session
+                    if self
+                        .primary_failed
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        self.sink.emit(TelemetryEvent::LlmFallback {
+                            ts_ms: now_ms(),
+                            role: "extraction".to_string(),
+                            primary_model: self.primary_model_name.clone(),
+                            fallback_model: self.fallback_model_name.clone(),
+                            error_reason: err.to_string(),
+                        });
+                        eprintln!(
+                            "liminis-graph: extraction primary '{}' failed ({}); switching to fallback for this session",
+                            self.primary_model_name, err
+                        );
+                    }
+
+                    if let Some(fb) = &self.fallback {
+                        return fb.extract(body, group_id).await;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        // primary_failed is true — skip primary entirely
+        if let Some(fb) = &self.fallback {
+            fb.extract(body, group_id).await
+        } else {
+            Err(Error::Ipc(
+                "extraction primary failed and no fallback configured".to_string(),
+            ))
+        }
+    }
+}
+
+impl Extractor for LlmRouter {
+    fn extract<'a>(
+        &'a self,
+        body: &'a str,
+        group_id: &'a str,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        Box::pin(self.do_extract(body, group_id))
+    }
+}
