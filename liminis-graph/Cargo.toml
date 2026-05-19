@@ -1,0 +1,9 @@
+[package]
+name = "liminis-graph"
+version = "0.1.0"
+edition = "2021"
+description = "LadybugDB knowledge-graph IPC binary"
+license = "MIT"
+
+[dependencies]
+liminis-graph-core = { path = "../liminis-graph-core" }
