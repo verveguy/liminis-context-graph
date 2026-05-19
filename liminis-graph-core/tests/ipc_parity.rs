@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use liminis_graph_core::{
-    db::Db, embedder::Embedder, extractor::Extractor, handlers, ipc::IpcRequest,
+    db::Db, embedder::Embedder, extractor::Extractor, handlers, ipc::IpcRequest, NoopSink,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -39,7 +39,7 @@ fn make_services() -> (Arc<Embedder>, Arc<Extractor>) {
     // (127.0.0.1:8765) which is not running in CI, so any call to embed() will
     // fail — that's expected for methods that require external services.
     let embedder = Arc::new(Embedder::from_env());
-    let extractor = Arc::new(Extractor::from_env());
+    let extractor = Arc::new(Extractor::from_env(Arc::new(NoopSink)));
     (embedder, extractor)
 }
 
@@ -74,7 +74,8 @@ async fn dispatch_val(
     emb: Arc<Embedder>,
     ext: Arc<Extractor>,
 ) -> Value {
-    let resp = handlers::dispatch(req(id, method, params), db, emb, ext).await;
+    let sink = Arc::new(NoopSink);
+    let resp = handlers::dispatch(req(id, method, params), db, emb, ext, sink).await;
     serde_json::to_value(resp).unwrap()
 }
 
