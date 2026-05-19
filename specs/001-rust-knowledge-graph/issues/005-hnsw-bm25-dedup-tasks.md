@@ -13,15 +13,15 @@ Tags: `[HOT]` = dedup hot path, bench REQUIRED before merge; `[LDB]` = LadybugDB
 **Purpose**: Add the three synchronous `Conn` methods needed by the hybrid dedup path.
 These are pure additions to `db.rs`; no existing behaviour is changed.
 
-- [ ] T001 [US4] [LDB] Add `entity_count_in_group(group_id: &str) -> Result<usize, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
+- [x] T001 [US4] [LDB] Add `entity_count_in_group(group_id: &str) -> Result<usize, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
   Query: `MATCH (e:Entity) WHERE e.group_id = '...' RETURN count(e)`.  
   Returns `0` on empty result (no entities, threshold check should use brute-force).
 
-- [ ] T002 [US4] [LDB] Add `get_entity_embeddings_by_uuids(uuids: &[String]) -> Result<Vec<(String, Vec<f32>)>, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
+- [x] T002 [US4] [LDB] Add `get_entity_embeddings_by_uuids(uuids: &[String]) -> Result<Vec<(String, Vec<f32>)>, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
   Query: `MATCH (e:Entity) WHERE e.uuid IN [...] RETURN e.uuid, e.name_embedding`.  
   Returns `(uuid, embedding)` pairs; entities with empty embeddings are excluded.
 
-- [ ] T003 [US4] [HOT] [LDB] Add `hybrid_dedup_similar_entity(name_embedding: &[f32], entity_name: &str, group_id: &str, threshold: f32) -> Result<Option<EntityRow>, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
+- [x] T003 [US4] [HOT] [LDB] Add `hybrid_dedup_similar_entity(name_embedding: &[f32], entity_name: &str, group_id: &str, threshold: f32) -> Result<Option<EntityRow>, Error>` to `Conn` in `liminis-graph-core/src/db.rs`.  
   Steps inside this method:  
   1. Call `vector_search_entities(name_embedding, &[group_id], 10)` — HNSW candidates.  
   2. Call `fts_search_entities(entity_name, &[group_id], 10)` — BM25 candidates.  
@@ -30,10 +30,10 @@ These are pure additions to `db.rs`; no existing behaviour is changed.
   5. Apply `cosine_similarity` vs. `threshold` (same as brute-force), return best match.  
   Add a module comment documenting that `ef` uses the lbug default (not configurable).
 
-- [ ] T004 [US4] [LDB] Add unit test `hybrid_dedup_returns_none_when_below_threshold` in `liminis-graph-core/src/db.rs` (in-file `#[cfg(test)]` block or `tests/db_dedup.rs`).  
+- [x] T004 [US4] [LDB] Add unit test `hybrid_dedup_returns_none_when_below_threshold` in `liminis-graph-core/src/db.rs` (in-file `#[cfg(test)]` block or `tests/db_dedup.rs`).  
   Seeds 3 entities, queries with a dissimilar embedding, asserts `None`.
 
-- [ ] T005 [US4] [LDB] Add unit test `hybrid_dedup_returns_best_match_above_threshold` in the same test location.  
+- [x] T005 [US4] [LDB] Add unit test `hybrid_dedup_returns_best_match_above_threshold` in the same test location.  
   Seeds 3 entities with known embeddings, queries with embedding identical to entity 2, asserts returned UUID matches entity 2.
 
 **Checkpoint**: `cargo test` passes; `hybrid_dedup_similar_entity` is callable on `Conn`.
