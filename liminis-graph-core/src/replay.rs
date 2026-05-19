@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use crate::db::Conn;
@@ -45,16 +46,30 @@ impl WalReplayer {
 
         for file_path in &files {
             stats.files_read += 1;
-            let content = fs::read_to_string(file_path)?;
-            let raw_lines: Vec<&str> = content.lines().collect();
+            let file = fs::File::open(file_path)?;
+            let reader = BufReader::new(file);
 
-            for (i, raw) in raw_lines.iter().enumerate() {
-                let raw = raw.trim();
+            for (i, line_result) in reader.lines().enumerate() {
+                // A truncated final line that ends with invalid UTF-8 (crash during write)
+                // produces an io::Error here — skip it, satisfying R-05.
+                let raw = match line_result {
+                    Ok(l) => l,
+                    Err(_) => {
+                        eprintln!(
+                            "[WAL WARN] skipping unreadable line {} in {:?}",
+                            i + 1,
+                            file_path
+                        );
+                        stats.lines_skipped += 1;
+                        continue;
+                    }
+                };
+                let raw = raw.trim().to_string();
                 if raw.is_empty() {
                     continue;
                 }
 
-                let wal_line: WalLine = match serde_json::from_str(raw) {
+                let wal_line: WalLine = match serde_json::from_str(&raw) {
                     Ok(l) => l,
                     Err(_) => {
                         eprintln!(
@@ -107,9 +122,9 @@ impl WalReplayer {
 }
 
 /// Substitutes `$key` placeholders in `cypher` with Cypher literal representations of the
-/// corresponding JSON values. Params are processed longest-name-first to avoid partial
-/// substitution of shorter names that are prefixes of longer ones (e.g., `$name` vs
-/// `$name_embedding`).
+/// corresponding JSON values. Uses a single left-to-right pass so already-substituted literal
+/// text is never re-scanned, preventing double-interpolation if a value contains `$key` patterns.
+/// Longest-key matching at each `$` prevents `$name` from consuming part of `$name_embedding`.
 fn interpolate_params(cypher: &str, params: &serde_json::Value) -> String {
     let serde_json::Value::Object(map) = params else {
         return cypher.to_string();
@@ -120,14 +135,25 @@ fn interpolate_params(cypher: &str, params: &serde_json::Value) -> String {
 
     let mut pairs: Vec<(&str, &serde_json::Value)> =
         map.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    // Longest key first to prevent $name from clobbering $name_embedding.
+    // Longest key first so that at each `$` position we greedily match the longest param name.
     pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    let mut result = cypher.to_string();
-    for (key, val) in pairs {
-        let placeholder = format!("${key}");
-        result = result.replace(&placeholder, &json_to_cypher_literal(val));
+    let mut result = String::with_capacity(cypher.len());
+    let mut remaining = cypher;
+    while let Some(dollar_pos) = remaining.find('$') {
+        result.push_str(&remaining[..dollar_pos]);
+        let after_dollar = &remaining[dollar_pos + 1..];
+        // Try each key (longest first) to find a match immediately after `$`.
+        if let Some((k, v)) = pairs.iter().find(|(k, _)| after_dollar.starts_with(k)) {
+            result.push_str(&json_to_cypher_literal(v));
+            remaining = &remaining[dollar_pos + 1 + k.len()..];
+        } else {
+            // `$` not followed by a known key — emit it literally.
+            result.push('$');
+            remaining = after_dollar;
+        }
     }
+    result.push_str(remaining);
     result
 }
 
@@ -196,5 +222,17 @@ mod interpolate_tests {
     fn test_json_to_cypher_literal_array() {
         let val = json!([1.0, 2.0]);
         assert_eq!(json_to_cypher_literal(&val), "[1.0, 2.0]");
+    }
+
+    #[test]
+    fn test_no_double_interpolation_when_value_contains_placeholder() {
+        // If param 'a' has value "$b" and param 'b' has value "secret", a multi-pass replace
+        // would substitute "$b" → "secret", producing "secret" in the result. Single-pass must not.
+        let cypher = "SET n.x = $a, n.y = $b";
+        let params = json!({"a": "$b", "b": "secret"});
+        let result = interpolate_params(cypher, &params);
+        // $a must expand to the literal string '$b' (escaped), not to 'secret'.
+        assert!(result.contains("'$b'"), "value containing placeholder must not be re-expanded");
+        assert!(result.contains("'secret'"), "$b must still expand to 'secret'");
     }
 }
