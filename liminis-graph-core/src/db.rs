@@ -765,6 +765,8 @@ fn value_as_f64(v: &lbug::Value) -> f64 {
 fn value_as_usize(v: &lbug::Value) -> usize {
     match v {
         lbug::Value::Int64(i) => *i as usize,
+        lbug::Value::UInt64(i) => *i as usize,
+        lbug::Value::Int32(i) => *i as usize,
         lbug::Value::Double(f) => *f as usize,
         _ => 0,
     }
