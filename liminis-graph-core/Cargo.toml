@@ -1,0 +1,18 @@
+[package]
+name = "liminis-graph-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core library for the Liminis knowledge graph over LadybugDB"
+license = "MIT"
+
+[dependencies]
+lbug = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "placeholder"
+harness = false
