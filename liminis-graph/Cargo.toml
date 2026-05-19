@@ -7,3 +7,5 @@ license = "MIT"
 
 [dependencies]
 liminis-graph-core = { path = "../liminis-graph-core" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
