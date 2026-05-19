@@ -12,12 +12,20 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      # The prebuilt liblbug.a doesn't ship companion third-party archives;
+      # build from source so all deps (fastpfor, brotli, lz4, zstd, yyjson…) are bundled.
+      LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Install cmake (ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y cmake
 
       - name: cargo build
         run: cargo build --release
@@ -34,10 +42,15 @@ jobs:
   bench-stub:
     name: bench compile (stub)
     runs-on: ubuntu-latest
+    env:
+      LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cmake
+        run: sudo apt-get install -y cmake
 
       - name: cargo bench --no-run
         run: cargo bench --no-run
