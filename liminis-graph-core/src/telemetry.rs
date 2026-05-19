@@ -26,7 +26,6 @@ pub enum TelemetryEvent {
         cache_creation_tokens: u64,
         estimated_cost_usd: Option<f64>,
     },
-    /// TODO: FR-009 — emit from primary→fallback transition in extractor chain
     LlmFallback {
         ts_ms: u64,
         role: String,
