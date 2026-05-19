@@ -54,7 +54,7 @@ impl<'db> Conn<'db> {
         let result = self.inner.query(sql)?;
         let mut rows = Vec::new();
         for row in result {
-            rows.push(row.iter().map(|v| v.to_string()).collect());
+            rows.push(row.iter().map(value_as_string).collect());
         }
         Ok(rows)
     }
@@ -64,9 +64,10 @@ impl<'db> Conn<'db> {
         crate::schema::init(self, embedding_dim)
     }
 
-    /// Creates HNSW + FTS indexes; idempotent via IF NOT EXISTS / error suppression.
+    /// Creates HNSW vector indexes and FTS indexes; idempotent.
     pub fn build_indices_and_constraints(&self) -> Result<(), Error> {
-        self.create_vector_indexes()
+        self.create_vector_indexes()?;
+        crate::schema::create_fts_indexes(self)
     }
 
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
@@ -584,7 +585,7 @@ fn format_str_array(v: &[String]) -> String {
 
 pub(crate) fn format_str_list(v: &[&str]) -> String {
     if v.is_empty() {
-        return "['']".to_string();
+        return "[]".to_string();
     }
     let parts: Vec<String> = v.iter().map(|s| format!("'{}'", escape(s))).collect();
     format!("[{}]", parts.join(", "))
