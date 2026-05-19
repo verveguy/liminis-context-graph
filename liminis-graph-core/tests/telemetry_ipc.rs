@@ -59,10 +59,9 @@ async fn ipc_call_event_emitted_on_successful_dispatch() {
     assert_eq!(events.len(), 1, "expected exactly one IpcCall event, got: {events:?}");
 
     match &events[0] {
-        TelemetryEvent::IpcCall { method, success, duration_ms, .. } => {
+        TelemetryEvent::IpcCall { method, success, .. } => {
             assert_eq!(method, "knowledge_build_indices");
             assert!(success, "expected success=true");
-            let _ = duration_ms; // duration_ms >= 0 is always true for u64
         }
         other => panic!("expected IpcCall event, got: {other:?}"),
     }

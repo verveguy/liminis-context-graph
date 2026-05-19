@@ -24,7 +24,8 @@ impl StderrSink {
 
 impl TelemetrySink for StderrSink {
     fn emit(&self, event: TelemetryEvent) {
-        // Non-blocking send; drop if receiver is gone (shutdown in progress).
+        // Unbounded channel: non-blocking, never drops on backpressure (queue grows),
+        // only drops the event when the receiver is gone (shutdown in progress).
         let _ = self.tx.send(event);
     }
 }
