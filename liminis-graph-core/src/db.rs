@@ -475,6 +475,84 @@ impl<'db> Conn<'db> {
         Ok(best.map(|(_, row)| row))
     }
 
+    /// Returns the number of Entity nodes in the given group. Returns 0 when the group is empty.
+    pub fn entity_count_in_group(&self, group_id: &str) -> Result<usize, Error> {
+        let sql = format!(
+            "MATCH (e:Entity) WHERE e.group_id = '{}' RETURN count(e)",
+            escape(group_id),
+        );
+        let mut result = self.inner.query(&sql)?;
+        if let Some(row) = result.next() {
+            Ok(value_as_usize(&row[0]))
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Fetches (uuid, name_embedding) pairs for a slice of UUIDs.
+    /// Excludes entities whose stored embedding is empty.
+    pub fn get_entity_embeddings_by_uuids(
+        &self,
+        uuids: &[String],
+    ) -> Result<Vec<(String, Vec<f32>)>, Error> {
+        if uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
+        let uuid_list = format_str_list(&uuid_refs);
+        let sql = format!(
+            "MATCH (e:Entity) WHERE e.uuid IN {uuid_list} RETURN e.uuid, e.name_embedding"
+        );
+        let result = self.inner.query(&sql)?;
+        let mut pairs = Vec::new();
+        for row in result {
+            let emb = value_as_float_array(&row[1]);
+            if !emb.is_empty() {
+                pairs.push((value_as_string(&row[0]), emb));
+            }
+        }
+        Ok(pairs)
+    }
+
+    /// Hybrid HNSW + BM25 dedup: retrieves 10 candidates per path, fuses with RRF,
+    /// cosine-rechecks the fused set against `threshold`, and returns the best match.
+    ///
+    /// Note: the `ef` search parameter is not configurable in lbug 0.16.1; the lbug default is used.
+    pub fn hybrid_dedup_similar_entity(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+    ) -> Result<Option<EntityRow>, Error> {
+        const CANDIDATE_K: usize = 10;
+
+        let vector_candidates =
+            self.vector_search_entities(name_embedding, &[group_id], CANDIDATE_K)?;
+        let bm25_candidates =
+            self.fts_search_entities(entity_name, &[group_id], CANDIDATE_K)?;
+        let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
+        let top_uuids: Vec<String> = fused_uuids.into_iter().take(CANDIDATE_K).collect();
+
+        let candidate_embeddings = self.get_entity_embeddings_by_uuids(&top_uuids)?;
+
+        let mut best: Option<(f32, String)> = None;
+        for (uuid, emb) in candidate_embeddings {
+            let sim = cosine_similarity(name_embedding, &emb);
+            if sim >= threshold {
+                if best.as_ref().map_or(true, |(s, _)| sim > *s) {
+                    best = Some((sim, uuid));
+                }
+            }
+        }
+
+        if let Some((_, uuid)) = best {
+            self.get_entity_by_uuid(&uuid)
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
         let sql = format!(
@@ -681,6 +759,14 @@ fn value_as_f64(v: &lbug::Value) -> f64 {
         lbug::Value::Float(f) => *f as f64,
         lbug::Value::Int64(i) => *i as f64,
         _ => 0.0,
+    }
+}
+
+fn value_as_usize(v: &lbug::Value) -> usize {
+    match v {
+        lbug::Value::Int64(i) => *i as usize,
+        lbug::Value::Double(f) => *f as usize,
+        _ => 0,
     }
 }
 
