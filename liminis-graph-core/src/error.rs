@@ -8,4 +8,22 @@ pub enum Error {
 
     #[error("query failed: {0}")]
     QueryFailed(String),
+
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("IPC error: {0}")]
+    Ipc(String),
+
+    #[error("task join error: {0}")]
+    Join(String),
+}
+
+impl From<tokio::task::JoinError> for Error {
+    fn from(e: tokio::task::JoinError) -> Self {
+        Error::Join(e.to_string())
+    }
 }
