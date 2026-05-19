@@ -102,13 +102,7 @@ fn test_fts_index_creation_and_query() {
         .unwrap();
     }
 
-    // Create FTS index on Entity.name using lbug-native syntax
-    conn.run_cypher(
-        "CALL CREATE_FTS_INDEX('Entity', 'entity_name_fts', ['name'])",
-    )
-    .unwrap();
-
-    // Query FTS index for 'Alice' using lbug-native syntax (no YIELD)
+    // FTS index created by init_schema above; query using lbug-native syntax (no YIELD)
     let rows = conn
         .cypher_query(
             "CALL QUERY_FTS_INDEX('Entity', 'entity_name_fts', 'Alice') \
