@@ -455,11 +455,15 @@ impl<'db> Conn<'db> {
             }
             let sim = cosine_similarity(name_embedding, &stored_embedding);
             if sim >= threshold {
-                if best.as_ref().map_or(true, |(s, _)| sim > *s) {
+                let candidate_uuid = value_as_string(&row[0]);
+                let is_better = best.as_ref().map_or(true, |(s, r)| {
+                    sim > *s || (sim == *s && candidate_uuid < r.uuid)
+                });
+                if is_better {
                     best = Some((
                         sim,
                         EntityRow {
-                            uuid: value_as_string(&row[0]),
+                            uuid: candidate_uuid,
                             name: value_as_string(&row[1]),
                             group_id: value_as_string(&row[2]),
                             labels: value_as_str_list(&row[3]),
@@ -540,7 +544,10 @@ impl<'db> Conn<'db> {
         for (uuid, emb) in candidate_embeddings {
             let sim = cosine_similarity(name_embedding, &emb);
             if sim >= threshold {
-                if best.as_ref().map_or(true, |(s, _)| sim > *s) {
+                let is_better = best.as_ref().map_or(true, |(s, best_uuid)| {
+                    sim > *s || (sim == *s && &uuid < best_uuid)
+                });
+                if is_better {
                     best = Some((sim, uuid));
                 }
             }
