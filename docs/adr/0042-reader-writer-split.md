@@ -45,7 +45,7 @@ Acceptance criterion SC-003 requires that the Anthropic prompt-cache hit rate on
 - `"cache_control": {"type": "ephemeral"}` on the system message object, Sonnet path only.
 - Token usage parsing for `cache_read_input_tokens` and `cache_creation_input_tokens` (already implemented).
 
-The quantitative hit-rate assertion (SC-003) is deferred to a follow-up issue: **"Establish prompt-caching baseline measurement in-repo"**. That issue must record the baseline figure and add a bench or test that asserts against it on a fixed replay corpus.
+The quantitative hit-rate assertion (SC-003) is deferred to follow-up issue **#12 "Establish prompt-caching baseline measurement in-repo"**. That issue must record the baseline figure and add a bench or test that asserts against it on a fixed replay corpus.
 
 ## References
 
