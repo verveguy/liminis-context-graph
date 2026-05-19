@@ -12,10 +12,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 reqwest = { workspace = true }
 time = { workspace = true }
-futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
