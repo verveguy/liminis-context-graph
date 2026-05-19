@@ -30,6 +30,7 @@ pub trait Extractor: Send + Sync {
 pub struct AnthropicExtractor {
     api_key: String,
     model: String,
+    url: String,
     client: Client,
     sink: Arc<dyn TelemetrySink>,
 }
@@ -43,11 +44,20 @@ impl AnthropicExtractor {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         let model = std::env::var("GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
-        Self { api_key, model, client: Client::new(), sink }
+        Self { api_key, model, url: ANTHROPIC_API_URL.to_string(), client: Client::new(), sink }
     }
 
     pub fn with_model(model: String, api_key: String, sink: Arc<dyn TelemetrySink>) -> Self {
-        Self { api_key, model, client: Client::new(), sink }
+        Self { api_key, model, url: ANTHROPIC_API_URL.to_string(), client: Client::new(), sink }
+    }
+
+    /// Constructs with a custom API URL — useful for pointing at an unreachable address in tests.
+    pub fn with_url(model: String, api_key: String, url: String, sink: Arc<dyn TelemetrySink>) -> Self {
+        Self { api_key, model, url, client: Client::new(), sink }
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model
     }
 
     fn is_sonnet(&self) -> bool {
@@ -83,7 +93,7 @@ impl AnthropicExtractor {
         loop {
             let mut req = self
                 .client
-                .post(ANTHROPIC_API_URL)
+                .post(&self.url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01");
 
@@ -192,6 +202,32 @@ impl Extractor for MockExtractor {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+// ── unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::NoopSink;
+
+    // T015: Sonnet model uses prompt-caching path; non-Sonnet does not.
+    #[test]
+    fn sonnet_model_detected_for_prompt_cache() {
+        let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+        let sonnet = AnthropicExtractor::with_model(
+            "claude-sonnet-4-5-20251115".to_string(),
+            "key".to_string(),
+            Arc::clone(&sink),
+        );
+        let haiku = AnthropicExtractor::with_model(
+            "claude-haiku-4-5-20251001".to_string(),
+            "key".to_string(),
+            Arc::clone(&sink),
+        );
+        assert!(sonnet.is_sonnet(), "sonnet model name should trigger prompt-cache path");
+        assert!(!haiku.is_sonnet(), "haiku model name should not trigger prompt-cache path");
+    }
+}
 
 fn extract_json_block(s: &str) -> &str {
     if let Some(start) = s.find("```json") {
