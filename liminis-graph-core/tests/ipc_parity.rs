@@ -17,11 +17,10 @@ use liminis_graph_core::{
     app_state::AppState,
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::Embedder,
+    embedder::HttpEmbedder,
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
-    llm_router::LlmRouter,
     telemetry::{NoopSink, TelemetrySink},
 };
 use serde_json::{json, Value};
@@ -49,7 +48,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
         db,
-        embedder: Arc::new(Embedder::from_env()),
+        embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),

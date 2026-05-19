@@ -35,7 +35,7 @@ pub fn rrf_fuse(bm25: &[(String, f64)], vector: &[(String, f64)]) -> Vec<String>
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).
 pub async fn hybrid_entity_search(
     db: Arc<Db>,
-    embedder: Arc<Embedder>,
+    embedder: Arc<dyn Embedder>,
     query: &str,
     group_ids: Vec<String>,
     limit: usize,
@@ -67,7 +67,7 @@ pub async fn hybrid_entity_search(
 /// Hybrid BM25 + HNSW edge (fact) search with RRF fusion (HOT path).
 pub async fn hybrid_edge_search(
     db: Arc<Db>,
-    embedder: Arc<Embedder>,
+    embedder: Arc<dyn Embedder>,
     query: &str,
     group_ids: Vec<String>,
     limit: usize,
