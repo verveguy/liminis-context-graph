@@ -45,7 +45,9 @@ impl WalWriter {
 }
 ```
 
-`with_chunk` sets a `in_chunk` flag, invokes the closure (which calls `log_mutation()` one or more times — each call pushes to `pending_lines`), then on `Ok` writes all `pending_lines` atomically to a JSONL file. On `Err`, `pending_lines` is discarded. This satisfies R-02 without any Python analog (the research confirmed `chunk()` does not exist in the Python implementation — it is a new invariant introduced here).
+`with_chunk` invokes the closure (which calls `log_mutation()` one or more times — each call pushes to `pending_lines`), then on `Ok` writes all `pending_lines` atomically to a JSONL file. On `Err`, `pending_lines` is discarded. This satisfies R-02.
+
+> **Note on spec vs. Python reality**: The issue body references a `chunk()` context manager in `wal.py`. Research found no such function in the actual Python codebase. Chunk-atomicity (R-02) is therefore a **new invariant introduced by the Rust service**, not a port of existing Python behavior. The spec reference was aspirational, not descriptive.
 
 ### AD-W3: Soft `max_events_per_file` — chunk wins, never splits
 
