@@ -1,4 +1,4 @@
-// IPC parity tests (T024): structural JSON-RPC 2.0 correctness for all 11 wire methods.
+// IPC parity tests: structural JSON-RPC 2.0 correctness for all 11 wire methods.
 //
 // Each test calls handlers::dispatch() in-process and checks that:
 //   1. The response is valid JSON-RPC 2.0 (has "jsonrpc":"2.0" and matching "id")
@@ -14,10 +14,19 @@
 use std::sync::Arc;
 
 use liminis_graph_core::{
-    db::Db, embedder::Embedder, extractor::Extractor, handlers, ipc::IpcRequest, NoopSink,
+    app_state::AppState,
+    db::Db,
+    dedup_adapter::PassthroughDedupAdapter,
+    embedder::Embedder,
+    extractor::MockExtractor,
+    handlers,
+    ipc::IpcRequest,
+    llm_router::LlmRouter,
+    telemetry::{NoopSink, TelemetrySink},
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,13 +43,18 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     (db, dir)
 }
 
-fn make_services() -> (Arc<Embedder>, Arc<Extractor>) {
-    // Use env-default constructors; the embedder points at the default address
-    // (127.0.0.1:8765) which is not running in CI, so any call to embed() will
-    // fail — that's expected for methods that require external services.
-    let embedder = Arc::new(Embedder::from_env());
-    let extractor = Arc::new(Extractor::from_env(Arc::new(NoopSink)));
-    (embedder, extractor)
+fn make_state(db: Arc<Db>) -> Arc<AppState> {
+    // MockExtractor + PassthroughDedupAdapter + default Embedder (unreachable URL in CI)
+    // Methods that call embed() will fail with -32000 — that's expected for those tests.
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db,
+        embedder: Arc::new(Embedder::from_env()),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+    })
 }
 
 fn req(id: i64, method: &str, params: Value) -> IpcRequest {
@@ -66,16 +80,8 @@ fn assert_err_resp(v: &Value, id: i64, expected_code: i32) {
     assert_eq!(v["error"]["code"], expected_code, "wrong error code: {v}");
 }
 
-async fn dispatch_val(
-    id: i64,
-    method: &str,
-    params: Value,
-    db: Arc<Db>,
-    emb: Arc<Embedder>,
-    ext: Arc<Extractor>,
-) -> Value {
-    let sink = Arc::new(NoopSink);
-    let resp = handlers::dispatch(req(id, method, params), db, emb, ext, sink).await;
+async fn dispatch_val(id: i64, method: &str, params: Value, state: Arc<AppState>) -> Value {
+    let resp = handlers::dispatch(req(id, method, params), state).await;
     serde_json::to_value(resp).unwrap()
 }
 
@@ -84,8 +90,8 @@ async fn dispatch_val(
 #[tokio::test]
 async fn parity_build_indices() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
-    let v = dispatch_val(1, "knowledge_build_indices", json!({}), db, emb, ext).await;
+    let state = make_state(db);
+    let v = dispatch_val(1, "knowledge_build_indices", json!({}), state).await;
     assert_ok_resp(&v, 1);
     assert_eq!(v["result"]["status"], "ok");
 }
@@ -93,14 +99,12 @@ async fn parity_build_indices() {
 #[tokio::test]
 async fn parity_get_episodes_empty() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         2,
         "knowledge_get_episodes",
         json!({"group_id": "parity_group", "last_n": 10}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 2);
@@ -111,14 +115,12 @@ async fn parity_get_episodes_empty() {
 #[tokio::test]
 async fn parity_get_nodes_by_group_empty() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         3,
         "knowledge_get_nodes_by_group",
         json!({"group_ids": ["parity_group"]}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 3);
@@ -128,14 +130,12 @@ async fn parity_get_nodes_by_group_empty() {
 #[tokio::test]
 async fn parity_get_edges_by_group_empty() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         4,
         "knowledge_get_edges_by_group",
         json!({"group_ids": ["parity_group"]}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 4);
@@ -145,14 +145,12 @@ async fn parity_get_edges_by_group_empty() {
 #[tokio::test]
 async fn parity_get_edges_by_uuids_empty() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         5,
         "knowledge_get_edges_by_uuids",
         json!({"uuids": []}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 5);
@@ -162,14 +160,12 @@ async fn parity_get_edges_by_uuids_empty() {
 #[tokio::test]
 async fn parity_query_cypher() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         6,
         "knowledge_query_cypher",
         json!({"query": "MATCH (n:Entity) RETURN n.uuid LIMIT 1"}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 6);
@@ -179,14 +175,12 @@ async fn parity_query_cypher() {
 #[tokio::test]
 async fn parity_delete_episode_noop() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         7,
         "knowledge_delete_episode",
         json!({"episode_uuid": "00000000-0000-0000-0000-000000000001"}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_ok_resp(&v, 7);
@@ -196,8 +190,8 @@ async fn parity_delete_episode_noop() {
 #[tokio::test]
 async fn parity_close() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
-    let v = dispatch_val(8, "knowledge_close", json!({}), db, emb, ext).await;
+    let state = make_state(db);
+    let v = dispatch_val(8, "knowledge_close", json!({}), state).await;
     assert_ok_resp(&v, 8);
     assert_eq!(v["result"]["status"], "closed");
 }
@@ -205,8 +199,8 @@ async fn parity_close() {
 #[tokio::test]
 async fn parity_unknown_method_returns_error() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
-    let v = dispatch_val(9, "no_such_method", json!({}), db, emb, ext).await;
+    let state = make_state(db);
+    let v = dispatch_val(9, "no_such_method", json!({}), state).await;
     assert_err_resp(&v, 9, -32000);
     let msg = v["error"]["message"].as_str().unwrap_or("");
     assert!(
@@ -218,21 +212,17 @@ async fn parity_unknown_method_returns_error() {
 #[tokio::test]
 async fn parity_find_entities_requires_embedder() {
     // Embedding call fails (no server at default URL) → -32000 error with an HTTP message.
-    // This test verifies the error is properly shaped JSON-RPC 2.0.
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         10,
         "knowledge_find_entities",
         json!({"query": "Alice", "group_ids": ["g"], "num_results": 5}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_eq!(v["jsonrpc"], "2.0");
     assert_eq!(v["id"], 10);
-    // Either a valid result (if embedding service happens to be up) or a -32000 error
     assert!(
         v.get("result").is_some() || v["error"]["code"] == -32000,
         "unexpected response shape: {v}"
@@ -242,14 +232,12 @@ async fn parity_find_entities_requires_embedder() {
 #[tokio::test]
 async fn parity_find_relationships_requires_embedder() {
     let (db, _dir) = make_db(4);
-    let (emb, ext) = make_services();
+    let state = make_state(db);
     let v = dispatch_val(
         11,
         "knowledge_find_relationships",
         json!({"query": "works at", "group_ids": ["g"], "num_results": 5}),
-        db,
-        emb,
-        ext,
+        state,
     )
     .await;
     assert_eq!(v["jsonrpc"], "2.0");
