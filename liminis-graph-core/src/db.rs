@@ -7,8 +7,8 @@ pub struct Db {
     inner: lbug::Database,
 }
 
-pub struct Conn {
-    inner: lbug::Connection,
+pub struct Conn<'db> {
+    inner: lbug::Connection<'db>,
 }
 
 impl Db {
@@ -18,20 +18,20 @@ impl Db {
     }
 
     /// Opens a connection and loads vector + FTS extensions (AD-2).
-    pub fn connect(&self) -> Result<Conn, Error> {
+    pub fn connect(&self) -> Result<Conn<'_>, Error> {
         let conn = lbug::Connection::new(&self.inner)?;
-        conn.query("INSTALL vector")?;
-        conn.query("LOAD EXTENSION vector")?;
-        conn.query("INSTALL fts")?;
-        conn.query("LOAD EXTENSION fts")?;
+        let _ = conn.query("INSTALL vector")?;
+        let _ = conn.query("LOAD EXTENSION vector")?;
+        let _ = conn.query("INSTALL fts")?;
+        let _ = conn.query("LOAD EXTENSION fts")?;
         Ok(Conn { inner: conn })
     }
 }
 
-impl Conn {
+impl<'db> Conn<'db> {
     /// Runs a raw Cypher statement; used internally by schema and Conn methods.
     pub(crate) fn raw_query(&self, sql: &str) -> Result<(), Error> {
-        self.inner.query(sql)?;
+        let _ = self.inner.query(sql)?;
         Ok(())
     }
 
@@ -95,6 +95,9 @@ impl Conn {
 
     /// Returns entities whose name starts with `name_prefix`.
     /// Pass `""` to return all entities.
+    ///
+    /// NOTE: `name_prefix` is single-quote–escaped but not parameterised; use only
+    /// trusted input until lbug exposes a parameterised-query API.
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
         let sql = format!(
             "MATCH (e:Entity) WHERE e.name STARTS WITH '{}' \
@@ -136,6 +139,8 @@ fn format_str_array(v: &[String]) -> String {
 fn value_as_string(v: &lbug::Value) -> String {
     match v {
         lbug::Value::String(s) => s.clone(),
-        other => format!("{other:?}"),
+        // Null and non-STRING variants are not expected for STRING schema columns;
+        // produce an empty string rather than a Debug representation.
+        _ => String::new(),
     }
 }
