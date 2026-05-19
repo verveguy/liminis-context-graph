@@ -222,7 +222,6 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
-<<<<<<< HEAD
     // ── Retrieval ─────────────────────────────────────────────────────────────
 
     /// Returns the last `last_n` episodic nodes for a given group, newest first.
