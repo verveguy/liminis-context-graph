@@ -38,13 +38,13 @@ Every LLM call (extraction, dedup) emits a token-usage event with raw token coun
 
 **Why P1**: Token cost is the primary operating cost signal; it is what the caching audit was measuring. Without it the service is financially opaque.
 
-**Independent test**: Ingest one episode with a known extraction model; verify a `token_usage` event appears with `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `estimated_cost_usd` all present and non-negative.
+**Independent test**: Ingest one episode with a known extraction model; verify a `token_usage` event appears with `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, and `estimated_cost_usd` all present and non-negative.
 
 **Acceptance scenarios**:
 
-1. **Given** an extraction call, **When** the Anthropic API returns a response, **Then** a `token_usage` event appears with `role: "extraction"`, `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, and `estimated_cost_usd`.
+1. **Given** an extraction call, **When** the Anthropic API returns a response, **Then** a `token_usage` event appears with `role: "extraction"`, `model`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`, and `estimated_cost_usd`.
 2. **Given** a dedup call, **When** the dedup model returns a response, **Then** a `token_usage` event appears with `role: "dedup"` and the appropriate token counts (fields that are not applicable to the model are omitted or zero).
-3. **Given** the 2026-04-30 caching audit replayed against the Rust service, **When** the audit script runs, **Then** `cache_read_tokens` and `cache_write_tokens` from `token_usage` events are sufficient to reproduce the cache-hit-rate calculations the audit performed.
+3. **Given** the 2026-04-30 caching audit replayed against the Rust service, **When** the audit script runs, **Then** `cache_read_tokens` and `cache_creation_tokens` from `token_usage` events are sufficient to reproduce the cache-hit-rate calculations the audit performed.
 
 ---
 
@@ -97,68 +97,64 @@ Every event type, every field name, every field type, and every allowed enum val
 
 ## Event Schema
 
-The following event types constitute the minimum telemetry surface. All events are emitted as JSONL (one compact JSON object per line). All events include a top-level `event` (string discriminant) and `timestamp` (RFC 3339, UTC).
+The following event types constitute the minimum telemetry surface. All events are emitted as JSONL (one compact JSON object per line).
+
+> **Implementation note**: the plan stage chose Unix-epoch milliseconds (`ts_ms`, u64) over RFC 3339 strings for the timestamp field to avoid a `chrono`/`time` dependency on the hot path. The discriminant tag serialises as `type` (matching `#[serde(tag = "type")]`), not `event`. `docs/telemetry.md` is the authoritative consumer-facing reference.
 
 ### `ipc_call`
 
 | Field | Type | Description |
 |---|---|---|
-| `event` | `"ipc_call"` | Discriminant |
-| `timestamp` | string (RFC 3339) | Wall-clock time at call completion |
-| `method` | string | IPC method name (e.g. `"add_episode"`, `"search"`) |
-| `duration_ms` | number | Wall-clock duration of the call in milliseconds |
+| `type` | `"ipc_call"` | Discriminant |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds at call completion |
+| `method` | string | IPC method name (e.g. `"knowledge_add_episode"`) |
+| `request_id` | any | JSON-RPC request `id` value as-is |
+| `duration_ms` | u64 | Wall-clock duration of the call in milliseconds |
 | `success` | bool | `true` if the call returned without error |
-| `error_kind` | string \| null | Short error category if `success` is false; null otherwise |
-| `group_id` | string \| null | The `group_id` scope of the call; null if not applicable |
 
 ### `token_usage`
 
 | Field | Type | Description |
 |---|---|---|
-| `event` | `"token_usage"` | Discriminant |
-| `timestamp` | string (RFC 3339) | Wall-clock time at response receipt |
-| `role` | `"extraction"` \| `"dedup"` | Which LLM role consumed tokens |
+| `type` | `"token_usage"` | Discriminant |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds at response receipt |
+| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, future: `"dedup"`) |
 | `model` | string | Model identifier as reported by the provider |
-| `input_tokens` | integer | Prompt tokens billed |
-| `output_tokens` | integer | Completion tokens billed |
-| `cache_read_tokens` | integer | Tokens read from the prompt cache (0 if not applicable) |
-| `cache_write_tokens` | integer | Tokens written to the prompt cache (0 if not applicable) |
-| `estimated_cost_usd` | number | Best-effort USD cost estimate; may be 0 if pricing is unknown for this model |
+| `input_tokens` | u64 | Prompt tokens billed |
+| `output_tokens` | u64 | Completion tokens billed |
+| `cache_read_tokens` | u64 | Tokens read from the prompt cache (0 if not applicable) |
+| `cache_creation_tokens` | u64 | Tokens written to the prompt cache (0 if not applicable) |
+| `estimated_cost_usd` | f64 or null | Best-effort USD cost estimate; null if model not in pricing table |
 
 ### `llm_fallback`
 
 | Field | Type | Description |
 |---|---|---|
-| `event` | `"llm_fallback"` | Discriminant |
-| `timestamp` | string (RFC 3339) | Wall-clock time of the transition |
-| `role` | `"extraction"` \| `"dedup"` | Which LLM role fell back |
+| `type` | `"llm_fallback"` | Discriminant |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds at transition |
+| `role` | string | Which LLM role fell back |
 | `primary_model` | string | Model that failed |
 | `fallback_model` | string | Model that will handle the request |
-| `error_kind` | string | Short category: `"auth"`, `"rate_limit"`, `"overloaded"`, `"timeout"`, `"other"` |
-| `error_message` | string | First line of the underlying error (truncated to 200 chars) |
+| `error_reason` | string | Reason the primary was unavailable (pending FR-009) |
 
 ### `wal_append`
 
 | Field | Type | Description |
 |---|---|---|
-| `event` | `"wal_append"` | Discriminant |
-| `timestamp` | string (RFC 3339) | Wall-clock time of append completion |
-| `op_type` | string | WAL operation type (e.g. `"add_episode"`, `"add_entity"`) |
+| `type` | `"wal_append"` | Discriminant |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds at append completion |
+| `duration_us` | u64 | Time to append the WAL entry, in microseconds |
 | `bytes` | integer | Bytes written (including newline) |
-| `duration_ms` | number | Time to write and fsync the line |
 
 ### `wal_replay_complete`
 
 | Field | Type | Description |
 |---|---|---|
-| `event` | `"wal_replay_complete"` | Discriminant |
-| `timestamp` | string (RFC 3339) | Wall-clock time at replay completion |
-| `total_lines` | integer | Total lines read from the WAL |
-| `replayed_lines` | integer | Lines successfully applied |
-| `skipped_lines` | integer | Lines skipped due to unknown op type (with warning) |
-| `error_lines` | integer | Lines skipped due to parse/apply errors |
-| `duration_ms` | number | Total replay wall-clock duration |
-| `throughput_lines_per_sec` | number | `replayed_lines / (duration_ms / 1000)` |
+| `type` | `"wal_replay_complete"` | Discriminant |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds at replay completion |
+| `episodes_replayed` | u64 | Episodes replayed from the WAL |
+| `duration_ms` | u64 | Total replay wall-clock duration in milliseconds |
+| `throughput_eps` | f64 | Episodes replayed per second |
 
 ---
 
@@ -213,7 +209,7 @@ The following event types constitute the minimum telemetry surface. All events a
 - **SC-001**: Given a known workload of N ingest + M search calls, the telemetry stream contains exactly N+M `ipc_call` events with correct field shapes.
 - **SC-002**: Given a workload triggering a primary→fallback transition, a `llm_fallback` event appears with `primary_model`, `fallback_model`, and `error_kind` all populated.
 - **SC-003**: Given a cold-boot WAL replay of ≥ 100 lines, a `wal_replay_complete` event appears with `throughput_lines_per_sec` computable from its fields.
-- **SC-004**: Given the 2026-04-30 caching audit replayed against the Rust service, all cache metrics (`cache_read_tokens`, `cache_write_tokens` per call) are available as `token_usage` fields; the audit script requires zero ad-hoc instrumentation.
+- **SC-004**: Given the 2026-04-30 caching audit replayed against the Rust service, all cache metrics (`cache_read_tokens`, `cache_creation_tokens` per call) are available as `token_usage` fields; the audit script requires zero ad-hoc instrumentation.
 - **SC-005**: Telemetry emission does not push the p95 search latency above 500 ms or WAL replay throughput below the 3× Python baseline, as measured by the CI bench suite.
 - **SC-006**: `docs/telemetry.md` is merged alongside the implementation and passes a completeness check (every field in every emitted event has a corresponding entry in the doc).
 
