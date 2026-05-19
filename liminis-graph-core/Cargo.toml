@@ -35,5 +35,9 @@ harness = false
 name = "wal_replay_bench"
 harness = false
 
+[[bench]]
+name = "telemetry_overhead"
+harness = false
+
 [[example]]
 name = "basic_ingest"
