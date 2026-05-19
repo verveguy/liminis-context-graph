@@ -16,6 +16,16 @@ pub struct Conn<'db> {
 impl Db {
     pub fn open(path: &str) -> Result<Self, Error> {
         let inner = lbug::Database::new(path, lbug::SystemConfig::default())?;
+        // Both INSTALL and LOAD EXTENSION are write transactions in lbug,
+        // and both must run before any vector / FTS use. Extensions persist at
+        // the Database level (not per-Connection), so we set them up once here
+        // — running them in connect() races concurrent callers.
+        let setup_conn = lbug::Connection::new(&inner)?;
+        let _ = setup_conn.query("INSTALL vector")?;
+        let _ = setup_conn.query("LOAD EXTENSION vector")?;
+        let _ = setup_conn.query("INSTALL fts")?;
+        let _ = setup_conn.query("LOAD EXTENSION fts")?;
+        drop(setup_conn);
         Ok(Self { inner })
     }
 
@@ -50,13 +60,12 @@ impl Db {
         Ok(db)
     }
 
-    /// Opens a connection and loads vector + FTS extensions (AD-2).
+    /// Opens a fresh connection against the already-set-up database.
+    /// Extension setup happens once in `Db::open` because `INSTALL` and
+    /// `LOAD EXTENSION` are both write transactions in lbug — running them
+    /// per-connection serializes every connect() and races concurrent callers.
     pub fn connect(&self) -> Result<Conn<'_>, Error> {
         let conn = lbug::Connection::new(&self.inner)?;
-        let _ = conn.query("INSTALL vector")?;
-        let _ = conn.query("LOAD EXTENSION vector")?;
-        let _ = conn.query("INSTALL fts")?;
-        let _ = conn.query("LOAD EXTENSION fts")?;
         Ok(Conn { inner: conn })
     }
 }
