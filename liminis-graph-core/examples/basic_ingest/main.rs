@@ -3,16 +3,12 @@ use liminis_graph_core::{Db, EntityRow, EpisodicRow};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::TempDir::new()?;
     let db_path = dir.path().join("demo.db");
-
-    println!("Opening database at {}", db_path.display());
-
     let db = Db::open(db_path.to_str().unwrap())?;
     let conn = db.connect()?;
     conn.init_schema(768)?;
 
     let embedding = vec![0.0f32; 768];
     let ts = "2026-01-01 00:00:00";
-
     let docs = [
         ("Alice", "Alice is a software engineer."),
         ("Bob", "Bob works on distributed systems."),
@@ -30,7 +26,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             summary: summary.to_string(),
             attributes: "{}".to_string(),
         })?;
-        println!("Ingested: {name}");
     }
 
     conn.insert_episodic(&EpisodicRow {
@@ -47,11 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     conn.create_vector_indexes()?;
-
-    println!("\nSearch results for prefix \"\":");
     for entity in conn.search_entities("")? {
-        println!("  {} — {}", entity.name, entity.summary);
+        println!("{} — {}", entity.name, entity.summary);
     }
-
     Ok(())
 }
