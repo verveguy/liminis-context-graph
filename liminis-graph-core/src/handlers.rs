@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -10,21 +11,37 @@ use crate::{
     extractor::Extractor,
     ipc::{IpcRequest, IpcResponse},
     search,
+    telemetry::{now_ms, TelemetryEvent, TelemetrySink},
 };
 
 const DEFAULT_GROUP_ID: &str = "liminis";
 
-/// Dispatches an IPC request to the appropriate library function (AD-2, T020).
+/// Dispatches an IPC request to the appropriate library function (AD-2, T020). [HOT]
 pub async fn dispatch(
     req: IpcRequest,
     db: Arc<Db>,
     embedder: Arc<Embedder>,
     extractor: Arc<Extractor>,
+    sink: Arc<dyn TelemetrySink>,
 ) -> IpcResponse {
-    match handle(&req, db, embedder, extractor).await {
-        Ok(result) => IpcResponse::ok(req.id, result),
-        Err(e) => IpcResponse::err(req.id, -32000, e.to_string()),
-    }
+    let method = req.method.clone();
+    let request_id = req.id.clone();
+    let start = Instant::now();
+
+    let (response, success) = match handle(&req, db, embedder, extractor).await {
+        Ok(result) => (IpcResponse::ok(req.id, result), true),
+        Err(e) => (IpcResponse::err(req.id, -32000, e.to_string()), false),
+    };
+
+    sink.emit(TelemetryEvent::IpcCall {
+        ts_ms: now_ms(),
+        method,
+        request_id,
+        duration_ms: start.elapsed().as_millis() as u64,
+        success,
+    });
+
+    response
 }
 
 async fn handle(
