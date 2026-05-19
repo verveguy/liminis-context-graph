@@ -21,6 +21,7 @@ tempfile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 lbug = { workspace = true }
+regex = { workspace = true }
 
 [[bench]]
 name = "placeholder"
@@ -28,6 +29,10 @@ harness = false
 
 [[bench]]
 name = "search"
+harness = false
+
+[[bench]]
+name = "wal_replay_bench"
 harness = false
 
 [[example]]
