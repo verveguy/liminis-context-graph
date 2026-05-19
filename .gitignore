@@ -1,0 +1,12 @@
+# Rust
+target/
+Cargo.lock.bak
+*.pdb
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
