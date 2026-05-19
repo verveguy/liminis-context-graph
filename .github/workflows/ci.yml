@@ -33,6 +33,17 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      - name: cargo test ipc_parity
+        run: cargo test --test ipc_parity
+
+      - name: check no ML runtime deps
+        run: |
+          if cargo tree 2>/dev/null | grep -E "tch|candle|onnxruntime|tract"; then
+            echo "ERROR: ML runtime dependency detected — violates Principle V"
+            exit 1
+          fi
+          echo "OK: no ML runtime deps found"
+
       - name: cargo clippy
         run: cargo clippy -- -D warnings
 
