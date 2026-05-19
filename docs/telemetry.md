@@ -85,7 +85,7 @@ Emitted after each WAL entry is written. **Not yet emitted** — pending issue #
 | Field | Type | Description |
 |-------|------|-------------|
 | `duration_us` | u64 | Time to append the WAL entry, in microseconds |
-| `bytes` | usize | Size of the appended WAL entry in bytes |
+| `bytes` | integer | Size of the appended WAL entry in bytes |
 
 Example:
 ```json
