@@ -34,12 +34,12 @@ cargo run -p liminis-graph -- /path/to/graph.db
 ## Workspace layout
 
 ```
-liminis-graph-core/   # library crate — all DB interaction
-liminis-graph/        # binary crate — IPC service (depends on core)
-examples/             # standalone consumers demonstrating the library API
-benches/              # performance benchmarks (criterion)
-docs/adr/             # architecture decision records
-specs/                # feature specifications
+liminis-graph-core/          # library crate — all DB interaction
+liminis-graph-core/benches/  # performance benchmarks (criterion)
+liminis-graph/               # binary crate — IPC service (depends on core)
+examples/                    # standalone consumers demonstrating the library API
+docs/adr/                    # architecture decision records
+specs/                       # feature specifications
 ```
 
 ## Dependencies

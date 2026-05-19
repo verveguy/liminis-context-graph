@@ -26,7 +26,7 @@ Developers must write an ADR before merging any change that alters:
 - The async/sync boundary in the library API
 - The embedding model or vector dimension
 
-ADRs are linked from the relevant `CLAUDE.md` sections so the constitution and the decision record stay in sync.
+ADRs are linked from the relevant spec and README sections so the constitution and the decision record stay in sync.
 
 ## References
 

@@ -1,7 +1,9 @@
 use liminis_graph_core::{Db, EntityRow, EpisodicRow};
 
 /// LadybugDB binding spike: proves lbug 0.16.1 can open a file DB, write Entity and Episodic
-/// nodes with 768-dim vector properties, round-trip HNSW + FTS indexes, and return results.
+/// nodes with 768-dim vector properties, create HNSW vector indexes, and search by name prefix.
+/// The FTS extension is loaded (required for future FTS index creation), but FTS index
+/// creation and queries are out of scope for this spike.
 #[test]
 fn round_trip_entity_and_episodic() {
     let dir = tempfile::TempDir::new().expect("tempdir");
