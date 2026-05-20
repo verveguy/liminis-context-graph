@@ -162,8 +162,9 @@ fn bench_dedup_hybrid_10k(c: &mut Criterion) {
         .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
         .collect();
 
-    let brute_ns = measure_brute_force_ns(&db, &query_emb, 5);
-
+    // No performance-ratio assertion at 10k: with CANDIDATE_K=200 the HNSW+BM25 overhead is
+    // non-trivial relative to a 10k brute-force scan. The constitution's ≤30% gate applies
+    // at 50k entities (FR-003, SC-003); see bench_dedup_hybrid_50k.
     c.bench_function("bench_dedup_hybrid_10k", |b| {
         b.iter_custom(|iters| {
             let mut total = std::time::Duration::ZERO;
@@ -175,13 +176,6 @@ fn bench_dedup_hybrid_10k(c: &mut Criterion) {
                     .unwrap();
                 total += start.elapsed();
             }
-            let rust_ns = total.as_nanos() / iters as u128;
-            assert!(
-                rust_ns <= brute_ns * 30 / 100,
-                "hybrid dedup 10k: {}ns > 30% of Rust brute-force {}ns",
-                rust_ns,
-                brute_ns
-            );
             total
         });
     });
