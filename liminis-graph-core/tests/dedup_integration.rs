@@ -80,18 +80,16 @@ fn dedup_uses_hybrid_above_threshold() {
         .brute_force_similar_entity(&query_emb, "test", 0.85)
         .unwrap();
 
-    // Both paths must find a match (multiple entities share axis 4; any is valid)
+    // Both paths must find a match
     assert!(hybrid_result.is_some(), "hybrid should find entity at axis {axis}");
     assert!(brute_result.is_some(), "brute-force should find entity at axis {axis}");
 
-    // Both results must be entities that genuinely match (cosine sim ≥ 0.85 means exact axis match)
-    // The specific UUID may differ since multiple entities share the same axis embedding;
-    // what matters is that both paths find a valid match above threshold.
-    let h_emb = hybrid_result.unwrap().name_embedding;
-    let b_emb = brute_result.unwrap().name_embedding;
+    // Both paths must return the same entity UUID — brute-force ties by lowest UUID, and
+    // hybrid must agree to satisfy the ≥ 95% decision-overlap requirement (R-003).
     assert_eq!(
-        h_emb, b_emb,
-        "both paths should return an entity with the same embedding (same axis)"
+        hybrid_result.unwrap().uuid,
+        brute_result.unwrap().uuid,
+        "hybrid and brute-force must return the same entity UUID"
     );
 }
 
