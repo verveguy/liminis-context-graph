@@ -136,9 +136,7 @@ pub async fn add_episode(
                     group_id: gid_owned.clone(),
                     labels: {
                         let mut labels = vec!["Entity".to_string()];
-                        if !extracted.entity_type.is_empty()
-                            && extracted.entity_type != "Entity"
-                        {
+                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
                             labels.push(extracted.entity_type.clone());
                         }
                         labels
@@ -174,7 +172,10 @@ pub async fn add_episode(
         let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
         for decision in decisions {
             match decision {
-                DedupDecision::Merge { existing_uuid, merged_summary } => {
+                DedupDecision::Merge {
+                    existing_uuid,
+                    merged_summary,
+                } => {
                     conn.run_cypher(&format!(
                         "MATCH (e:Entity {{uuid: '{}'}}) SET e.summary = '{}'",
                         escape_pub(&existing_uuid),

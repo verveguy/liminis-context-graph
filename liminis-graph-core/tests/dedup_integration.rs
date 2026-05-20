@@ -70,7 +70,9 @@ fn dedup_uses_hybrid_above_threshold() {
 
     // Entity 500 % 8 = 4 → axis 4
     let axis = 500 % dim;
-    let query_emb: Vec<f32> = (0..dim).map(|j| if j == axis { 1.0 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|j| if j == axis { 1.0 } else { 0.0 })
+        .collect();
     let entity_name = "Entity 500";
 
     let hybrid_result = conn
@@ -81,8 +83,14 @@ fn dedup_uses_hybrid_above_threshold() {
         .unwrap();
 
     // Both paths must find a match
-    assert!(hybrid_result.is_some(), "hybrid should find entity at axis {axis}");
-    assert!(brute_result.is_some(), "brute-force should find entity at axis {axis}");
+    assert!(
+        hybrid_result.is_some(),
+        "hybrid should find entity at axis {axis}"
+    );
+    assert!(
+        brute_result.is_some(),
+        "brute-force should find entity at axis {axis}"
+    );
 
     // Both paths must return the same entity UUID — brute-force ties by lowest UUID, and
     // hybrid must agree to satisfy the ≥ 95% decision-overlap requirement (R-003).
@@ -106,14 +114,19 @@ fn dedup_overlap_1k_corpus_100_probes() {
 
     for i in 0..n_probes {
         let axis = i % dim;
-        let query_emb: Vec<f32> = (0..dim).map(|j| if j == axis { 1.0f32 } else { 0.0 }).collect();
+        let query_emb: Vec<f32> = (0..dim)
+            .map(|j| if j == axis { 1.0f32 } else { 0.0 })
+            .collect();
         let query_name = format!("Entity {i}");
 
         let brute = conn
             .brute_force_similar_entity(&query_emb, "test", 0.85)
             .unwrap()
             .map(|e| e.uuid);
-        assert!(brute.is_some(), "brute-force returned None for probe {i} (axis {axis}) — fixture broken");
+        assert!(
+            brute.is_some(),
+            "brute-force returned None for probe {i} (axis {axis}) — fixture broken"
+        );
         let hybrid = conn
             .hybrid_dedup_similar_entity(&query_emb, &query_name, "test", 0.85)
             .unwrap()

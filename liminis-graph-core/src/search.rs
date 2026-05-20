@@ -50,10 +50,8 @@ pub async fn hybrid_entity_search(
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let candidate_limit = limit * 3;
 
-        let bm25 = conn
-            .fts_search_entities(&query_owned, &gid_refs, candidate_limit)?;
-        let vector = conn
-            .vector_search_entities(&embedding, &gid_refs, candidate_limit)?;
+        let bm25 = conn.fts_search_entities(&query_owned, &gid_refs, candidate_limit)?;
+        let vector = conn.vector_search_entities(&embedding, &gid_refs, candidate_limit)?;
 
         let fused_uuids = rrf_fuse(&bm25, &vector);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
@@ -80,10 +78,8 @@ pub async fn hybrid_edge_search(
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let candidate_limit = limit * 3;
 
-        let bm25 = conn
-            .fts_search_edges(&query_owned, &gid_refs, candidate_limit)?;
-        let vector = conn
-            .vector_search_edges(&embedding, &gid_refs, candidate_limit)?;
+        let bm25 = conn.fts_search_edges(&query_owned, &gid_refs, candidate_limit)?;
+        let vector = conn.vector_search_edges(&embedding, &gid_refs, candidate_limit)?;
 
         let fused_uuids = rrf_fuse(&bm25, &vector);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();

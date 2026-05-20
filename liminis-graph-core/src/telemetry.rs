@@ -75,7 +75,9 @@ pub struct CaptureSink {
 
 impl CaptureSink {
     pub fn new() -> Self {
-        Self { events: Mutex::new(Vec::new()) }
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
     }
 
     pub fn events(&self) -> Vec<TelemetryEvent> {
@@ -103,10 +105,10 @@ fn load_pricing() -> &'static Value {
     static PRICING: OnceLock<Value> = OnceLock::new();
     PRICING.get_or_init(|| {
         if let Ok(path) = std::env::var("LIMINIS_LLM_COST_TABLE_PATH") {
-            match std::fs::read_to_string(&path)
-                .and_then(|s| serde_json::from_str::<Value>(&s)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
-            {
+            match std::fs::read_to_string(&path).and_then(|s| {
+                serde_json::from_str::<Value>(&s)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            }) {
                 Ok(v) => return v,
                 Err(e) => eprintln!(
                     "liminis-graph: LIMINIS_LLM_COST_TABLE_PATH={path} unreadable or invalid JSON, \
@@ -160,7 +162,10 @@ mod tests {
         });
         let events = sink.events();
         assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], TelemetryEvent::IpcCall { success: true, .. }));
+        assert!(matches!(
+            events[0],
+            TelemetryEvent::IpcCall { success: true, .. }
+        ));
     }
 
     #[test]
@@ -187,6 +192,10 @@ mod tests {
     #[test]
     fn noop_sink_does_not_panic() {
         let sink = NoopSink;
-        sink.emit(TelemetryEvent::WalAppend { ts_ms: 0, duration_us: 1, bytes: 512 });
+        sink.emit(TelemetryEvent::WalAppend {
+            ts_ms: 0,
+            duration_us: 1,
+            bytes: 512,
+        });
     }
 }

@@ -13,23 +13,23 @@ use crate::error::Error;
 /// struct field declaration order, matching Python's `json.dumps()` dict insertion order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalLine {
-    pub seq:    u64,
-    pub ts:     String,
-    pub db:     String,
+    pub seq: u64,
+    pub ts: String,
+    pub db: String,
     pub cypher: String,
     pub params: serde_json::Value,
 }
 
 /// Appends WAL lines atomically per chunk to `.graphiti/wal/` JSONL files.
 pub struct WalWriter {
-    wal_dir:                 PathBuf,
-    global_seq:              u64,
-    file_seq:                u32,
-    events_in_current_file:  usize,
-    max_events_per_file:     usize,
-    session_id:              String,
-    pending_lines:           Vec<WalLine>,
-    current_file:            Option<PathBuf>,
+    wal_dir: PathBuf,
+    global_seq: u64,
+    file_seq: u32,
+    events_in_current_file: usize,
+    max_events_per_file: usize,
+    session_id: String,
+    pending_lines: Vec<WalLine>,
+    current_file: Option<PathBuf>,
 }
 
 impl WalWriter {
@@ -89,13 +89,11 @@ impl WalWriter {
             return Ok(());
         }
 
-        let ts = Utc::now()
-            .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
-            .to_string();
+        let ts = Utc::now().format("%Y-%m-%dT%H:%M:%S%.6f+00:00").to_string();
         let line = WalLine {
-            seq:    self.global_seq,
+            seq: self.global_seq,
             ts,
-            db:     database.to_string(),
+            db: database.to_string(),
             cypher: cypher.to_string(),
             params,
         };
@@ -144,8 +142,7 @@ impl WalWriter {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let mut writer = BufWriter::new(file);
         for line in &self.pending_lines {
-            let json =
-                serde_json::to_string(line).map_err(|e| Error::WalJson(e.to_string()))?;
+            let json = serde_json::to_string(line).map_err(|e| Error::WalJson(e.to_string()))?;
             writer.write_all(json.as_bytes())?;
             writer.write_all(b"\n")?;
         }

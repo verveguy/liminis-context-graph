@@ -23,9 +23,7 @@ use tokio::sync::RwLock;
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
-    let db = Arc::new(
-        Db::open(dir.path().join("telemetry_test.db").to_str().unwrap()).unwrap(),
-    );
+    let db = Arc::new(Db::open(dir.path().join("telemetry_test.db").to_str().unwrap()).unwrap());
     {
         let conn = db.connect().unwrap();
         conn.init_schema(dim).unwrap();
@@ -59,17 +57,19 @@ async fn ipc_call_event_emitted_on_successful_dispatch() {
     let sink = Arc::new(CaptureSink::new());
     let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
-    let _resp = handlers::dispatch(
-        req(1, "knowledge_build_indices", json!({})),
-        state,
-    )
-    .await;
+    let _resp = handlers::dispatch(req(1, "knowledge_build_indices", json!({})), state).await;
 
     let events = sink.events();
-    assert_eq!(events.len(), 1, "expected exactly one IpcCall event, got: {events:?}");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one IpcCall event, got: {events:?}"
+    );
 
     match &events[0] {
-        TelemetryEvent::IpcCall { method, success, .. } => {
+        TelemetryEvent::IpcCall {
+            method, success, ..
+        } => {
             assert_eq!(method, "knowledge_build_indices");
             assert!(success, "expected success=true");
         }
@@ -84,11 +84,7 @@ async fn ipc_call_event_emitted_on_error_dispatch() {
     let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
     // Use an unknown method to get success=false
-    let _resp = handlers::dispatch(
-        req(2, "no_such_method", json!({})),
-        state,
-    )
-    .await;
+    let _resp = handlers::dispatch(req(2, "no_such_method", json!({})), state).await;
 
     let events = sink.events();
     assert_eq!(events.len(), 1);

@@ -82,9 +82,7 @@ async fn passthrough_dedup_adapter_always_returns_true() {
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
-    let db = Arc::new(
-        Db::open(dir.path().join("conc_test.db").to_str().unwrap()).unwrap(),
-    );
+    let db = Arc::new(Db::open(dir.path().join("conc_test.db").to_str().unwrap()).unwrap());
     {
         let conn = db.connect().unwrap();
         conn.init_schema(dim).unwrap();
@@ -108,10 +106,28 @@ async fn concurrent_add_episode_no_write_conflict() {
     let s2 = Arc::clone(&state);
 
     let h1 = tokio::spawn(async move {
-        episode::add_episode(s1, "ep-a", "body-a", "src", "desc", "2026-01-01 00:00:00", "grp").await
+        episode::add_episode(
+            s1,
+            "ep-a",
+            "body-a",
+            "src",
+            "desc",
+            "2026-01-01 00:00:00",
+            "grp",
+        )
+        .await
     });
     let h2 = tokio::spawn(async move {
-        episode::add_episode(s2, "ep-b", "body-b", "src", "desc", "2026-01-01 00:00:00", "grp").await
+        episode::add_episode(
+            s2,
+            "ep-b",
+            "body-b",
+            "src",
+            "desc",
+            "2026-01-01 00:00:00",
+            "grp",
+        )
+        .await
     });
 
     let r1 = h1.await.unwrap();

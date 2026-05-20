@@ -27,8 +27,7 @@ impl AppState {
     /// - `GRAPHITI_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
     pub fn from_env(sink: Arc<dyn TelemetrySink>, db: Arc<Db>) -> Self {
         let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
-        let extractor: Arc<dyn Extractor> =
-            Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
+        let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
         let dedup: Arc<dyn DedupAdapter> = if std::env::var("GRAPHITI_DEDUP_LLM").is_ok() {
             Arc::new(LocalDedupAdapter::from_env())
         } else {

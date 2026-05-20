@@ -74,7 +74,10 @@ fn test_rel_table_creation_and_query() {
         )
         .unwrap();
 
-    assert!(!rows.is_empty(), "RELATES_TO edge was not found after insert");
+    assert!(
+        !rows.is_empty(),
+        "RELATES_TO edge was not found after insert"
+    );
     let first = &rows[0];
     assert_eq!(first[0], "r1", "uuid mismatch");
     assert_eq!(first[1], "Alice knows Bob", "fact mismatch");
@@ -110,7 +113,10 @@ fn test_fts_index_creation_and_query() {
         )
         .unwrap();
 
-    assert!(!rows.is_empty(), "FTS query for 'Alice' returned no results");
+    assert!(
+        !rows.is_empty(),
+        "FTS query for 'Alice' returned no results"
+    );
     let first = &rows[0];
     assert_eq!(first.len(), 2, "expected 2 columns (uuid, score)");
     eprintln!("FTS result[0]: uuid={:?}, score={:?}", first[0], first[1]);
@@ -158,7 +164,10 @@ fn test_hnsw_vector_query() {
     assert!(!rows.is_empty(), "HNSW query returned no results");
     let first = &rows[0];
     assert_eq!(first.len(), 2, "expected 2 columns (uuid, distance)");
-    eprintln!("HNSW result[0]: uuid={:?}, distance={:?}", first[0], first[1]);
+    eprintln!(
+        "HNSW result[0]: uuid={:?}, distance={:?}",
+        first[0], first[1]
+    );
     // The closest result should be e0 (same direction as query vector)
     assert_eq!(first[0], "e0", "nearest neighbor should be e0");
 }

@@ -32,8 +32,8 @@ impl Db {
     /// If `db_path` is absent but `wal_dir` contains `.jsonl` files, creates a fresh DB and
     /// replays the WAL to rebuild it (R-06). Otherwise behaves like `Db::open`.
     pub fn open_or_rebuild(
-        db_path:       &str,
-        wal_dir:       &str,
+        db_path: &str,
+        wal_dir: &str,
         embedding_dim: usize,
     ) -> Result<Self, Error> {
         let db_exists = Path::new(db_path).exists();
@@ -43,9 +43,8 @@ impl Db {
             && wal_dir_path
                 .read_dir()
                 .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.path().extension().and_then(|x| x.to_str()) == Some("jsonl")
-                    })
+                    rd.filter_map(|e| e.ok())
+                        .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
                 })
                 .unwrap_or(false);
 
@@ -276,10 +275,7 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns all Entity nodes in the given group_ids.
-    pub fn get_entities_by_group_ids(
-        &self,
-        group_ids: &[&str],
-    ) -> Result<Vec<EntityRow>, Error> {
+    pub fn get_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<EntityRow>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
             "MATCH (e:Entity) WHERE e.group_id IN {gid_list} \
@@ -304,10 +300,7 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns all RELATES_TO edges in the given group_ids.
-    pub fn get_edges_by_group_ids(
-        &self,
-        group_ids: &[&str],
-    ) -> Result<Vec<RelatesToEdge>, Error> {
+    pub fn get_edges_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<RelatesToEdge>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
             "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
@@ -463,9 +456,9 @@ impl<'db> Conn<'db> {
             let sim = cosine_similarity(name_embedding, &stored_embedding);
             if sim >= threshold {
                 let candidate_uuid = value_as_string(&row[0]);
-                let is_better = best.as_ref().is_none_or(|(s, r)| {
-                    sim > *s || (sim == *s && candidate_uuid < r.uuid)
-                });
+                let is_better = best
+                    .as_ref()
+                    .is_none_or(|(s, r)| sim > *s || (sim == *s && candidate_uuid < r.uuid));
                 if is_better {
                     best = Some((
                         sim,
@@ -511,9 +504,8 @@ impl<'db> Conn<'db> {
         }
         let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
         let uuid_list = format_str_list(&uuid_refs);
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.uuid IN {uuid_list} RETURN e.uuid, e.name_embedding"
-        );
+        let sql =
+            format!("MATCH (e:Entity) WHERE e.uuid IN {uuid_list} RETURN e.uuid, e.name_embedding");
         let result = self.inner.query(&sql)?;
         let mut pairs = Vec::new();
         for row in result {
@@ -540,8 +532,7 @@ impl<'db> Conn<'db> {
 
         let vector_candidates =
             self.vector_search_entities(name_embedding, &[group_id], CANDIDATE_K)?;
-        let bm25_candidates =
-            self.fts_search_entities(entity_name, &[group_id], CANDIDATE_K)?;
+        let bm25_candidates = self.fts_search_entities(entity_name, &[group_id], CANDIDATE_K)?;
         let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
 
         let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
@@ -550,9 +541,9 @@ impl<'db> Conn<'db> {
         for (uuid, emb) in candidate_embeddings {
             let sim = cosine_similarity(name_embedding, &emb);
             if sim >= threshold {
-                let is_better = best.as_ref().is_none_or(|(s, best_uuid)| {
-                    sim > *s || (sim == *s && &uuid < best_uuid)
-                });
+                let is_better = best
+                    .as_ref()
+                    .is_none_or(|(s, best_uuid)| sim > *s || (sim == *s && &uuid < best_uuid));
                 if is_better {
                     best = Some((sim, uuid));
                 }
@@ -621,10 +612,7 @@ impl<'db> Conn<'db> {
     }
 
     /// Fetches full RelatesToEdge rows for a slice of UUIDs from RelatesToNode_.
-    pub fn get_relates_to_by_uuids(
-        &self,
-        uuids: &[String],
-    ) -> Result<Vec<RelatesToEdge>, Error> {
+    pub fn get_relates_to_by_uuids(&self, uuids: &[String]) -> Result<Vec<RelatesToEdge>, Error> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }

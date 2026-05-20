@@ -42,7 +42,12 @@ impl HttpEmbedder {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
-        Self { url, model, dim, client: Client::new() }
+        Self {
+            url,
+            model,
+            dim,
+            client: Client::new(),
+        }
     }
 
     async fn do_embed(&self, text: &str) -> Result<Vec<f32>, Error> {
