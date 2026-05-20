@@ -542,9 +542,9 @@ impl<'db> Conn<'db> {
             self.vector_search_entities(name_embedding, &[group_id], CANDIDATE_K)?;
         let bm25_candidates =
             self.fts_search_entities(entity_name, &[group_id], CANDIDATE_K)?;
-        let top_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
+        let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
 
-        let candidate_embeddings = self.get_entity_embeddings_by_uuids(&top_uuids)?;
+        let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
 
         let mut best: Option<(f32, String)> = None;
         for (uuid, emb) in candidate_embeddings {

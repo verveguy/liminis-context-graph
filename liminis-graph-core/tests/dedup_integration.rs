@@ -113,6 +113,7 @@ fn dedup_overlap_1k_corpus_100_probes() {
             .brute_force_similar_entity(&query_emb, "test", 0.85)
             .unwrap()
             .map(|e| e.uuid);
+        assert!(brute.is_some(), "brute-force returned None for probe {i} (axis {axis}) — fixture broken");
         let hybrid = conn
             .hybrid_dedup_similar_entity(&query_emb, &query_name, "test", 0.85)
             .unwrap()
