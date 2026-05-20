@@ -22,9 +22,9 @@ fn read_fixture_lines(name: &str) -> Vec<String> {
 #[test]
 fn test_forward_compat_five_fields_present() {
     let line = WalLine {
-        seq:    1,
-        ts:     "2026-05-19T00:00:00.000000+00:00".to_string(),
-        db:     "graphiti".to_string(),
+        seq: 1,
+        ts: "2026-05-19T00:00:00.000000+00:00".to_string(),
+        db: "graphiti".to_string(),
         cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
         params: serde_json::json!({"uuid": "test"}),
     };
@@ -44,9 +44,9 @@ fn test_forward_compat_five_fields_present() {
 #[test]
 fn test_forward_compat_ts_is_string() {
     let line = WalLine {
-        seq:    1,
-        ts:     "2026-05-19T12:34:56.000000+00:00".to_string(),
-        db:     "graphiti".to_string(),
+        seq: 1,
+        ts: "2026-05-19T12:34:56.000000+00:00".to_string(),
+        db: "graphiti".to_string(),
         cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
         params: serde_json::json!({}),
     };
@@ -67,9 +67,9 @@ fn test_forward_compat_ts_is_string() {
 #[test]
 fn test_forward_compat_params_is_object() {
     let line = WalLine {
-        seq:    1,
-        ts:     "2026-05-19T00:00:00.000000+00:00".to_string(),
-        db:     "graphiti".to_string(),
+        seq: 1,
+        ts: "2026-05-19T00:00:00.000000+00:00".to_string(),
+        db: "graphiti".to_string(),
         cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
         params: serde_json::json!({"uuid": "x", "name": "Alice"}),
     };
@@ -86,10 +86,12 @@ fn test_forward_compat_params_is_object() {
 /// All lines in the Python-produced fixture must deserialize to WalLine without error (R-04).
 #[test]
 fn test_backward_compat_python_fixture_parseable() {
-    for (i, raw) in read_fixture_lines("python_produced.jsonl").iter().enumerate() {
-        serde_json::from_str::<WalLine>(raw).unwrap_or_else(|e| {
-            panic!("line {i} failed to deserialize: {e}\nContent: {raw}")
-        });
+    for (i, raw) in read_fixture_lines("python_produced.jsonl")
+        .iter()
+        .enumerate()
+    {
+        serde_json::from_str::<WalLine>(raw)
+            .unwrap_or_else(|e| panic!("line {i} failed to deserialize: {e}\nContent: {raw}"));
     }
 }
 

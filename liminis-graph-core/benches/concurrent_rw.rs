@@ -140,8 +140,8 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                     // Assert p95 ≤ P95_BUDGET_MS
                     if !latencies.is_empty() {
                         latencies.sort_unstable();
-                        let p95_idx = ((latencies.len() as f64 * 0.95) as usize)
-                            .min(latencies.len() - 1);
+                        let p95_idx =
+                            ((latencies.len() as f64 * 0.95) as usize).min(latencies.len() - 1);
                         let p95 = latencies[p95_idx];
                         assert!(
                             p95 <= Duration::from_millis(P95_BUDGET_MS),

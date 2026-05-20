@@ -26,7 +26,5 @@ pub use llm_router::LlmRouter;
 pub use replay::{ReplayStats, WalReplayer};
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink};
-pub use types::{
-    EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge,
-};
+pub use types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge};
 pub use wal::{WalLine, WalWriter};

@@ -60,10 +60,19 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
     let source = p["source"].as_str().unwrap_or("text").to_string();
     let source_desc = p["source_description"].as_str().unwrap_or("").to_string();
     let ref_time = p["reference_time"].as_str().unwrap_or("").to_string();
-    let group_id = p["group_id"].as_str().unwrap_or(DEFAULT_GROUP_ID).to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
 
     let episode_uuid = episode::add_episode(
-        state, &name, &body, &source, &source_desc, &ref_time, &group_id,
+        state,
+        &name,
+        &body,
+        &source,
+        &source_desc,
+        &ref_time,
+        &group_id,
     )
     .await?;
 
@@ -78,9 +87,14 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
-    let entities =
-        search::hybrid_entity_search(Arc::clone(&state.db), Arc::clone(&state.embedder), &query, group_ids, limit)
-            .await?;
+    let entities = search::hybrid_entity_search(
+        Arc::clone(&state.db),
+        Arc::clone(&state.embedder),
+        &query,
+        group_ids,
+        limit,
+    )
+    .await?;
     Ok(serde_json::to_value(entities)?)
 }
 
@@ -90,9 +104,14 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
-    let edges =
-        search::hybrid_edge_search(Arc::clone(&state.db), Arc::clone(&state.embedder), &query, group_ids, limit)
-            .await?;
+    let edges = search::hybrid_edge_search(
+        Arc::clone(&state.db),
+        Arc::clone(&state.embedder),
+        &query,
+        group_ids,
+        limit,
+    )
+    .await?;
     Ok(serde_json::to_value(edges)?)
 }
 
@@ -103,7 +122,10 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
-    let group_id = p["group_id"].as_str().unwrap_or(DEFAULT_GROUP_ID).to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
     let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
 
     let db = Arc::clone(&state.db);
@@ -171,7 +193,11 @@ async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let uuids: Vec<String> = req.params["uuids"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
 
     let db = Arc::clone(&state.db);

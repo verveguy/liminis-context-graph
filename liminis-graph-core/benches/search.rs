@@ -53,7 +53,9 @@ fn bench_hybrid_entity_search(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(100, dim);
 
-    let query_vec: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_vec: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     c.bench_function("hybrid_entity_search_fts_fallback", |b| {
         b.iter(|| {
@@ -68,7 +70,9 @@ fn bench_hybrid_edge_search(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(100, dim);
 
-    let query_vec: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_vec: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     c.bench_function("hybrid_edge_search_fts_fallback", |b| {
         b.iter(|| {
@@ -82,7 +86,9 @@ fn bench_hybrid_edge_search(c: &mut Criterion) {
 fn bench_dedup_brute_force_1k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(1000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     c.bench_function("bench_dedup_brute_force_1k", |b| {
         b.iter_custom(|iters| {
@@ -103,7 +109,9 @@ fn bench_dedup_brute_force_1k(c: &mut Criterion) {
 fn bench_dedup_hybrid_1k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(1000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     // No performance-ratio assertion at 1k: with CANDIDATE_K=200 the HNSW+BM25 overhead is
     // non-trivial relative to a 1k brute-force scan. The constitution's ≤30% gate applies
@@ -127,7 +135,9 @@ fn bench_dedup_hybrid_1k(c: &mut Criterion) {
 fn bench_dedup_brute_force_10k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(10_000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     c.bench_function("bench_dedup_brute_force_10k", |b| {
         b.iter_custom(|iters| {
@@ -148,7 +158,9 @@ fn bench_dedup_brute_force_10k(c: &mut Criterion) {
 fn bench_dedup_hybrid_10k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(10_000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     let brute_ns = measure_brute_force_ns(&db, &query_emb, 5);
 
@@ -178,7 +190,9 @@ fn bench_dedup_hybrid_10k(c: &mut Criterion) {
 fn bench_dedup_brute_force_50k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(50_000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     c.bench_function("bench_dedup_brute_force_50k", |b| {
         b.iter_custom(|iters| {
@@ -199,7 +213,9 @@ fn bench_dedup_brute_force_50k(c: &mut Criterion) {
 fn bench_dedup_hybrid_50k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(50_000, dim);
-    let query_emb: Vec<f32> = (0..dim).map(|i| if i == 0 { 1.0f32 } else { 0.0 }).collect();
+    let query_emb: Vec<f32> = (0..dim)
+        .map(|i| if i == 0 { 1.0f32 } else { 0.0 })
+        .collect();
 
     // 3 samples for 50k to keep setup time reasonable.
     let brute_ns = measure_brute_force_ns(&db, &query_emb, 3);
@@ -281,7 +297,11 @@ fn bench_dedup_overlap_check(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_hybrid_entity_search, bench_hybrid_edge_search);
+criterion_group!(
+    benches,
+    bench_hybrid_entity_search,
+    bench_hybrid_edge_search
+);
 criterion_group!(
     dedup,
     bench_dedup_brute_force_1k,
@@ -290,5 +310,9 @@ criterion_group!(
     bench_dedup_hybrid_10k,
     bench_dedup_overlap_check
 );
-criterion_group!(dedup_50k, bench_dedup_brute_force_50k, bench_dedup_hybrid_50k);
+criterion_group!(
+    dedup_50k,
+    bench_dedup_brute_force_50k,
+    bench_dedup_hybrid_50k
+);
 criterion_main!(benches, dedup, dedup_50k);

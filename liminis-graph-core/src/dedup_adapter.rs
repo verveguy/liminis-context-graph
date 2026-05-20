@@ -46,7 +46,10 @@ impl LocalDedupAdapter {
     pub fn from_env() -> Self {
         let url = std::env::var("GRAPHITI_DEDUP_ADAPTER_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8767".to_string());
-        Self { url, client: Client::new() }
+        Self {
+            url,
+            client: Client::new(),
+        }
     }
 
     async fn call(&self, candidate: &EntityRow, incoming: &ExtractedEntity) -> Result<bool, Error> {

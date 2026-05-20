@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
@@ -39,7 +39,10 @@ impl LlmRouter {
         sink: Arc<dyn TelemetrySink>,
     ) -> Self {
         let primary_model_name = primary.model_name().to_string();
-        let fallback_model_name = fallback.as_ref().map(|f| f.model_name().to_string()).unwrap_or_default();
+        let fallback_model_name = fallback
+            .as_ref()
+            .map(|f| f.model_name().to_string())
+            .unwrap_or_default();
         Self {
             primary,
             primary_model_name,
@@ -56,7 +59,10 @@ impl LlmRouter {
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
 
         let mut parts = spec.splitn(2, ':');
-        let primary_model = parts.next().unwrap_or("claude-haiku-4-5-20251001").to_string();
+        let primary_model = parts
+            .next()
+            .unwrap_or("claude-haiku-4-5-20251001")
+            .to_string();
         let fallback_model = parts.next().map(str::to_string);
 
         let primary = AnthropicExtractor::with_model(
@@ -65,8 +71,8 @@ impl LlmRouter {
             Arc::clone(&sink),
         );
         let fallback_model_name = fallback_model.clone().unwrap_or_default();
-        let fallback = fallback_model
-            .map(|m| AnthropicExtractor::with_model(m, api_key, Arc::clone(&sink)));
+        let fallback =
+            fallback_model.map(|m| AnthropicExtractor::with_model(m, api_key, Arc::clone(&sink)));
 
         Self {
             primary,
@@ -118,7 +124,9 @@ impl LlmRouter {
             fb.extract(body, group_id).await
         } else {
             // Unreachable: primary_failed is only set when fallback.is_some().
-            Err(Error::Ipc("BUG: primary_failed set without fallback".to_string()))
+            Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            ))
         }
     }
 }

@@ -50,16 +50,39 @@ impl AnthropicExtractor {
             .next()
             .unwrap_or("claude-haiku-4-5-20251001")
             .to_string();
-        Self { api_key, model, url: ANTHROPIC_API_URL.to_string(), client: Client::new(), sink }
+        Self {
+            api_key,
+            model,
+            url: ANTHROPIC_API_URL.to_string(),
+            client: Client::new(),
+            sink,
+        }
     }
 
     pub fn with_model(model: String, api_key: String, sink: Arc<dyn TelemetrySink>) -> Self {
-        Self { api_key, model, url: ANTHROPIC_API_URL.to_string(), client: Client::new(), sink }
+        Self {
+            api_key,
+            model,
+            url: ANTHROPIC_API_URL.to_string(),
+            client: Client::new(),
+            sink,
+        }
     }
 
     /// Constructs with a custom API URL — useful for pointing at an unreachable address in tests.
-    pub fn with_url(model: String, api_key: String, url: String, sink: Arc<dyn TelemetrySink>) -> Self {
-        Self { api_key, model, url, client: Client::new(), sink }
+    pub fn with_url(
+        model: String,
+        api_key: String,
+        url: String,
+        sink: Arc<dyn TelemetrySink>,
+    ) -> Self {
+        Self {
+            api_key,
+            model,
+            url,
+            client: Client::new(),
+            sink,
+        }
     }
 
     pub fn model_name(&self) -> &str {
@@ -70,7 +93,11 @@ impl AnthropicExtractor {
         self.model.to_lowercase().contains("sonnet")
     }
 
-    async fn do_extract(&self, episode_body: &str, _group_id: &str) -> Result<ExtractionResult, Error> {
+    async fn do_extract(
+        &self,
+        episode_body: &str,
+        _group_id: &str,
+    ) -> Result<ExtractionResult, Error> {
         let system_text = "You are a knowledge graph extraction assistant. \
             Extract named entities and relationships from the given text. \
             Return ONLY valid JSON matching this schema exactly:\n\
@@ -124,7 +151,9 @@ impl AnthropicExtractor {
                 .as_array()
                 .and_then(|arr| arr.first())
                 .and_then(|block| block["text"].as_str())
-                .ok_or_else(|| Error::Ipc("extraction response missing content text".to_string()))?;
+                .ok_or_else(|| {
+                    Error::Ipc("extraction response missing content text".to_string())
+                })?;
 
             let json_str = extract_json_block(content);
             let result: ExtractionResult = serde_json::from_str(json_str)?;
@@ -230,8 +259,14 @@ mod tests {
             "key".to_string(),
             Arc::clone(&sink),
         );
-        assert!(sonnet.is_sonnet(), "sonnet model name should trigger prompt-cache path");
-        assert!(!haiku.is_sonnet(), "haiku model name should not trigger prompt-cache path");
+        assert!(
+            sonnet.is_sonnet(),
+            "sonnet model name should trigger prompt-cache path"
+        );
+        assert!(
+            !haiku.is_sonnet(),
+            "haiku model name should not trigger prompt-cache path"
+        );
     }
 }
 

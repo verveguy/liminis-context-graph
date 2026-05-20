@@ -54,7 +54,12 @@ fn round_trip_entity_and_episodic() {
 
     // 6. Search — empty prefix matches all entities.
     let results = conn.search_entities("").expect("search entities");
-    assert_eq!(results.len(), 3, "expected 3 entities, got {}", results.len());
+    assert_eq!(
+        results.len(),
+        3,
+        "expected 3 entities, got {}",
+        results.len()
+    );
 
     // 7. Prefix search should narrow results.
     let results = conn.search_entities("Entity 1").expect("prefix search");

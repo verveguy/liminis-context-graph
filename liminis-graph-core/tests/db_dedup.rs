@@ -15,7 +15,9 @@ fn insert_test_entities(conn: &liminis_graph_core::Conn<'_>, n: usize, dim: usiz
     let ts = "2026-01-01 00:00:00";
     for i in 0..n {
         let axis = i % dim;
-        let emb: Vec<f32> = (0..dim).map(|j| if j == axis { 1.0 } else { 0.0 }).collect();
+        let emb: Vec<f32> = (0..dim)
+            .map(|j| if j == axis { 1.0 } else { 0.0 })
+            .collect();
         conn.insert_entity(&EntityRow {
             uuid: format!("entity-{i:04}"),
             name: format!("Entity {i}"),
@@ -48,7 +50,11 @@ fn hybrid_dedup_returns_none_when_below_threshold() {
     let result = conn
         .hybrid_dedup_similar_entity(&query_emb, "Entity 99", "test-group", 0.85)
         .unwrap();
-    assert!(result.is_none(), "expected None for dissimilar query, got {:?}", result.map(|e| e.uuid));
+    assert!(
+        result.is_none(),
+        "expected None for dissimilar query, got {:?}",
+        result.map(|e| e.uuid)
+    );
 }
 
 #[test]

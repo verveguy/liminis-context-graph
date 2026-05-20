@@ -31,9 +31,7 @@ use tokio::sync::RwLock;
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
-    let db = Arc::new(
-        Db::open(dir.path().join("parity.db").to_str().unwrap()).unwrap(),
-    );
+    let db = Arc::new(Db::open(dir.path().join("parity.db").to_str().unwrap()).unwrap());
     {
         let conn = db.connect().unwrap();
         conn.init_schema(dim).unwrap();

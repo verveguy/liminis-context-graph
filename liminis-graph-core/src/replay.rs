@@ -9,8 +9,8 @@ use crate::wal::WalLine;
 /// Statistics returned from a WAL replay run.
 pub struct ReplayStats {
     pub lines_replayed: u64,
-    pub lines_skipped:  u64,
-    pub files_read:     u64,
+    pub lines_skipped: u64,
+    pub files_read: u64,
 }
 
 /// Replays all `.jsonl` WAL files in lexicographic filename order against a LadybugDB connection.
@@ -20,15 +20,17 @@ pub struct WalReplayer {
 
 impl WalReplayer {
     pub fn new(wal_dir: impl Into<PathBuf>) -> Self {
-        Self { wal_dir: wal_dir.into() }
+        Self {
+            wal_dir: wal_dir.into(),
+        }
     }
 
     /// Reads all JSONL files, executes known mutations, skips truncated/unknown lines (R-05, R-08).
     pub fn replay(&self, conn: &Conn<'_>) -> Result<ReplayStats, Error> {
         let mut stats = ReplayStats {
             lines_replayed: 0,
-            lines_skipped:  0,
-            files_read:     0,
+            lines_skipped: 0,
+            files_read: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -195,7 +197,10 @@ mod interpolate_tests {
         let cypher = "SET n.name_embedding = $name_embedding, n.name = $name";
         let params = json!({"name": "Alice", "name_embedding": [1.0, 0.0]});
         let result = interpolate_params(cypher, &params);
-        assert!(result.contains("[1.0, 0.0]"), "embedding should be an array");
+        assert!(
+            result.contains("[1.0, 0.0]"),
+            "embedding should be an array"
+        );
         assert!(result.contains("'Alice'"), "name should be a string");
         assert!(
             !result.contains("'Alice'_embedding"),
@@ -231,7 +236,13 @@ mod interpolate_tests {
         let params = json!({"a": "$b", "b": "secret"});
         let result = interpolate_params(cypher, &params);
         // $a must expand to the literal string '$b' (escaped), not to 'secret'.
-        assert!(result.contains("'$b'"), "value containing placeholder must not be re-expanded");
-        assert!(result.contains("'secret'"), "$b must still expand to 'secret'");
+        assert!(
+            result.contains("'$b'"),
+            "value containing placeholder must not be re-expanded"
+        );
+        assert!(
+            result.contains("'secret'"),
+            "$b must still expand to 'secret'"
+        );
     }
 }

@@ -46,5 +46,10 @@ fn bench_capture_sink(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_noop_sink, bench_channel_send, bench_capture_sink);
+criterion_group!(
+    benches,
+    bench_noop_sink,
+    bench_channel_send,
+    bench_capture_sink
+);
 criterion_main!(benches);
