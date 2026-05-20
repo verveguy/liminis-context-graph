@@ -6,8 +6,8 @@ on:
 
 jobs:
   test:
-    name: test (macos-latest)
-    runs-on: macos-latest
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
     env:
       # The prebuilt liblbug.a doesn't ship companion third-party archives;
       # build from source so all deps (fastpfor, brotli, lz4, zstd, yyjson…) are bundled.
@@ -19,14 +19,10 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: cargo build
-        run: cargo build --release
+      - uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test
-
-      - name: cargo test ipc_parity
-        run: cargo test --test ipc_parity
+        run: cargo test --release
 
       - name: check no ML runtime deps
         run: |
@@ -37,33 +33,37 @@ jobs:
           echo "OK: no ML runtime deps found"
 
       - name: cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --release -- -D warnings
 
       - name: cargo fmt
         run: cargo fmt --check
 
   bench-stub:
     name: bench compile (stub)
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: cargo bench --no-run
         run: cargo bench --no-run
 
   bench-dedup:
     name: bench-dedup
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: dedup decision-overlap check (R-007, always runs)
         run: cargo bench --bench search -- dedup_overlap_check
