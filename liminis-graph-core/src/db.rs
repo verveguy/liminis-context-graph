@@ -525,8 +525,8 @@ impl<'db> Conn<'db> {
         Ok(pairs)
     }
 
-    /// Hybrid HNSW + BM25 dedup: retrieves 10 candidates per path, fuses with RRF,
-    /// cosine-rechecks the fused set against `threshold`, and returns the best match.
+    /// Hybrid HNSW + BM25 dedup: retrieves CANDIDATE_K candidates per path, fuses with RRF,
+    /// cosine-rechecks the full fused set against `threshold`, and returns the best match.
     ///
     /// Note: the `ef` search parameter is not configurable in lbug 0.16.1; the lbug default is used.
     pub fn hybrid_dedup_similar_entity(
@@ -536,14 +536,13 @@ impl<'db> Conn<'db> {
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
-        const CANDIDATE_K: usize = 10;
+        const CANDIDATE_K: usize = 200;
 
         let vector_candidates =
             self.vector_search_entities(name_embedding, &[group_id], CANDIDATE_K)?;
         let bm25_candidates =
             self.fts_search_entities(entity_name, &[group_id], CANDIDATE_K)?;
-        let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
-        let top_uuids: Vec<String> = fused_uuids.into_iter().take(CANDIDATE_K).collect();
+        let top_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
 
         let candidate_embeddings = self.get_entity_embeddings_by_uuids(&top_uuids)?;
 
