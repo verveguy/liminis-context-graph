@@ -18,13 +18,13 @@ Hybrid (HNSW + BM25 + RRF) carries fixed per-query overhead absent from brute-fo
 
 PR #18 (commit `194f938`) already removed the same assertion from `bench_dedup_hybrid_1k` and added an explanatory comment. The `_10k` variant was missed in that PR, leaving it as a broken CI gate.
 
-The R-007 95% overlap gate (`dedup_overlap_check`) now passes — that fix from issue #16 is complete. This issue is solely about removing a misplaced perf assertion that was never valid at 10k scale.
+The R-003 95% overlap gate (`dedup_overlap_check`) now passes — that fix from issue #16 is complete. This issue is solely about removing a misplaced perf assertion that was never valid at 10k scale.
 
 ## User Scenarios & Testing
 
 ### User Story 1 - `bench-dedup` CI job passes without removing the perf observation (Priority: P1)
 
-A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees `bench_dedup_hybrid_10k` complete without a panic, and the bench output still prints the measured hybrid and brute-force timings for visibility.
+A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees `bench_dedup_hybrid_10k` complete without a panic, and the bench output still prints the measured hybrid timing for visibility. (The brute-force baseline for 10k is reported by the separate `bench_dedup_brute_force_10k` bench.)
 
 **Why this priority**: The assertion causes a CI hard failure on every push, blocking all merges. The underlying claim (hybrid ≤ 30% of brute at 10k) is architecturally unsound; asserting it provides no correctness guarantee and actively mislabels a healthy system as broken.
 
@@ -33,8 +33,8 @@ A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees
 **Acceptance Scenarios**:
 
 1. **Given** the fix is applied, **When** `cargo bench --bench search -- bench_dedup_hybrid_10k` runs, **Then** the bench completes without a panic, regardless of the hybrid/brute-force ratio.
-2. **Given** the fix, **When** the bench output is inspected, **Then** hybrid and brute-force timings are still printed (perf observation retained), matching the `_1k` bench's behavior.
-3. **Given** the fix, **When** `cargo bench --bench search -- dedup_overlap_check` runs, **Then** the R-007 95% overlap gate still passes (no regression to the issue-16 fix).
+2. **Given** the fix, **When** the bench output is inspected, **Then** hybrid timing is still printed by `bench_dedup_hybrid_10k` (perf observation retained), matching the `_1k` bench's behavior. Brute-force timing for 10k is available via `bench_dedup_brute_force_10k`.
+3. **Given** the fix, **When** `cargo bench --bench search -- dedup_overlap_check` runs, **Then** the R-003 95% overlap gate still passes (no regression to the issue-16 fix).
 
 ---
 
@@ -51,7 +51,7 @@ A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees
 - **FR-002**: The `bench_dedup_hybrid_10k` bench MUST still measure and report hybrid dedup timing (the perf observation is retained; only the assertion gate is removed).
 - **FR-003**: An explanatory comment MUST be added to `bench_dedup_hybrid_10k` matching the style of the `_1k` comment (commit `194f938`), stating that the perf gate applies at 50k, not at 10k.
 - **FR-004**: `bench_dedup_hybrid_50k` MUST retain its existing `≤ 30% of brute-force` assertion unchanged.
-- **FR-005**: `dedup_overlap_check` MUST continue to pass (no changes to the R-007 gate).
+- **FR-005**: `dedup_overlap_check` MUST continue to pass (no changes to the R-003 gate).
 
 ## Success Criteria
 
@@ -60,7 +60,7 @@ A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees
 - **SC-001**: `cargo bench --bench search -- bench_dedup_hybrid_10k` exits 0 on `ubuntu-latest`.
 - **SC-002**: `cargo bench --bench search -- dedup_overlap_check` continues to exit 0 with reported overlap ≥ 95%.
 - **SC-003**: `cargo bench --bench search -- bench_dedup_hybrid_50k` continues to exit 0 (50k perf gate intact).
-- **SC-004**: The diff is confined to `liminis-graph-core/benches/search.rs` — no changes to `src/`, `Cargo.toml`, or any other file.
+- **SC-004**: The implementation fix is confined to `liminis-graph-core/benches/search.rs` — no changes to `src/`, `Cargo.toml`, CI workflow files, or other source files. (The `specs/` document is a Fabrik workflow artifact added by the Specify stage, not part of the implementation diff.)
 
 ## Assumptions
 
@@ -78,7 +78,7 @@ A developer running `cargo bench --bench search` (or CI on `ubuntu-latest`) sees
 
 ## Source References
 
-- `liminis-graph-core/benches/search.rs:148–175` — `bench_dedup_hybrid_10k` (assertion to remove)
-- `liminis-graph-core/benches/search.rs:103–125` — `bench_dedup_hybrid_1k` (reference treatment after PR #18)
-- `liminis-graph-core/benches/search.rs:199–228` — `bench_dedup_hybrid_50k` (perf gate to preserve)
+- `liminis-graph-core/benches/search.rs:158–182` — `bench_dedup_hybrid_10k` (assertion to remove)
+- `liminis-graph-core/benches/search.rs:109–133` — `bench_dedup_hybrid_1k` (reference treatment after PR #18)
+- `liminis-graph-core/benches/search.rs:207–239` — `bench_dedup_hybrid_50k` (perf gate to preserve)
 - Commit `194f938` — removed the same assertion from `_1k`
