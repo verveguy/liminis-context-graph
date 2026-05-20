@@ -26,8 +26,15 @@ jobs:
 
       - name: check no ML runtime deps
         run: |
-          if cargo tree 2>/dev/null | grep -E "tch|candle|onnxruntime|tract"; then
+          # Match crate names only — "tch" must not also match "scratch", etc.
+          # cargo tree prints lines like "├── tch v0.18.0"; an awk filter on the
+          # crate-name token avoids the substring false positives the prior grep had.
+          banned=$(cargo tree 2>/dev/null \
+            | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^v[0-9]/) print $(i-1) }' \
+            | grep -Ex '(tch|candle|onnxruntime|tract)' || true)
+          if [ -n "$banned" ]; then
             echo "ERROR: ML runtime dependency detected — violates Principle V"
+            echo "$banned"
             exit 1
           fi
           echo "OK: no ML runtime deps found"
