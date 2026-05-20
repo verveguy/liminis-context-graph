@@ -137,7 +137,7 @@ fn interpolate_params(cypher: &str, params: &serde_json::Value) -> String {
     let mut pairs: Vec<(&str, &serde_json::Value)> =
         map.iter().map(|(k, v)| (k.as_str(), v)).collect();
     // Longest key first so that at each `$` position we greedily match the longest param name.
-    pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
 
     let mut result = String::with_capacity(cypher.len());
     let mut remaining = cypher;
