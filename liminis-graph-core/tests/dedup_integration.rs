@@ -93,6 +93,44 @@ fn dedup_uses_hybrid_above_threshold() {
     );
 }
 
+/// R-003 acceptance gate: hybrid dedup must agree with brute-force on ≥ 95% of decisions
+/// over 100 probes against a 1k-entity axis-aligned corpus (matches bench_dedup_overlap_check).
+#[test]
+fn dedup_overlap_1k_corpus_100_probes() {
+    let dim = 8;
+    let (db, _dir) = build_db_with_entities(1000, dim);
+    let conn = db.connect().unwrap();
+
+    let n_probes = 100;
+    let mut matches = 0usize;
+
+    for i in 0..n_probes {
+        let axis = i % dim;
+        let query_emb: Vec<f32> = (0..dim).map(|j| if j == axis { 1.0f32 } else { 0.0 }).collect();
+        let query_name = format!("Entity {i}");
+
+        let brute = conn
+            .brute_force_similar_entity(&query_emb, "test", 0.85)
+            .unwrap()
+            .map(|e| e.uuid);
+        let hybrid = conn
+            .hybrid_dedup_similar_entity(&query_emb, &query_name, "test", 0.85)
+            .unwrap()
+            .map(|e| e.uuid);
+
+        if brute == hybrid {
+            matches += 1;
+        }
+    }
+
+    let overlap = matches as f64 / n_probes as f64;
+    assert!(
+        overlap >= 0.95,
+        "decision overlap {:.1}% < 95% required (R-003)",
+        overlap * 100.0
+    );
+}
+
 /// entity_count_in_group returns 0 for an empty or non-existent group.
 #[test]
 fn entity_count_in_group_returns_zero_for_empty_group() {
