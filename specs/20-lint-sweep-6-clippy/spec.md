@@ -53,9 +53,9 @@ The changes are purely cosmetic / idiomatic rewrites. No test should be affected
 
 ### Functional Requirements
 
-- **FR-001**: Replace both `map_or(true, |…| …)` calls in `src/db.rs` (lines 466, 554) with `is_none_or(|…| …)`.
-- **FR-002**: Replace the redundant closure `|e| value_as_string(e)` in `src/db.rs` (line 806) with the function reference `value_as_string`.
-- **FR-003**: Replace `.splitn(2, ':')` in `src/extractor.rs` (line 47) with `.split(':')`.
+- **FR-001**: Replace both `map_or(true, |…| …)` calls in `src/db.rs` (lines 466, 553) with `is_none_or(|…| …)`.
+- **FR-002**: Replace the redundant closure `|e| value_as_string(e)` in `src/db.rs` (line 805) with the function reference `value_as_string`.
+- **FR-003**: Replace `.splitn(2, ':')` in `src/extractor.rs` (line 49) with `.split(':')`.
 - **FR-004**: Remove the redundant `.trim()` before `.split_whitespace()` in `src/replay.rs` (line 87) and `src/wal.rs` (line 79).
 - **FR-005**: Run `cargo fmt` across all 20 files listed in the issue and commit the formatting changes.
 - **FR-006**: No semantic behavior change is introduced by any of these edits.
@@ -65,8 +65,8 @@ The changes are purely cosmetic / idiomatic rewrites. No test should be affected
 The following files require changes:
 
 **Clippy fixes**:
-- `liminis-graph-core/src/db.rs` (lines 466, 554, 806)
-- `liminis-graph-core/src/extractor.rs` (line 47)
+- `liminis-graph-core/src/db.rs` (lines 466, 553, 805)
+- `liminis-graph-core/src/extractor.rs` (line 49)
 - `liminis-graph-core/src/replay.rs` (line 87)
 - `liminis-graph-core/src/wal.rs` (line 79)
 
@@ -117,8 +117,8 @@ The following files require changes:
 
 ## Source References
 
-- `liminis-graph-core/src/db.rs:466, 554, 806`
-- `liminis-graph-core/src/extractor.rs:47`
+- `liminis-graph-core/src/db.rs:466, 553, 805`
+- `liminis-graph-core/src/extractor.rs:49`
 - `liminis-graph-core/src/replay.rs:87`
 - `liminis-graph-core/src/wal.rs:79`
 - PR #17 (CI switch to Linux), PR #18 (issue #16, db.rs edits — must merge first), PR #19 (ML-deps fix)
