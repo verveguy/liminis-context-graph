@@ -46,7 +46,7 @@ impl AnthropicExtractor {
         // AnthropicExtractor::from_env only needs the primary token.
         let model = std::env::var("GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string())
-            .splitn(2, ':')
+            .split(':')
             .next()
             .unwrap_or("claude-haiku-4-5-20251001")
             .to_string();

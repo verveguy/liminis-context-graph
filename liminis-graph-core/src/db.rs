@@ -463,7 +463,7 @@ impl<'db> Conn<'db> {
             let sim = cosine_similarity(name_embedding, &stored_embedding);
             if sim >= threshold {
                 let candidate_uuid = value_as_string(&row[0]);
-                let is_better = best.as_ref().map_or(true, |(s, r)| {
+                let is_better = best.as_ref().is_none_or(|(s, r)| {
                     sim > *s || (sim == *s && candidate_uuid < r.uuid)
                 });
                 if is_better {
@@ -550,7 +550,7 @@ impl<'db> Conn<'db> {
         for (uuid, emb) in candidate_embeddings {
             let sim = cosine_similarity(name_embedding, &emb);
             if sim >= threshold {
-                let is_better = best.as_ref().map_or(true, |(s, best_uuid)| {
+                let is_better = best.as_ref().is_none_or(|(s, best_uuid)| {
                     sim > *s || (sim == *s && &uuid < best_uuid)
                 });
                 if is_better {
@@ -802,7 +802,7 @@ fn value_as_float_array(v: &lbug::Value) -> Vec<f32> {
 fn value_as_str_list(v: &lbug::Value) -> Vec<String> {
     match v {
         lbug::Value::Array(_, elems) | lbug::Value::List(_, elems) => {
-            elems.iter().map(|e| value_as_string(e)).collect()
+            elems.iter().map(value_as_string).collect()
         }
         _ => vec![],
     }

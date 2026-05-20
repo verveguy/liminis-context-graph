@@ -76,7 +76,6 @@ impl WalWriter {
         }
 
         let first_token = cypher
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
