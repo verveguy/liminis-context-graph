@@ -84,7 +84,6 @@ impl WalReplayer {
 
                 let first_token = wal_line
                     .cypher
-                    .trim()
                     .split_whitespace()
                     .next()
                     .unwrap_or("")
