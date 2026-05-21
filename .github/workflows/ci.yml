@@ -21,8 +21,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `cargo test` must stay --release: linking the 6 integration-test
+      # binaries against lbug + third-party static archives in debug mode
+      # OOMs the 7GB Ubuntu runner during `ld` (bus error / signal 7).
+      # Release dead-code-eliminates enough to fit. Clippy below runs in
+      # debug since it doesn't link binaries.
       - name: cargo test
-        run: cargo test
+        run: cargo test --release
 
       - name: check no ML runtime deps
         run: |
