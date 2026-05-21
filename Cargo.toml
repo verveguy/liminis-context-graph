@@ -2,6 +2,15 @@
 members = ["liminis-graph-core", "liminis-graph"]
 resolver = "2"
 
+# Strip debuginfo from dev/test builds. Linking the six integration-test
+# binaries against the full lbug static archive (+ third-party deps) with
+# default `debug = "full"` blows the 7GB Ubuntu CI runner's RAM during
+# `ld` and triggers "collect2: fatal error: ld terminated with signal 7".
+# We don't need debug symbols on CI; if a dev wants them locally they can
+# override with `RUSTFLAGS="-C debuginfo=2"`.
+[profile.dev]
+debug = "line-tables-only"
+
 [workspace.dependencies]
 lbug = "=0.16.1"
 thiserror = "2"
