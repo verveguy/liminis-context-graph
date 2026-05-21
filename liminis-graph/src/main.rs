@@ -12,8 +12,8 @@ use tokio::{
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = std::env::var("GRAPHITI_SOCKET_PATH")
         .unwrap_or_else(|_| ".graphiti/service.sock".to_string());
-    let db_path = std::env::var("GRAPHITI_DB_PATH")
-        .unwrap_or_else(|_| ".graphiti/db/liminis.db".to_string());
+    let db_path =
+        std::env::var("GRAPHITI_DB_PATH").unwrap_or_else(|_| ".graphiti/db/liminis.db".to_string());
     let embedding_dim: usize = std::env::var("GRAPHITI_EMBEDDING_DIM")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -63,8 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = match serde_json::from_str::<IpcRequest>(&line) {
                     Ok(req) => {
                         let is_close = req.method == "knowledge_close";
-                        let resp =
-                            handlers::dispatch(req, Arc::clone(&state)).await;
+                        let resp = handlers::dispatch(req, Arc::clone(&state)).await;
                         let json = serde_json::to_string(&resp).unwrap_or_default();
                         let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
                         if is_close {
