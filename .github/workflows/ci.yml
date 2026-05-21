@@ -22,7 +22,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo test
-        run: cargo test --release
+        run: cargo test
 
       - name: check no ML runtime deps
         run: |
@@ -40,7 +40,7 @@ jobs:
           echo "OK: no ML runtime deps found"
 
       - name: cargo clippy
-        run: cargo clippy --release -- -D warnings
+        run: cargo clippy -- -D warnings
 
       - name: cargo fmt
         run: cargo fmt --check
@@ -72,15 +72,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: dedup decision-overlap check (R-007, always runs)
+      # R-007 95% overlap is a correctness gate — runs on every PR.
+      - name: dedup decision-overlap check (R-007)
         run: cargo bench --bench search -- dedup_overlap_check
 
-      - name: dedup bench 1k (always runs)
+      # Perf benches are observation, not gates — only on main push, to keep PR latency low.
+      - name: dedup bench 1k
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: cargo bench --bench search -- 1k --measurement-time 30
 
-      - name: dedup bench 10k (always runs)
+      - name: dedup bench 10k
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: cargo bench --bench search -- 10k --measurement-time 30
 
-      - name: dedup bench 50k (main push only)
+      - name: dedup bench 50k
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: cargo bench --bench search -- dedup_50k
