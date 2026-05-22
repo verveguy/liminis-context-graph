@@ -166,11 +166,34 @@ impl WalWriter {
         path
     }
 
+    /// Force-closes the current WAL file (if open) so the next write opens a fresh file.
+    /// Since writes are flushed and fsynced per chunk, rotation only resets `current_file`.
+    /// Returns `(files_rotated, files_total)` — `files_rotated` is 0 or 1.
+    pub fn rotate(&mut self) -> (u32, u32) {
+        let files_rotated = if self.current_file.take().is_some() { 1 } else { 0 };
+        let files_total = count_jsonl_files(&self.wal_dir);
+        (files_rotated, files_total)
+    }
+
     /// Returns pending line count (for tests).
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
         self.pending_lines.len()
     }
+}
+
+fn count_jsonl_files(dir: &Path) -> u32 {
+    if !dir.exists() {
+        return 0;
+    }
+    fs::read_dir(dir)
+        .ok()
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+                .count() as u32
+        })
+        .unwrap_or(0)
 }
 
 /// Reads all `.jsonl` files in `wal_dir` (reverse lexicographic) and returns `max_seq + 1`,
