@@ -38,6 +38,9 @@ pub async fn dispatch(req: IpcRequest, state: Arc<AppState>) -> IpcResponse {
 
 async fn handle(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     match req.method.as_str() {
+        "health_check" => handle_health_check(state).await,
+        "knowledge_status" => handle_knowledge_status(state).await,
+        "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_add_episode" => handle_add_episode(req, state).await,
         "knowledge_find_entities" => handle_find_entities(req, state).await,
         "knowledge_find_relationships" => handle_find_relationships(req, state).await,
@@ -65,7 +68,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
 
-    let episode_uuid = episode::add_episode(
+    let result = episode::add_episode(
         state,
         &name,
         &body,
@@ -76,7 +79,145 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
     )
     .await?;
 
-    Ok(json!({ "episode_uuid": episode_uuid }))
+    Ok(json!({ "episode_uuid": result.episode_uuid }))
+}
+
+async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        conn.probe()
+    })
+    .await??;
+    drop(_guard);
+    Ok(json!({ "ok": true, "healthy": true }))
+}
+
+async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    let db = Arc::clone(&state.db);
+    let db_path = state.db_path.clone();
+    let embedding_model = state.embedding_model.clone();
+    let embedding_dim = state.embedder.dim();
+    let wal_dir = state.wal_dir.clone();
+
+    let _guard = state.write_lock.read().await;
+    let (entity_count, episode_count, edge_count, wal_exists, wal_file_count, wal_byte_size) =
+        tokio::task::spawn_blocking(move || -> Result<(u64, u64, u64, bool, u64, u64), crate::error::Error> {
+            let conn = db.connect()?;
+            let entity_count = conn.count_nodes("Entity")?;
+            let episode_count = conn.count_nodes("Episodic")?;
+            let edge_count = conn.count_relates_to_edges()?;
+            let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+            Ok((entity_count, episode_count, edge_count, wal_exists, wal_file_count, wal_byte_size))
+        })
+        .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "database_path": db_path,
+        "embedding_model": embedding_model,
+        "embedding_dim": embedding_dim,
+        "entity_count": entity_count,
+        "edge_count": edge_count,
+        "episode_count": episode_count,
+        "wal": {
+            "exists": wal_exists,
+            "file_count": wal_file_count,
+            "byte_size": wal_byte_size,
+        },
+    }))
+}
+
+fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
+    let dir = match wal_dir {
+        Some(d) => d,
+        None => return (false, 0, 0),
+    };
+    if !dir.exists() {
+        return (false, 0, 0);
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return (true, 0, 0),
+    };
+    let mut file_count: u64 = 0;
+    let mut byte_size: u64 = 0;
+    for entry in rd.flatten() {
+        if entry
+            .path()
+            .extension()
+            .and_then(|x| x.to_str())
+            == Some("jsonl")
+        {
+            file_count += 1;
+            if let Ok(meta) = entry.metadata() {
+                byte_size += meta.len();
+            }
+        }
+    }
+    (true, file_count, byte_size)
+}
+
+async fn handle_knowledge_process_chunk(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+
+    let chunk_text = p["chunk_text"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("chunk_text is required and must be non-empty".to_string()))?
+        .to_string();
+
+    let chunk_id = p["chunk_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("chunk_id is required".to_string()))?
+        .to_string();
+
+    let source_file = p["source_file"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("source_file is required".to_string()))?
+        .to_string();
+
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+
+    let ref_time = match p["reference_time"].as_str() {
+        Some(s) => {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|_| Error::Ipc(format!("reference_time is not valid ISO 8601: {s}")))?;
+            s.to_string()
+        }
+        None => chrono::Utc::now().to_rfc3339(),
+    };
+
+    let start = Instant::now();
+    let result = episode::add_episode(
+        state,
+        &chunk_id,
+        &chunk_text,
+        "text",
+        &chunk_id,
+        &ref_time,
+        &group_id,
+    )
+    .await?;
+
+    Ok(json!({
+        "success": true,
+        "chunk_id": chunk_id,
+        "source_file": source_file,
+        "episode_uuid": result.episode_uuid,
+        "nodes_extracted": result.nodes_extracted,
+        "edges_extracted": result.edges_extracted,
+        "duration_seconds": start.elapsed().as_secs_f64(),
+    }))
 }
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────
