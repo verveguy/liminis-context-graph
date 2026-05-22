@@ -39,6 +39,9 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
     })
 }
 

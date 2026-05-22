@@ -667,6 +667,30 @@ impl<'db> Conn<'db> {
         Ok(0)
     }
 
+    /// Returns the count of RELATES_TO relationship edges.
+    pub fn count_relates_to_edges(&self) -> Result<u64, Error> {
+        let result = self
+            .inner
+            .query("MATCH ()-[r:RELATES_TO]->() RETURN count(r)")?;
+        for row in result {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
+    /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
+    pub fn probe(&self) -> Result<(), Error> {
+        self.inner.query("RETURN 1").map_err(|e| {
+            Error::QueryFailed(format!("health probe failed: {e}"))
+        })?;
+        Ok(())
+    }
+
     /// Returns entities whose name starts with `name_prefix`.
     /// Pass `""` to return all entities.
     ///

@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
 
-    let state = Arc::new(AppState::from_env(Arc::clone(&telemetry_sink), db));
+    let state = Arc::new(AppState::from_env(Arc::clone(&telemetry_sink), db, db_path.clone()));
 
     // Remove stale socket file
     let _ = std::fs::remove_file(&socket_path);
