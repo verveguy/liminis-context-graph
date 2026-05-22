@@ -643,9 +643,11 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let path = std::path::Path::new(&db_path_del);
         if path.is_dir() {
-            std::fs::remove_dir_all(path)?;
+            std::fs::remove_dir_all(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path_del)))?;
         } else if path.exists() {
-            std::fs::remove_file(path)?;
+            std::fs::remove_file(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path_del)))?;
             // Remove lbug sibling files (e.g. <db>.wal) that lbug creates next to the DB file.
             // If we leave them behind, lbug will reject them on the next open because the
             // database ID in the WAL won't match the freshly created DB.
@@ -655,7 +657,8 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         }
         if let Some(wal) = wal_dir {
             if wal.exists() {
-                std::fs::remove_dir_all(&wal)?;
+                std::fs::remove_dir_all(&wal)
+                    .map_err(|e| Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display())))?;
             }
         }
         Ok(())
@@ -665,9 +668,12 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     // Phase 2: create fresh DB and initialize schema
     let db_path_reinit = db_path.clone();
     let reinit_result = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
-        // Ensure parent directory exists (it may have been removed with the DB)
+        // Ensure parent directory exists (it may have been removed with the DB).
+        // Skip if parent is empty (e.g. db_path is a bare filename with no directory component).
         if let Some(parent) = std::path::Path::new(&db_path_reinit).parent() {
-            std::fs::create_dir_all(parent)?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
         }
         let db = Db::open(&db_path_reinit)?;
         {
