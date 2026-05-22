@@ -85,7 +85,6 @@ pub struct PassageResult {
     pub source_description: String,
     pub group_id: String,
     pub created_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_at: Option<String>,
     pub score: f64,
 }
