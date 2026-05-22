@@ -668,19 +668,11 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns the count of RELATES_TO relationship edges.
+    ///
+    /// Uses the RelatesToNode_ shadow node count (1:1 with RELATES_TO rels, always maintained
+    /// by insert_relates_to_edge) to avoid relying on an unverified rel-table Cypher pattern.
     pub fn count_relates_to_edges(&self) -> Result<u64, Error> {
-        let result = self
-            .inner
-            .query("MATCH ()-[r:RELATES_TO]->() RETURN count(r)")?;
-        for row in result {
-            match &row[0] {
-                lbug::Value::Int64(n) => return Ok(*n as u64),
-                lbug::Value::UInt64(n) => return Ok(*n),
-                lbug::Value::Int32(n) => return Ok(*n as u64),
-                _ => {}
-            }
-        }
-        Ok(0)
+        self.count_nodes("RelatesToNode_")
     }
 
     /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
