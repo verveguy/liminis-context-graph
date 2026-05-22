@@ -398,7 +398,10 @@ pub fn apply_corrections_file(
 
         match result {
             Ok(action) => {
-                applied += 1;
+                // In dry_run mode, nothing is actually applied (FR-015: "applied: 0").
+                if !dry_run {
+                    applied += 1;
+                }
                 details.push(ApplyDetail {
                     id: entry.id.clone(),
                     action,
