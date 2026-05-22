@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -45,7 +46,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     // Methods that call embed() will fail with -32000 — that's expected for those tests.
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -253,7 +254,7 @@ async fn parity_find_relationships_requires_embedder() {
 fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),

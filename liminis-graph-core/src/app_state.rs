@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -13,7 +14,10 @@ use crate::{
 };
 
 pub struct AppState {
-    pub db: Arc<Db>,
+    /// ArcSwap allows `clear_all` to atomically replace the live Db under the write lock
+    /// without holding an inner Mutex. All other handlers call `db.load_full()` to get a
+    /// snapshot Arc<Db> — a lock-free read. See ADR-0043.
+    pub db: ArcSwap<Db>,
     pub embedder: Arc<dyn Embedder>,
     pub extractor: Arc<dyn Extractor>,
     pub dedup: Arc<dyn DedupAdapter>,
@@ -43,7 +47,7 @@ impl AppState {
         let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
         Self {
-            db,
+            db: ArcSwap::from(db),
             embedder,
             extractor,
             dedup,

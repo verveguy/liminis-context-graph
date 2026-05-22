@@ -88,7 +88,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
 }
 
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -100,7 +100,7 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 }
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let db_path = state.db_path.clone();
     let embedding_model = state.embedding_model.clone();
     let embedding_dim = state.embedder.dim();
@@ -234,7 +234,7 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let entities = search::hybrid_entity_search(
-        Arc::clone(&state.db),
+        state.db.load_full(),
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -251,7 +251,7 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let edges = search::hybrid_edge_search(
-        Arc::clone(&state.db),
+        state.db.load_full(),
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -274,7 +274,7 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         .to_string();
     let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let episodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -292,7 +292,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
         .unwrap_or("")
         .to_string();
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -307,7 +307,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
 async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_group_ids(&req.params["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -323,7 +323,7 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_group_ids(&req.params["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -346,7 +346,7 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
         })
         .unwrap_or_default();
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -362,7 +362,7 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
 async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let query = req.params["query"].as_str().unwrap_or("").to_string();
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let rows = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -375,7 +375,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 }
 
 async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;

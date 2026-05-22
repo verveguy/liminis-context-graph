@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -33,7 +34,7 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 
 fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppState> {
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
