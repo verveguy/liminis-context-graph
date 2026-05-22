@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{
     error::Error,
-    types::{EntityRow, EpisodicRow, MentionsEdge, RelatesToEdge},
+    types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
 pub struct Db {
@@ -419,6 +419,191 @@ impl<'db> Conn<'db> {
              ORDER BY distance ASC LIMIT {limit}"
         );
         self.collect_uuid_score_pairs(&sql)
+    }
+
+    /// HNSW vector search on Episodic nodes; returns PassageResult rows with score = raw distance.
+    /// Caller must convert distance → similarity: `score = 1.0 - distance`.
+    pub fn vector_search_episodic(
+        &self,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<PassageResult>, Error> {
+        let vec_lit = format_float_array(embedding);
+        let sql = format!(
+            "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', {vec_lit}, {limit}) \
+             WITH node, distance \
+             RETURN node.uuid, node.name, node.content, node.source_description, \
+             node.group_id, node.created_at, node.valid_at, distance \
+             ORDER BY distance ASC LIMIT {limit}"
+        );
+        let result = self.inner.query(&sql)?;
+        let mut rows = Vec::new();
+        for row in result {
+            let valid_at = match value_as_optional_timestamp_str(&row[6]) {
+                Some(s) if s.is_empty() => None,
+                other => other,
+            };
+            rows.push(PassageResult {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                content: value_as_string(&row[2]),
+                source_description: value_as_string(&row[3]),
+                group_id: value_as_string(&row[4]),
+                created_at: value_as_timestamp_str(&row[5]),
+                valid_at,
+                score: value_as_f64(&row[7]),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Lists Entity nodes with optional group filter, ordered by uuid DESC.
+    pub fn list_entities(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let sql = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                let gid_list = format_str_list(gids);
+                format!(
+                    "MATCH (e:Entity) WHERE e.group_id IN {gid_list} \
+                     RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                     e.summary, e.attributes ORDER BY e.uuid DESC LIMIT {limit}"
+                )
+            }
+            _ => format!(
+                "MATCH (e:Entity) \
+                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT {limit}"
+            ),
+        };
+        let result = self.inner.query(&sql)?;
+        let mut rows = Vec::new();
+        for row in result {
+            rows.push(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Lists RELATES_TO edges with optional group filter, ordered by uuid DESC.
+    pub fn list_relationships(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let sql = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                let gid_list = format_str_list(gids);
+                format!(
+                    "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
+                     WHERE r.group_id IN {gid_list} \
+                     RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+                     r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {limit}"
+                )
+            }
+            _ => format!(
+                "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
+                 RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+                 r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {limit}"
+            ),
+        };
+        self.collect_relates_to_edges(&sql)
+    }
+
+    /// Returns 1-hop neighbors via two directed queries (outgoing + incoming), merged in Rust.
+    /// Returns `(edges, unique_neighbor_uuids)` truncated to `num_results` edges.
+    pub fn get_entity_neighbors(
+        &self,
+        entity_uuid: &str,
+        num_results: usize,
+    ) -> Result<(Vec<RelatesToEdge>, Vec<String>), Error> {
+        let uuid_esc = escape(entity_uuid);
+
+        let out_sql = format!(
+            "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(n:Entity) \
+             RETURN r.uuid, r.name, c.uuid, n.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes LIMIT {num_results}"
+        );
+        let in_sql = format!(
+            "MATCH (n:Entity)-[r:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
+             RETURN r.uuid, r.name, n.uuid, c.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes LIMIT {num_results}"
+        );
+
+        let mut edges = self.collect_relates_to_edges(&out_sql)?;
+        edges.extend(self.collect_relates_to_edges(&in_sql)?);
+        edges.truncate(num_results);
+
+        let mut seen = std::collections::HashSet::new();
+        let mut neighbor_uuids: Vec<String> = Vec::new();
+        for edge in &edges {
+            let neighbor = if edge.source_node_uuid == entity_uuid {
+                edge.target_node_uuid.clone()
+            } else {
+                edge.source_node_uuid.clone()
+            };
+            if seen.insert(neighbor.clone()) {
+                neighbor_uuids.push(neighbor);
+            }
+        }
+
+        Ok((edges, neighbor_uuids))
+    }
+
+    /// Returns Entity nodes reachable via Episodic nodes whose source_description CONTAINS `source`.
+    ///
+    /// Uses Cypher `CONTAINS` predicate (substring semantics, FR-017). If lbug's dialect does not
+    /// support `CONTAINS`, this will return an error and the caller should fall back to Rust-side
+    /// filtering.
+    pub fn get_entities_by_source(
+        &self,
+        source: &str,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let src_esc = escape(source);
+        let sql = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                let gid_list = format_str_list(gids);
+                format!(
+                    "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
+                     WHERE ep.source_description CONTAINS '{src_esc}' AND e.group_id IN {gid_list} \
+                     RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                     e.summary, e.attributes LIMIT {limit}"
+                )
+            }
+            _ => format!(
+                "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
+                 WHERE ep.source_description CONTAINS '{src_esc}' \
+                 RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                 e.summary, e.attributes LIMIT {limit}"
+            ),
+        };
+        let result = self.inner.query(&sql)?;
+        let mut rows = Vec::new();
+        for row in result {
+            rows.push(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            });
+        }
+        Ok(rows)
     }
 
     fn collect_uuid_score_pairs(&self, sql: &str) -> Result<Vec<(String, f64)>, Error> {
