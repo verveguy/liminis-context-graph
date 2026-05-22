@@ -415,10 +415,11 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
 
 async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
-    let num_results = p["num_results"].as_u64().unwrap_or(500) as usize;
-    if num_results == 0 {
+    let num_results_raw = p["num_results"].as_i64().unwrap_or(500);
+    if num_results_raw <= 0 {
         return Err(Error::Ipc("num_results must be > 0".to_string()));
     }
+    let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
     let db = Arc::clone(&state.db);
@@ -444,10 +445,11 @@ async fn handle_list_relationships(
     state: Arc<AppState>,
 ) -> Result<Value, Error> {
     let p = &req.params;
-    let num_results = p["num_results"].as_u64().unwrap_or(1000) as usize;
-    if num_results == 0 {
+    let num_results_raw = p["num_results"].as_i64().unwrap_or(1000);
+    if num_results_raw <= 0 {
         return Err(Error::Ipc("num_results must be > 0".to_string()));
     }
+    let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
     let db = Arc::clone(&state.db);
@@ -479,14 +481,22 @@ async fn handle_get_entity_neighbors(
         .ok_or_else(|| Error::Ipc("entity_uuid is required".to_string()))?
         .to_string();
     let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
     let db = Arc::clone(&state.db);
     let _guard = state.write_lock.read().await;
     let (edges, nodes) = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let (edges, neighbor_uuids) = conn.get_entity_neighbors(&entity_uuid, num_results)?;
-        let neighbor_strings: Vec<String> = neighbor_uuids;
-        let nodes = conn.get_entities_by_uuids(&neighbor_strings)?;
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let (edges, neighbor_uuids) = conn.get_entity_neighbors(
+            &entity_uuid,
+            group_ids.as_deref().map(|_| gid_refs.as_slice()),
+            num_results,
+        )?;
+        let nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
         Ok::<_, crate::error::Error>((edges, nodes))
     })
     .await??;

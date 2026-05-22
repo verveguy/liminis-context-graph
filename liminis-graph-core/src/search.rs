@@ -34,8 +34,8 @@ pub fn rrf_fuse(bm25: &[(String, f64)], vector: &[(String, f64)]) -> Vec<String>
 
 /// Pure vector-cosine passage search on Episodic nodes (HOT path — no lock held).
 ///
-/// `num_results` is clamped to `[1, 100]`; `min_score` is clamped to `[0.0, 1.0]`.
 /// lbug HNSW returns distance (lower = closer); converts to similarity: `score = 1.0 - distance`.
+/// Group filtering is pushed into the Cypher WHERE clause; results arrive ordered by score DESC.
 pub async fn search_passages(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
@@ -49,17 +49,16 @@ pub async fn search_passages(
 
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
         let conn = db.connect()?;
-        let mut passages = conn.vector_search_episodic(&embedding, overdraw)?;
+        let gid_refs: Option<Vec<&str>> =
+            group_ids.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let mut passages =
+            conn.vector_search_episodic(&embedding, gid_refs.as_deref(), overdraw)?;
 
         for p in &mut passages {
             p.score = 1.0 - p.score;
         }
 
-        if let Some(ref gids) = group_ids {
-            passages.retain(|p| gids.contains(&p.group_id));
-        }
         passages.retain(|p| p.score >= min_score);
-        passages.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         passages.truncate(num_results);
         Ok(passages)
     })

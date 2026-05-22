@@ -423,15 +423,23 @@ impl<'db> Conn<'db> {
 
     /// HNSW vector search on Episodic nodes; returns PassageResult rows with score = raw distance.
     /// Caller must convert distance → similarity: `score = 1.0 - distance`.
+    /// Optional `group_ids` filter is pushed into the Cypher WHERE clause after the HNSW scan.
     pub fn vector_search_episodic(
         &self,
         embedding: &[f32],
+        group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<PassageResult>, Error> {
         let vec_lit = format_float_array(embedding);
+        let gid_filter = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                format!("WHERE node.group_id IN {}", format_str_list(gids))
+            }
+            _ => String::new(),
+        };
         let sql = format!(
             "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', {vec_lit}, {limit}) \
-             WITH node, distance \
+             WITH node, distance {gid_filter} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, distance \
              ORDER BY distance ASC LIMIT {limit}"
@@ -525,19 +533,28 @@ impl<'db> Conn<'db> {
     pub fn get_entity_neighbors(
         &self,
         entity_uuid: &str,
+        group_ids: Option<&[&str]>,
         num_results: usize,
     ) -> Result<(Vec<RelatesToEdge>, Vec<String>), Error> {
         let uuid_esc = escape(entity_uuid);
+        let gid_filter = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                format!("WHERE r.group_id IN {}", format_str_list(gids))
+            }
+            _ => String::new(),
+        };
 
         let out_sql = format!(
             "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(n:Entity) \
+             {gid_filter} \
              RETURN r.uuid, r.name, c.uuid, n.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes LIMIT {num_results}"
+             r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {num_results}"
         );
         let in_sql = format!(
             "MATCH (n:Entity)-[r:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
+             {gid_filter} \
              RETURN r.uuid, r.name, n.uuid, c.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes LIMIT {num_results}"
+             r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {num_results}"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql)?;
