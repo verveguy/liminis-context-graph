@@ -411,6 +411,136 @@ async fn test_knowledge_process_chunk_rejects_missing_chunk_id() {
     assert_err_resp(&v, 34, -32000);
 }
 
+// ── Tier 1b: knowledge_search_passages ───────────────────────────────────────
+
+#[tokio::test]
+async fn parity_search_passages_empty_db() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        40,
+        "knowledge_search_passages",
+        serde_json::json!({"query": "test passage", "num_results": 5, "min_score": 0.0}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 40);
+    assert!(v["result"]["passages"].is_array(), "expected passages array: {v}");
+    assert_eq!(v["result"]["count"], 0, "empty db should yield 0 passages: {v}");
+}
+
+#[tokio::test]
+async fn parity_search_passages_empty_query() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        41,
+        "knowledge_search_passages",
+        serde_json::json!({"query": "", "num_results": 5}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 41, -32000);
+}
+
+// ── Tier 1b: knowledge_list_entities ─────────────────────────────────────────
+
+#[tokio::test]
+async fn parity_list_entities_empty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(42, "knowledge_list_entities", json!({}), state).await;
+    assert_ok_resp(&v, 42);
+    assert!(v["result"]["nodes"].is_array(), "expected nodes array: {v}");
+    assert_eq!(v["result"]["count"], 0, "empty db: {v}");
+}
+
+#[tokio::test]
+async fn parity_list_entities_invalid_num_results() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        43,
+        "knowledge_list_entities",
+        json!({"num_results": 0}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 43, -32000);
+}
+
+// ── Tier 1b: knowledge_list_relationships ────────────────────────────────────
+
+#[tokio::test]
+async fn parity_list_relationships_empty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(44, "knowledge_list_relationships", json!({}), state).await;
+    assert_ok_resp(&v, 44);
+    assert!(v["result"]["facts"].is_array(), "expected facts array: {v}");
+    assert_eq!(v["result"]["count"], 0, "empty db: {v}");
+}
+
+// ── Tier 1b: knowledge_get_entity_neighbors ───────────────────────────────────
+
+#[tokio::test]
+async fn parity_get_entity_neighbors_missing_uuid() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(45, "knowledge_get_entity_neighbors", json!({}), state).await;
+    assert_err_resp(&v, 45, -32000);
+}
+
+#[tokio::test]
+async fn parity_get_entity_neighbors_nonexistent() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        46,
+        "knowledge_get_entity_neighbors",
+        json!({"entity_uuid": "00000000-0000-0000-0000-000000000099"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 46);
+    assert!(v["result"]["nodes"].is_array(), "expected nodes: {v}");
+    assert!(v["result"]["edges"].is_array(), "expected edges: {v}");
+    assert_eq!(v["result"]["node_count"], 0, "no neighbors for nonexistent uuid: {v}");
+    assert_eq!(v["result"]["edge_count"], 0, "no edges for nonexistent uuid: {v}");
+}
+
+// ── Tier 1b: knowledge_get_entities_by_source ────────────────────────────────
+
+#[tokio::test]
+async fn parity_get_entities_by_source_empty_source() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        47,
+        "knowledge_get_entities_by_source",
+        json!({"source": ""}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 47, -32000);
+}
+
+#[tokio::test]
+async fn parity_get_entities_by_source_no_match() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        48,
+        "knowledge_get_entities_by_source",
+        json!({"source": "nonexistent-source-xyz"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 48);
+    assert!(v["result"]["nodes"].is_array(), "expected nodes: {v}");
+    assert_eq!(v["result"]["node_count"], 0, "no match: {v}");
+}
+
 #[tokio::test]
 async fn test_knowledge_process_chunk_rejects_bad_reference_time() {
     let (db, _dir) = make_db(4);
