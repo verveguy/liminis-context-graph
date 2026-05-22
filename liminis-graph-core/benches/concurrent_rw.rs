@@ -39,6 +39,9 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
+        db_path: "bench.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
     })
 }
 
