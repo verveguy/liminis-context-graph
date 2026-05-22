@@ -87,6 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (tx, mut rx) =
                         tokio::sync::mpsc::unbounded_channel::<Value>();
                     let state_clone = Arc::clone(&state);
+                    let req_id = req.id.clone();
                     let dispatch_handle =
                         tokio::spawn(handlers::dispatch(req, state_clone, Some(tx)));
 
@@ -99,7 +100,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .await
                             .is_err()
                         {
-                            // Client disconnected; rx drops → tx.send() fails → replay aborts
+                            // Client disconnected; drop rx so cancel_fn detects closed channel,
+                            // then abort the dispatch task to clean up the async wrapper.
                             client_ok = false;
                             break;
                         }
@@ -107,10 +109,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if client_ok {
                         dispatch_handle.await.unwrap_or_else(|_| {
-                            IpcResponse::err(Value::Null, -32000, "Internal error")
+                            IpcResponse::err(req_id, -32000, "Internal error")
                         })
                     } else {
-                        // Client gone; don't try to write the terminal response
+                        // Drop rx before aborting so cancel_fn sees the closed channel promptly
+                        drop(rx);
+                        dispatch_handle.abort();
                         continue;
                     }
                 } else {

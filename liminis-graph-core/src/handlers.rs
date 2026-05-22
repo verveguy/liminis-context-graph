@@ -829,6 +829,7 @@ async fn handle_rebuild_from_wal(
                 ReplayOptions {
                     from_seq,
                     dry_run,
+                    cancel_fn: tx.as_ref().map(build_cancel_fn),
                     progress_fn: build_progress_fn(tx),
                 },
             )
@@ -857,23 +858,6 @@ async fn handle_rebuild_from_wal(
             )));
         }
 
-        // Return existing running job instead of starting a second
-        let existing = {
-            let jobs = state
-                .rebuild_jobs
-                .lock()
-                .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
-            jobs.values()
-                .find(|j| j.status == JobStatus::Running)
-                .map(|j| j.job_id.clone())
-        };
-        if let Some(existing_id) = existing {
-            return Ok(json!({
-                "success": true,
-                "job_id": existing_id,
-                "status": "running",
-            }));
-        }
     }
 
     // Non-streaming dry_run: run synchronously and return stats immediately
@@ -888,6 +872,7 @@ async fn handle_rebuild_from_wal(
                     from_seq,
                     dry_run: true,
                     progress_fn: None,
+                    cancel_fn: None,
                 },
             )
         })
@@ -901,15 +886,26 @@ async fn handle_rebuild_from_wal(
         }));
     }
 
-    // Create and register a new job
-    let job_id = Uuid::new_v4().to_string();
-    {
+    // Atomically check for an existing running job and register a new one (prevents FR-011 TOCTOU race)
+    let job_id = {
         let mut jobs = state
             .rebuild_jobs
             .lock()
             .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
+        if let Some(existing_id) = jobs.values()
+            .find(|j| j.status == JobStatus::Running)
+            .map(|j| j.job_id.clone())
+        {
+            return Ok(json!({
+                "success": true,
+                "job_id": existing_id,
+                "status": "running",
+            }));
+        }
+        let job_id = Uuid::new_v4().to_string();
         jobs.insert(job_id.clone(), RebuildJob::new(job_id.clone()));
-    }
+        job_id
+    };
 
     // Spawn background task; write lock acquired inside the task
     let db = state.db.load_full();
@@ -946,6 +942,7 @@ async fn handle_rebuild_from_wal(
                     from_seq,
                     dry_run,
                     progress_fn: Some(progress_fn),
+                    cancel_fn: None,
                 },
             )
         })
@@ -1050,6 +1047,11 @@ fn has_jsonl_files(dir: &std::path::Path) -> bool {
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
         })
         .unwrap_or(false)
+}
+
+fn build_cancel_fn(tx: &UnboundedSender<Value>) -> Box<dyn Fn() -> bool + Send> {
+    let tx = tx.clone();
+    Box::new(move || tx.is_closed())
 }
 
 fn build_progress_fn(
