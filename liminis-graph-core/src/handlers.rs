@@ -435,6 +435,7 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     drop(_guard);
 
     let count = nodes.len();
+    // TODO(#32): source-info enrichment per node deferred
     Ok(json!({ "nodes": nodes, "count": count }))
 }
 
@@ -463,6 +464,7 @@ async fn handle_list_relationships(
     drop(_guard);
 
     let count = facts.len();
+    // TODO(#32): source-info enrichment per edge deferred
     Ok(json!({ "facts": facts, "count": count }))
 }
 
@@ -493,6 +495,7 @@ async fn handle_get_entity_neighbors(
     let center_uuid = p["entity_uuid"].as_str().unwrap_or("").to_string();
     let node_count = nodes.len();
     let edge_count = edges.len();
+    // TODO(#32): source-info enrichment per node/edge deferred
     Ok(json!({
         "center_uuid": center_uuid,
         "nodes": nodes,
@@ -502,7 +505,7 @@ async fn handle_get_entity_neighbors(
     }))
 }
 
-// TODO(issue-NNN): per-result source-info enrichment (_serialize_nodes_with_sources) is deferred
+// TODO(#32): per-result source-info enrichment (_serialize_nodes_with_sources) is deferred
 async fn handle_get_entities_by_source(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -535,6 +538,7 @@ async fn handle_get_entities_by_source(
 
     let source_val = p["source"].as_str().unwrap_or("").to_string();
     let node_count = nodes.len();
+    // TODO(#32): source-info enrichment per node deferred
     Ok(json!({ "source": source_val, "nodes": nodes, "node_count": node_count }))
 }
 
