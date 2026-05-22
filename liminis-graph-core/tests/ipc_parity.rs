@@ -17,7 +17,7 @@ use liminis_graph_core::{
     app_state::AppState,
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::HttpEmbedder,
+    embedder::{HttpEmbedder, MockEmbedder},
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
@@ -246,4 +246,186 @@ async fn parity_find_relationships_requires_embedder() {
         v.get("result").is_some() || v["error"]["code"] == -32000,
         "unexpected response shape: {v}"
     );
+}
+
+// ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
+
+fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db,
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+    })
+}
+
+// ── Tier 1a: health_check ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_health_check_ok() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(20, "health_check", json!({}), state).await;
+    assert_ok_resp(&v, 20);
+    assert_eq!(v["result"]["ok"], true, "expected ok:true: {v}");
+    assert_eq!(v["result"]["healthy"], true, "expected healthy:true: {v}");
+}
+
+// ── Tier 1a: knowledge_status ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_knowledge_status_empty_db() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(21, "knowledge_status", json!({}), state).await;
+    assert_ok_resp(&v, 21);
+    let r = &v["result"];
+    assert_eq!(r["entity_count"], 0, "expected 0 entities: {v}");
+    assert_eq!(r["edge_count"], 0, "expected 0 edges: {v}");
+    assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
+    assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
+    assert!(
+        r["database_path"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "expected non-empty database_path: {v}"
+    );
+    assert!(
+        r["embedding_model"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "expected non-empty embedding_model: {v}"
+    );
+    assert!(
+        r["embedding_dim"].as_u64().is_some(),
+        "expected numeric embedding_dim: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_knowledge_status_counts() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    // Insert one episode via knowledge_process_chunk; MockExtractor yields 2 entities, 1 edge.
+    let ingest = dispatch_val(
+        22,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-001",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 22);
+
+    let v = dispatch_val(23, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 23);
+    let r = &v["result"];
+    assert_eq!(r["entity_count"], 2, "expected 2 entities: {v}");
+    assert_eq!(r["episode_count"], 1, "expected 1 episode: {v}");
+    assert_eq!(r["edge_count"], 1, "expected 1 RELATES_TO edge: {v}");
+}
+
+// ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_ok() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        30,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "test-chunk-1",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 30);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "expected success:true: {v}");
+    assert_eq!(r["chunk_id"], "test-chunk-1");
+    assert_eq!(r["source_file"], "test.txt");
+    assert!(
+        r["episode_uuid"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "expected non-empty episode_uuid: {v}"
+    );
+    assert!(r["nodes_extracted"].as_u64().is_some(), "expected numeric nodes_extracted: {v}");
+    assert!(r["edges_extracted"].as_u64().is_some(), "expected numeric edges_extracted: {v}");
+    assert!(r["duration_seconds"].as_f64().is_some(), "expected numeric duration_seconds: {v}");
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_duplicate_chunk_id() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let params = json!({
+        "chunk_text": "Alice works at Acme Corp.",
+        "chunk_id": "dup-chunk",
+        "source_file": "test.txt",
+        "reference_time": "2024-06-01T12:00:00Z",
+    });
+    let v1 = dispatch_val(31, "knowledge_process_chunk", params.clone(), Arc::clone(&state)).await;
+    let v2 = dispatch_val(32, "knowledge_process_chunk", params, Arc::clone(&state)).await;
+    assert_ok_resp(&v1, 31);
+    assert_ok_resp(&v2, 32);
+    let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap();
+    let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap();
+    assert_ne!(uuid1, uuid2, "duplicate chunk_id must produce distinct episode_uuid values");
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_rejects_empty_chunk_text() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        33,
+        "knowledge_process_chunk",
+        json!({ "chunk_text": "", "chunk_id": "c1", "source_file": "f.txt" }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 33, -32000);
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_rejects_missing_chunk_id() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        34,
+        "knowledge_process_chunk",
+        json!({ "chunk_text": "some text", "source_file": "f.txt" }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 34, -32000);
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_rejects_bad_reference_time() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        35,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "some text",
+            "chunk_id": "c1",
+            "source_file": "f.txt",
+            "reference_time": "not-a-date",
+        }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 35, -32000);
 }
