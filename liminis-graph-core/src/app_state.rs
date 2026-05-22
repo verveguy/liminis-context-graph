@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use tokio::sync::RwLock;
@@ -10,7 +12,9 @@ use crate::{
     embedder::{Embedder, HttpEmbedder},
     extractor::Extractor,
     llm_router::LlmRouter,
+    rebuild_job::RebuildJob,
     telemetry::TelemetrySink,
+    wal::WalWriter,
 };
 
 pub struct AppState {
@@ -26,6 +30,9 @@ pub struct AppState {
     pub db_path: String,
     pub wal_dir: Option<PathBuf>,
     pub embedding_model: String,
+    pub wal_writer: Arc<Mutex<Option<WalWriter>>>,
+    pub active_writes: Arc<AtomicUsize>,
+    pub rebuild_jobs: Arc<Mutex<HashMap<String, RebuildJob>>>,
 }
 
 impl AppState {
@@ -44,6 +51,9 @@ impl AppState {
             Arc::new(PassthroughDedupAdapter)
         };
         let wal_dir = std::env::var("GRAPHITI_WAL_DIR").ok().map(PathBuf::from);
+        let wal_writer = wal_dir
+            .as_deref()
+            .and_then(|dir| WalWriter::new(dir, 10_000).ok());
         let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
         Self {
@@ -56,6 +66,9 @@ impl AppState {
             db_path,
             wal_dir,
             embedding_model,
+            wal_writer: Arc::new(Mutex::new(wal_writer)),
+            active_writes: Arc::new(AtomicUsize::new(0)),
+            rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

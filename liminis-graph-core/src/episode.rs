@@ -1,4 +1,5 @@
 use std::sync::{Arc, OnceLock};
+use std::sync::atomic::Ordering;
 
 use crate::{
     app_state::AppState,
@@ -12,6 +13,13 @@ pub struct AddEpisodeResult {
     pub episode_uuid: String,
     pub nodes_extracted: usize,
     pub edges_extracted: usize,
+}
+
+struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for ActiveWriteGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 const DEDUP_THRESHOLD: f32 = 0.85;
@@ -53,6 +61,10 @@ pub async fn add_episode(
     reference_time: &str,
     group_id: &str,
 ) -> Result<AddEpisodeResult, Error> {
+    // Track write in flight so rebuild_from_wal can gate on active writes.
+    state.active_writes.fetch_add(1, Ordering::Relaxed);
+    let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
+
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::try_join!(
         state.embedder.embed(body),
