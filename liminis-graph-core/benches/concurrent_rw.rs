@@ -117,7 +117,7 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                             tokio::spawn(async move {
                                 let t = Instant::now();
                                 let _ = search::hybrid_entity_search(
-                                    Arc::clone(&s.db),
+                                    s.db.load_full(),
                                     Arc::clone(&s.embedder),
                                     "Alice",
                                     vec!["bench".to_string()],
