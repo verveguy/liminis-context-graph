@@ -111,17 +111,21 @@ pub fn patch_applied_at(path: &Path, id: &str, ts: &str) -> Result<(), Error> {
         .map_err(|e| Error::Ipc(format!("corrections file read error: {e}")))?;
     let lines: Vec<&str> = text.lines().collect();
 
-    // Find the line containing this correction's id
-    // Match both inline (`- id: <val>`) and standalone (`id: <val>`) YAML forms.
-    let id_bare = format!("id: {id}");
-    let id_quoted = format!("id: \"{id}\"");
-    let id_inline_bare = format!("- id: {id}");
-    let id_inline_quoted = format!("- id: \"{id}\"");
+    // Find the line containing this correction's id.
+    // Handle both inline (`- id: <val>`) and standalone (`id: <val>`) forms,
+    // with bare, double-quoted, or single-quoted values.
     let id_line_idx = lines
         .iter()
         .position(|l| {
             let t = l.trim();
-            t == id_bare || t == id_quoted || t == id_inline_bare || t == id_inline_quoted
+            let val = if let Some(rest) = t.strip_prefix("- id:") {
+                Some(rest.trim().trim_matches('"').trim_matches('\''))
+            } else if let Some(rest) = t.strip_prefix("id:") {
+                Some(rest.trim().trim_matches('"').trim_matches('\''))
+            } else {
+                None
+            };
+            val == Some(id)
         })
         .ok_or_else(|| Error::Ipc(format!("correction id '{id}' not found in corrections file")))?;
 
@@ -146,8 +150,10 @@ pub fn patch_applied_at(path: &Path, id: &str, ts: &str) -> Result<(), Error> {
     let field_indent = " ".repeat(item_indent + 2);
     let new_line = format!("{field_indent}applied_at: \"{ts}\"");
 
-    // Check if applied_at already exists in the block
-    let applied_at_idx = (id_line_idx..block_end)
+    // Check if applied_at already exists in the block. Scan from item_line_idx
+    // rather than id_line_idx because YAML keys are unordered — applied_at may appear
+    // before id in the serialized output.
+    let applied_at_idx = (item_line_idx..block_end)
         .find(|&i| lines[i].trim_start().starts_with("applied_at:"));
 
     let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
@@ -481,8 +487,8 @@ fn apply_same_as(
                     old_edge.target_node_uuid.clone()
                 };
 
-                // De-duplicate: skip if canonical already has a directed edge to same endpoint
-                if conn.has_directed_edge(&new_src, &new_dst)? {
+                // De-duplicate: skip if canonical already has an edge with the same name to the same endpoint
+                if conn.has_directed_edge(&new_src, &new_dst, &old_edge.name)? {
                     conn.invalidate_edge(&old_edge.uuid, ts)?;
                     continue;
                 }

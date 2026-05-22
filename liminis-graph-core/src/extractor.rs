@@ -205,7 +205,8 @@ impl AnthropicExtractor {
                     "role": "user",
                     "content": format!(
                         "Classify the entity types for:\n\n{}",
-                        serde_json::to_string(&input).unwrap_or_default()
+                        serde_json::to_string(&input)
+                            .map_err(|e| Error::Ipc(format!("failed to serialize entities: {e}")))?
                     )
                 }
             ]

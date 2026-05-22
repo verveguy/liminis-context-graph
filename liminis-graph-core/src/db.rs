@@ -991,18 +991,19 @@ impl<'db> Conn<'db> {
     pub fn get_full_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
         let uuid_esc = escape(entity_uuid);
         // Outgoing edges (entity is source)
+        // Use rn.invalid_at (shadow node) — invalidate_edge sets it reliably there.
         let out_sql = format!(
             "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(dst:Entity) \
              MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
              RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+             r.valid_at, rn.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
         );
         // Incoming edges (entity is target)
         let in_sql = format!(
             "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
              MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
              RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+             r.valid_at, rn.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
         );
         let mut edges = self.collect_full_relates_to_edges(&out_sql)?;
         edges.extend(self.collect_full_relates_to_edges(&in_sql)?);
@@ -1030,13 +1031,20 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
-    /// Checks whether a directed RELATES_TO edge already exists from `source_uuid` to `target_uuid`.
-    /// Used during same_as merge de-duplication (FR-013).
-    pub fn has_directed_edge(&self, source_uuid: &str, target_uuid: &str) -> Result<bool, Error> {
+    /// Checks whether a directed RELATES_TO edge with the given `name` already exists from
+    /// `source_uuid` to `target_uuid`. The name filter prevents over-deduplication when the
+    /// canonical entity has semantically different relationships to the same target.
+    pub fn has_directed_edge(
+        &self,
+        source_uuid: &str,
+        target_uuid: &str,
+        name: &str,
+    ) -> Result<bool, Error> {
         let sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}})-[r:RELATES_TO]->(dst:Entity {{uuid: '{}'}}) \
+            "MATCH (src:Entity {{uuid: '{}'}})-[r:RELATES_TO {{name: '{}'}}]->(dst:Entity {{uuid: '{}'}}) \
              RETURN count(r)",
             escape(source_uuid),
+            escape(name),
             escape(target_uuid),
         );
         let mut result = self.inner.query(&sql)?;

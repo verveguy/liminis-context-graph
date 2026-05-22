@@ -655,10 +655,14 @@ async fn test_apply_corrections_dry_run() {
     .await;
     assert_ok_resp(&v, 53);
     let r = &v["result"];
-    assert_eq!(r["success"], true, "dry_run should succeed: {v}");
+    // Edge existence is validated even in dry_run (FR-015). Both retract entries reference
+    // nonexistent edge UUIDs, so success is false and errors has one entry per failing correction.
+    assert_eq!(r["success"], false, "dry_run with nonexistent edges must fail: {v}");
     assert_eq!(r["applied"], 0, "dry_run must not apply: {v}");
+    let errs = r["errors"].as_array().expect("errors must be an array");
+    assert_eq!(errs.len(), 2, "expected one error per nonexistent edge: {v}");
 
-    // File must be byte-identical after dry_run
+    // File must be byte-identical after dry_run — patch_applied_at is not called in dry_run
     let after = std::fs::read_to_string(&corrections_path).unwrap();
     assert_eq!(before, after, "dry_run must not modify the corrections file");
 }
