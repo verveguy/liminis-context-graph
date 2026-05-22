@@ -86,8 +86,8 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
     let db = Arc::clone(&state.db);
     let _guard = state.write_lock.read().await;
     tokio::task::spawn_blocking(move || {
-        let conn = db.connect()?;
-        conn.probe()
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        conn.probe().map_err(|e| Error::Ipc(format!("db: {e}")))
     })
     .await??;
     drop(_guard);
