@@ -862,7 +862,7 @@ async fn handle_rebuild_from_wal(
 
     // Non-streaming dry_run: run synchronously and return stats immediately
     if dry_run {
-        let db = Arc::clone(&state.db);
+        let db = state.db.load_full();
         let wal_dir_c = wal_dir.clone();
         let stats = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
             let conn = db.connect()?;
