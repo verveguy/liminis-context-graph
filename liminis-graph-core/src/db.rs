@@ -1124,7 +1124,7 @@ impl<'db> Conn<'db> {
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
         let sql = format!(
-            "MATCH (e:Entity) WHERE e.group_id = '{}' AND size(e.labels) = 1 \
+            "MATCH (e:Entity) WHERE e.group_id = '{}' AND size(e.labels) = 1 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.summary, e.attributes ORDER BY e.uuid SKIP {} LIMIT {}",
             escape(group_id),
