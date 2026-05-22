@@ -42,6 +42,20 @@ docs/adr/                    # architecture decision records
 specs/                       # feature specifications
 ```
 
+## Configuration (environment variables)
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GRAPHITI_SOCKET_PATH` | Yes | Unix socket path the IPC daemon listens on |
+| `GRAPHITI_DB_PATH` | Yes | Path to the LadybugDB database file |
+| `GRAPHITI_EMBEDDING_MODEL` | No | Embedding model name (default `bge-base-en-v1.5`) |
+| `GRAPHITI_EMBEDDING_DIM` | No | Embedding vector dimension (default 768) |
+| `GRAPHITI_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
+| `GRAPHITI_DEDUP_LLM` | No | If set, enables local dedup adapter |
+| `GRAPHITI_WAL_DIR` | No | Directory for write-ahead log JSONL files |
+| `ANTHROPIC_API_KEY` | No | API key for Anthropic extraction/classification LLM calls |
+| `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for all three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
+
 ## Dependencies
 
 | Crate | Version | Role |
