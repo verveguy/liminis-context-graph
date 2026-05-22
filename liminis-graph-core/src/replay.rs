@@ -24,6 +24,9 @@ pub struct ReplayOptions {
     /// Called once per file and once per 1000 mutations.
     /// Returning `false` aborts the replay cleanly (e.g., on broken pipe).
     pub progress_fn: Option<Box<dyn Fn(&ReplayProgress) -> bool + Send>>,
+    /// Called once per mutation. Returning `true` aborts the replay immediately
+    /// (used to detect client disconnection faster than the 1000-mutation progress cadence).
+    pub cancel_fn: Option<Box<dyn Fn() -> bool + Send>>,
 }
 
 impl Default for ReplayOptions {
@@ -32,6 +35,7 @@ impl Default for ReplayOptions {
             from_seq: 0,
             dry_run: false,
             progress_fn: None,
+            cancel_fn: None,
         }
     }
 }
@@ -181,6 +185,13 @@ impl WalReplayer {
                 }
 
                 mutations_in_file += 1;
+
+                // Cancel check: abort immediately if client disconnected
+                if let Some(ref cancel) = opts.cancel_fn {
+                    if cancel() {
+                        break 'files;
+                    }
+                }
 
                 // Progress: once per 1000 mutations within a file
                 if mutations_in_file % 1000 == 0 {
