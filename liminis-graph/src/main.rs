@@ -2,7 +2,8 @@ mod sink;
 
 use std::sync::Arc;
 
-use liminis_graph_core::{app_state::AppState, db::Db, handlers, ipc::IpcRequest};
+use liminis_graph_core::{app_state::AppState, db::Db, handlers, ipc::IpcRequest, IpcResponse};
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixListener,
@@ -60,29 +61,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                let response = match serde_json::from_str::<IpcRequest>(&line) {
-                    Ok(req) => {
-                        let is_close = req.method == "knowledge_close";
-                        let resp = handlers::dispatch(req, Arc::clone(&state)).await;
-                        let json = serde_json::to_string(&resp).unwrap_or_default();
-                        let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-                        if is_close {
-                            // Exit process cleanly — matches Python service behaviour.
-                            std::process::exit(0);
-                        }
-                        continue;
-                    }
+                let req: IpcRequest = match serde_json::from_str(&line) {
+                    Ok(r) => r,
                     Err(e) => {
-                        serde_json::json!({
+                        let response = serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": null,
                             "error": {"code": -32700, "message": format!("Parse error: {e}")}
-                        })
+                        });
+                        let json = serde_json::to_string(&response).unwrap_or_default();
+                        let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+                        continue;
                     }
                 };
 
-                let json = serde_json::to_string(&response).unwrap_or_default();
+                let is_close = req.method == "knowledge_close";
+                let is_streaming = req
+                    .params
+                    .get("_progress_token")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false);
+
+                let resp = if is_streaming {
+                    // Streaming: drain progress lines before writing terminal response
+                    let (tx, mut rx) =
+                        tokio::sync::mpsc::unbounded_channel::<Value>();
+                    let state_clone = Arc::clone(&state);
+                    let dispatch_handle =
+                        tokio::spawn(handlers::dispatch(req, state_clone, Some(tx)));
+
+                    // Drain progress lines until channel closes (tx dropped inside dispatch)
+                    let mut client_ok = true;
+                    while let Some(val) = rx.recv().await {
+                        let json = serde_json::to_string(&val).unwrap_or_default();
+                        if writer
+                            .write_all(format!("{json}\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            // Client disconnected; rx drops → tx.send() fails → replay aborts
+                            client_ok = false;
+                            break;
+                        }
+                    }
+
+                    if client_ok {
+                        dispatch_handle.await.unwrap_or_else(|_| {
+                            IpcResponse::err(Value::Null, -32000, "Internal error")
+                        })
+                    } else {
+                        // Client gone; don't try to write the terminal response
+                        continue;
+                    }
+                } else {
+                    handlers::dispatch(req, Arc::clone(&state), None).await
+                };
+
+                let json = serde_json::to_string(&resp).unwrap_or_default();
                 let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+
+                if is_close {
+                    // Exit process cleanly — matches Python service behaviour.
+                    std::process::exit(0);
+                }
             }
         });
     }
