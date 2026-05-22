@@ -11,7 +11,9 @@
 // To enable exact Python-vs-Rust parity comparison, capture fixtures with
 // scripts/record_corpus.py and set PARITY_GOLDEN=1 (see tests/fixtures/README.md).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use liminis_graph_core::{
@@ -55,6 +57,9 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         db_path: "test.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -82,7 +87,7 @@ fn assert_err_resp(v: &Value, id: i64, expected_code: i32) {
 }
 
 async fn dispatch_val(id: i64, method: &str, params: Value, state: Arc<AppState>) -> Value {
-    let resp = handlers::dispatch(req(id, method, params), state).await;
+    let resp = handlers::dispatch(req(id, method, params), state, None).await;
     serde_json::to_value(resp).unwrap()
 }
 
@@ -263,6 +268,9 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         db_path: "test.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

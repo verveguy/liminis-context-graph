@@ -1,6 +1,8 @@
 // T014 integration tests: LlmRouter fallback, PassthroughDedupAdapter default, write serialization.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use liminis_graph_core::{
@@ -104,6 +106,9 @@ async fn concurrent_add_episode_no_write_conflict() {
         db_path: "test.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let s1 = Arc::clone(&state);
