@@ -646,6 +646,12 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             std::fs::remove_dir_all(path)?;
         } else if path.exists() {
             std::fs::remove_file(path)?;
+            // Remove lbug sibling files (e.g. <db>.wal) that lbug creates next to the DB file.
+            // If we leave them behind, lbug will reject them on the next open because the
+            // database ID in the WAL won't match the freshly created DB.
+            for ext in &[".wal", ".lock"] {
+                let _ = std::fs::remove_file(format!("{}{}", db_path_del, ext));
+            }
         }
         if let Some(wal) = wal_dir {
             if wal.exists() {
