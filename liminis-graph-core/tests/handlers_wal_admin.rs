@@ -340,7 +340,7 @@ async fn test_rebuild_status_completed_after_background_job() {
         let status_v = dispatch(
             23,
             "knowledge_rebuild_status",
-            json!({"job_id": job_id}),
+            json!({"job_id": job_id.as_str()}),
             Arc::clone(&state),
         )
         .await;
