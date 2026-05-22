@@ -5,7 +5,7 @@ use crate::{
     db::Db,
     embedder::Embedder,
     error::Error,
-    types::{EntityRow, RelatesToEdge},
+    types::{EntityRow, PassageResult, RelatesToEdge},
 };
 
 /// Reciprocal Rank Fusion (AD-7).
@@ -30,6 +30,42 @@ pub fn rrf_fuse(bm25: &[(String, f64)], vector: &[(String, f64)]) -> Vec<String>
             .then_with(|| a.0.cmp(&b.0))
     });
     ranked.into_iter().map(|(uuid, _)| uuid).collect()
+}
+
+/// Pure vector-cosine passage search on Episodic nodes (HOT path — no lock held).
+///
+/// `num_results` is clamped to `[1, 100]`; `min_score` is clamped to `[0.0, 1.0]`.
+/// lbug HNSW returns distance (lower = closer); converts to similarity: `score = 1.0 - distance`.
+pub async fn search_passages(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+) -> Result<Vec<PassageResult>, Error> {
+    let embedding = embedder.embed(query).await?;
+    let overdraw = num_results * 3;
+
+    let results = tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
+        let conn = db.connect()?;
+        let mut passages = conn.vector_search_episodic(&embedding, overdraw)?;
+
+        for p in &mut passages {
+            p.score = 1.0 - p.score;
+        }
+
+        if let Some(ref gids) = group_ids {
+            passages.retain(|p| gids.contains(&p.group_id));
+        }
+        passages.retain(|p| p.score >= min_score);
+        passages.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        passages.truncate(num_results);
+        Ok(passages)
+    })
+    .await??;
+
+    Ok(results)
 }
 
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).

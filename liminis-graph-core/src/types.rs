@@ -76,3 +76,16 @@ pub struct ExtractedEdge {
 pub struct EmbeddingResult {
     pub embedding: Vec<f32>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PassageResult {
+    pub uuid: String,
+    pub name: String,
+    pub content: String,
+    pub source_description: String,
+    pub group_id: String,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid_at: Option<String>,
+    pub score: f64,
+}
