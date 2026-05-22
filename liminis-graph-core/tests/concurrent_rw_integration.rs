@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -94,7 +95,7 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 async fn concurrent_add_episode_no_write_conflict() {
     let (db, _dir) = make_db(4);
     let state = Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),

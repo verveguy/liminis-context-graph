@@ -12,6 +12,7 @@ resolver = "2"
 debug = "line-tables-only"
 
 [workspace.dependencies]
+arc-swap = "1"
 lbug = "=0.16.1"
 thiserror = "2"
 tempfile = "3"

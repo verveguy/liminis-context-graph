@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use liminis_graph_core::{
     app_state::AppState,
@@ -33,7 +34,7 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
     let sink = Arc::new(NoopSink);
     let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(BENCH_DIM));
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder,
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),

@@ -6,6 +6,7 @@ description = "Core library for the Liminis knowledge graph over LadybugDB"
 license = "MIT"
 
 [dependencies]
+arc-swap = { workspace = true }
 lbug = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
