@@ -7,6 +7,13 @@ use crate::{
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
 };
 
+#[derive(Debug)]
+pub struct AddEpisodeResult {
+    pub episode_uuid: String,
+    pub nodes_extracted: usize,
+    pub edges_extracted: usize,
+}
+
 const DEDUP_THRESHOLD: f32 = 0.85;
 
 static HYBRID_THRESHOLD: OnceLock<usize> = OnceLock::new();
@@ -45,7 +52,7 @@ pub async fn add_episode(
     source_description: &str,
     reference_time: &str,
     group_id: &str,
-) -> Result<String, Error> {
+) -> Result<AddEpisodeResult, Error> {
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::try_join!(
         state.embedder.embed(body),
@@ -151,6 +158,10 @@ pub async fn add_episode(
         decisions.push(decision);
     }
 
+    // Capture counts before extraction moves into the Phase C closure.
+    let nodes_extracted = extraction.entities.len();
+    let edges_extracted = extraction.edges.len();
+
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
     let ep_uuid = episode_uuid.clone();
@@ -254,5 +265,9 @@ pub async fn add_episode(
     .await??;
     drop(_write_guard);
 
-    Ok(episode_uuid)
+    Ok(AddEpisodeResult {
+        episode_uuid,
+        nodes_extracted,
+        edges_extracted,
+    })
 }

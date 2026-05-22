@@ -100,6 +100,9 @@ async fn concurrent_add_episode_no_write_conflict() {
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink: Arc::new(NoopSink),
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
     });
 
     let s1 = Arc::clone(&state);

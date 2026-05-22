@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -18,6 +19,9 @@ pub struct AppState {
     pub dedup: Arc<dyn DedupAdapter>,
     pub write_lock: Arc<RwLock<()>>,
     pub sink: Arc<dyn TelemetrySink>,
+    pub db_path: String,
+    pub wal_dir: Option<PathBuf>,
+    pub embedding_model: String,
 }
 
 impl AppState {
@@ -25,7 +29,9 @@ impl AppState {
     ///
     /// - `GRAPHITI_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
     /// - `GRAPHITI_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
-    pub fn from_env(sink: Arc<dyn TelemetrySink>, db: Arc<Db>) -> Self {
+    /// - `GRAPHITI_WAL_DIR`: optional WAL directory path.
+    /// - `GRAPHITI_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
+    pub fn from_env(sink: Arc<dyn TelemetrySink>, db: Arc<Db>, db_path: String) -> Self {
         let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
         let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
         let dedup: Arc<dyn DedupAdapter> = if std::env::var("GRAPHITI_DEDUP_LLM").is_ok() {
@@ -33,6 +39,9 @@ impl AppState {
         } else {
             Arc::new(PassthroughDedupAdapter)
         };
+        let wal_dir = std::env::var("GRAPHITI_WAL_DIR").ok().map(PathBuf::from);
+        let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
         Self {
             db,
             embedder,
@@ -40,6 +49,9 @@ impl AppState {
             dedup,
             write_lock: Arc::new(RwLock::new(())),
             sink,
+            db_path,
+            wal_dir,
+            embedding_model,
         }
     }
 }
