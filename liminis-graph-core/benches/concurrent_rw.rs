@@ -5,7 +5,9 @@
 // RwLock contention model without real LLM or HTTP latency. This proves the
 // write-guard-only-around-DB-commit design (ADR-042) does not block reads.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -43,6 +45,9 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         db_path: "bench.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

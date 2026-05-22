@@ -5,7 +5,9 @@
 // scenario 1: timing events emitted per IPC call with field shapes matching
 // docs/telemetry.md.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use liminis_graph_core::{
@@ -43,6 +45,9 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
         db_path: "test.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -61,7 +66,7 @@ async fn ipc_call_event_emitted_on_successful_dispatch() {
     let sink = Arc::new(CaptureSink::new());
     let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
-    let _resp = handlers::dispatch(req(1, "knowledge_build_indices", json!({})), state).await;
+    let _resp = handlers::dispatch(req(1, "knowledge_build_indices", json!({})), state, None).await;
 
     let events = sink.events();
     assert_eq!(
@@ -88,7 +93,7 @@ async fn ipc_call_event_emitted_on_error_dispatch() {
     let state = make_state_with_sink(db, Arc::clone(&sink) as Arc<dyn TelemetrySink>);
 
     // Use an unknown method to get success=false
-    let _resp = handlers::dispatch(req(2, "no_such_method", json!({})), state).await;
+    let _resp = handlers::dispatch(req(2, "no_such_method", json!({})), state, None).await;
 
     let events = sink.events();
     assert_eq!(events.len(), 1);
