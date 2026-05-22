@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use crate::{
     app_state::AppState,
+    db::Db,
     episode,
     error::Error,
     ipc::{IpcRequest, IpcResponse},
@@ -51,6 +52,9 @@ async fn handle(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> 
         "knowledge_get_edges_by_uuids" => handle_get_edges_by_uuids(req, state).await,
         "knowledge_query_cypher" => handle_query_cypher(req, state).await,
         "knowledge_build_indices" => handle_build_indices(state).await,
+        "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
+        "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
+        "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
         "knowledge_search_passages" => handle_search_passages(req, state).await,
         "knowledge_list_entities" => handle_list_entities(req, state).await,
@@ -402,7 +406,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
     let passages = search::search_passages(
-        Arc::clone(&state.db),
+        state.db.load_full(),
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -423,7 +427,7 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -453,7 +457,7 @@ async fn handle_list_relationships(
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let facts = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -484,7 +488,7 @@ async fn handle_get_entity_neighbors(
     let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let (edges, nodes) = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -530,7 +534,7 @@ async fn handle_get_entities_by_source(
     let num_results = p["num_results"].as_u64().unwrap_or(100) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -553,6 +557,145 @@ async fn handle_get_entities_by_source(
     Ok(json!({ "source": source_val, "nodes": nodes, "node_count": node_count }))
 }
 
+async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let source_file = p["source_file"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("source_file is required and must be non-empty".to_string()))?
+        .to_string();
+
+    let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
+
+    let db = state.db.load_full();
+    let _guard = state.write_lock.write().await;
+    let deleted_uuids = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> =
+            group_ids_owned.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "source_file": req.params["source_file"],
+        "deleted_count": deleted_uuids.len(),
+        "deleted_uuids": deleted_uuids,
+    }))
+}
+
+/// Deletes all Episodic nodes for the given chunk_id.
+///
+/// Note: only the episode nodes are removed. Entity nodes that were extracted
+/// from this chunk and are connected solely to the deleted episodes become
+/// orphaned — they remain in the graph. Callers should be aware of this outcome.
+/// A future entity-GC method may clean up such orphans.
+async fn handle_delete_chunk_episode(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let chunk_id = p["chunk_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("chunk_id is required and must be non-empty".to_string()))?
+        .to_string();
+
+    let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
+
+    let db = state.db.load_full();
+    let _guard = state.write_lock.write().await;
+    let deleted_uuids = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> =
+            group_ids_owned.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "chunk_id": req.params["chunk_id"],
+        "deleted_count": deleted_uuids.len(),
+        "deleted_uuids": deleted_uuids,
+    }))
+}
+
+async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let confirm = req.params["confirm"].as_bool().unwrap_or(false);
+    if !confirm {
+        return Err(Error::Ipc(
+            "Must set 'confirm' to true to clear graph".to_string(),
+        ));
+    }
+
+    let db_path = state.db_path.clone();
+    let wal_dir = state.wal_dir.clone();
+    let embedding_dim = state.embedder.dim();
+
+    let _guard = state.write_lock.write().await;
+
+    // Phase 1: delete DB files and WAL directory (point of no return)
+    let db_path_del = db_path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), Error> {
+        let path = std::path::Path::new(&db_path_del);
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        if let Some(wal) = wal_dir {
+            if wal.exists() {
+                std::fs::remove_dir_all(&wal)?;
+            }
+        }
+        Ok(())
+    })
+    .await??;
+
+    // Phase 2: create fresh DB and initialize schema
+    let db_path_reinit = db_path.clone();
+    let reinit_result = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
+        // Ensure parent directory exists (it may have been removed with the DB)
+        if let Some(parent) = std::path::Path::new(&db_path_reinit).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let db = Db::open(&db_path_reinit)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+        }
+        Ok(db)
+    })
+    .await;
+
+    let new_db = match reinit_result {
+        Ok(Ok(db)) => db,
+        Ok(Err(e)) => {
+            drop(_guard);
+            return Err(Error::Ipc(format!(
+                "Graph files deleted but reinitialization failed: {e}. \
+                 Restart the service to recover."
+            )));
+        }
+        Err(e) => {
+            drop(_guard);
+            return Err(Error::Ipc(format!(
+                "Graph files deleted but reinitialization task panicked: {e}. \
+                 Restart the service to recover."
+            )));
+        }
+    };
+
+    state.db.store(Arc::new(new_db));
+    drop(_guard);
+
+    Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn extract_group_ids(v: &Value) -> Vec<String> {
@@ -566,20 +709,20 @@ fn extract_group_ids(v: &Value) -> Vec<String> {
     }
 }
 
-/// Returns `None` when group_ids is absent/null/empty (= no filter = all groups).
+/// Returns None when group_ids is absent, null, or false — meaning "all groups".
+/// Returns Some(vec) for an array or single string — meaning "these groups only".
+/// Used by deletion methods, which differ from search handlers: absent = all groups,
+/// not the default "liminis" group.
 fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
     match v {
-        Value::Array(arr) if !arr.is_empty() => {
-            let ids: Vec<String> = arr
+        Value::Array(arr) => {
+            let gids: Vec<String> = arr
                 .iter()
                 .filter_map(|e| e.as_str().map(str::to_string))
                 .collect();
-            if ids.is_empty() {
-                None
-            } else {
-                Some(ids)
-            }
+            if gids.is_empty() { None } else { Some(gids) }
         }
+        Value::String(s) => Some(vec![s.clone()]),
         _ => None,
     }
 }
