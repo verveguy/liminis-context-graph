@@ -13,7 +13,7 @@ use crate::{
 
 /// Batch size for `reprocess_entity_types` LLM classification.
 /// Chosen to keep per-call prompt size manageable without excessive API round-trips.
-const REPROCESS_BATCH_SIZE: usize = 50;
+pub(crate) const REPROCESS_BATCH_SIZE: usize = 50;
 
 // ── YAML schema types ─────────────────────────────────────────────────────────
 
@@ -112,10 +112,17 @@ pub fn patch_applied_at(path: &Path, id: &str, ts: &str) -> Result<(), Error> {
     let lines: Vec<&str> = text.lines().collect();
 
     // Find the line containing this correction's id
-    let id_pattern = format!("id: {id}");
+    // Match both inline (`- id: <val>`) and standalone (`id: <val>`) YAML forms.
+    let id_bare = format!("id: {id}");
+    let id_quoted = format!("id: \"{id}\"");
+    let id_inline_bare = format!("- id: {id}");
+    let id_inline_quoted = format!("- id: \"{id}\"");
     let id_line_idx = lines
         .iter()
-        .position(|l| l.trim() == id_pattern || l.trim() == format!("id: \"{id}\""))
+        .position(|l| {
+            let t = l.trim();
+            t == id_bare || t == id_quoted || t == id_inline_bare || t == id_inline_quoted
+        })
         .ok_or_else(|| Error::Ipc(format!("correction id '{id}' not found in corrections file")))?;
 
     // Find the list item (`- `) that contains this id (scan backwards)
@@ -527,11 +534,11 @@ fn apply_retract(
         Error::Ipc("retract requires 'edge_uuid'".to_string())
     })?;
 
-    if !dry_run {
-        // Verify edge exists before invalidating
-        conn.get_edge_by_uuid(edge_uuid)?
-            .ok_or_else(|| Error::Ipc(format!("edge_uuid '{edge_uuid}' not found in graph")))?;
+    // Verify edge exists (same check as validate_corrections per FR-015 dry_run requirement)
+    conn.get_edge_by_uuid(edge_uuid)?
+        .ok_or_else(|| Error::Ipc(format!("edge_uuid '{edge_uuid}' not found in graph")))?;
 
+    if !dry_run {
         conn.invalidate_edge(edge_uuid, ts)?;
         patch_applied_at(path, &entry.id, ts)?;
     }
