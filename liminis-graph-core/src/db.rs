@@ -832,6 +832,32 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// Returns an EntityRow by exact name match. Returns the first match if multiple exist.
+    pub fn get_entity_by_name(&self, name: &str, group_id: &str) -> Result<Option<EntityRow>, Error> {
+        let sql = format!(
+            "MATCH (e:Entity) WHERE e.name = '{}' AND e.group_id = '{}' \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes LIMIT 1",
+            escape(name),
+            escape(group_id),
+        );
+        let mut result = self.inner.query(&sql)?;
+        if let Some(row) = result.next() {
+            Ok(Some(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
         let sql = format!(

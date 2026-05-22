@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod corrections;
 pub mod db;
 pub mod dedup_adapter;
 pub mod embedder;

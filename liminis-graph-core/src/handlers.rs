@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
+    corrections,
     db::Db,
     episode,
     error::Error,
@@ -80,6 +81,9 @@ async fn handle(
         "knowledge_list_relationships" => handle_list_relationships(req, state).await,
         "knowledge_get_entity_neighbors" => handle_get_entity_neighbors(req, state).await,
         "knowledge_get_entities_by_source" => handle_get_entities_by_source(req, state).await,
+        "knowledge_validate_corrections" => handle_validate_corrections(state).await,
+        "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
+        "knowledge_reprocess_entity_types" => handle_reprocess_entity_types(req, state).await,
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
 }
@@ -1009,6 +1013,137 @@ async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result
         "elapsed_seconds": job.elapsed_seconds(),
         "error": job.error,
         "result": job.result,
+    }))
+}
+
+// ── Corrections handlers ──────────────────────────────────────────────────────
+
+async fn handle_validate_corrections(state: Arc<AppState>) -> Result<Value, Error> {
+    let workspace_root = state
+        .workspace_root
+        .clone()
+        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        Ok::<_, Error>(corrections::validate_corrections_file(&conn, &workspace_root))
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "valid": result.valid,
+        "message": result.message,
+        "total_corrections": result.total_corrections,
+        "unapplied_corrections": result.unapplied_corrections,
+        "issues": result.issues,
+        "warnings": result.warnings,
+    }))
+}
+
+async fn handle_apply_corrections(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let workspace_root = state
+        .workspace_root
+        .clone()
+        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.write().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        Ok::<_, Error>(corrections::apply_corrections_file(&conn, &workspace_root, dry_run))
+    })
+    .await??;
+    drop(_guard);
+
+    let mut resp = json!({
+        "success": result.success,
+        "applied": result.applied,
+        "skipped": result.skipped,
+        "errors": result.errors,
+        "details": result.details,
+    });
+    if let Some(msg) = result.message {
+        resp["message"] = json!(msg);
+    }
+    Ok(resp)
+}
+
+async fn handle_reprocess_entity_types(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    state
+        .workspace_root
+        .as_ref()
+        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+
+    let group_id = req.params["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+
+    // Phase A (read lock): list all generic-only entities for the group
+    let db = Arc::clone(&state.db);
+    let group_id_a = group_id.clone();
+    let _read_guard = state.write_lock.read().await;
+    let entities = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        corrections::list_all_generic_entities(&conn, &group_id_a)
+    })
+    .await??;
+    drop(_read_guard);
+
+    if entities.is_empty() {
+        return Ok(json!({ "success": true, "reclassified_count": 0, "group_id": group_id }));
+    }
+
+    // Phase B (no lock): classify entities via LLM
+    let pairs: Vec<(String, String)> = entities
+        .iter()
+        .map(|e| (e.name.clone(), e.summary.clone()))
+        .collect();
+    let pair_refs: Vec<(&str, &str)> = pairs.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+
+    let types = match state.extractor.classify_entities(&pair_refs).await {
+        Ok(t) => t,
+        Err(e) => {
+            return Ok(json!({
+                "success": false,
+                "group_id": group_id,
+                "error": format!("Failed to reprocess entity types: {e}"),
+            }));
+        }
+    };
+
+    // Phase C (write lock): apply label mutations
+    let updates: Vec<(String, String)> = entities
+        .iter()
+        .zip(types.iter())
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(e, t)| (e.uuid.clone(), t.clone()))
+        .collect();
+
+    let db = Arc::clone(&state.db);
+    let _write_guard = state.write_lock.write().await;
+    let reclassified = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        corrections::apply_entity_type_labels(&conn, &updates)
+    })
+    .await??;
+    drop(_write_guard);
+
+    Ok(json!({
+        "success": true,
+        "reclassified_count": reclassified,
+        "group_id": group_id,
     }))
 }
 
