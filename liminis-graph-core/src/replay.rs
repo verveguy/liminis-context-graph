@@ -11,6 +11,36 @@ pub struct ReplayStats {
     pub lines_replayed: u64,
     pub lines_skipped: u64,
     pub files_read: u64,
+    /// Always 0 — callers invoke `knowledge_build_indices` separately after rebuild.
+    pub indexes_created: u64,
+}
+
+/// Options for `WalReplayer::replay_opts`.
+pub struct ReplayOptions {
+    /// Skip WAL lines with `seq < from_seq`. Default: 0 (replay all).
+    pub from_seq: u64,
+    /// Count mutations without applying them. Default: false.
+    pub dry_run: bool,
+    /// Called once per file and once per 1000 mutations.
+    /// Returning `false` aborts the replay cleanly (e.g., on broken pipe).
+    pub progress_fn: Option<Box<dyn Fn(&ReplayProgress) -> bool + Send>>,
+}
+
+impl Default for ReplayOptions {
+    fn default() -> Self {
+        ReplayOptions {
+            from_seq: 0,
+            dry_run: false,
+            progress_fn: None,
+        }
+    }
+}
+
+/// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
+pub struct ReplayProgress {
+    pub files_processed: u64,
+    pub mutations_replayed: u64,
+    pub message: String,
 }
 
 /// Replays all `.jsonl` WAL files in lexicographic filename order against a LadybugDB connection.
@@ -27,10 +57,21 @@ impl WalReplayer {
 
     /// Reads all JSONL files, executes known mutations, skips truncated/unknown lines (R-05, R-08).
     pub fn replay(&self, conn: &Conn<'_>) -> Result<ReplayStats, Error> {
+        self.replay_opts(conn, ReplayOptions::default())
+    }
+
+    /// Like `replay` but with `from_seq` filtering, dry-run mode, and optional progress callback.
+    ///
+    /// - Lines with `seq < opts.from_seq` are skipped without counting against `lines_skipped`.
+    /// - When `opts.dry_run`, mutations are counted but not executed against the DB.
+    /// - `opts.progress_fn` is called once per file and once per 1000 mutations within a file;
+    ///   returning `false` aborts the replay cleanly.
+    pub fn replay_opts(&self, conn: &Conn<'_>, opts: ReplayOptions) -> Result<ReplayStats, Error> {
         let mut stats = ReplayStats {
             lines_replayed: 0,
             lines_skipped: 0,
             files_read: 0,
+            indexes_created: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -46,10 +87,24 @@ impl WalReplayer {
         // Lexicographic order — ISO-8601 timestamp prefix ensures chronological order (R-07).
         files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
 
-        for file_path in &files {
+        'files: for file_path in &files {
             stats.files_read += 1;
+
+            // Progress: once per file
+            if let Some(ref f) = opts.progress_fn {
+                let p = ReplayProgress {
+                    files_processed: stats.files_read,
+                    mutations_replayed: stats.lines_replayed,
+                    message: format!("processing file {}", file_path.display()),
+                };
+                if !f(&p) {
+                    break 'files;
+                }
+            }
+
             let file = fs::File::open(file_path)?;
             let reader = BufReader::new(file);
+            let mut mutations_in_file: u64 = 0;
 
             for (i, line_result) in reader.lines().enumerate() {
                 // A truncated final line that ends with invalid UTF-8 (crash during write)
@@ -84,6 +139,11 @@ impl WalReplayer {
                     }
                 };
 
+                // from_seq filter — skip without counting as skipped
+                if wal_line.seq < opts.from_seq {
+                    continue;
+                }
+
                 let first_token = wal_line
                     .cypher
                     .split_whitespace()
@@ -102,17 +162,41 @@ impl WalReplayer {
                     continue;
                 }
 
-                let cypher = interpolate_params(&wal_line.cypher, &wal_line.params);
-                match conn.raw_query(&cypher) {
-                    Ok(_) => stats.lines_replayed += 1,
-                    Err(e) => {
-                        eprintln!(
-                            "[WAL WARN] replay execution error at line {} in {:?}: {}",
-                            i + 1,
-                            file_path,
-                            e
-                        );
-                        stats.lines_skipped += 1;
+                if opts.dry_run {
+                    stats.lines_replayed += 1;
+                } else {
+                    let cypher = interpolate_params(&wal_line.cypher, &wal_line.params);
+                    match conn.raw_query(&cypher) {
+                        Ok(_) => stats.lines_replayed += 1,
+                        Err(e) => {
+                            eprintln!(
+                                "[WAL WARN] replay execution error at line {} in {:?}: {}",
+                                i + 1,
+                                file_path,
+                                e
+                            );
+                            stats.lines_skipped += 1;
+                        }
+                    }
+                }
+
+                mutations_in_file += 1;
+
+                // Progress: once per 1000 mutations within a file
+                if mutations_in_file % 1000 == 0 {
+                    if let Some(ref f) = opts.progress_fn {
+                        let p = ReplayProgress {
+                            files_processed: stats.files_read,
+                            mutations_replayed: stats.lines_replayed,
+                            message: format!(
+                                "replayed {} mutations in file {}",
+                                mutations_in_file,
+                                file_path.display()
+                            ),
+                        };
+                        if !f(&p) {
+                            break 'files;
+                        }
                     }
                 }
             }

@@ -23,7 +23,7 @@ pub use error::Error;
 pub use extractor::{AnthropicExtractor, Extractor, MockExtractor};
 pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;
-pub use replay::{ReplayStats, WalReplayer};
+pub use replay::{ReplayOptions, ReplayProgress, ReplayStats, WalReplayer};
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink};
 pub use types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge};
