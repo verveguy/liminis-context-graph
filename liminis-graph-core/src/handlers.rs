@@ -52,6 +52,11 @@ async fn handle(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> 
         "knowledge_query_cypher" => handle_query_cypher(req, state).await,
         "knowledge_build_indices" => handle_build_indices(state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
+        "knowledge_search_passages" => handle_search_passages(req, state).await,
+        "knowledge_list_entities" => handle_list_entities(req, state).await,
+        "knowledge_list_relationships" => handle_list_relationships(req, state).await,
+        "knowledge_get_entity_neighbors" => handle_get_entity_neighbors(req, state).await,
+        "knowledge_get_entities_by_source" => handle_get_entities_by_source(req, state).await,
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
 }
@@ -382,6 +387,157 @@ async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
     Ok(json!({"status": "ok"}))
 }
 
+// ── Tier 1b read handlers ─────────────────────────────────────────────────────
+
+async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let query = p["query"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("query is required and must be non-empty".to_string()))?
+        .to_string();
+    let num_results = (p["num_results"].as_u64().unwrap_or(10) as usize).clamp(1, 100);
+    let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+
+    let passages = search::search_passages(
+        Arc::clone(&state.db),
+        Arc::clone(&state.embedder),
+        &query,
+        group_ids,
+        num_results,
+        min_score,
+    )
+    .await?;
+    let count = passages.len();
+    Ok(json!({ "passages": passages, "count": count }))
+}
+
+async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let num_results = p["num_results"].as_u64().unwrap_or(500) as usize;
+    if num_results == 0 {
+        return Err(Error::Ipc("num_results must be > 0".to_string()));
+    }
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    let nodes = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        conn.list_entities(group_ids.as_deref().map(|_| gid_refs.as_slice()), num_results)
+    })
+    .await??;
+    drop(_guard);
+
+    let count = nodes.len();
+    Ok(json!({ "nodes": nodes, "count": count }))
+}
+
+async fn handle_list_relationships(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let num_results = p["num_results"].as_u64().unwrap_or(1000) as usize;
+    if num_results == 0 {
+        return Err(Error::Ipc("num_results must be > 0".to_string()));
+    }
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    let facts = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        conn.list_relationships(group_ids.as_deref().map(|_| gid_refs.as_slice()), num_results)
+    })
+    .await??;
+    drop(_guard);
+
+    let count = facts.len();
+    Ok(json!({ "facts": facts, "count": count }))
+}
+
+async fn handle_get_entity_neighbors(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let entity_uuid = p["entity_uuid"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("entity_uuid is required".to_string()))?
+        .to_string();
+    let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    let (edges, nodes) = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let (edges, neighbor_uuids) = conn.get_entity_neighbors(&entity_uuid, num_results)?;
+        let neighbor_strings: Vec<String> = neighbor_uuids;
+        let nodes = conn.get_entities_by_uuids(&neighbor_strings)?;
+        Ok::<_, crate::error::Error>((edges, nodes))
+    })
+    .await??;
+    drop(_guard);
+
+    let center_uuid = p["entity_uuid"].as_str().unwrap_or("").to_string();
+    let node_count = nodes.len();
+    let edge_count = edges.len();
+    Ok(json!({
+        "center_uuid": center_uuid,
+        "nodes": nodes,
+        "edges": edges,
+        "node_count": node_count,
+        "edge_count": edge_count,
+    }))
+}
+
+// TODO(issue-NNN): per-result source-info enrichment (_serialize_nodes_with_sources) is deferred
+async fn handle_get_entities_by_source(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let source = p["source"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("source is required and must be non-empty".to_string()))?
+        .to_string();
+    let num_results = p["num_results"].as_u64().unwrap_or(100) as usize;
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+
+    let db = Arc::clone(&state.db);
+    let _guard = state.write_lock.read().await;
+    let nodes = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        conn.get_entities_by_source(
+            &source,
+            group_ids.as_deref().map(|_| gid_refs.as_slice()),
+            num_results,
+        )
+    })
+    .await??;
+    drop(_guard);
+
+    let source_val = p["source"].as_str().unwrap_or("").to_string();
+    let node_count = nodes.len();
+    Ok(json!({ "source": source_val, "nodes": nodes, "node_count": node_count }))
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn extract_group_ids(v: &Value) -> Vec<String> {
@@ -392,5 +548,23 @@ fn extract_group_ids(v: &Value) -> Vec<String> {
             .collect(),
         Value::String(s) => vec![s.clone()],
         _ => vec![DEFAULT_GROUP_ID.to_string()],
+    }
+}
+
+/// Returns `None` when group_ids is absent/null/empty (= no filter = all groups).
+fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::Array(arr) if !arr.is_empty() => {
+            let ids: Vec<String> = arr
+                .iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect();
+            if ids.is_empty() {
+                None
+            } else {
+                Some(ids)
+            }
+        }
+        _ => None,
     }
 }
