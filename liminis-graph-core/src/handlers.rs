@@ -1,7 +1,10 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde_json::{json, Value};
+use tokio::sync::mpsc::UnboundedSender;
+use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
@@ -9,6 +12,8 @@ use crate::{
     episode,
     error::Error,
     ipc::{IpcRequest, IpcResponse},
+    rebuild_job::{JobStatus, RebuildJob},
+    replay::{ReplayOptions, ReplayProgress, WalReplayer},
     search,
     telemetry::{now_ms, TelemetryEvent},
 };
@@ -16,12 +21,19 @@ use crate::{
 const DEFAULT_GROUP_ID: &str = "liminis";
 
 /// Dispatches an IPC request to the appropriate library function. [IPC]
-pub async fn dispatch(req: IpcRequest, state: Arc<AppState>) -> IpcResponse {
+///
+/// `progress_tx` is `Some` when the caller detected `_progress_token` in the request params;
+/// only `knowledge_rebuild_from_wal` uses it. All other handlers ignore it.
+pub async fn dispatch(
+    req: IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> IpcResponse {
     let method = req.method.clone();
     let request_id = req.id.clone();
     let start = Instant::now();
 
-    let (response, success) = match handle(&req, Arc::clone(&state)).await {
+    let (response, success) = match handle(&req, Arc::clone(&state), progress_tx).await {
         Ok(result) => (IpcResponse::ok(req.id, result), true),
         Err(e) => (IpcResponse::err(req.id, -32000, e.to_string()), false),
     };
@@ -37,7 +49,11 @@ pub async fn dispatch(req: IpcRequest, state: Arc<AppState>) -> IpcResponse {
     response
 }
 
-async fn handle(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+async fn handle(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
     match req.method.as_str() {
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state).await,
@@ -55,6 +71,9 @@ async fn handle(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> 
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
+        "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
+        "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
+        "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
         "knowledge_search_passages" => handle_search_passages(req, state).await,
         "knowledge_list_entities" => handle_list_entities(req, state).await,
@@ -708,7 +727,322 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))
 }
 
+// ── WAL admin handlers ────────────────────────────────────────────────────────
+
+async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error> {
+    let wal_dir = state.wal_dir.clone();
+    let wal_writer = Arc::clone(&state.wal_writer);
+
+    // Serialize with in-flight writes (FR-006)
+    let _write_guard = state.write_lock.write().await;
+
+    let (files_flushed, files_total) = tokio::task::spawn_blocking(move || -> Result<(u32, u32), Error> {
+        let mut w = wal_writer
+            .lock()
+            .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?;
+        if let Some(ref mut writer) = *w {
+            let (r, t) = writer.rotate();
+            Ok((r, t))
+        } else {
+            // No writer; count JSONL files in wal_dir if configured and present
+            let total = wal_dir
+                .as_deref()
+                .map(|d| {
+                    if d.exists() {
+                        std::fs::read_dir(d)
+                            .ok()
+                            .map(|rd| {
+                                rd.filter_map(|e| e.ok())
+                                    .filter(|e| {
+                                        e.path().extension().and_then(|x| x.to_str())
+                                            == Some("jsonl")
+                                    })
+                                    .count() as u32
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0);
+            Ok((0, total))
+        }
+    })
+    .await??;
+    drop(_write_guard);
+
+    Ok(json!({
+        "success": true,
+        "files_flushed": files_flushed,
+        "files_total": files_total,
+    }))
+}
+
+async fn handle_rebuild_from_wal(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+
+    let from_seq = validate_from_seq(&p["from_seq"])?;
+    let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+
+    let wal_dir = state.wal_dir.clone().ok_or_else(|| {
+        Error::Ipc("No WAL directory configured (set GRAPHITI_WAL_DIR)".to_string())
+    })?;
+
+    if !wal_dir.exists() || !has_jsonl_files(&wal_dir) {
+        return Err(Error::Ipc(format!(
+            "No WAL files found at {}",
+            wal_dir.display()
+        )));
+    }
+
+    let is_streaming = progress_tx.is_some();
+
+    if is_streaming {
+        if !dry_run {
+            let active = state.active_writes.load(Ordering::Relaxed);
+            if active > 0 {
+                return Err(Error::Ipc(format!(
+                    "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
+                )));
+            }
+        }
+
+        let db = state.db.load_full();
+        let wal_dir_c = wal_dir.clone();
+        let tx = progress_tx;
+
+        // Write lock held in async scope; guard released after spawn_blocking completes.
+        let _write_guard = if !dry_run {
+            Some(state.write_lock.write().await)
+        } else {
+            None
+        };
+
+        let stats = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+            let conn = db.connect()?;
+            WalReplayer::new(&wal_dir_c).replay_opts(
+                &conn,
+                ReplayOptions {
+                    from_seq,
+                    dry_run,
+                    progress_fn: build_progress_fn(tx),
+                },
+            )
+        })
+        .await??;
+        drop(_write_guard);
+
+        let mut result = json!({
+            "success": true,
+            "mutations_replayed": stats.lines_replayed,
+            "wal_files_processed": stats.files_read,
+            "indexes_created": stats.indexes_created,
+        });
+        if dry_run {
+            result["dry_run"] = json!(true);
+        }
+        return Ok(result);
+    }
+
+    // Non-streaming path
+    if !dry_run {
+        let active = state.active_writes.load(Ordering::Relaxed);
+        if active > 0 {
+            return Err(Error::Ipc(format!(
+                "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
+            )));
+        }
+
+        // Return existing running job instead of starting a second
+        let existing = {
+            let jobs = state
+                .rebuild_jobs
+                .lock()
+                .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
+            jobs.values()
+                .find(|j| j.status == JobStatus::Running)
+                .map(|j| j.job_id.clone())
+        };
+        if let Some(existing_id) = existing {
+            return Ok(json!({
+                "success": true,
+                "job_id": existing_id,
+                "status": "running",
+            }));
+        }
+    }
+
+    // Create and register a new job
+    let job_id = Uuid::new_v4().to_string();
+    {
+        let mut jobs = state
+            .rebuild_jobs
+            .lock()
+            .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
+        jobs.insert(job_id.clone(), RebuildJob::new(job_id.clone()));
+    }
+
+    // Spawn background task; write lock acquired inside the task
+    let db = state.db.load_full();
+    let write_lock = Arc::clone(&state.write_lock);
+    let rebuild_jobs = Arc::clone(&state.rebuild_jobs);
+    let job_id_task = job_id.clone();
+    let wal_dir_c = wal_dir.clone();
+
+    tokio::spawn(async move {
+        // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
+        let _write_guard = if !dry_run {
+            Some(write_lock.write_owned().await)
+        } else {
+            None
+        };
+
+        let jobs_ref = Arc::clone(&rebuild_jobs);
+        let jid = job_id_task.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+            let conn = db.connect()?;
+            let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
+                if let Ok(mut guard) = jobs_ref.lock() {
+                    if let Some(job) = guard.get_mut(&jid) {
+                        job.mutations_replayed = p.mutations_replayed;
+                        job.wal_files_processed = p.files_processed;
+                    }
+                }
+                true
+            });
+            WalReplayer::new(&wal_dir_c).replay_opts(
+                &conn,
+                ReplayOptions {
+                    from_seq,
+                    dry_run,
+                    progress_fn: Some(progress_fn),
+                },
+            )
+        })
+        .await;
+
+        drop(_write_guard);
+
+        if let Ok(mut jobs) = rebuild_jobs.lock() {
+            if let Some(job) = jobs.get_mut(&job_id_task) {
+                match result {
+                    Ok(Ok(stats)) => {
+                        job.status = JobStatus::Completed;
+                        job.mutations_replayed = stats.lines_replayed;
+                        job.wal_files_processed = stats.files_read;
+                        job.result = Some(json!({
+                            "mutations_replayed": stats.lines_replayed,
+                            "wal_files_processed": stats.files_read,
+                            "indexes_created": stats.indexes_created,
+                            "dry_run": dry_run,
+                        }));
+                    }
+                    Ok(Err(e)) => {
+                        job.status = JobStatus::Failed;
+                        job.error = Some(e.to_string());
+                    }
+                    Err(e) => {
+                        job.status = JobStatus::Failed;
+                        job.error = Some(format!("Task panicked: {e}"));
+                    }
+                }
+            }
+        }
+    });
+
+    Ok(json!({
+        "success": true,
+        "job_id": job_id,
+        "status": "running",
+    }))
+}
+
+async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let job_id = req.params["job_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("job_id is required and must be non-empty".to_string()))?
+        .to_string();
+
+    let jobs = state
+        .rebuild_jobs
+        .lock()
+        .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
+
+    let Some(job) = jobs.get(&job_id) else {
+        return Ok(json!({"status": "not_found"}));
+    };
+
+    Ok(json!({
+        "job_id": job.job_id,
+        "status": job.status.as_str(),
+        "mutations_replayed": job.mutations_replayed,
+        "wal_files_processed": job.wal_files_processed,
+        "start_time": job.start_time.to_rfc3339(),
+        "elapsed_seconds": job.elapsed_seconds(),
+        "error": job.error,
+        "result": job.result,
+    }))
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+fn validate_from_seq(v: &Value) -> Result<u64, Error> {
+    match v {
+        Value::Null => Ok(0),
+        Value::Bool(_) => Err(Error::Ipc(
+            "from_seq must be a non-negative integer, not a boolean".to_string(),
+        )),
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                Ok(u)
+            } else if let Some(i) = n.as_i64() {
+                Err(Error::Ipc(format!(
+                    "from_seq must be non-negative, got {i}"
+                )))
+            } else {
+                Err(Error::Ipc(
+                    "from_seq must be a non-negative integer".to_string(),
+                ))
+            }
+        }
+        _ => Err(Error::Ipc(
+            "from_seq must be a non-negative integer".to_string(),
+        )),
+    }
+}
+
+fn has_jsonl_files(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        })
+        .unwrap_or(false)
+}
+
+fn build_progress_fn(
+    tx: Option<UnboundedSender<Value>>,
+) -> Option<Box<dyn Fn(&ReplayProgress) -> bool + Send>> {
+    tx.map(|tx| {
+        let f: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
+            let val = json!({
+                "type": "progress",
+                "message": p.message,
+                "mutations_replayed_so_far": p.mutations_replayed,
+                "files_processed_so_far": p.files_processed,
+            });
+            tx.send(val).is_ok()
+        });
+        f
+    })
+}
 
 fn extract_group_ids(v: &Value) -> Vec<String> {
     match v {
