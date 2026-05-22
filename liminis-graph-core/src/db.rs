@@ -274,6 +274,79 @@ impl<'db> Conn<'db> {
         self.raw_query(&sql)
     }
 
+    /// Deletes all Episodic nodes whose source_description equals source_file or starts with
+    /// source_file + ":". Returns the UUIDs of deleted episodes.
+    ///
+    /// When group_ids is Some, only episodes in those groups are considered.
+    pub fn remove_episodes_by_source(
+        &self,
+        source_file: &str,
+        group_ids: Option<&[&str]>,
+    ) -> Result<Vec<String>, Error> {
+        let escaped_src = escape(source_file);
+        let group_clause = match group_ids {
+            Some(ids) if !ids.is_empty() => {
+                format!(" AND ep.group_id IN {}", format_str_list(ids))
+            }
+            _ => String::new(),
+        };
+        let prefix = format!("{}:", source_file);
+        let escaped_prefix = escape(&prefix);
+        let match_sql = format!(
+            "MATCH (ep:Episodic) WHERE (ep.source_description = '{}' \
+             OR ep.source_description STARTS WITH '{}'){} RETURN ep.uuid",
+            escaped_src, escaped_prefix, group_clause,
+        );
+        let result = self.inner.query(&match_sql)?;
+        let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
+        if !uuids.is_empty() {
+            let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
+            let uuid_list = format_str_list(&uuid_refs);
+            let delete_sql = format!(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep"
+            );
+            self.raw_query(&delete_sql)?;
+        }
+        Ok(uuids)
+    }
+
+    /// Deletes all Episodic nodes whose name (chunk identifier) matches chunk_id.
+    /// Returns the UUIDs of deleted episodes.
+    ///
+    /// Matches on ep.name (which always stores chunk_id) rather than source_description.
+    /// Orphaned entities connected only to the deleted episodes are NOT removed — callers
+    /// should be aware that entity nodes may become disconnected after this call.
+    ///
+    /// When group_ids is Some, only episodes in those groups are considered.
+    pub fn remove_episodes_by_chunk_id(
+        &self,
+        chunk_id: &str,
+        group_ids: Option<&[&str]>,
+    ) -> Result<Vec<String>, Error> {
+        let group_clause = match group_ids {
+            Some(ids) if !ids.is_empty() => {
+                format!(" AND ep.group_id IN {}", format_str_list(ids))
+            }
+            _ => String::new(),
+        };
+        let match_sql = format!(
+            "MATCH (ep:Episodic) WHERE ep.name = '{}'{} RETURN ep.uuid",
+            escape(chunk_id),
+            group_clause,
+        );
+        let result = self.inner.query(&match_sql)?;
+        let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
+        if !uuids.is_empty() {
+            let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
+            let uuid_list = format_str_list(&uuid_refs);
+            let delete_sql = format!(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep"
+            );
+            self.raw_query(&delete_sql)?;
+        }
+        Ok(uuids)
+    }
+
     /// Returns all Entity nodes in the given group_ids.
     pub fn get_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<EntityRow>, Error> {
         let gid_list = format_str_list(group_ids);
