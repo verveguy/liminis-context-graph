@@ -12,6 +12,7 @@
 // scripts/record_corpus.py and set PARITY_GOLDEN=1 (see tests/fixtures/README.md).
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
@@ -273,6 +274,22 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+    })
+}
+
+fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db,
+        embedder: Arc::new(HttpEmbedder::from_env()),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        workspace_root: Some(workspace_root),
     })
 }
 
@@ -569,4 +586,94 @@ async fn test_knowledge_process_chunk_rejects_bad_reference_time() {
     )
     .await;
     assert_err_resp(&v, 35, -32000);
+}
+
+// ── Tier 3: corrections ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_validate_corrections_no_workspace() {
+    // workspace_root is None — all corrections methods should return a structured error
+    let (db, _dir) = make_db(4);
+    let state = make_state(db); // workspace_root: None
+    let v = dispatch_val(50, "knowledge_validate_corrections", json!({}), state).await;
+    assert_err_resp(&v, 50, -32000);
+}
+
+#[tokio::test]
+async fn test_validate_corrections_no_file() {
+    // workspace_root set but no .liminis/knowledge-corrections.yaml exists
+    let (db, _dir) = make_db(4);
+    let workspace_dir = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace_dir.path().to_path_buf());
+    let v = dispatch_val(51, "knowledge_validate_corrections", json!({}), state).await;
+    assert_ok_resp(&v, 51);
+    let r = &v["result"];
+    assert_eq!(r["valid"], true, "no file should be valid:true: {v}");
+    assert_eq!(r["total_corrections"], 0, "should be 0: {v}");
+    assert_eq!(r["unapplied_corrections"], 0, "should be 0: {v}");
+    assert!(r["issues"].as_array().map(|a| a.is_empty()).unwrap_or(false), "no issues: {v}");
+}
+
+#[tokio::test]
+async fn test_apply_corrections_no_file() {
+    let (db, _dir) = make_db(4);
+    let workspace_dir = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace_dir.path().to_path_buf());
+    let v = dispatch_val(52, "knowledge_apply_corrections", json!({}), state).await;
+    assert_ok_resp(&v, 52);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "no file should succeed: {v}");
+    assert_eq!(r["applied"], 0, "nothing applied: {v}");
+}
+
+#[tokio::test]
+async fn test_apply_corrections_dry_run() {
+    let (db, _dir) = make_db(4);
+    let workspace_dir = TempDir::new().unwrap();
+
+    // Create .liminis/knowledge-corrections.yaml with two unapplied retract entries
+    let liminis_dir = workspace_dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    let corrections_path = liminis_dir.join("knowledge-corrections.yaml");
+    std::fs::write(
+        &corrections_path,
+        "corrections:\n  - id: r1\n    type: retract\n    edge_uuid: nonexistent-uuid-1\n  - id: r2\n    type: retract\n    edge_uuid: nonexistent-uuid-2\n",
+    )
+    .unwrap();
+
+    let before = std::fs::read_to_string(&corrections_path).unwrap();
+    let state = make_state_with_workspace(db, workspace_dir.path().to_path_buf());
+    let v = dispatch_val(
+        53,
+        "knowledge_apply_corrections",
+        json!({"dry_run": true}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 53);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "dry_run should succeed: {v}");
+    assert_eq!(r["applied"], 0, "dry_run must not apply: {v}");
+
+    // File must be byte-identical after dry_run
+    let after = std::fs::read_to_string(&corrections_path).unwrap();
+    assert_eq!(before, after, "dry_run must not modify the corrections file");
+}
+
+#[tokio::test]
+async fn test_reprocess_entity_types_no_entities() {
+    let (db, _dir) = make_db(4);
+    let workspace_dir = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace_dir.path().to_path_buf());
+    let v = dispatch_val(
+        54,
+        "knowledge_reprocess_entity_types",
+        json!({"group_id": "test_group"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 54);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "no entities to reprocess: {v}");
+    assert_eq!(r["reclassified_count"], 0, "nothing to reclassify: {v}");
 }
