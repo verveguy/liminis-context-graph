@@ -1024,7 +1024,7 @@ async fn handle_validate_corrections(state: Arc<AppState>) -> Result<Value, Erro
         .clone()
         .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -1054,7 +1054,7 @@ async fn handle_apply_corrections(
 
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -1091,7 +1091,7 @@ async fn handle_reprocess_entity_types(
         .to_string();
 
     // Phase A (read lock): list all generic-only entities for the group
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let group_id_a = group_id.clone();
     let _read_guard = state.write_lock.read().await;
     let entities = tokio::task::spawn_blocking(move || {
@@ -1131,7 +1131,7 @@ async fn handle_reprocess_entity_types(
         .map(|(e, t)| (e.uuid.clone(), t.clone()))
         .collect();
 
-    let db = Arc::clone(&state.db);
+    let db = state.db.load_full();
     let _write_guard = state.write_lock.write().await;
     let reclassified = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;

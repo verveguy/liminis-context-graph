@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -37,7 +38,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     let wal_writer = WalWriter::new(&wal_dir, 10_000).ok();
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -49,13 +50,14 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         wal_writer: Arc::new(Mutex::new(wal_writer)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     })
 }
 
 fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -67,6 +69,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         wal_writer: Arc::new(Mutex::new(None)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     })
 }
 

@@ -280,7 +280,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
 fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db,
+        db: ArcSwap::from(db),
         embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -289,6 +289,9 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         db_path: "test.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: Some(workspace_root),
     })
 }

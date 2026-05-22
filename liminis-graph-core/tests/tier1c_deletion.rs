@@ -2,7 +2,9 @@
 //
 // Each test exercises the IPC handler via handlers::dispatch() in-process.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use liminis_graph_core::{
@@ -45,6 +47,10 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         db_path: db_path.to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     })
 }
 
@@ -58,7 +64,7 @@ fn req(id: i64, method: &str, params: Value) -> IpcRequest {
 }
 
 async fn dispatch_val(id: i64, method: &str, params: Value, state: Arc<AppState>) -> Value {
-    let resp = handlers::dispatch(req(id, method, params), state).await;
+    let resp = handlers::dispatch(req(id, method, params), state, None).await;
     serde_json::to_value(resp).unwrap()
 }
 
