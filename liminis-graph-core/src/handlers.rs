@@ -203,12 +203,13 @@ async fn handle_knowledge_process_chunk(
     };
 
     let start = Instant::now();
+    let source_desc = format!("{}:{}", source_file, chunk_id);
     let result = episode::add_episode(
         state,
         &chunk_id,
         &chunk_text,
         "text",
-        &chunk_id,
+        &source_desc,
         &ref_time,
         &group_id,
     )
