@@ -876,6 +876,31 @@ async fn handle_rebuild_from_wal(
         }
     }
 
+    // Non-streaming dry_run: run synchronously and return stats immediately
+    if dry_run {
+        let db = Arc::clone(&state.db);
+        let wal_dir_c = wal_dir.clone();
+        let stats = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+            let conn = db.connect()?;
+            WalReplayer::new(&wal_dir_c).replay_opts(
+                &conn,
+                ReplayOptions {
+                    from_seq,
+                    dry_run: true,
+                    progress_fn: None,
+                },
+            )
+        })
+        .await??;
+        return Ok(json!({
+            "success": true,
+            "mutations_replayed": stats.lines_replayed,
+            "wal_files_processed": stats.files_read,
+            "indexes_created": stats.indexes_created,
+            "dry_run": true,
+        }));
+    }
+
     // Create and register a new job
     let job_id = Uuid::new_v4().to_string();
     {
