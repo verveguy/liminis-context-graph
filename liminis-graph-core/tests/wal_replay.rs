@@ -1,4 +1,5 @@
-use liminis_graph_core::{Db, WalReplayer};
+use liminis_graph_core::{Db, ReplayOptions, ReplayProgress, WalReplayer};
+use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -197,4 +198,179 @@ fn test_open_or_rebuild_from_wal() {
         episodic_count, 2,
         "expected 2 Episodic nodes after WAL rebuild"
     );
+}
+
+fn make_entity_line(seq: u64, uuid: &str) -> String {
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {{uuid: '{uuid}'}}) ON CREATE SET n.name = '{uuid}', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-05-22 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{{}}'","params":{{}}}}"#
+    )
+}
+
+/// from_seq: lines with seq < from_seq are skipped, not counted as skipped in stats.
+#[test]
+fn test_replay_opts_from_seq() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Write 3 entities with seq 0,1,2
+    let content = [
+        make_entity_line(0, "entity-seq0"),
+        make_entity_line(1, "entity-seq1"),
+        make_entity_line(2, "entity-seq2"),
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_aaa111_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: 1, // skip seq=0
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts");
+
+    assert_eq!(stats.lines_replayed, 2, "only seq>=1 lines replayed");
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 2, "only 2 entities in DB (seq 1 and 2)");
+}
+
+/// dry_run: mutations are counted but DB is unchanged.
+#[test]
+fn test_replay_opts_dry_run() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let content = [
+        make_entity_line(0, "dry-entity-a"),
+        make_entity_line(1, "dry-entity-b"),
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_bbb222_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let count_before = conn.count_nodes("Entity").unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts dry_run");
+
+    assert_eq!(stats.lines_replayed, 2, "dry_run should count 2 mutations");
+    let count_after = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count_before, count_after, "dry_run must not modify the DB");
+}
+
+/// progress_fn fires at least once per file.
+#[test]
+fn test_replay_opts_progress_callback() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    fs::write(
+        wal_dir.path().join("20260522_000000_ccc333_0000.jsonl"),
+        make_entity_line(0, "prog-a") + "\n",
+    )
+    .unwrap();
+    fs::write(
+        wal_dir.path().join("20260522_000001_ddd444_0001.jsonl"),
+        make_entity_line(1, "prog-b") + "\n",
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let calls: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_clone = Arc::clone(&calls);
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let _stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                progress_fn: Some(Box::new(move |p: &ReplayProgress| {
+                    calls_clone
+                        .lock()
+                        .unwrap()
+                        .push((p.files_processed, p.mutations_replayed));
+                    true
+                })),
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts progress");
+
+    let calls_guard = calls.lock().unwrap();
+    assert!(
+        calls_guard.len() >= 2,
+        "progress_fn must fire at least once per file (got {} calls)",
+        calls_guard.len()
+    );
+}
+
+/// progress_fn returning false aborts replay after current file.
+#[test]
+fn test_replay_opts_progress_abort() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    fs::write(
+        wal_dir.path().join("20260522_000000_eee555_0000.jsonl"),
+        make_entity_line(0, "abort-a") + "\n",
+    )
+    .unwrap();
+    fs::write(
+        wal_dir.path().join("20260522_000001_fff666_0001.jsonl"),
+        make_entity_line(1, "abort-b") + "\n",
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    // Return false on first call — should abort after first file
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                progress_fn: Some(Box::new(|_| false)),
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts abort");
+
+    assert_eq!(stats.files_read, 1, "replay aborted after first file");
 }

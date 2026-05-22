@@ -191,6 +191,54 @@ fn test_mutation_filter_excludes_index_ddl() {
     );
 }
 
+/// rotate() after writes returns (1, 1); second rotate returns (0, 1).
+#[test]
+fn test_rotate_after_writes() {
+    let dir = TempDir::new().unwrap();
+    let mut w = open_writer(&dir, 50);
+
+    w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'x'})", json!({}), "db"))
+        .unwrap();
+
+    let (rotated, total) = w.rotate();
+    assert_eq!(rotated, 1, "one file should have been open and rotated");
+    assert_eq!(total, 1, "one JSONL file exists after rotation");
+
+    // Second rotate: no file open, but the existing file is still there.
+    let (rotated2, total2) = w.rotate();
+    assert_eq!(rotated2, 0, "no open file to rotate");
+    assert_eq!(total2, 1, "still one JSONL file in directory");
+}
+
+/// rotate() with no prior writes returns (0, 0).
+#[test]
+fn test_rotate_no_prior_writes() {
+    let dir = TempDir::new().unwrap();
+    let mut w = open_writer(&dir, 50);
+
+    let (rotated, total) = w.rotate();
+    assert_eq!(rotated, 0, "nothing to rotate when no writes happened");
+    assert_eq!(total, 0, "no files in empty WAL dir");
+}
+
+/// After rotate(), new writes open a fresh file (not appending to the old one).
+#[test]
+fn test_rotate_forces_new_file() {
+    let dir = TempDir::new().unwrap();
+    let mut w = open_writer(&dir, 50);
+
+    w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'a'})", json!({}), "db"))
+        .unwrap();
+    w.rotate();
+
+    // Write again; should produce a second file.
+    w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'b'})", json!({}), "db"))
+        .unwrap();
+
+    let files = jsonl_files(&dir);
+    assert_eq!(files.len(), 2, "rotate must force a new file on next write");
+}
+
 /// Filename must match the pattern YYYYMMDD_HHMMSS_<6hex>_0000.jsonl
 #[test]
 fn test_filename_format() {
