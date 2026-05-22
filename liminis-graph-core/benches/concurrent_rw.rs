@@ -48,6 +48,7 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         wal_writer: Arc::new(Mutex::new(None)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     })
 }
 

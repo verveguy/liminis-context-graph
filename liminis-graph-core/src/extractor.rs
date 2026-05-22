@@ -22,6 +22,16 @@ pub trait Extractor: Send + Sync {
         episode_body: &'a str,
         group_id: &'a str,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
+
+    /// Classifies entity types for a batch of (name, summary) pairs.
+    ///
+    /// Returns a `Vec<String>` of the same length as `entities`. Each entry is the
+    /// specific entity type label for that entity (e.g. `"Person"`, `"Organization"`),
+    /// or an empty string if the entity could not be classified.
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
 }
 
 // ── AnthropicExtractor ────────────────────────────────────────────────────────
@@ -161,6 +171,88 @@ impl AnthropicExtractor {
         }
     }
 
+    async fn do_classify_entities(
+        &self,
+        entities: &[(&str, &str)],
+    ) -> Result<Vec<String>, Error> {
+        if entities.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let system_text = "You are a knowledge graph entity classifier. Given a list of entities \
+            (name and summary), assign each a specific entity type label. Use concise PascalCase \
+            labels such as Person, Organization, Location, Concept, Product, Event, Technology. \
+            Return ONLY valid JSON: an array of strings, one per input entity, in the same order \
+            as the input. Use an empty string for an entity whose type cannot be determined.";
+
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+
+        let input: Vec<Value> = entities
+            .iter()
+            .map(|(name, summary)| json!({"name": name, "summary": summary}))
+            .collect();
+
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": 512,
+            "system": system_value,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": format!(
+                        "Classify the entity types for:\n\n{}",
+                        serde_json::to_string(&input).unwrap_or_default()
+                    )
+                }
+            ]
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+
+            if (status == 429 || status == 529) && attempt < 3 {
+                let delay = Duration::from_secs(1u64 << attempt);
+                sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| {
+                    Error::Ipc("classify_entities response missing content text".to_string())
+                })?;
+
+            let json_str = extract_json_block(content);
+            let types: Vec<String> = serde_json::from_str(json_str)?;
+            // Ensure length matches input; pad/truncate defensively.
+            let mut result = types;
+            result.resize(entities.len(), String::new());
+            return Ok(result);
+        }
+    }
+
     fn emit_token_usage(&self, resp: &Value) {
         let usage = &resp["usage"];
         if !usage.is_object() {
@@ -198,6 +290,13 @@ impl Extractor for AnthropicExtractor {
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
         Box::pin(self.do_extract(episode_body, group_id))
     }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(self.do_classify_entities(entities))
+    }
 }
 
 // ── MockExtractor ─────────────────────────────────────────────────────────────
@@ -233,6 +332,15 @@ impl Extractor for MockExtractor {
                 }],
             })
         })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        // MockExtractor returns empty string for each entity — no reclassification.
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
     }
 }
 

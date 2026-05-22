@@ -33,6 +33,10 @@ pub struct AppState {
     pub wal_writer: Arc<Mutex<Option<WalWriter>>>,
     pub active_writes: Arc<AtomicUsize>,
     pub rebuild_jobs: Arc<Mutex<HashMap<String, RebuildJob>>>,
+    /// Workspace root for locating `.liminis/knowledge-corrections.yaml`.
+    /// Read from `LIMINIS_WORKSPACE_ROOT` env var. All corrections methods return
+    /// an error if this is `None`.
+    pub workspace_root: Option<PathBuf>,
 }
 
 impl AppState {
@@ -56,6 +60,7 @@ impl AppState {
             .and_then(|dir| WalWriter::new(dir, 10_000).ok());
         let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
+        let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT").ok().map(PathBuf::from);
         Self {
             db: ArcSwap::from(db),
             embedder,
@@ -69,6 +74,7 @@ impl AppState {
             wal_writer: Arc::new(Mutex::new(wal_writer)),
             active_writes: Arc::new(AtomicUsize::new(0)),
             rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+            workspace_root,
         }
     }
 }

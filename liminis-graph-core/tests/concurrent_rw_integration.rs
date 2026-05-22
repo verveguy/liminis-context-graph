@@ -109,6 +109,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         wal_writer: Arc::new(Mutex::new(None)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     });
 
     let s1 = Arc::clone(&state);
