@@ -7,7 +7,7 @@
 
 The WAL rebuild operation (`knowledge_rebuild_from_wal`) can take seconds to minutes depending on WAL log size. Without progress reporting, callers have no visibility into replay progress and must either poll `knowledge_rebuild_status` or treat the operation as a black box.
 
-The existing IPC transport (`main.rs`) is a line-delimited JSON-RPC channel over stdin/stdout. Each request produces a single JSON-RPC response. The transport has no native concept of streaming or intermediate events.
+The existing IPC transport (`main.rs`) is a line-delimited JSON-RPC channel over a Unix domain socket. Each request produces a single JSON-RPC response. The transport has no native concept of streaming or intermediate events.
 
 Two options were considered:
 
@@ -24,12 +24,12 @@ If a JSON-RPC request includes a `"_progress_token"` key with a non-null value i
 
 1. A `tokio::sync::mpsc::unbounded_channel::<Value>()` is created.
 2. `handlers::dispatch()` is spawned as a separate `tokio::task`, receiving the `tx` end.
-3. `main.rs` drains the `rx` end, writing each `Value` as a JSON line to stdout immediately.
+3. `main.rs` drains the `rx` end, writing each `Value` as a JSON line to the Unix socket immediately.
 4. Once the dispatch task completes, the terminal JSON-RPC response is written.
 
 Progress values written by the handler have the shape:
 ```json
-{"progress": {"files_processed": 3, "mutations_replayed": 1500, "message": "Replayed file 3/10"}}
+{"type": "progress", "message": "replayed 1000 mutations in file ...", "mutations_replayed_so_far": 1500, "files_processed_so_far": 3}
 ```
 
 The `_progress_token` value itself is opaque; the caller uses it to correlate progress events with the originating request (useful when multiple requests are in flight over the same channel, though the current server is single-request).
@@ -58,11 +58,11 @@ Background `tokio::spawn` tasks cannot hold a `RwLockWriteGuard<'_, ()>` because
 - **Single write lock**: streaming and background-job paths both acquire the same `RwLock` write guard, ensuring rebuild and `add_episode` never overlap. The lock is held for the duration of the `spawn_blocking` replay, not across the full async task lifetime.
 - **Dry-run is always synchronous**: `dry_run: true` without `_progress_token` returns a direct response with `mutations_replayed` and `dry_run: true`. No job is created, no lock is held.
 - **Progress granularity**: `progress_fn` fires once per WAL file and once per 1 000 mutations, keeping stdout traffic low for large replays.
-- **Transport compatibility**: progress lines and the terminal response share the same stdout stream. Callers must handle both structured (`{"progress": ...}`) and terminal (`{"jsonrpc": "2.0", ...}`) JSON lines. Non-streaming callers see only the terminal response.
+- **Transport compatibility**: progress lines and the terminal response share the same Unix socket. Callers must handle both structured (`{"type": "progress", ...}`) and terminal (`{"jsonrpc": "2.0", ...}`) JSON lines. Non-streaming callers see only the terminal response.
 
 ## References
 
-- Issue #29 spec: `docs/spec/issue-29-wal-admin-handlers.md`
+- Issue #29 spec: `specs/29-tier-2-wal-admin/spec.md`
 - ADR-042: `docs/adr/0042-reader-writer-split.md` (RwLock design; `OwnedRwLockWriteGuard` pattern derived from it)
 - WAL implementation: `liminis-graph-core/src/wal.rs`, `liminis-graph-core/src/replay.rs`
 - Streaming main.rs path: `liminis-graph/src/main.rs`
