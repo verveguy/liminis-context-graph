@@ -81,12 +81,7 @@ fn assert_err(v: &Value, id: i64) {
     assert!(v.get("error").is_some(), "expected error field: {v}");
 }
 
-async fn process_chunk(
-    id: i64,
-    chunk_id: &str,
-    source_file: &str,
-    state: Arc<AppState>,
-) -> Value {
+async fn process_chunk(id: i64, chunk_id: &str, source_file: &str, state: Arc<AppState>) -> Value {
     dispatch_val(
         id,
         "knowledge_process_chunk",
@@ -179,7 +174,10 @@ async fn delete_by_source_missing_param() {
     let v = dispatch_val(1, "knowledge_delete_by_source", json!({}), state).await;
     assert_err(&v, 1);
     let msg = v["error"]["message"].as_str().unwrap_or("");
-    assert!(msg.contains("source_file"), "error should mention source_file: {v}");
+    assert!(
+        msg.contains("source_file"),
+        "error should mention source_file: {v}"
+    );
 }
 
 // ── delete_chunk_episode ──────────────────────────────────────────────────────
@@ -237,7 +235,10 @@ async fn delete_chunk_episode_all_revisions() {
     )
     .await;
     assert_ok(&v, 4);
-    assert_eq!(v["result"]["deleted_count"], 2, "both revisions must be deleted: {v}");
+    assert_eq!(
+        v["result"]["deleted_count"], 2,
+        "both revisions must be deleted: {v}"
+    );
 
     let (_, ep_after, _) = status_counts(5, Arc::clone(&state)).await;
     assert_eq!(ep_after, 0, "all revisions should be gone");

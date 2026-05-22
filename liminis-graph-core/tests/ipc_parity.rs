@@ -322,11 +322,17 @@ async fn test_knowledge_status_empty_db() {
     assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
     assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
     assert!(
-        r["database_path"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        r["database_path"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "expected non-empty database_path: {v}"
     );
     assert!(
-        r["embedding_model"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        r["embedding_model"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "expected non-empty embedding_model: {v}"
     );
     assert!(
@@ -387,12 +393,24 @@ async fn test_knowledge_process_chunk_ok() {
     assert_eq!(r["chunk_id"], "test-chunk-1");
     assert_eq!(r["source_file"], "test.txt");
     assert!(
-        r["episode_uuid"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        r["episode_uuid"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "expected non-empty episode_uuid: {v}"
     );
-    assert!(r["nodes_extracted"].as_u64().is_some(), "expected numeric nodes_extracted: {v}");
-    assert!(r["edges_extracted"].as_u64().is_some(), "expected numeric edges_extracted: {v}");
-    assert!(r["duration_seconds"].as_f64().is_some(), "expected numeric duration_seconds: {v}");
+    assert!(
+        r["nodes_extracted"].as_u64().is_some(),
+        "expected numeric nodes_extracted: {v}"
+    );
+    assert!(
+        r["edges_extracted"].as_u64().is_some(),
+        "expected numeric edges_extracted: {v}"
+    );
+    assert!(
+        r["duration_seconds"].as_f64().is_some(),
+        "expected numeric duration_seconds: {v}"
+    );
 }
 
 #[tokio::test]
@@ -405,13 +423,22 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
         "source_file": "test.txt",
         "reference_time": "2024-06-01T12:00:00Z",
     });
-    let v1 = dispatch_val(31, "knowledge_process_chunk", params.clone(), Arc::clone(&state)).await;
+    let v1 = dispatch_val(
+        31,
+        "knowledge_process_chunk",
+        params.clone(),
+        Arc::clone(&state),
+    )
+    .await;
     let v2 = dispatch_val(32, "knowledge_process_chunk", params, Arc::clone(&state)).await;
     assert_ok_resp(&v1, 31);
     assert_ok_resp(&v2, 32);
     let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap();
     let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap();
-    assert_ne!(uuid1, uuid2, "duplicate chunk_id must produce distinct episode_uuid values");
+    assert_ne!(
+        uuid1, uuid2,
+        "duplicate chunk_id must produce distinct episode_uuid values"
+    );
 }
 
 #[tokio::test]
@@ -456,8 +483,14 @@ async fn parity_search_passages_empty_db() {
     )
     .await;
     assert_ok_resp(&v, 40);
-    assert!(v["result"]["passages"].is_array(), "expected passages array: {v}");
-    assert_eq!(v["result"]["count"], 0, "empty db should yield 0 passages: {v}");
+    assert!(
+        v["result"]["passages"].is_array(),
+        "expected passages array: {v}"
+    );
+    assert_eq!(
+        v["result"]["count"], 0,
+        "empty db should yield 0 passages: {v}"
+    );
 }
 
 #[tokio::test]
@@ -536,8 +569,14 @@ async fn parity_get_entity_neighbors_nonexistent() {
     assert_ok_resp(&v, 46);
     assert!(v["result"]["nodes"].is_array(), "expected nodes: {v}");
     assert!(v["result"]["edges"].is_array(), "expected edges: {v}");
-    assert_eq!(v["result"]["node_count"], 0, "no neighbors for nonexistent uuid: {v}");
-    assert_eq!(v["result"]["edge_count"], 0, "no edges for nonexistent uuid: {v}");
+    assert_eq!(
+        v["result"]["node_count"], 0,
+        "no neighbors for nonexistent uuid: {v}"
+    );
+    assert_eq!(
+        v["result"]["edge_count"], 0,
+        "no edges for nonexistent uuid: {v}"
+    );
 }
 
 // ── Tier 1b: knowledge_get_entities_by_source ────────────────────────────────
@@ -614,7 +653,13 @@ async fn test_validate_corrections_no_file() {
     assert_eq!(r["valid"], true, "no file should be valid:true: {v}");
     assert_eq!(r["total_corrections"], 0, "should be 0: {v}");
     assert_eq!(r["unapplied_corrections"], 0, "should be 0: {v}");
-    assert!(r["issues"].as_array().map(|a| a.is_empty()).unwrap_or(false), "no issues: {v}");
+    assert!(
+        r["issues"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "no issues: {v}"
+    );
 }
 
 #[tokio::test]
@@ -657,14 +702,24 @@ async fn test_apply_corrections_dry_run() {
     let r = &v["result"];
     // Edge existence is validated even in dry_run (FR-015). Both retract entries reference
     // nonexistent edge UUIDs, so success is false and errors has one entry per failing correction.
-    assert_eq!(r["success"], false, "dry_run with nonexistent edges must fail: {v}");
+    assert_eq!(
+        r["success"], false,
+        "dry_run with nonexistent edges must fail: {v}"
+    );
     assert_eq!(r["applied"], 0, "dry_run must not apply: {v}");
     let errs = r["errors"].as_array().expect("errors must be an array");
-    assert_eq!(errs.len(), 2, "expected one error per nonexistent edge: {v}");
+    assert_eq!(
+        errs.len(),
+        2,
+        "expected one error per nonexistent edge: {v}"
+    );
 
     // File must be byte-identical after dry_run — patch_applied_at is not called in dry_run
     let after = std::fs::read_to_string(&corrections_path).unwrap();
-    assert_eq!(before, after, "dry_run must not modify the corrections file");
+    assert_eq!(
+        before, after,
+        "dry_run must not modify the corrections file"
+    );
 }
 
 #[tokio::test]

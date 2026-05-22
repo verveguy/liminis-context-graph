@@ -84,11 +84,11 @@ impl LlmRouter {
         }
     }
 
-    async fn do_classify_entities(
-        &self,
-        entities: &[(&str, &str)],
-    ) -> Result<Vec<String>, Error> {
-        if !self.primary_failed.load(std::sync::atomic::Ordering::Acquire) {
+    async fn do_classify_entities(&self, entities: &[(&str, &str)]) -> Result<Vec<String>, Error> {
+        if !self
+            .primary_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             match self.primary.classify_entities(entities).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {

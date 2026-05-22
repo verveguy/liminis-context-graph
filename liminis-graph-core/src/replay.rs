@@ -15,29 +15,22 @@ pub struct ReplayStats {
     pub indexes_created: u64,
 }
 
+/// Callback invoked during replay to emit progress; returning `false` aborts cleanly.
+pub type ProgressFn = Box<dyn Fn(&ReplayProgress) -> bool + Send>;
+/// Callback invoked once per mutation; returning `true` aborts immediately.
+pub type CancelFn = Box<dyn Fn() -> bool + Send>;
+
 /// Options for `WalReplayer::replay_opts`.
+#[derive(Default)]
 pub struct ReplayOptions {
     /// Skip WAL lines with `seq < from_seq`. Default: 0 (replay all).
     pub from_seq: u64,
     /// Count mutations without applying them. Default: false.
     pub dry_run: bool,
     /// Called once per file and once per 1000 mutations.
-    /// Returning `false` aborts the replay cleanly (e.g., on broken pipe).
-    pub progress_fn: Option<Box<dyn Fn(&ReplayProgress) -> bool + Send>>,
-    /// Called once per mutation. Returning `true` aborts the replay immediately
-    /// (used to detect client disconnection faster than the 1000-mutation progress cadence).
-    pub cancel_fn: Option<Box<dyn Fn() -> bool + Send>>,
-}
-
-impl Default for ReplayOptions {
-    fn default() -> Self {
-        ReplayOptions {
-            from_seq: 0,
-            dry_run: false,
-            progress_fn: None,
-            cancel_fn: None,
-        }
-    }
+    pub progress_fn: Option<ProgressFn>,
+    /// Called once per mutation to detect client disconnection faster than the 1000-mutation cadence.
+    pub cancel_fn: Option<CancelFn>,
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -194,7 +187,7 @@ impl WalReplayer {
                 }
 
                 // Progress: once per 1000 mutations within a file
-                if mutations_in_file % 1000 == 0 {
+                if mutations_in_file.is_multiple_of(1000) {
                     if let Some(ref f) = opts.progress_fn {
                         let p = ReplayProgress {
                             files_processed: stats.files_read,

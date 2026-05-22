@@ -302,9 +302,8 @@ impl<'db> Conn<'db> {
         if !uuids.is_empty() {
             let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
             let uuid_list = format_str_list(&uuid_refs);
-            let delete_sql = format!(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep"
-            );
+            let delete_sql =
+                format!("MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep");
             self.raw_query(&delete_sql)?;
         }
         Ok(uuids)
@@ -339,9 +338,8 @@ impl<'db> Conn<'db> {
         if !uuids.is_empty() {
             let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
             let uuid_list = format_str_list(&uuid_refs);
-            let delete_sql = format!(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep"
-            );
+            let delete_sql =
+                format!("MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep");
             self.raw_query(&delete_sql)?;
         }
         Ok(uuids)
@@ -833,7 +831,11 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns an EntityRow by exact name match. Returns the first match if multiple exist.
-    pub fn get_entity_by_name(&self, name: &str, group_id: &str) -> Result<Option<EntityRow>, Error> {
+    pub fn get_entity_by_name(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
         let sql = format!(
             "MATCH (e:Entity) WHERE e.name = '{}' AND e.group_id = '{}' \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
@@ -978,9 +980,9 @@ impl<'db> Conn<'db> {
 
     /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
     pub fn probe(&self) -> Result<(), Error> {
-        self.inner.query("RETURN 1").map_err(|e| {
-            Error::QueryFailed(format!("health probe failed: {e}"))
-        })?;
+        self.inner
+            .query("RETURN 1")
+            .map_err(|e| Error::QueryFailed(format!("health probe failed: {e}")))?;
         Ok(())
     }
 
@@ -988,7 +990,10 @@ impl<'db> Conn<'db> {
 
     /// Returns edges for an entity including fact_embedding from the RelatesToNode_ shadow node.
     /// Used by same_as corrections to copy edges from alias to canonical with intact embeddings.
-    pub fn get_full_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
+    pub fn get_full_edges_for_entity(
+        &self,
+        entity_uuid: &str,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
         let uuid_esc = escape(entity_uuid);
         // Outgoing edges (entity is source)
         // Use rn.invalid_at (shadow node) — invalidate_edge sets it reliably there.

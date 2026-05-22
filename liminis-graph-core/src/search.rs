@@ -49,8 +49,9 @@ pub async fn search_passages(
 
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
         let conn = db.connect()?;
-        let gid_refs: Option<Vec<&str>> =
-            group_ids.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         let mut passages =
             conn.vector_search_episodic(&embedding, gid_refs.as_deref(), overdraw)?;
 

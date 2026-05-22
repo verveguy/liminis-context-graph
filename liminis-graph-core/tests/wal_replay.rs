@@ -1,7 +1,7 @@
 use liminis_graph_core::{Db, ReplayOptions, ReplayProgress, WalReplayer};
-use std::sync::{Arc, Mutex};
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 fn fixture_path(name: &str) -> std::path::PathBuf {

@@ -139,7 +139,13 @@ async fn test_prepare_checkpoint_idempotent() {
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 
     // First call: no open writer, so files_flushed=0 but files_total reflects the pre-seeded file
-    let v1 = dispatch(3, "knowledge_prepare_checkpoint", json!({}), Arc::clone(&state)).await;
+    let v1 = dispatch(
+        3,
+        "knowledge_prepare_checkpoint",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
     assert_eq!(v1["result"]["success"], true, "{v1}");
     assert_eq!(v1["result"]["files_flushed"], 0, "no open writer: {v1}");
     assert_eq!(v1["result"]["files_total"], 1, "{v1}");
@@ -216,7 +222,13 @@ async fn test_rebuild_from_wal_non_streaming_returns_job_id() {
     .unwrap();
 
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
-    let v = dispatch(12, "knowledge_rebuild_from_wal", json!({}), Arc::clone(&state)).await;
+    let v = dispatch(
+        12,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
 
     assert_eq!(v["result"]["success"], true, "{v}");
     let job_id = v["result"]["job_id"].as_str().expect("expected job_id");
@@ -245,7 +257,10 @@ async fn test_rebuild_from_wal_rejects_boolean_from_seq() {
     )
     .await;
 
-    assert!(v.get("error").is_some(), "expected error for boolean from_seq: {v}");
+    assert!(
+        v.get("error").is_some(),
+        "expected error for boolean from_seq: {v}"
+    );
     assert_eq!(v["error"]["code"], -32000, "{v}");
     let msg = v["error"]["message"].as_str().unwrap_or("");
     assert!(msg.contains("boolean"), "error should mention boolean: {v}");
@@ -272,7 +287,10 @@ async fn test_rebuild_from_wal_rejects_negative_from_seq() {
     )
     .await;
 
-    assert!(v.get("error").is_some(), "expected error for negative from_seq: {v}");
+    assert!(
+        v.get("error").is_some(),
+        "expected error for negative from_seq: {v}"
+    );
     assert_eq!(v["error"]["code"], -32000, "{v}");
 }
 
@@ -303,7 +321,10 @@ async fn test_rebuild_status_rejects_empty_job_id() {
     let (db, _dir) = make_db(4);
     let state = make_state_no_wal(db);
     let v = dispatch(21, "knowledge_rebuild_status", json!({"job_id": ""}), state).await;
-    assert!(v.get("error").is_some(), "expected error for empty job_id: {v}");
+    assert!(
+        v.get("error").is_some(),
+        "expected error for empty job_id: {v}"
+    );
     assert_eq!(v["error"]["code"], -32000, "{v}");
 }
 
@@ -352,7 +373,10 @@ async fn test_rebuild_status_completed_after_background_job() {
         match status {
             "completed" => {
                 assert!(
-                    status_v["result"]["mutations_replayed"].as_u64().unwrap_or(0) >= 1,
+                    status_v["result"]["mutations_replayed"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        >= 1,
                     "expected at least 1 mutation replayed: {status_v}"
                 );
                 return;
