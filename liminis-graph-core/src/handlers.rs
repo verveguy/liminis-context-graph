@@ -1105,23 +1105,29 @@ async fn handle_reprocess_entity_types(
         return Ok(json!({ "success": true, "reclassified_count": 0, "group_id": group_id }));
     }
 
-    // Phase B (no lock): classify entities via LLM
+    // Phase B (no lock): classify entities via LLM in batches to avoid token limit violations.
     let pairs: Vec<(String, String)> = entities
         .iter()
         .map(|e| (e.name.clone(), e.summary.clone()))
         .collect();
-    let pair_refs: Vec<(&str, &str)> = pairs.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
 
-    let types = match state.extractor.classify_entities(&pair_refs).await {
-        Ok(t) => t,
-        Err(e) => {
-            return Ok(json!({
-                "success": false,
-                "group_id": group_id,
-                "error": format!("Failed to reprocess entity types: {e}"),
-            }));
+    let mut types: Vec<String> = Vec::with_capacity(entities.len());
+    for chunk in pairs.chunks(corrections::REPROCESS_BATCH_SIZE) {
+        let refs: Vec<(&str, &str)> = chunk.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        match state.extractor.classify_entities(&refs).await {
+            Ok(mut batch) => {
+                batch.resize(chunk.len(), String::new());
+                types.extend(batch);
+            }
+            Err(e) => {
+                return Ok(json!({
+                    "success": false,
+                    "group_id": group_id,
+                    "error": format!("Failed to reprocess entity types: {e}"),
+                }));
+            }
         }
-    };
+    }
 
     // Phase C (write lock): apply label mutations
     let updates: Vec<(String, String)> = entities
