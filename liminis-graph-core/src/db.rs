@@ -958,6 +958,170 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
+    // ── Corrections support ───────────────────────────────────────────────────
+
+    /// Returns edges for an entity including fact_embedding from the RelatesToNode_ shadow node.
+    /// Used by same_as corrections to copy edges from alias to canonical with intact embeddings.
+    pub fn get_full_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
+        let uuid_esc = escape(entity_uuid);
+        // Outgoing edges (entity is source)
+        let out_sql = format!(
+            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(dst:Entity) \
+             MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
+             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+        );
+        // Incoming edges (entity is target)
+        let in_sql = format!(
+            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+             MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
+             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+        );
+        let mut edges = self.collect_full_relates_to_edges(&out_sql)?;
+        edges.extend(self.collect_full_relates_to_edges(&in_sql)?);
+        Ok(edges)
+    }
+
+    fn collect_full_relates_to_edges(&self, sql: &str) -> Result<Vec<RelatesToEdge>, Error> {
+        let result = self.inner.query(sql)?;
+        let mut rows = Vec::new();
+        for row in result {
+            rows.push(RelatesToEdge {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                source_node_uuid: value_as_string(&row[2]),
+                target_node_uuid: value_as_string(&row[3]),
+                group_id: value_as_string(&row[4]),
+                fact: value_as_string(&row[5]),
+                valid_at: value_as_optional_timestamp_str(&row[6]),
+                invalid_at: value_as_optional_timestamp_str(&row[7]),
+                attributes: value_as_string(&row[8]),
+                fact_embedding: value_as_float_array(&row[9]),
+                created_at: value_as_timestamp_str(&row[10]),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// Checks whether a directed RELATES_TO edge already exists from `source_uuid` to `target_uuid`.
+    /// Used during same_as merge de-duplication (FR-013).
+    pub fn has_directed_edge(&self, source_uuid: &str, target_uuid: &str) -> Result<bool, Error> {
+        let sql = format!(
+            "MATCH (src:Entity {{uuid: '{}'}})-[r:RELATES_TO]->(dst:Entity {{uuid: '{}'}}) \
+             RETURN count(r)",
+            escape(source_uuid),
+            escape(target_uuid),
+        );
+        let mut result = self.inner.query(&sql)?;
+        if let Some(row) = result.next() {
+            Ok(value_as_usize(&row[0]) > 0)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Returns a full RelatesToEdge by UUID, joining via the RELATES_TO rel.
+    pub fn get_edge_by_uuid(&self, uuid: &str) -> Result<Option<RelatesToEdge>, Error> {
+        let sql = format!(
+            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) WHERE r.uuid = '{}' \
+             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes",
+            escape(uuid),
+        );
+        let mut rows = self.collect_relates_to_edges(&sql)?;
+        Ok(rows.pop())
+    }
+
+    /// Returns all RELATES_TO edges where the entity with `entity_uuid` is either source or target.
+    pub fn get_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
+        let uuid_esc = escape(entity_uuid);
+        let out_sql = format!(
+            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(dst:Entity) \
+             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes"
+        );
+        let in_sql = format!(
+            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
+             r.valid_at, r.invalid_at, r.attributes"
+        );
+        let mut edges = self.collect_relates_to_edges(&out_sql)?;
+        edges.extend(self.collect_relates_to_edges(&in_sql)?);
+        Ok(edges)
+    }
+
+    /// Updates the labels array on the Entity with the given UUID.
+    pub fn update_entity_labels(&self, uuid: &str, labels: &[String]) -> Result<(), Error> {
+        let labels_lit = format_str_array(labels);
+        let sql = format!(
+            "MATCH (e:Entity {{uuid: '{}'}}) SET e.labels = {}",
+            escape(uuid),
+            labels_lit,
+        );
+        self.raw_query(&sql)
+    }
+
+    /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
+    /// on the RelatesToNode_ shadow node. Also attempts to set `invalid_at` on the
+    /// RELATES_TO relationship property (lbug 0.16.1 may not support SET on rels;
+    /// if it fails the error is logged but not propagated).
+    pub fn invalidate_edge(&self, edge_uuid: &str, invalid_at: &str) -> Result<(), Error> {
+        let uuid_esc = escape(edge_uuid);
+        let ts_esc = escape(invalid_at);
+        let node_sql = format!(
+            "MATCH (rn:RelatesToNode_ {{uuid: '{uuid_esc}'}}) \
+             SET rn.invalid_at = timestamp('{ts_esc}')"
+        );
+        self.raw_query(&node_sql)?;
+        // Attempt SET on the RELATES_TO rel — non-fatal if unsupported.
+        let rel_sql = format!(
+            "MATCH (src:Entity)-[r:RELATES_TO {{uuid: '{uuid_esc}'}}]->(dst:Entity) \
+             SET r.invalid_at = timestamp('{ts_esc}')"
+        );
+        if let Err(e) = self.raw_query(&rel_sql) {
+            eprintln!(
+                "liminis-graph: SET invalid_at on RELATES_TO rel unsupported or failed (non-fatal): {e}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Returns a paged list of Entity nodes whose only label is the generic "Entity"
+    /// (i.e., not yet classified into a specific type). Batch size 50 is `REPROCESS_BATCH_SIZE`.
+    ///
+    /// Uses `SKIP`/`LIMIT` for paging. `offset` is the number of rows to skip.
+    pub fn list_generic_entities_page(
+        &self,
+        group_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let sql = format!(
+            "MATCH (e:Entity) WHERE e.group_id = '{}' AND size(e.labels) = 1 \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes ORDER BY e.uuid SKIP {} LIMIT {}",
+            escape(group_id),
+            offset,
+            limit,
+        );
+        let result = self.inner.query(&sql)?;
+        let mut rows = Vec::new();
+        for row in result {
+            rows.push(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            });
+        }
+        Ok(rows)
+    }
+
     /// Returns entities whose name starts with `name_prefix`.
     /// Pass `""` to return all entities.
     ///

@@ -17,6 +17,7 @@ uuid = { workspace = true }
 reqwest = { workspace = true }
 time = { workspace = true }
 futures = { workspace = true }
+serde_yaml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

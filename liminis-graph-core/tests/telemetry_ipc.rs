@@ -48,6 +48,7 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
         wal_writer: Arc::new(Mutex::new(None)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
     })
 }
 

@@ -26,3 +26,4 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 futures = "0.3"
+serde_yaml = "0.9"
