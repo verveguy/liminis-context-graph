@@ -32,7 +32,7 @@ A liminis client opens a Unix-socket connection and calls `health_check` before 
 1. **Given** a running liminis-graph with a healthy, queryable DB, **When** a client sends `{"jsonrpc":"2.0","id":1,"method":"health_check","params":{}}`, **Then** the service replies `{"jsonrpc":"2.0","id":1,"result":{"ok":true}}` within 10 ms (warm path).
 2. **Given** liminis-graph started but DB open failed (e.g., permission denied, corrupt file), **When** a client sends `health_check`, **Then** the service replies with a JSON-RPC error object (`{"code": <non-zero>, "message": "<subsystem>: <reason>"}`) naming the failed subsystem — not `{"ok": true}`.
 3. **Given** a client sends `health_check` while the DB is still initialising (race at startup), **When** dispatched, **Then** the service returns a not-ready JSON-RPC error immediately rather than blocking the caller.
-4. **Given** the DB path's filesystem permissions are revoked after startup, **When** `health_check` is called, **Then** service returns `ok: false` with a permission error and does not crash the daemon.
+4. **Given** the DB path's filesystem permissions are revoked after startup, **When** `health_check` is called, **Then** service returns a JSON-RPC error with a permission error message and does not crash the daemon.
 
 ---
 
@@ -78,7 +78,7 @@ The indexing queue calls `knowledge_process_chunk` for each document chunk. The 
 - `knowledge_status` is called while a write transaction holds the exclusive lock → returns counts from pre-transaction DB state without waiting; never deadlocks.
 - WAL directory does not exist → `wal` subobject: `exists: false`, `file_count: 0`, `byte_size: 0`.
 - WAL directory exists but is empty → `wal` subobject: `exists: true`, `file_count: 0`, `byte_size: 0`.
-- DB path permission revoked after successful startup → `health_check` returns `ok: false`, daemon stays running.
+- DB path permission revoked after successful startup → `health_check` returns a JSON-RPC error (not `ok: false`), daemon stays running.
 - `group_id` absent from `knowledge_process_chunk` params → defaults to `"liminis"` (same default as Python and all other handlers).
 - `reference_time` absent → defaults to server wall-clock time at dispatch.
 
@@ -102,7 +102,7 @@ The indexing queue calls `knowledge_process_chunk` for each document chunk. The 
 - **health_check result**: `{"ok": true}` on success; JSON-RPC error object on failure.
 - **knowledge_status result**: Subset of Python's response shape. Required fields: `database_path`, `embedding_model`, `embedding_dim`, `entity_count`, `edge_count`, `episode_count`, `wal`. All other Python fields omitted unless cheaply computable.
 - **WAL subobject**: `{"exists": bool, "file_count": int, "byte_size": int}`. Populated by scanning `GRAPHITI_WAL_DIR` (or equivalent configured path) at request time.
-- **knowledge_process_chunk params**: `chunk_text` → `episode_body`, `chunk_id` → episode `name`, `source_file` → `source_description` (and `source` defaults to `"text"`), `group_id` → `group_id`, `reference_time` → `reference_time`.
+- **knowledge_process_chunk params**: `chunk_text` → `episode_body`, `chunk_id` → episode `name` and `source_description` (matching Python's behavior; `source_file` is validated and returned in the response but not stored in the episodic node), `source` defaults to `"text"`, `group_id` → `group_id`, `reference_time` → `reference_time`.
 - **knowledge_process_chunk result**: `{"success": true, "chunk_id": str, "source_file": str, "episode_uuid": str, "nodes_extracted": int, "edges_extracted": int, "duration_seconds": float}`.
 
 ## Success Criteria *(mandatory)*
