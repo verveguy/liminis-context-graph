@@ -1,5 +1,5 @@
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 
 use crate::{
     app_state::AppState,

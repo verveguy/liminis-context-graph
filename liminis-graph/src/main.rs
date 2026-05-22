@@ -40,7 +40,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
 
-    let state = Arc::new(AppState::from_env(Arc::clone(&telemetry_sink), db, db_path.clone()));
+    let state = Arc::new(AppState::from_env(
+        Arc::clone(&telemetry_sink),
+        db,
+        db_path.clone(),
+    ));
 
     // Remove stale socket file
     let _ = std::fs::remove_file(&socket_path);
@@ -84,8 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let resp = if is_streaming {
                     // Streaming: drain progress lines before writing terminal response
-                    let (tx, mut rx) =
-                        tokio::sync::mpsc::unbounded_channel::<Value>();
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
                     let state_clone = Arc::clone(&state);
                     let req_id = req.id.clone();
                     let dispatch_handle =
@@ -108,9 +111,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     if client_ok {
-                        dispatch_handle.await.unwrap_or_else(|_| {
-                            IpcResponse::err(req_id, -32000, "Internal error")
-                        })
+                        dispatch_handle
+                            .await
+                            .unwrap_or_else(|_| IpcResponse::err(req_id, -32000, "Internal error"))
                     } else {
                         // Drop rx before aborting so cancel_fn sees the closed channel promptly
                         drop(rx);

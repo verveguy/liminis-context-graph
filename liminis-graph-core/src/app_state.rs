@@ -60,7 +60,9 @@ impl AppState {
             .and_then(|dir| WalWriter::new(dir, 10_000).ok());
         let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
-        let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT").ok().map(PathBuf::from);
+        let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT")
+            .ok()
+            .map(PathBuf::from);
         Self {
             db: ArcSwap::from(db),
             embedder,

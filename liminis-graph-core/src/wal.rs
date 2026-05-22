@@ -170,7 +170,11 @@ impl WalWriter {
     /// Since writes are flushed and fsynced per chunk, rotation only resets `current_file`.
     /// Returns `(files_rotated, files_total)` — `files_rotated` is 0 or 1.
     pub fn rotate(&mut self) -> (u32, u32) {
-        let files_rotated = if self.current_file.take().is_some() { 1 } else { 0 };
+        let files_rotated = if self.current_file.take().is_some() {
+            1
+        } else {
+            0
+        };
         let files_total = count_jsonl_files(&self.wal_dir);
         (files_rotated, files_total)
     }

@@ -14,7 +14,7 @@ use crate::{
     error::Error,
     ipc::{IpcRequest, IpcResponse},
     rebuild_job::{JobStatus, RebuildJob},
-    replay::{ReplayOptions, ReplayProgress, WalReplayer},
+    replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     search,
     telemetry::{now_ms, TelemetryEvent},
 };
@@ -135,14 +135,23 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
 
     let _guard = state.write_lock.read().await;
     let (entity_count, episode_count, edge_count, wal_exists, wal_file_count, wal_byte_size) =
-        tokio::task::spawn_blocking(move || -> Result<(u64, u64, u64, bool, u64, u64), crate::error::Error> {
-            let conn = db.connect()?;
-            let entity_count = conn.count_nodes("Entity")?;
-            let episode_count = conn.count_nodes("Episodic")?;
-            let edge_count = conn.count_relates_to_edges()?;
-            let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
-            Ok((entity_count, episode_count, edge_count, wal_exists, wal_file_count, wal_byte_size))
-        })
+        tokio::task::spawn_blocking(
+            move || -> Result<(u64, u64, u64, bool, u64, u64), crate::error::Error> {
+                let conn = db.connect()?;
+                let entity_count = conn.count_nodes("Entity")?;
+                let episode_count = conn.count_nodes("Episodic")?;
+                let edge_count = conn.count_relates_to_edges()?;
+                let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+                Ok((
+                    entity_count,
+                    episode_count,
+                    edge_count,
+                    wal_exists,
+                    wal_file_count,
+                    wal_byte_size,
+                ))
+            },
+        )
         .await??;
     drop(_guard);
 
@@ -176,12 +185,7 @@ fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
     let mut file_count: u64 = 0;
     let mut byte_size: u64 = 0;
     for entry in rd.flatten() {
-        if entry
-            .path()
-            .extension()
-            .and_then(|x| x.to_str())
-            == Some("jsonl")
-        {
+        if entry.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
             file_count += 1;
             if let Ok(meta) = entry.metadata() {
                 byte_size += meta.len();
@@ -458,7 +462,10 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        conn.list_entities(group_ids.as_deref().map(|_| gid_refs.as_slice()), num_results)
+        conn.list_entities(
+            group_ids.as_deref().map(|_| gid_refs.as_slice()),
+            num_results,
+        )
     })
     .await??;
     drop(_guard);
@@ -468,10 +475,7 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     Ok(json!({ "nodes": nodes, "count": count }))
 }
 
-async fn handle_list_relationships(
-    req: &IpcRequest,
-    state: Arc<AppState>,
-) -> Result<Value, Error> {
+async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let num_results_raw = p["num_results"].as_i64().unwrap_or(1000);
     if num_results_raw <= 0 {
@@ -488,7 +492,10 @@ async fn handle_list_relationships(
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        conn.list_relationships(group_ids.as_deref().map(|_| gid_refs.as_slice()), num_results)
+        conn.list_relationships(
+            group_ids.as_deref().map(|_| gid_refs.as_slice()),
+            num_results,
+        )
     })
     .await??;
     drop(_guard);
@@ -594,8 +601,9 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Option<Vec<&str>> =
-            group_ids_owned.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let gid_refs: Option<Vec<&str>> = group_ids_owned
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())
     })
     .await??;
@@ -632,8 +640,9 @@ async fn handle_delete_chunk_episode(
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Option<Vec<&str>> =
-            group_ids_owned.as_ref().map(|v| v.iter().map(String::as_str).collect());
+        let gid_refs: Option<Vec<&str>> = group_ids_owned
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())
     })
     .await??;
@@ -666,11 +675,13 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let path = std::path::Path::new(&db_path_del);
         if path.is_dir() {
-            std::fs::remove_dir_all(path)
-                .map_err(|e| Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path_del)))?;
+            std::fs::remove_dir_all(path).map_err(|e| {
+                Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path_del))
+            })?;
         } else if path.exists() {
-            std::fs::remove_file(path)
-                .map_err(|e| Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path_del)))?;
+            std::fs::remove_file(path).map_err(|e| {
+                Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path_del))
+            })?;
             // Remove lbug sibling files (e.g. <db>.wal) that lbug creates next to the DB file.
             // If we leave them behind, lbug will reject them on the next open because the
             // database ID in the WAL won't match the freshly created DB.
@@ -680,8 +691,9 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         }
         if let Some(wal) = wal_dir {
             if wal.exists() {
-                std::fs::remove_dir_all(&wal)
-                    .map_err(|e| Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display())))?;
+                std::fs::remove_dir_all(&wal).map_err(|e| {
+                    Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display()))
+                })?;
             }
         }
         Ok(())
@@ -740,39 +752,40 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
     // Serialize with in-flight writes (FR-006)
     let _write_guard = state.write_lock.write().await;
 
-    let (files_flushed, files_total) = tokio::task::spawn_blocking(move || -> Result<(u32, u32), Error> {
-        let mut w = wal_writer
-            .lock()
-            .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?;
-        if let Some(ref mut writer) = *w {
-            let (r, t) = writer.rotate();
-            Ok((r, t))
-        } else {
-            // No writer; count JSONL files in wal_dir if configured and present
-            let total = wal_dir
-                .as_deref()
-                .map(|d| {
-                    if d.exists() {
-                        std::fs::read_dir(d)
-                            .ok()
-                            .map(|rd| {
-                                rd.filter_map(|e| e.ok())
-                                    .filter(|e| {
-                                        e.path().extension().and_then(|x| x.to_str())
-                                            == Some("jsonl")
-                                    })
-                                    .count() as u32
-                            })
-                            .unwrap_or(0)
-                    } else {
-                        0
-                    }
-                })
-                .unwrap_or(0);
-            Ok((0, total))
-        }
-    })
-    .await??;
+    let (files_flushed, files_total) =
+        tokio::task::spawn_blocking(move || -> Result<(u32, u32), Error> {
+            let mut w = wal_writer
+                .lock()
+                .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?;
+            if let Some(ref mut writer) = *w {
+                let (r, t) = writer.rotate();
+                Ok((r, t))
+            } else {
+                // No writer; count JSONL files in wal_dir if configured and present
+                let total = wal_dir
+                    .as_deref()
+                    .map(|d| {
+                        if d.exists() {
+                            std::fs::read_dir(d)
+                                .ok()
+                                .map(|rd| {
+                                    rd.filter_map(|e| e.ok())
+                                        .filter(|e| {
+                                            e.path().extension().and_then(|x| x.to_str())
+                                                == Some("jsonl")
+                                        })
+                                        .count() as u32
+                                })
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
+                Ok((0, total))
+            }
+        })
+        .await??;
     drop(_write_guard);
 
     Ok(json!({
@@ -826,19 +839,20 @@ async fn handle_rebuild_from_wal(
             None
         };
 
-        let stats = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
-            let conn = db.connect()?;
-            WalReplayer::new(&wal_dir_c).replay_opts(
-                &conn,
-                ReplayOptions {
-                    from_seq,
-                    dry_run,
-                    cancel_fn: tx.as_ref().map(build_cancel_fn),
-                    progress_fn: build_progress_fn(tx),
-                },
-            )
-        })
-        .await??;
+        let stats =
+            tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+                let conn = db.connect()?;
+                WalReplayer::new(&wal_dir_c).replay_opts(
+                    &conn,
+                    ReplayOptions {
+                        from_seq,
+                        dry_run,
+                        cancel_fn: tx.as_ref().map(build_cancel_fn),
+                        progress_fn: build_progress_fn(tx),
+                    },
+                )
+            })
+            .await??;
         drop(_write_guard);
 
         let mut result = json!({
@@ -861,26 +875,26 @@ async fn handle_rebuild_from_wal(
                 "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
             )));
         }
-
     }
 
     // Non-streaming dry_run: run synchronously and return stats immediately
     if dry_run {
         let db = state.db.load_full();
         let wal_dir_c = wal_dir.clone();
-        let stats = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
-            let conn = db.connect()?;
-            WalReplayer::new(&wal_dir_c).replay_opts(
-                &conn,
-                ReplayOptions {
-                    from_seq,
-                    dry_run: true,
-                    progress_fn: None,
-                    cancel_fn: None,
-                },
-            )
-        })
-        .await??;
+        let stats =
+            tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+                let conn = db.connect()?;
+                WalReplayer::new(&wal_dir_c).replay_opts(
+                    &conn,
+                    ReplayOptions {
+                        from_seq,
+                        dry_run: true,
+                        progress_fn: None,
+                        cancel_fn: None,
+                    },
+                )
+            })
+            .await??;
         return Ok(json!({
             "success": true,
             "mutations_replayed": stats.lines_replayed,
@@ -896,7 +910,8 @@ async fn handle_rebuild_from_wal(
             .rebuild_jobs
             .lock()
             .map_err(|_| Error::Ipc("rebuild_jobs lock poisoned".to_string()))?;
-        if let Some(existing_id) = jobs.values()
+        if let Some(existing_id) = jobs
+            .values()
             .find(|j| j.status == JobStatus::Running)
             .map(|j| j.job_id.clone())
         {
@@ -929,28 +944,29 @@ async fn handle_rebuild_from_wal(
         let jobs_ref = Arc::clone(&rebuild_jobs);
         let jid = job_id_task.clone();
 
-        let result = tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
-            let conn = db.connect()?;
-            let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
-                if let Ok(mut guard) = jobs_ref.lock() {
-                    if let Some(job) = guard.get_mut(&jid) {
-                        job.mutations_replayed = p.mutations_replayed;
-                        job.wal_files_processed = p.files_processed;
+        let result =
+            tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+                let conn = db.connect()?;
+                let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
+                    if let Ok(mut guard) = jobs_ref.lock() {
+                        if let Some(job) = guard.get_mut(&jid) {
+                            job.mutations_replayed = p.mutations_replayed;
+                            job.wal_files_processed = p.files_processed;
+                        }
                     }
-                }
-                true
-            });
-            WalReplayer::new(&wal_dir_c).replay_opts(
-                &conn,
-                ReplayOptions {
-                    from_seq,
-                    dry_run,
-                    progress_fn: Some(progress_fn),
-                    cancel_fn: None,
-                },
-            )
-        })
-        .await;
+                    true
+                });
+                WalReplayer::new(&wal_dir_c).replay_opts(
+                    &conn,
+                    ReplayOptions {
+                        from_seq,
+                        dry_run,
+                        progress_fn: Some(progress_fn),
+                        cancel_fn: None,
+                    },
+                )
+            })
+            .await;
 
         drop(_write_guard);
 
@@ -1019,16 +1035,18 @@ async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result
 // ── Corrections handlers ──────────────────────────────────────────────────────
 
 async fn handle_validate_corrections(state: Arc<AppState>) -> Result<Value, Error> {
-    let workspace_root = state
-        .workspace_root
-        .clone()
-        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+    let workspace_root = state.workspace_root.clone().ok_or_else(|| {
+        Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string())
+    })?;
 
     let db = state.db.load_full();
     let _guard = state.write_lock.read().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        Ok::<_, Error>(corrections::validate_corrections_file(&conn, &workspace_root))
+        Ok::<_, Error>(corrections::validate_corrections_file(
+            &conn,
+            &workspace_root,
+        ))
     })
     .await??;
     drop(_guard);
@@ -1043,14 +1061,10 @@ async fn handle_validate_corrections(state: Arc<AppState>) -> Result<Value, Erro
     }))
 }
 
-async fn handle_apply_corrections(
-    req: &IpcRequest,
-    state: Arc<AppState>,
-) -> Result<Value, Error> {
-    let workspace_root = state
-        .workspace_root
-        .clone()
-        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let workspace_root = state.workspace_root.clone().ok_or_else(|| {
+        Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string())
+    })?;
 
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
@@ -1058,7 +1072,11 @@ async fn handle_apply_corrections(
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        Ok::<_, Error>(corrections::apply_corrections_file(&conn, &workspace_root, dry_run))
+        Ok::<_, Error>(corrections::apply_corrections_file(
+            &conn,
+            &workspace_root,
+            dry_run,
+        ))
     })
     .await??;
     drop(_guard);
@@ -1080,10 +1098,9 @@ async fn handle_reprocess_entity_types(
     req: &IpcRequest,
     state: Arc<AppState>,
 ) -> Result<Value, Error> {
-    state
-        .workspace_root
-        .as_ref()
-        .ok_or_else(|| Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string()))?;
+    state.workspace_root.as_ref().ok_or_else(|| {
+        Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string())
+    })?;
 
     let group_id = req.params["group_id"]
         .as_str()
@@ -1113,7 +1130,10 @@ async fn handle_reprocess_entity_types(
 
     let mut types: Vec<String> = Vec::with_capacity(entities.len());
     for chunk in pairs.chunks(corrections::REPROCESS_BATCH_SIZE) {
-        let refs: Vec<(&str, &str)> = chunk.iter().map(|(n, s)| (n.as_str(), s.as_str())).collect();
+        let refs: Vec<(&str, &str)> = chunk
+            .iter()
+            .map(|(n, s)| (n.as_str(), s.as_str()))
+            .collect();
         match state.extractor.classify_entities(&refs).await {
             Ok(mut batch) => {
                 batch.resize(chunk.len(), String::new());
@@ -1195,11 +1215,9 @@ fn build_cancel_fn(tx: &UnboundedSender<Value>) -> Box<dyn Fn() -> bool + Send> 
     Box::new(move || tx.is_closed())
 }
 
-fn build_progress_fn(
-    tx: Option<UnboundedSender<Value>>,
-) -> Option<Box<dyn Fn(&ReplayProgress) -> bool + Send>> {
+fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
     tx.map(|tx| {
-        let f: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
+        let f: ProgressFn = Box::new(move |p| {
             let val = json!({
                 "type": "progress",
                 "message": p.message,
@@ -1234,7 +1252,11 @@ fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
                 .iter()
                 .filter_map(|e| e.as_str().map(str::to_string))
                 .collect();
-            if gids.is_empty() { None } else { Some(gids) }
+            if gids.is_empty() {
+                None
+            } else {
+                Some(gids)
+            }
         }
         Value::String(s) => Some(vec![s.clone()]),
         _ => None,

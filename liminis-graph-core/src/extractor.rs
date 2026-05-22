@@ -171,10 +171,7 @@ impl AnthropicExtractor {
         }
     }
 
-    async fn do_classify_entities(
-        &self,
-        entities: &[(&str, &str)],
-    ) -> Result<Vec<String>, Error> {
+    async fn do_classify_entities(&self, entities: &[(&str, &str)]) -> Result<Vec<String>, Error> {
         if entities.is_empty() {
             return Ok(vec![]);
         }

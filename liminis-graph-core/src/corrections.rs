@@ -83,7 +83,9 @@ pub struct ReprocessResult {
 // ── File location ─────────────────────────────────────────────────────────────
 
 pub fn corrections_file_path(workspace_root: &Path) -> PathBuf {
-    workspace_root.join(".liminis").join("knowledge-corrections.yaml")
+    workspace_root
+        .join(".liminis")
+        .join("knowledge-corrections.yaml")
 }
 
 // ── File I/O ──────────────────────────────────────────────────────────────────
@@ -96,8 +98,8 @@ pub fn read_corrections_file(path: &Path) -> Result<Option<CorrectionsFile>, Err
     }
     let text = std::fs::read_to_string(path)
         .map_err(|e| Error::Ipc(format!("failed to read corrections file: {e}")))?;
-    let file: CorrectionsFile = serde_yaml::from_str(&text)
-        .map_err(|e| Error::Ipc(format!("YAML parse error: {e}")))?;
+    let file: CorrectionsFile =
+        serde_yaml::from_str(&text).map_err(|e| Error::Ipc(format!("YAML parse error: {e}")))?;
     Ok(Some(file))
 }
 
@@ -118,16 +120,17 @@ pub fn patch_applied_at(path: &Path, id: &str, ts: &str) -> Result<(), Error> {
         .iter()
         .position(|l| {
             let t = l.trim();
-            let val = if let Some(rest) = t.strip_prefix("- id:") {
-                Some(rest.trim().trim_matches('"').trim_matches('\''))
-            } else if let Some(rest) = t.strip_prefix("id:") {
-                Some(rest.trim().trim_matches('"').trim_matches('\''))
-            } else {
-                None
-            };
+            let val = t
+                .strip_prefix("- id:")
+                .or_else(|| t.strip_prefix("id:"))
+                .map(|rest| rest.trim().trim_matches('"').trim_matches('\''));
             val == Some(id)
         })
-        .ok_or_else(|| Error::Ipc(format!("correction id '{id}' not found in corrections file")))?;
+        .ok_or_else(|| {
+            Error::Ipc(format!(
+                "correction id '{id}' not found in corrections file"
+            ))
+        })?;
 
     // Find the list item (`- `) that contains this id (scan backwards)
     let item_line_idx = (0..=id_line_idx)
@@ -153,8 +156,8 @@ pub fn patch_applied_at(path: &Path, id: &str, ts: &str) -> Result<(), Error> {
     // Check if applied_at already exists in the block. Scan from item_line_idx
     // rather than id_line_idx because YAML keys are unordered — applied_at may appear
     // before id in the serialized output.
-    let applied_at_idx = (item_line_idx..block_end)
-        .find(|&i| lines[i].trim_start().starts_with("applied_at:"));
+    let applied_at_idx =
+        (item_line_idx..block_end).find(|&i| lines[i].trim_start().starts_with("applied_at:"));
 
     let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
     if let Some(idx) = applied_at_idx {
@@ -209,7 +212,13 @@ pub fn detect_cycles(entries: &[CorrectionEntry]) -> Vec<String> {
     for start in &nodes {
         if *state.get(start).unwrap_or(&0) == 0 {
             let mut path: Vec<String> = Vec::new();
-            dfs_detect(start, &alias_to_canonical, &mut state, &mut path, &mut cycles);
+            dfs_detect(
+                start,
+                &alias_to_canonical,
+                &mut state,
+                &mut path,
+                &mut cycles,
+            );
         }
     }
 
@@ -231,7 +240,8 @@ fn dfs_detect(
             1 => {
                 // Back edge → cycle found
                 let cycle_start = path.iter().position(|n| n == next).unwrap_or(0);
-                let cycle_nodes: Vec<&str> = path[cycle_start..].iter().map(|s| s.as_str()).collect();
+                let cycle_nodes: Vec<&str> =
+                    path[cycle_start..].iter().map(|s| s.as_str()).collect();
                 cycles.push(format!(
                     "Alias cycle: {} -> {}",
                     cycle_nodes.join(" -> "),
@@ -277,7 +287,11 @@ pub fn validate_corrections_file(conn: &Conn, workspace_root: &Path) -> Validate
     };
 
     let total = file.corrections.len();
-    let unapplied = file.corrections.iter().filter(|e| e.applied_at.is_none()).count();
+    let unapplied = file
+        .corrections
+        .iter()
+        .filter(|e| e.applied_at.is_none())
+        .count();
     let mut issues: Vec<String> = Vec::new();
     let warnings: Vec<String> = Vec::new();
 
@@ -356,11 +370,7 @@ pub fn validate_corrections_file(conn: &Conn, workspace_root: &Path) -> Validate
 
 // ── apply_corrections_file ────────────────────────────────────────────────────
 
-pub fn apply_corrections_file(
-    conn: &Conn,
-    workspace_root: &Path,
-    dry_run: bool,
-) -> ApplyResult {
+pub fn apply_corrections_file(conn: &Conn, workspace_root: &Path, dry_run: bool) -> ApplyResult {
     let path = corrections_file_path(workspace_root);
 
     let file = match read_corrections_file(&path) {
@@ -450,7 +460,9 @@ fn apply_same_as(
 
     let aliases = entry.aliases.as_deref().unwrap_or(&[]);
     if aliases.is_empty() {
-        return Err(Error::Ipc("same_as requires non-empty 'aliases'".to_string()));
+        return Err(Error::Ipc(
+            "same_as requires non-empty 'aliases'".to_string(),
+        ));
     }
 
     for alias_name in aliases {
@@ -526,7 +538,12 @@ fn apply_same_as(
         patch_applied_at(path, &entry.id, ts)?;
     }
 
-    Ok(if dry_run { "dry_run:same_as" } else { "same_as" }.to_string())
+    Ok(if dry_run {
+        "dry_run:same_as"
+    } else {
+        "same_as"
+    }
+    .to_string())
 }
 
 fn apply_retract(
@@ -536,9 +553,10 @@ fn apply_retract(
     ts: &str,
     dry_run: bool,
 ) -> Result<String, Error> {
-    let edge_uuid = entry.edge_uuid.as_deref().ok_or_else(|| {
-        Error::Ipc("retract requires 'edge_uuid'".to_string())
-    })?;
+    let edge_uuid = entry
+        .edge_uuid
+        .as_deref()
+        .ok_or_else(|| Error::Ipc("retract requires 'edge_uuid'".to_string()))?;
 
     // Verify edge exists (same check as validate_corrections per FR-015 dry_run requirement)
     conn.get_edge_by_uuid(edge_uuid)?
@@ -549,7 +567,12 @@ fn apply_retract(
         patch_applied_at(path, &entry.id, ts)?;
     }
 
-    Ok(if dry_run { "dry_run:retract" } else { "retract" }.to_string())
+    Ok(if dry_run {
+        "dry_run:retract"
+    } else {
+        "retract"
+    }
+    .to_string())
 }
 
 fn resolve_canonical(conn: &Conn, entry: &CorrectionEntry) -> Result<EntityRow, Error> {
@@ -597,10 +620,7 @@ pub fn list_all_generic_entities(conn: &Conn, group_id: &str) -> Result<Vec<Enti
 /// Phase B: applies specific entity type labels.
 /// `updates` is a slice of (entity_uuid, specific_type_label) pairs.
 /// Returns the number of entities actually updated.
-pub fn apply_entity_type_labels(
-    conn: &Conn,
-    updates: &[(String, String)],
-) -> Result<usize, Error> {
+pub fn apply_entity_type_labels(conn: &Conn, updates: &[(String, String)]) -> Result<usize, Error> {
     let mut count = 0;
     for (uuid, entity_type) in updates {
         if entity_type.is_empty() {
@@ -646,7 +666,10 @@ mod tests {
         let result = read_corrections_file(&path);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("YAML parse error"), "expected parse error, got: {err}");
+        assert!(
+            err.contains("YAML parse error"),
+            "expected parse error, got: {err}"
+        );
     }
 
     #[test]
