@@ -69,7 +69,7 @@ liminis-app starts the embedder sidecar, waits until it reports healthy, then st
 
 - **FR-001**: The sidecar MUST expose `POST /` (path configurable via `GRAPHITI_EMBEDDING_PATH`, default `/`) accepting `{"text": "<string>", "model": "<string>"}` and returning `{"embedding": [<floats>]}` with HTTP 200.
 - **FR-002**: The sidecar MUST expose `GET /health` returning HTTP 200 with `{"ok": true}` when the model is fully loaded and ready to serve, and HTTP 503 when not yet ready. No other status codes are expected on this path.
-- **FR-003**: The sidecar MUST bind to the address and port derived from `GRAPHITI_EMBEDDING_URL` (default `127.0.0.1:8765`). If the env var is unset, the defaults apply.
+- **FR-003**: The sidecar MUST bind to the address and port derived from `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`). If the env var is unset, the defaults apply.
 - **FR-004**: The sidecar MUST load the model named by `GRAPHITI_EMBEDDING_MODEL` (default `bge-base-en-v1.5`) via `sentence-transformers` at startup. The `/health` endpoint MUST return 503 until the model is fully loaded.
 - **FR-005**: The sidecar MUST return HTTP 400 for `POST /` with an empty `text` field or a missing `text` field.
 - **FR-006**: The sidecar MUST return HTTP 400 for `POST /` when the `model` field names a model other than the one loaded at startup (the sidecar loads exactly one model; runtime hot-swap is out of scope).
@@ -95,7 +95,7 @@ liminis-app starts the embedder sidecar, waits until it reports healthy, then st
 
 - **SC-001**: `POST /` with a non-empty text string returns a 768-element (or `GRAPHITI_EMBEDDING_DIM`-element) float array within 5 seconds on a warm sidecar (model already loaded).
 - **SC-002**: `GET /health` returns HTTP 200 within 500 ms of the model finishing its load, and returns HTTP 503 during loading — verified by timing the health poll against a fresh sidecar startup.
-- **SC-003**: `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, and `knowledge_process_chunk` all return successful JSON-RPC results (not HTTP-error errors) when the sidecar is running alongside liminis-graph — verified end-to-end against a real LadybugDB.
+- **SC-003**: `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_process_chunk`, and `knowledge_reprocess_entity_types` all return successful JSON-RPC results (not HTTP-error errors) when the sidecar is running alongside liminis-graph — verified end-to-end against a real LadybugDB.
 - **SC-004**: Unmodified `HttpEmbedder::from_env()` in liminis-graph-core can complete an embedding round-trip against the sidecar without code changes to the Rust crate.
 - **SC-005**: The liminis-graph README contains a section explaining the sidecar dependency, the `GRAPHITI_EMBEDDING_URL` env var, and how to start the sidecar manually.
 
