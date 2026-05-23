@@ -46,7 +46,7 @@ liminis-app polls `knowledge_status` every few seconds to display entity/edge/ep
 
 **Acceptance Scenarios**:
 
-1. **Given** a DB with 50 entities, 120 edges, and 30 episodes, **When** a client sends `knowledge_status`, **Then** the response contains `entity_count: 50`, `edge_count: 120`, `episode_count: 30`, plus `database_path` and `embedding_model`.
+1. **Given** a DB with 50 entities, 120 relationships, and 30 episodes, **When** a client sends `knowledge_status`, **Then** the response contains `entity_count: 50`, `relationship_count: 120`, `episode_count: 30`, `graphiti_initialized: true`, `connected: true`, `initializing: false`, plus `database_path` and `embedding_model`.
 2. **Given** a populated WAL directory containing files, **When** `knowledge_status` is called, **Then** the response contains a `wal` subobject with `exists: true`, `file_count: <n>`, `byte_size: <total bytes>`.
 3. **Given** a WAL directory that exists but is empty (zero `.jsonl` files), **When** `knowledge_status` is called, **Then** `wal` subobject contains `exists: true`, `file_count: 0`, `byte_size: 0`.
 4. **Given** a field the Rust service does not cheaply compute (e.g., LLM cost, cumulative uptime), **When** `knowledge_status` is called, **Then** that field is **absent from the JSON object** — it MUST NOT appear as `null`, `0`, `false`, or any fabricated value.
@@ -88,7 +88,7 @@ The indexing queue calls `knowledge_process_chunk` for each document chunk. The 
 
 - **FR-001**: The service MUST accept JSON-RPC 2.0 over Unix socket for the three new methods: `health_check`, `knowledge_status`, `knowledge_process_chunk`. Transport and framing are unchanged from existing handlers.
 - **FR-002**: `health_check` MUST return `{"ok": true}` when the DB is open and queryable. It MUST return a JSON-RPC error object (not `ok: false`) when the DB is unavailable, naming the failed subsystem in the `message` field. It MUST NOT block if the DB is initialising. Warm-path latency MUST be under 10 ms.
-- **FR-003**: `knowledge_status` MUST include the following fields in its result object: `database_path` (string), `embedding_model` (string), `embedding_dim` (integer), `entity_count` (integer), `edge_count` (integer), `episode_count` (integer), `wal` (object with `exists`, `file_count`, `byte_size`).
+- **FR-003**: `knowledge_status` MUST include the following fields in its result object: `database_path` (string), `embedding_model` (string), `embedding_dim` (integer), `entity_count` (integer), `relationship_count` (integer), `episode_count` (integer), `wal` (object with `exists`, `file_count`, `byte_size`), `graphiti_initialized` (bool), `connected` (bool), `initializing` (bool). The field `last_index_time` (string, ISO 8601) MUST be included when at least one episode exists, and omitted (not null) when no episodes exist.
 - **FR-004**: Any Python `knowledge_status` response field that the Rust service cannot cheaply compute MUST be **omitted entirely** from the response — not set to `null`, `0`, `false`, or any placeholder. Deferred fields MUST be enumerated in the release notes for this issue with a follow-up tracking issue reference.
 - **FR-005**: `knowledge_process_chunk` MUST accept the following parameter names matching Python: `chunk_text` (string, required), `chunk_id` (string, required), `source_file` (string, required), `group_id` (string, optional, default `"liminis"`), `reference_time` (ISO 8601 string, optional, default now).
 - **FR-006**: `knowledge_process_chunk` MUST return a result object with the following fields matching Python: `success` (bool), `chunk_id` (string), `source_file` (string), `episode_uuid` (string), `nodes_extracted` (integer), `edges_extracted` (integer), `duration_seconds` (float).
@@ -100,7 +100,7 @@ The indexing queue calls `knowledge_process_chunk` for each document chunk. The 
 ### Key Entities
 
 - **health_check result**: `{"ok": true}` on success; JSON-RPC error object on failure.
-- **knowledge_status result**: Subset of Python's response shape. Required fields: `database_path`, `embedding_model`, `embedding_dim`, `entity_count`, `edge_count`, `episode_count`, `wal`. All other Python fields omitted unless cheaply computable.
+- **knowledge_status result**: Subset of Python's response shape. Required fields: `database_path`, `embedding_model`, `embedding_dim`, `entity_count`, `relationship_count`, `episode_count`, `wal`, `graphiti_initialized`, `connected`, `initializing`. `last_index_time` (ISO 8601 string) is included when episodes exist, absent otherwise. `index_created_at` is deferred (tracked in issue #47). All other Python fields omitted unless cheaply computable.
 - **WAL subobject**: `{"exists": bool, "file_count": int, "byte_size": int}`. Populated by scanning `GRAPHITI_WAL_DIR` (or equivalent configured path) at request time.
 - **knowledge_process_chunk params**: `chunk_text` → `episode_body`, `chunk_id` → episode `name` and `source_description` (matching Python's behavior; `source_file` is validated and returned in the response but not stored in the episodic node), `source` defaults to `"text"`, `group_id` → `group_id`, `reference_time` → `reference_time`.
 - **knowledge_process_chunk result**: `{"success": true, "chunk_id": str, "source_file": str, "episode_uuid": str, "nodes_extracted": int, "edges_extracted": int, "duration_seconds": float}`.
