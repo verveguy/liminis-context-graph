@@ -48,6 +48,7 @@ specs/                       # feature specifications
 |----------|----------|-------------|
 | `GRAPHITI_SOCKET_PATH` | Yes | Unix socket path the IPC daemon listens on |
 | `GRAPHITI_DB_PATH` | Yes | Path to the LadybugDB database file |
+| `GRAPHITI_EMBEDDING_URL` | No | Base URL for the HTTP embedder sidecar (default `http://127.0.0.1:8765`) |
 | `GRAPHITI_EMBEDDING_MODEL` | No | Embedding model name (default `bge-base-en-v1.5`) |
 | `GRAPHITI_EMBEDDING_DIM` | No | Embedding vector dimension (default 768) |
 | `GRAPHITI_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
@@ -64,6 +65,43 @@ specs/                       # feature specifications
 | `thiserror` | `2` | Error type generation |
 
 No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.
+
+## Embedder Sidecar
+
+`HttpEmbedder` delegates embedding to an external HTTP service. You must start the embedder sidecar **before** starting the liminis-graph binary. Without it, the following five IPC methods fail immediately with an HTTP connection error:
+
+- `knowledge_find_entities`
+- `knowledge_find_relationships`
+- `knowledge_search_passages`
+- `knowledge_process_chunk`
+- `knowledge_reprocess_entity_types`
+
+Read-only methods that do not call the embedder (`health_check`, `knowledge_status`, `knowledge_list_entities`, `knowledge_get_episodes`) continue to work without the sidecar.
+
+### Sidecar location
+
+The sidecar script lives in the `liminis-framework` repository at:
+
+```
+framework/src/skills/knowledge-graph/scripts/embedder_server.py
+```
+
+### Starting manually
+
+```bash
+# From the liminis-framework checkout:
+uv run framework/src/skills/knowledge-graph/scripts/embedder_server.py
+```
+
+The sidecar binds to `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`). It logs model loading progress to stderr. Poll `GET /health` to confirm readiness before starting liminis-graph:
+
+```bash
+until curl -sf http://127.0.0.1:8765/health | grep -q '"ok":true'; do
+  echo "waiting for embedder…"; sleep 1
+done
+```
+
+See [ADR 0044](docs/adr/0044-embedder-http-contract.md) for the full HTTP contract specification.
 
 ## Architecture decisions
 
