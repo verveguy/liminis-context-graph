@@ -108,7 +108,7 @@ fn test_fts_index_creation_and_query() {
     // FTS index created by init_schema above; query using lbug-native syntax (no YIELD)
     let rows = conn
         .cypher_query(
-            "CALL QUERY_FTS_INDEX('Entity', 'entity_name_fts', 'Alice') \
+            "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', 'Alice') \
              WITH node, score RETURN node.uuid, score",
         )
         .unwrap();
