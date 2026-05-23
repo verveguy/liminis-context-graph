@@ -1004,9 +1004,9 @@ impl<'db> Conn<'db> {
     /// Returns the `created_at` of the most-recently created Episodic node, or `None` if there
     /// are no episodes yet.
     pub fn get_latest_episode_time(&self) -> Result<Option<String>, Error> {
-        let result = self
-            .inner
-            .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at DESC LIMIT 1")?;
+        let result = self.inner.query(
+            "MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at DESC LIMIT 1",
+        )?;
         Ok(result
             .into_iter()
             .next()
