@@ -27,6 +27,7 @@ use liminis_graph_core::{
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
 };
+use regex::Regex;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -349,6 +350,10 @@ async fn test_knowledge_status_empty_db() {
         r["last_index_time"].is_null(),
         "expected last_index_time:null on empty db: {v}"
     );
+    assert!(
+        r.get("index_created_at").is_none(),
+        "expected index_created_at to be absent from empty-DB response: {v}"
+    );
 }
 
 #[tokio::test]
@@ -387,6 +392,14 @@ async fn test_knowledge_status_counts() {
     assert!(
         r["last_index_time"].as_str().is_some(),
         "expected non-null last_index_time after ingestion: {v}"
+    );
+    let ica = r["index_created_at"]
+        .as_str()
+        .expect("expected index_created_at to be a string");
+    let iso8601 = Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$").unwrap();
+    assert!(
+        iso8601.is_match(ica),
+        "expected index_created_at to be ISO 8601 UTC, got: {ica}"
     );
 }
 
