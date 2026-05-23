@@ -127,7 +127,16 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 }
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task.
-type StatusFields = (u64, u64, u64, bool, u64, u64, Option<String>, Option<String>);
+type StatusFields = (
+    u64,
+    u64,
+    u64,
+    bool,
+    u64,
+    u64,
+    Option<String>,
+    Option<String>,
+);
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let db = state.db.load_full();
