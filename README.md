@@ -96,7 +96,7 @@ uv run framework/src/skills/knowledge-graph/scripts/embedder_server.py
 The sidecar binds to `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`). It logs model loading progress to stderr. Poll `GET /health` to confirm readiness before starting liminis-graph:
 
 ```bash
-until curl -sf http://127.0.0.1:8765/health | grep -q '"ok":true'; do
+until curl -sf http://127.0.0.1:8765/health | grep -q '"ok": *true'; do
   echo "waiting for embedder…"; sleep 1
 done
 ```
