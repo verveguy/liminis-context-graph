@@ -44,7 +44,7 @@ Response body (HTTP 200):
 |----------|----------|---------|-------------|
 | `GRAPHITI_EMBEDDING_URL` | `HttpEmbedder` (reads) + sidecar (binds) | `http://127.0.0.1:8765` | Full URL `HttpEmbedder` posts to; sidecar extracts host:port from this |
 | `GRAPHITI_EMBEDDING_MODEL` | `HttpEmbedder` (sends in body) + sidecar (loads at startup) | `bge-base-en-v1.5` / `BAAI/bge-base-en-v1.5` | See model-name normalization below |
-| `GRAPHITI_EMBEDDING_DIM` | `HttpEmbedder` (validates) | `768` | Expected vector length; sidecar output must match |
+| `GRAPHITI_EMBEDDING_DIM` | `HttpEmbedder` (reads) + sidecar (warns on mismatch) | `768` | Expected vector length; sidecar logs a warning at startup if the loaded model's actual dim differs |
 | `GRAPHITI_EMBEDDING_PATH` | sidecar (mounts route) | `/` | Path the sidecar mounts the embed endpoint on; must match the path in `GRAPHITI_EMBEDDING_URL` |
 
 ### L2 Normalization is Mandatory
