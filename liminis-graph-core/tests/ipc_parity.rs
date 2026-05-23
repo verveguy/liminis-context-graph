@@ -12,7 +12,7 @@
 // scripts/record_corpus.py and set PARITY_GOLDEN=1 (see tests/fixtures/README.md).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
@@ -866,15 +866,38 @@ async fn test_get_entity_neighbors_after_ingest() {
 // scripts/record_corpus.py against a live Python graphiti service
 // (see tests/fixtures/README.md).
 
-fn baseline_db_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+/// Copies the baseline_db fixture into a fresh TempDir and returns the path
+/// inside the copy alongside the TempDir (which must stay alive for the test).
+/// Protects the original fixture from the write transactions that Db::open
+/// issues (INSTALL / LOAD EXTENSION are write transactions in lbug).
+fn open_baseline_db() -> Option<(PathBuf, TempDir)> {
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/baseline_db/liminis.db");
-    if p.exists() { Some(p) } else { None }
+    if !src.exists() {
+        return None;
+    }
+    let tmp = TempDir::new().ok()?;
+    let dst = tmp.path().join("liminis.db");
+    copy_path(&src, &dst).ok()?;
+    Some((dst, tmp))
+}
+
+fn copy_path(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_path(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
 }
 
 #[test]
 fn python_db_index_names_fts_entities() {
-    let Some(path) = baseline_db_path() else {
+    let Some((path, _tmp)) = open_baseline_db() else {
         eprintln!(
             "SKIP python_db_index_names_fts_entities: \
              tests/fixtures/baseline_db/liminis.db absent — \
@@ -882,7 +905,7 @@ fn python_db_index_names_fts_entities() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     let result = conn.fts_search_entities("test", &["*"], 5);
     assert!(
@@ -894,7 +917,7 @@ fn python_db_index_names_fts_entities() {
 
 #[test]
 fn python_db_index_names_fts_edges() {
-    let Some(path) = baseline_db_path() else {
+    let Some((path, _tmp)) = open_baseline_db() else {
         eprintln!(
             "SKIP python_db_index_names_fts_edges: \
              tests/fixtures/baseline_db/liminis.db absent — \
@@ -902,7 +925,7 @@ fn python_db_index_names_fts_edges() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     let result = conn.fts_search_edges("test", &["*"], 5);
     assert!(
@@ -914,7 +937,7 @@ fn python_db_index_names_fts_edges() {
 
 #[test]
 fn python_db_index_names_vector_entities() {
-    let Some(path) = baseline_db_path() else {
+    let Some((path, _tmp)) = open_baseline_db() else {
         eprintln!(
             "SKIP python_db_index_names_vector_entities: \
              tests/fixtures/baseline_db/liminis.db absent — \
@@ -922,7 +945,7 @@ fn python_db_index_names_vector_entities() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
     let result = conn.vector_search_entities(&vec![0.0_f32; 768], &["*"], 5);
@@ -935,7 +958,7 @@ fn python_db_index_names_vector_entities() {
 
 #[test]
 fn python_db_index_names_vector_edges() {
-    let Some(path) = baseline_db_path() else {
+    let Some((path, _tmp)) = open_baseline_db() else {
         eprintln!(
             "SKIP python_db_index_names_vector_edges: \
              tests/fixtures/baseline_db/liminis.db absent — \
@@ -943,7 +966,7 @@ fn python_db_index_names_vector_edges() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
     let result = conn.vector_search_edges(&vec![0.0_f32; 768], &["*"], 5);
