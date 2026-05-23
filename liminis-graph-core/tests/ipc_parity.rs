@@ -853,3 +853,103 @@ async fn test_get_entity_neighbors_after_ingest() {
          two-hop write/read may be broken: {v}"
     );
 }
+
+// ── Python-DB index name regression tests (FR-005) ───────────────────────────
+//
+// These tests open the Python-populated baseline_db fixture without any schema
+// init or index creation, then call every method that queries an index by name.
+// They guard against the class of bug in issue #49: Rust using a different index
+// name than the Python graphiti service used when creating the DB.
+//
+// The fixture at tests/fixtures/baseline_db/liminis.db is NOT committed to git.
+// These tests skip gracefully when the file is absent. To populate it, run
+// scripts/record_corpus.py against a live Python graphiti service
+// (see tests/fixtures/README.md).
+
+fn baseline_db_path() -> Option<PathBuf> {
+    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/baseline_db/liminis.db");
+    if p.exists() { Some(p) } else { None }
+}
+
+#[test]
+fn python_db_index_names_fts_entities() {
+    let Some(path) = baseline_db_path() else {
+        eprintln!(
+            "SKIP python_db_index_names_fts_entities: \
+             tests/fixtures/baseline_db/liminis.db absent — \
+             run scripts/record_corpus.py to populate it"
+        );
+        return;
+    };
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let conn = db.connect().expect("connect");
+    let result = conn.fts_search_entities("test", &["*"], 5);
+    assert!(
+        result.is_ok(),
+        "fts_search_entities failed against Python DB (index name mismatch?): {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn python_db_index_names_fts_edges() {
+    let Some(path) = baseline_db_path() else {
+        eprintln!(
+            "SKIP python_db_index_names_fts_edges: \
+             tests/fixtures/baseline_db/liminis.db absent — \
+             run scripts/record_corpus.py to populate it"
+        );
+        return;
+    };
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let conn = db.connect().expect("connect");
+    let result = conn.fts_search_edges("test", &["*"], 5);
+    assert!(
+        result.is_ok(),
+        "fts_search_edges failed against Python DB (index name mismatch?): {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn python_db_index_names_vector_entities() {
+    let Some(path) = baseline_db_path() else {
+        eprintln!(
+            "SKIP python_db_index_names_vector_entities: \
+             tests/fixtures/baseline_db/liminis.db absent — \
+             run scripts/record_corpus.py to populate it"
+        );
+        return;
+    };
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let conn = db.connect().expect("connect");
+    // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
+    let result = conn.vector_search_entities(&vec![0.0_f32; 768], &["*"], 5);
+    assert!(
+        result.is_ok(),
+        "vector_search_entities failed against Python DB (index name mismatch?): {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn python_db_index_names_vector_edges() {
+    let Some(path) = baseline_db_path() else {
+        eprintln!(
+            "SKIP python_db_index_names_vector_edges: \
+             tests/fixtures/baseline_db/liminis.db absent — \
+             run scripts/record_corpus.py to populate it"
+        );
+        return;
+    };
+    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db");
+    let conn = db.connect().expect("connect");
+    // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
+    let result = conn.vector_search_edges(&vec![0.0_f32; 768], &["*"], 5);
+    assert!(
+        result.is_ok(),
+        "vector_search_edges failed against Python DB (index name mismatch?): {:?}",
+        result.err()
+    );
+}
