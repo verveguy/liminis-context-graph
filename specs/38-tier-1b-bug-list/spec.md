@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-38`
 **Created**: 2026-05-22
-**Status**: Draft
+**Status**: Implemented
 **Input**: User description: "list_relationships and get_entity_neighbors return Cypher binder errors against real workspaces because the queries use [r:RELATES_TO] with property access, but the production LadybugDB schema stores edges as RelatesToNode_ nodes."
 
 ## Background
@@ -15,7 +15,7 @@ Binder exception: Cannot find property uuid for r.
 
 The root cause is an inconsistency between the LadybugDB schema as written by the Python graphiti service and the Cypher queries used by some read methods in `liminis-graph-core/src/db.rs`.
 
-**Dual-encoding in `insert_relates_to_edge`**: The Rust write path creates both a `RelatesToNode_` shadow node (holding all edge properties: `uuid`, `name`, `fact`, `fact_embedding`, etc.) and a direct `[:RELATES_TO]` relationship between Entity nodes (with property copies). However, the Python graphiti service apparently does not create a direct `RELATES_TO` relationship with properties — it uses a different traversal pattern (likely `(src:Entity)-[:MENTIONS]->(n:RelatesToNode_)-[:MENTIONS]->(dst:Entity)`) that the Research stage must verify against the Python `EntityEdge` ORM and the live demo-notebook DB.
+**Dual-encoding in `insert_relates_to_edge`**: The Rust write path creates both a `RelatesToNode_` shadow node (holding all edge properties: `uuid`, `name`, `fact`, `fact_embedding`, etc.) and a direct `[:RELATES_TO]` relationship between Entity nodes (with property copies). The Python graphiti service does **not** create the direct `Entity→Entity RELATES_TO` relationship — it uses the two-hop pattern `(src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity)`, as verified by the Research stage against `graphiti_core/driver/ladybug_driver.py` (schema) and `graphiti_core/driver/ladybug/hnsw_safe_writes.py` (write path).
 
 **The symptom**: Read queries that pattern-match `(src:Entity)-[r:RELATES_TO]->(dst:Entity)` and then access `r.uuid` / `r.name` crash on Python-populated workspaces because either (a) no `RELATES_TO` relationship exists, or (b) it exists without the expected properties. This affects:
 
