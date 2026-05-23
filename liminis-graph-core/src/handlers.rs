@@ -137,7 +137,6 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let wal_dir = state.wal_dir.clone();
 
     let _guard = state.write_lock.read().await;
-    type StatusFields = (u64, u64, u64, bool, u64, u64, Option<String>);
     let (
         entity_count,
         episode_count,
