@@ -1013,6 +1013,24 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_timestamp_str(&row[0])))
     }
 
+    /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
+    pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
+        let result = self
+            .inner
+            .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at ASC LIMIT 1")
+            .map_err(|e| Error::QueryFailed(format!("get_earliest_episode_time failed: {e}")))?;
+        for row in result {
+            match &row[0] {
+                lbug::Value::Null(_) => return Ok(None),
+                lbug::Value::Timestamp(dt) => {
+                    return Ok(Some(format_datetime_iso8601(*dt)));
+                }
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
+
     /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
     pub fn probe(&self) -> Result<(), Error> {
         self.inner
@@ -1327,6 +1345,18 @@ fn format_datetime(dt: time::OffsetDateTime) -> String {
     // Format as "YYYY-MM-DD HH:MM:SS" (matches Python graphiti wire format)
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
+fn format_datetime_iso8601(dt: time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         dt.year(),
         dt.month() as u8,
         dt.day(),
