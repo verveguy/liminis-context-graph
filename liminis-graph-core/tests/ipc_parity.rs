@@ -775,18 +775,26 @@ async fn test_list_relationships_after_ingest() {
     )
     .await;
     assert_ok_resp(&v, 61);
-    let facts = v["result"]["facts"].as_array().expect("expected facts array");
+    let facts = v["result"]["facts"]
+        .as_array()
+        .expect("expected facts array");
     assert!(
         !facts.is_empty(),
         "expected ≥1 relationship after ingest, got 0 — two-hop write/read may be broken: {v}"
     );
     let fact = &facts[0];
     assert!(
-        fact["uuid"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        fact["uuid"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "fact uuid should be non-empty: {v}"
     );
     assert!(
-        fact["fact"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        fact["fact"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "fact.fact should be non-empty: {v}"
     );
 }
@@ -820,7 +828,9 @@ async fn test_get_entity_neighbors_after_ingest() {
     )
     .await;
     assert_ok_resp(&lr, 63);
-    let facts = lr["result"]["facts"].as_array().expect("expected facts array");
+    let facts = lr["result"]["facts"]
+        .as_array()
+        .expect("expected facts array");
     assert!(!facts.is_empty(), "expected ≥1 relationship: {lr}");
     let src_uuid = facts[0]["source_node_uuid"]
         .as_str()
