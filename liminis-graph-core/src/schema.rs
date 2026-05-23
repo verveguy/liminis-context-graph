@@ -92,9 +92,16 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 }
 
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
-    // Errors mean "already exists" — suppress them for idempotency
-    let _ = conn.raw_query("CALL CREATE_FTS_INDEX('Entity', 'entity_name_fts', ['name'])");
-    let _ =
-        conn.raw_query("CALL CREATE_FTS_INDEX('RelatesToNode_', 'relates_to_fact_fts', ['fact'])");
+    // Errors mean "already exists" — suppress them for idempotency.
+    // Index names and covered columns match the Python graphiti service (canonical source).
+    let _ = conn
+        .raw_query("CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])");
+    let _ = conn.raw_query(
+        "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
+    );
+    let _ = conn.raw_query(
+        "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
+         ['content', 'source', 'source_description'])",
+    );
     Ok(())
 }
