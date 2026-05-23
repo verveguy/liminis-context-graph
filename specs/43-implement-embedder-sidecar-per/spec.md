@@ -64,7 +64,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 
 ### Edge Cases
 
-- `EMBEDDER_HOST` / `EMBEDDER_PORT` env vars override the default bind address — both must be respected independently.
+- `GRAPHITI_EMBEDDING_URL` env var overrides the default bind address and port (both host and port are extracted from the URL).
 - `POST /` received while the model is still loading → HTTP 503, not a crash or hang.
 - Malformed JSON body → HTTP 400 with a message; the sidecar keeps running.
 - `"text"` field present but empty string → HTTP 400.
@@ -77,12 +77,12 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 ### Functional Requirements
 
 - **FR-001**: The sidecar MUST be a single Python file (`embedder_server.py`) with PEP 723 inline dependency metadata so it can be invoked directly with `uv run embedder_server.py` without any prior environment setup.
-- **FR-002**: The sidecar MUST bind to `127.0.0.1:8765` by default. The bind address and port MUST be overrideable via `EMBEDDER_HOST` and `EMBEDDER_PORT` environment variables respectively.
+- **FR-002**: The sidecar MUST bind to `127.0.0.1:8765` by default. The bind address and port MUST be overrideable via the `GRAPHITI_EMBEDDING_URL` environment variable (the sidecar extracts host and port from the URL). This supersedes the originally-proposed `EMBEDDER_HOST`/`EMBEDDER_PORT` split — using a single URL keeps the sidecar and `HttpEmbedder` (Rust) in lockstep, since both read `GRAPHITI_EMBEDDING_URL`. See ADR-044 Implementation Notes.
 - **FR-003**: The sidecar MUST serve `POST /` accepting `application/json` body `{"text": "<string>", "model": "<string>"}` and returning `{"embedding": [<N floats>]}` with HTTP 200. The `text` and `model` fields are both required.
 - **FR-004**: The sidecar MUST load `BAAI/bge-base-en-v1.5` via `sentence-transformers`. The returned embedding MUST have exactly 768 dimensions, matching the dimension expected by liminis-graph's `HttpEmbedder`.
 - **FR-005**: The sidecar MUST serve `GET /health`. While the model is loading, this endpoint MUST return HTTP 503 with body `{"ok": false}`. Once the model is ready, it MUST return HTTP 200 with body `{"ok": true}`. The ready state MUST NOT revert to 503 after the model has loaded.
 - **FR-006**: The sidecar MUST emit a structured log line at the moment it begins loading the model and a second structured log line at the moment the model is ready and the server is accepting requests.
-- **FR-007**: The sidecar MUST use FastAPI as its HTTP framework. The `uvicorn` ASGI server is the expected runner (included as a PEP 723 dependency).
+- **FR-007**: The sidecar MUST use `aiohttp` as its HTTP framework (`AppRunner`/`TCPSite` runner pattern). This supersedes the originally-proposed FastAPI + uvicorn — FastAPI's uvicorn runner opens the TCP socket inside or after the lifespan hook, so lifecycle pollers receive `ECONNREFUSED` during the cold-start window instead of HTTP 503. The `aiohttp` pattern binds the socket synchronously before model loading begins. See ADR-044 Implementation Notes.
 - **FR-008**: The sidecar MUST reject requests to `POST /` while the model is still loading with HTTP 503; it MUST NOT hang, crash, or queue the request indefinitely.
 - **FR-009**: `POST /` MUST return HTTP 400 for: (a) missing or empty `"text"` field, (b) missing `"model"` field, (c) `"model"` value that does not match the loaded model name, (d) malformed JSON body.
 - **FR-010**: The sidecar MUST operate over TCP only (no Unix socket transport). The `HttpEmbedder` in Rust already targets `http://127.0.0.1:8765/`; no Rust-side changes are required for this issue.
@@ -92,7 +92,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 
 ### Key Entities
 
-- **`embedder_server.py`**: Single-file PEP 723 Python script. Serves `POST /` (embed) and `GET /health`. Depends on `fastapi`, `uvicorn`, `sentence-transformers`, `torch`.
+- **`embedder_server.py`**: Single-file PEP 723 Python script. Serves `POST /` (embed) and `GET /health`. Depends on `aiohttp`, `sentence-transformers`.
 - **Embed request**: `{"text": "<non-empty string>", "model": "<model name>"}` — both fields required.
 - **Embed response**: `{"embedding": [<768 floats>]}` — exactly 768 dimensions for `bge-base-en-v1.5`.
 - **Health response (loading)**: HTTP 503, `{"ok": false}`.
@@ -106,7 +106,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 - **SC-002**: `curl -X POST http://127.0.0.1:8765/ -H 'content-type: application/json' -d '{"text":"hello","model":"bge-base-en-v1.5"}'` returns `{"embedding": [...]}` with exactly 768 floats.
 - **SC-003**: `GET /health` returns HTTP 503 while the model is loading and HTTP 200 `{"ok": true}` once the model is ready; it never returns 200 before the model is loaded.
 - **SC-004**: With the sidecar running on the default port, `knowledge_find_entities` completes end-to-end against demo-notebook without HTTP errors (verified using the repro from #39).
-- **SC-005**: Cold-start time from `uv run` invocation to first HTTP 200 from `/health` is measured and documented in the README; the documented value reflects a real CPU run (not a warm-cache run).
+- **SC-005**: Cold-start time from `uv run` invocation to first HTTP 200 from `/health` is documented in the README; the documented value reflects a CPU run with a warm HuggingFace cache (5–15 s). First-run time (which includes a ~500 MB model download) is noted separately.
 - **SC-006**: Port-collision: if `127.0.0.1:8765` is already in use, the sidecar exits non-zero with a clear error message naming the port; it does not start silently on a different port.
 
 ## Assumptions
@@ -116,7 +116,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 - The loaded model's embedding dimension is always 768 for `BAAI/bge-base-en-v1.5`. No dimension check beyond asserting the output shape at startup is required.
 - `HttpEmbedder` in liminis-graph currently calls `POST /` with `{"text": "...", "model": "..."}` and expects `{"embedding": [...]}` — the contract is defined in ADR-044. No changes to the Rust side are needed for this issue.
 - The sidecar is a single-process, single-worker server. Concurrency under load is not a requirement for this issue; embedding is CPU-bound and the in-process GIL serialises calls naturally.
-- FastAPI + uvicorn is an acceptable dependency footprint for a developer tool sidecar.
+- `aiohttp` + `sentence-transformers` is an acceptable dependency footprint for a developer tool sidecar. FastAPI + uvicorn was originally assumed but superseded by ADR-044 (server-before-model ordering requirement).
 - Logging goes to stdout; structured format (human-readable level + message) is sufficient. No JSON log format or log aggregation is required.
 
 ## Out of Scope
