@@ -36,7 +36,7 @@ Response body (HTTP 200):
 **Health endpoint** — `GET /health`:
 
 - HTTP 200 + `{"ok": true}` — model is loaded and ready
-- HTTP 503 — model is still loading; client should retry
+- HTTP 503 + `{"ok": false}` — model is still loading; client should retry
 
 ### Env Var Linkage
 
@@ -59,7 +59,7 @@ Exact string comparison would produce a false HTTP 400 in the unset default case
 
 ### Server-Before-Model Startup Ordering
 
-The HTTP server **must** bind and begin accepting connections before the `SentenceTransformer` model load begins. Model loading takes several seconds. If the socket is not open during load, lifecycle pollers cannot poll `GET /health` and will time out waiting for TCP connectivity. The sidecar uses `aiohttp`'s `AppRunner`/`TCPSite` runner pattern to achieve this: `runner.setup()` + `site.start()` binds the socket synchronously, then `asyncio.to_thread(SentenceTransformer, ...)` loads the model without blocking the event loop.
+The HTTP server **must** bind and begin accepting connections before the `SentenceTransformer` model load begins. Model loading takes typically 5–15 s on CPU (warm HuggingFace cache). If the socket is not open during load, lifecycle pollers cannot poll `GET /health` and will time out waiting for TCP connectivity. The sidecar uses `aiohttp`'s `AppRunner`/`TCPSite` runner pattern to achieve this: `runner.setup()` + `site.start()` binds the socket synchronously, then `asyncio.to_thread(SentenceTransformer, ...)` loads the model without blocking the event loop.
 
 ### Error Responses
 
@@ -73,6 +73,16 @@ The HTTP server **must** bind and begin accepting connections before the `Senten
 ### Concurrency
 
 The sidecar handles concurrent `POST /` requests by offloading each `encode()` call to a thread via `asyncio.to_thread`. The Python GIL serializes the CPU-bound encoding work itself; the `aiohttp` event loop remains responsive to incoming connections. No application-level serialization lock is introduced.
+
+## Implementation Notes
+
+### Framework: `aiohttp`, not FastAPI
+
+The sidecar uses `aiohttp`'s `AppRunner`/`TCPSite` runner pattern rather than FastAPI + uvicorn. FastAPI's uvicorn runner opens the TCP socket inside or after the lifespan hook — during the cold-start window (5–15 s of model loading) the socket is not bound and lifecycle pollers receive `ECONNREFUSED` instead of a 503. The `aiohttp` pattern binds the socket synchronously in `runner.setup()` + `site.start()`, then loads the model in a background thread, so `GET /health` returns 503 from the very first millisecond. Feature spec #43 originally specified FastAPI (FR-007); that requirement is superseded by this ADR.
+
+### Env Vars: `GRAPHITI_EMBEDDING_URL`, not `EMBEDDER_HOST`/`EMBEDDER_PORT`
+
+Both `HttpEmbedder` (Rust caller) and the sidecar read a single `GRAPHITI_EMBEDDING_URL` to determine the bind/target address. Feature spec #43 proposed splitting this into `EMBEDDER_HOST` and `EMBEDDER_PORT` (FR-002); that approach is superseded by this ADR. Using a single URL env var keeps the two processes in lockstep — setting `GRAPHITI_EMBEDDING_URL` once overrides both where the Rust crate sends requests and where the sidecar binds.
 
 ## Consequences
 
