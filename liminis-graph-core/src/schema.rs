@@ -59,8 +59,10 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
 /// Creates the RELATES_TO and MENTIONS relationship tables.
 ///
 /// RELATES_TO declares three FROM-TO pairs:
-///   Entity→Entity (Rust write path — carries all properties)
-///   Entity→RelatesToNode_ and RelatesToNode_→Entity (two-hop links — property-free)
+///   Entity→Entity (Rust write path — carries all property values)
+///   Entity→RelatesToNode_ and RelatesToNode_→Entity (two-hop navigation hops — no meaningful
+///     data on the rel; in Rust-initialized DBs the shared column schema means these rels have
+///     NULL values for uuid/name/etc., but reads always pull those from the RelatesToNode_ node)
 /// All reads use the two-hop pattern; the Entity→Entity pair is kept for schema compatibility.
 /// Note: `IF NOT EXISTS` is a no-op on Python-populated workspaces (schema already created
 /// without the Entity→Entity pair). Old Rust-only databases without two-hop links will return
