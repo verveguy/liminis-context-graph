@@ -246,7 +246,7 @@ impl<'db> Conn<'db> {
              'content_embedding', metric := 'cosine')",
         );
         let _ = self.raw_query(
-            "CALL CREATE_VECTOR_INDEX('RelatesToNode_', 'relates_to_fact_embedding_idx', \
+            "CALL CREATE_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
              'fact_embedding', metric := 'cosine')",
         );
         Ok(())
@@ -450,7 +450,7 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "CALL QUERY_FTS_INDEX('Entity', 'entity_name_fts', '{}') \
+            "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', '{}') \
              WITH node, score WHERE node.group_id IN {gid_list} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT {limit}",
@@ -468,7 +468,7 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "CALL QUERY_FTS_INDEX('RelatesToNode_', 'relates_to_fact_fts', '{}') \
+            "CALL QUERY_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', '{}') \
              WITH node, score WHERE node.group_id IN {gid_list} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT {limit}",
@@ -505,7 +505,7 @@ impl<'db> Conn<'db> {
         let vec_lit = format_float_array(embedding);
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "CALL QUERY_VECTOR_INDEX('RelatesToNode_', 'relates_to_fact_embedding_idx', \
+            "CALL QUERY_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
              {vec_lit}, {limit}) \
              WITH node, distance WHERE node.group_id IN {gid_list} \
              RETURN node.uuid, distance \
