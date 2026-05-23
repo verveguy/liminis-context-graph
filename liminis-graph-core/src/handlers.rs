@@ -127,7 +127,7 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 }
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task.
-type StatusFields = (u64, u64, u64, bool, u64, u64, Option<String>);
+type StatusFields = (u64, u64, u64, bool, u64, u64, Option<String>, Option<String>);
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let db = state.db.load_full();
@@ -145,12 +145,14 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         wal_file_count,
         wal_byte_size,
         last_index_time,
+        index_created_at,
     ) = tokio::task::spawn_blocking(move || -> Result<StatusFields, crate::error::Error> {
         let conn = db.connect()?;
         let entity_count = conn.count_nodes("Entity")?;
         let episode_count = conn.count_nodes("Episodic")?;
         let edge_count = conn.count_relates_to_edges()?;
         let last_index_time = conn.get_latest_episode_time()?;
+        let index_created_at = conn.get_earliest_episode_time()?;
         let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
         Ok((
             entity_count,
@@ -160,6 +162,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_file_count,
             wal_byte_size,
             last_index_time,
+            index_created_at,
         ))
     })
     .await??;
@@ -167,7 +170,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
 
     // startup sequence (Db::open → init_schema → bind socket) completes before any request
     // can arrive, so these lifecycle values are always true/true/false at handler time
-    Ok(json!({
+    let mut result = json!({
         "database_path": db_path,
         "embedding_model": embedding_model,
         "embedding_dim": embedding_dim,
@@ -183,7 +186,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "file_count": wal_file_count,
             "byte_size": wal_byte_size,
         },
-    }))
+    });
+    if let Some(t) = index_created_at {
+        result["index_created_at"] = json!(t);
+    }
+    Ok(result)
 }
 
 fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
