@@ -93,7 +93,11 @@ framework/src/skills/knowledge-graph/scripts/embedder_server.py
 uv run framework/src/skills/knowledge-graph/scripts/embedder_server.py
 ```
 
-The sidecar binds to `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`). It logs model loading progress to stderr. Poll `GET /health` to confirm readiness before starting liminis-graph:
+The sidecar binds to `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`). It logs model loading progress to stderr.
+
+**Cold-start time**: `bge-base-en-v1.5` takes typically **5–15 s** to load on CPU (warm HuggingFace cache). The first run includes a ~500 MB model download from HuggingFace Hub, which adds variable time depending on network speed.
+
+Poll `GET /health` to confirm readiness before starting liminis-graph:
 
 ```bash
 until curl -sf http://127.0.0.1:8765/health | grep -q '"ok": *true'; do
