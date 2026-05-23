@@ -739,3 +739,107 @@ async fn test_reprocess_entity_types_no_entities() {
     assert_eq!(r["success"], true, "no entities to reprocess: {v}");
     assert_eq!(r["reclassified_count"], 0, "nothing to reclassify: {v}");
 }
+
+// ── Tier 1b regression: two-hop RELATES_TO traversal ─────────────────────────
+//
+// These tests verify that list_relationships and get_entity_neighbors return
+// populated results after ingestion via add_episode (the Rust write path).
+// They guard against regressions where the two-hop write (Entity→RelatesToNode_→Entity)
+// or two-hop read (MATCH ...→rn:RelatesToNode_→...) is accidentally removed.
+
+#[tokio::test]
+async fn test_list_relationships_after_ingest() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    // Ingest one episode; MockExtractor yields Alice-[works_at]->Acme Corp.
+    let ingest = dispatch_val(
+        60,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-list-rel",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 60);
+
+    let v = dispatch_val(
+        61,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 61);
+    let facts = v["result"]["facts"].as_array().expect("expected facts array");
+    assert!(
+        !facts.is_empty(),
+        "expected ≥1 relationship after ingest, got 0 — two-hop write/read may be broken: {v}"
+    );
+    let fact = &facts[0];
+    assert!(
+        fact["uuid"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "fact uuid should be non-empty: {v}"
+    );
+    assert!(
+        fact["fact"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "fact.fact should be non-empty: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_get_entity_neighbors_after_ingest() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    // Ingest one episode; MockExtractor yields Alice-[works_at]->Acme Corp.
+    let ingest = dispatch_val(
+        62,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-neighbors",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 62);
+
+    // Get the source entity UUID from list_relationships.
+    let lr = dispatch_val(
+        63,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&lr, 63);
+    let facts = lr["result"]["facts"].as_array().expect("expected facts array");
+    assert!(!facts.is_empty(), "expected ≥1 relationship: {lr}");
+    let src_uuid = facts[0]["source_node_uuid"]
+        .as_str()
+        .expect("expected source_node_uuid")
+        .to_string();
+    assert!(!src_uuid.is_empty(), "source_node_uuid must be non-empty");
+
+    let v = dispatch_val(
+        64,
+        "knowledge_get_entity_neighbors",
+        json!({"entity_uuid": src_uuid}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 64);
+    let edge_count = v["result"]["edge_count"].as_u64().unwrap_or(0);
+    assert!(
+        edge_count >= 1,
+        "expected ≥1 neighbor edge for entity {src_uuid}, got {edge_count} — \
+         two-hop write/read may be broken: {v}"
+    );
+}
