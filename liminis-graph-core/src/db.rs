@@ -196,25 +196,29 @@ impl<'db> Conn<'db> {
             escape(&edge.fact),
             escape(&edge.attributes),
         );
-        self.raw_query(&rel_sql)?;
+        // Direct Entity→Entity rel is non-fatal: Python-schema DBs have no Entity→Entity
+        // FROM-TO pair in RELATES_TO, so this insert will fail there. The two-hop links
+        // below are sufficient for all reads; the direct rel is kept for schema compatibility
+        // with Rust-initialized DBs only.
+        if let Err(e) = self.raw_query(&rel_sql) {
+            eprintln!(
+                "liminis-graph: direct RELATES_TO rel insert failed (non-fatal, Python-schema DB?): {e}"
+            );
+        }
 
-        // Create two-hop links so reads using the Python traversal pattern work
-        // (Entity→RelatesToNode_→Entity). These carry no properties — all edge data
-        // lives on the RelatesToNode_ shadow node.
-        let hop1_sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}}), (rn:RelatesToNode_ {{uuid: '{}'}}) \
-             CREATE (src)-[:RELATES_TO]->(rn)",
+        // Create both two-hop links in a single statement so either both exist or neither does.
+        // Reads use Entity→RelatesToNode_→Entity; the hops carry no meaningful properties —
+        // all edge data lives on the RelatesToNode_ shadow node.
+        let hops_sql = format!(
+            "MATCH (src:Entity {{uuid: '{}'}}), \
+                   (rn:RelatesToNode_ {{uuid: '{}'}}), \
+                   (dst:Entity {{uuid: '{}'}}) \
+             CREATE (src)-[:RELATES_TO]->(rn), (rn)-[:RELATES_TO]->(dst)",
             escape(&edge.source_node_uuid),
-            escape(&edge.uuid),
-        );
-        self.raw_query(&hop1_sql)?;
-        let hop2_sql = format!(
-            "MATCH (rn:RelatesToNode_ {{uuid: '{}'}}), (dst:Entity {{uuid: '{}'}}) \
-             CREATE (rn)-[:RELATES_TO]->(dst)",
             escape(&edge.uuid),
             escape(&edge.target_node_uuid),
         );
-        self.raw_query(&hop2_sql)
+        self.raw_query(&hops_sql)
     }
 
     pub fn insert_mentions_edge(&self, e: &MentionsEdge) -> Result<(), Error> {
