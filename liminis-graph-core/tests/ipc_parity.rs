@@ -871,8 +871,8 @@ async fn test_get_entity_neighbors_after_ingest() {
 /// Protects the original fixture from the write transactions that Db::open
 /// issues (INSTALL / LOAD EXTENSION are write transactions in lbug).
 fn open_baseline_db() -> Option<(PathBuf, TempDir)> {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/baseline_db/liminis.db");
+    let src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/baseline_db/liminis.db");
     if !src.exists() {
         return None;
     }
