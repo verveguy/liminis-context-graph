@@ -1007,10 +1007,10 @@ impl<'db> Conn<'db> {
         let result = self
             .inner
             .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at DESC LIMIT 1")?;
-        for row in result {
-            return Ok(value_as_optional_timestamp_str(&row[0]));
-        }
-        Ok(None)
+        Ok(result
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_timestamp_str(&row[0])))
     }
 
     /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
