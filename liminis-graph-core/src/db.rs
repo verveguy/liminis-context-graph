@@ -1252,12 +1252,12 @@ pub fn escape_pub(s: &str) -> String {
     escape(s)
 }
 
-/// Escapes special FTS query characters (Lucene-style).
+/// Escapes FTS query strings for embedding in Cypher CALL statements.
 fn escape_fts(s: &str) -> String {
-    // Intentionally uses SQL-style apostrophe doubling (not backslash escaping).
-    // This function targets FTS/Lucene query strings embedded in SQL WHERE clauses,
-    // not Cypher string literals — leave unchanged even though escape() was fixed.
-    s.replace('\'', "''")
+    // The query argument is embedded inside a Cypher single-quoted string literal
+    // (CALL QUERY_FTS_INDEX(..., '...')), so it requires the same Cypher-compliant
+    // backslash escaping as escape(). SQL-style '' doubling causes Cypher parser failure.
+    escape(s)
 }
 
 pub(crate) fn format_float_array(v: &[f32]) -> String {
