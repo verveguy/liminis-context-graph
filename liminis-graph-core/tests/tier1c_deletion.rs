@@ -325,7 +325,7 @@ async fn clear_all_wipes_and_reinitializes() {
     let (entities, episodes, edges) = status_counts(4, Arc::clone(&state)).await;
     assert_eq!(entities, 0, "entity_count must be 0 after clear_all");
     assert_eq!(episodes, 0, "episode_count must be 0 after clear_all");
-    assert_eq!(edges, 0, "edge_count must be 0 after clear_all");
+    assert_eq!(edges, 0, "relationship_count must be 0 after clear_all");
 }
 
 #[tokio::test]
