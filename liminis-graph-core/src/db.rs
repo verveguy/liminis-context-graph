@@ -1001,6 +1001,18 @@ impl<'db> Conn<'db> {
         self.count_nodes("RelatesToNode_")
     }
 
+    /// Returns the `created_at` of the most-recently created Episodic node, or `None` if there
+    /// are no episodes yet.
+    pub fn get_latest_episode_time(&self) -> Result<Option<String>, Error> {
+        let result = self
+            .inner
+            .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at DESC LIMIT 1")?;
+        for row in result {
+            return Ok(value_as_optional_timestamp_str(&row[0]));
+        }
+        Ok(None)
+    }
+
     /// Cheap health probe — runs `RETURN 1` to verify the DB is queryable.
     pub fn probe(&self) -> Result<(), Error> {
         self.inner
