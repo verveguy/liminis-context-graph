@@ -1015,11 +1015,11 @@ impl<'db> Conn<'db> {
 
     /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
     pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
-        let result = self
+        let mut result = self
             .inner
             .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at ASC LIMIT 1")
             .map_err(|e| Error::QueryFailed(format!("get_earliest_episode_time failed: {e}")))?;
-        for row in result {
+        if let Some(row) = result.next() {
             match &row[0] {
                 lbug::Value::Null(_) => return Ok(None),
                 lbug::Value::Timestamp(dt) => {
