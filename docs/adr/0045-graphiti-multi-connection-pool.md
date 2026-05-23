@@ -1,7 +1,7 @@
-# ADR-045: Named Multi-Connection Pool for GraphitiSocketClient
+# ADR 0045: Named Multi-Connection Pool for GraphitiSocketClient
 
-**Status**: Accepted  
-**Date**: 2026-05-22  
+**Date**: 2026-05-22
+**Status**: Accepted
 **Issue**: #42
 
 ## Context
@@ -64,6 +64,13 @@ lines per ADR-043. During a rebuild, live `knowledge_status` calls on `renderer-
 stale data. `GraphitiSocketClient` exposes `isRebuilding: boolean`, set synchronously on entry to
 `rebuildFromWal()` and cleared on exit. Callers check this to skip live status polls and return
 cached data with `rebuilding: true`.
+
+The lifecycle manager must also check `isRebuilding` before issuing `healthCheck()` on the
+`lifecycle` connection. While a rebuild is in progress, the `lifecycle` connection slot is occupied;
+a concurrent `healthCheck()` would queue behind it and time out at the 30-second slot limit, which
+the lifecycle manager could misinterpret as the service being dead and trigger a restart loop. The
+correct behaviour is to suppress health probes while `isRebuilding` is true — the rebuild is a
+controlled operation, not an error state.
 
 ## Python-Only Tools
 
