@@ -339,10 +339,16 @@ async fn test_knowledge_status_empty_db() {
         r["embedding_dim"].as_u64().is_some(),
         "expected numeric embedding_dim: {v}"
     );
-    assert_eq!(r["graphiti_initialized"], true, "expected graphiti_initialized:true: {v}");
+    assert_eq!(
+        r["graphiti_initialized"], true,
+        "expected graphiti_initialized:true: {v}"
+    );
     assert_eq!(r["connected"], true, "expected connected:true: {v}");
     assert_eq!(r["initializing"], false, "expected initializing:false: {v}");
-    assert!(r["last_index_time"].is_null(), "expected last_index_time:null on empty db: {v}");
+    assert!(
+        r["last_index_time"].is_null(),
+        "expected last_index_time:null on empty db: {v}"
+    );
 }
 
 #[tokio::test]
@@ -370,8 +376,14 @@ async fn test_knowledge_status_counts() {
     let r = &v["result"];
     assert_eq!(r["entity_count"], 2, "expected 2 entities: {v}");
     assert_eq!(r["episode_count"], 1, "expected 1 episode: {v}");
-    assert_eq!(r["relationship_count"], 1, "expected 1 RELATES_TO relationship: {v}");
-    assert_eq!(r["graphiti_initialized"], true, "expected graphiti_initialized:true: {v}");
+    assert_eq!(
+        r["relationship_count"], 1,
+        "expected 1 RELATES_TO relationship: {v}"
+    );
+    assert_eq!(
+        r["graphiti_initialized"], true,
+        "expected graphiti_initialized:true: {v}"
+    );
     assert!(
         r["last_index_time"].as_str().is_some(),
         "expected non-null last_index_time after ingestion: {v}"

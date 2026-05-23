@@ -137,25 +137,32 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let wal_dir = state.wal_dir.clone();
 
     let _guard = state.write_lock.read().await;
-    let (entity_count, episode_count, edge_count, wal_exists, wal_file_count, wal_byte_size, last_index_time) =
-        tokio::task::spawn_blocking(move || -> Result<StatusFields, crate::error::Error> {
-            let conn = db.connect()?;
-            let entity_count = conn.count_nodes("Entity")?;
-            let episode_count = conn.count_nodes("Episodic")?;
-            let edge_count = conn.count_relates_to_edges()?;
-            let last_index_time = conn.get_latest_episode_time()?;
-            let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
-            Ok((
-                entity_count,
-                episode_count,
-                edge_count,
-                wal_exists,
-                wal_file_count,
-                wal_byte_size,
-                last_index_time,
-            ))
-        })
-        .await??;
+    let (
+        entity_count,
+        episode_count,
+        edge_count,
+        wal_exists,
+        wal_file_count,
+        wal_byte_size,
+        last_index_time,
+    ) = tokio::task::spawn_blocking(move || -> Result<StatusFields, crate::error::Error> {
+        let conn = db.connect()?;
+        let entity_count = conn.count_nodes("Entity")?;
+        let episode_count = conn.count_nodes("Episodic")?;
+        let edge_count = conn.count_relates_to_edges()?;
+        let last_index_time = conn.get_latest_episode_time()?;
+        let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+        Ok((
+            entity_count,
+            episode_count,
+            edge_count,
+            wal_exists,
+            wal_file_count,
+            wal_byte_size,
+            last_index_time,
+        ))
+    })
+    .await??;
     drop(_guard);
 
     // startup sequence (Db::open → init_schema → bind socket) completes before any request
