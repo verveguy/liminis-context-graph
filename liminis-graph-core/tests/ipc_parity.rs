@@ -905,7 +905,8 @@ fn python_db_index_names_fts_entities() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
+    let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
+        .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     let result = conn.fts_search_entities("test", &["*"], 5);
     assert!(
@@ -925,7 +926,8 @@ fn python_db_index_names_fts_edges() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
+    let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
+        .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     let result = conn.fts_search_edges("test", &["*"], 5);
     assert!(
@@ -945,7 +947,8 @@ fn python_db_index_names_vector_entities() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
+    let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
+        .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
     let result = conn.vector_search_entities(&vec![0.0_f32; 768], &["*"], 5);
@@ -966,7 +969,8 @@ fn python_db_index_names_vector_edges() {
         );
         return;
     };
-    let db = Db::open(path.to_str().unwrap()).expect("open baseline_db copy");
+    let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
+        .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
     let result = conn.vector_search_edges(&vec![0.0_f32; 768], &["*"], 5);
