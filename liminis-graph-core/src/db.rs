@@ -1242,7 +1242,9 @@ impl<'db> Conn<'db> {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn escape(s: &str) -> String {
-    s.replace('\'', "''")
+    // Cypher single-quoted string literals use backslash escaping, not SQL-style doubling.
+    // Backslashes must be escaped first so the newly introduced backslashes are not re-escaped.
+    s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
 /// Public escape function for use by other modules (e.g. episode.rs).
@@ -1252,8 +1254,9 @@ pub fn escape_pub(s: &str) -> String {
 
 /// Escapes special FTS query characters (Lucene-style).
 fn escape_fts(s: &str) -> String {
-    // Only escape single-quotes for the outer SQL string; inner FTS special chars
-    // (AND, OR, NOT) are handled by the FTS engine.
+    // Intentionally uses SQL-style apostrophe doubling (not backslash escaping).
+    // This function targets FTS/Lucene query strings embedded in SQL WHERE clauses,
+    // not Cypher string literals — leave unchanged even though escape() was fixed.
     s.replace('\'', "''")
 }
 
