@@ -84,4 +84,5 @@ A startup-time schema probe was considered and rejected:
 - Issue #38: Tier 1b bug — `list_relationships` and `get_entity_neighbors` use wrong edge schema
 - `liminis-graph-core/src/db.rs`: `insert_relates_to_edge`, all read methods
 - `liminis-graph-core/src/schema.rs`: `create_edge_tables`
-- Python driver: `graphiti_core/driver/ladybug/hnsw_safe_writes.py`
+- `graphiti_core/driver/ladybug_driver.py`: defines the Python RELATES_TO table schema (`CREATE REL TABLE` declaration, FROM-TO pairs, no properties)
+- `graphiti_core/driver/ladybug/hnsw_safe_writes.py`: defines the Python edge write pattern (`hnsw_safe_save_entity_edge` — creates `RelatesToNode_` + two-hop `[:RELATES_TO]` rels)
