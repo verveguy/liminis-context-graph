@@ -102,7 +102,7 @@ async fn status_counts(id: i64, state: Arc<AppState>) -> (u64, u64, u64) {
     (
         r["entity_count"].as_u64().unwrap_or(0),
         r["episode_count"].as_u64().unwrap_or(0),
-        r["edge_count"].as_u64().unwrap_or(0),
+        r["relationship_count"].as_u64().unwrap_or(0),
     )
 }
 

@@ -318,7 +318,7 @@ async fn test_knowledge_status_empty_db() {
     assert_ok_resp(&v, 21);
     let r = &v["result"];
     assert_eq!(r["entity_count"], 0, "expected 0 entities: {v}");
-    assert_eq!(r["edge_count"], 0, "expected 0 edges: {v}");
+    assert_eq!(r["relationship_count"], 0, "expected 0 relationships: {v}");
     assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
     assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
     assert!(
@@ -339,6 +339,10 @@ async fn test_knowledge_status_empty_db() {
         r["embedding_dim"].as_u64().is_some(),
         "expected numeric embedding_dim: {v}"
     );
+    assert_eq!(r["graphiti_initialized"], true, "expected graphiti_initialized:true: {v}");
+    assert_eq!(r["connected"], true, "expected connected:true: {v}");
+    assert_eq!(r["initializing"], false, "expected initializing:false: {v}");
+    assert!(r["last_index_time"].is_null(), "expected last_index_time:null on empty db: {v}");
 }
 
 #[tokio::test]
@@ -366,7 +370,12 @@ async fn test_knowledge_status_counts() {
     let r = &v["result"];
     assert_eq!(r["entity_count"], 2, "expected 2 entities: {v}");
     assert_eq!(r["episode_count"], 1, "expected 1 episode: {v}");
-    assert_eq!(r["edge_count"], 1, "expected 1 RELATES_TO edge: {v}");
+    assert_eq!(r["relationship_count"], 1, "expected 1 RELATES_TO relationship: {v}");
+    assert_eq!(r["graphiti_initialized"], true, "expected graphiti_initialized:true: {v}");
+    assert!(
+        r["last_index_time"].as_str().is_some(),
+        "expected non-null last_index_time after ingestion: {v}"
+    );
 }
 
 // ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────
