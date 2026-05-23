@@ -196,7 +196,25 @@ impl<'db> Conn<'db> {
             escape(&edge.fact),
             escape(&edge.attributes),
         );
-        self.raw_query(&rel_sql)
+        self.raw_query(&rel_sql)?;
+
+        // Create two-hop links so reads using the Python traversal pattern work
+        // (Entity→RelatesToNode_→Entity). These carry no properties — all edge data
+        // lives on the RelatesToNode_ shadow node.
+        let hop1_sql = format!(
+            "MATCH (src:Entity {{uuid: '{}'}}), (rn:RelatesToNode_ {{uuid: '{}'}}) \
+             CREATE (src)-[:RELATES_TO]->(rn)",
+            escape(&edge.source_node_uuid),
+            escape(&edge.uuid),
+        );
+        self.raw_query(&hop1_sql)?;
+        let hop2_sql = format!(
+            "MATCH (rn:RelatesToNode_ {{uuid: '{}'}}), (dst:Entity {{uuid: '{}'}}) \
+             CREATE (rn)-[:RELATES_TO]->(dst)",
+            escape(&edge.uuid),
+            escape(&edge.target_node_uuid),
+        );
+        self.raw_query(&hop2_sql)
     }
 
     pub fn insert_mentions_edge(&self, e: &MentionsEdge) -> Result<(), Error> {
@@ -374,10 +392,10 @@ impl<'db> Conn<'db> {
     pub fn get_edges_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<RelatesToEdge>, Error> {
         let gid_list = format_str_list(group_ids);
         let sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
-             WHERE r.group_id IN {gid_list} \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes"
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE rn.group_id IN {gid_list} \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes"
         );
         self.collect_relates_to_edges(&sql)
     }
@@ -389,10 +407,10 @@ impl<'db> Conn<'db> {
         }
         let uuid_list = format_str_list(uuids);
         let sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
-             WHERE r.uuid IN {uuid_list} \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes"
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE rn.uuid IN {uuid_list} \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes"
         );
         self.collect_relates_to_edges(&sql)
     }
@@ -584,16 +602,16 @@ impl<'db> Conn<'db> {
             Some(gids) if !gids.is_empty() => {
                 let gid_list = format_str_list(gids);
                 format!(
-                    "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
-                     WHERE r.group_id IN {gid_list} \
-                     RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-                     r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {limit}"
+                    "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+                     WHERE rn.group_id IN {gid_list} \
+                     RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+                     rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {limit}"
                 )
             }
             _ => format!(
-                "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) \
-                 RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-                 r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {limit}"
+                "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+                 RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+                 rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {limit}"
             ),
         };
         self.collect_relates_to_edges(&sql)
@@ -610,22 +628,22 @@ impl<'db> Conn<'db> {
         let uuid_esc = escape(entity_uuid);
         let gid_filter = match group_ids {
             Some(gids) if !gids.is_empty() => {
-                format!("WHERE r.group_id IN {}", format_str_list(gids))
+                format!("WHERE rn.group_id IN {}", format_str_list(gids))
             }
             _ => String::new(),
         };
 
         let out_sql = format!(
-            "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(n:Entity) \
+            "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
-             RETURN r.uuid, r.name, c.uuid, n.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {num_results}"
+             RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {num_results}"
         );
         let in_sql = format!(
-            "MATCH (n:Entity)-[r:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
+            "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
              {gid_filter} \
-             RETURN r.uuid, r.name, n.uuid, c.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes ORDER BY r.uuid DESC LIMIT {num_results}"
+             RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {num_results}"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql)?;
@@ -921,10 +939,11 @@ impl<'db> Conn<'db> {
         }
         let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
         let uuid_list = format_str_list(&uuid_refs);
-        // Join RelatesToNode_ with RELATES_TO rel to get source/target node UUIDs
+        // Resolve src/dst via the two-hop links (Entity→RelatesToNode_→Entity).
         let sql = format!(
             "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN {uuid_list} \
-             OPTIONAL MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) WHERE r.uuid = rn.uuid \
+             OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
+             OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
              rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes"
         );
@@ -996,19 +1015,16 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<RelatesToEdge>, Error> {
         let uuid_esc = escape(entity_uuid);
         // Outgoing edges (entity is source)
-        // Use rn.invalid_at (shadow node) — invalidate_edge sets it reliably there.
         let out_sql = format!(
-            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(dst:Entity) \
-             MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, rn.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at"
         );
         // Incoming edges (entity is target)
         let in_sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
-             MATCH (rn:RelatesToNode_ {{uuid: r.uuid}}) \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, rn.invalid_at, r.attributes, rn.fact_embedding, r.created_at"
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at"
         );
         let mut edges = self.collect_full_relates_to_edges(&out_sql)?;
         edges.extend(self.collect_full_relates_to_edges(&in_sql)?);
@@ -1046,8 +1062,8 @@ impl<'db> Conn<'db> {
         name: &str,
     ) -> Result<bool, Error> {
         let sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}})-[r:RELATES_TO {{name: '{}'}}]->(dst:Entity {{uuid: '{}'}}) \
-             RETURN count(r)",
+            "MATCH (src:Entity {{uuid: '{}'}})-[:RELATES_TO]->(rn:RelatesToNode_ {{name: '{}'}})-[:RELATES_TO]->(dst:Entity {{uuid: '{}'}}) \
+             RETURN count(rn)",
             escape(source_uuid),
             escape(name),
             escape(target_uuid),
@@ -1060,12 +1076,13 @@ impl<'db> Conn<'db> {
         }
     }
 
-    /// Returns a full RelatesToEdge by UUID, joining via the RELATES_TO rel.
+    /// Returns a full RelatesToEdge by UUID, joining via the RelatesToNode_ shadow node.
     pub fn get_edge_by_uuid(&self, uuid: &str) -> Result<Option<RelatesToEdge>, Error> {
         let sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) WHERE r.uuid = '{}' \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes",
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE rn.uuid = '{}' \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes",
             escape(uuid),
         );
         let mut rows = self.collect_relates_to_edges(&sql)?;
@@ -1076,14 +1093,14 @@ impl<'db> Conn<'db> {
     pub fn get_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
         let uuid_esc = escape(entity_uuid);
         let out_sql = format!(
-            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[r:RELATES_TO]->(dst:Entity) \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes"
+            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes"
         );
         let in_sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
-             RETURN r.uuid, r.name, src.uuid, dst.uuid, r.group_id, r.fact, \
-             r.valid_at, r.invalid_at, r.attributes"
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+             RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes"
         );
         let mut edges = self.collect_relates_to_edges(&out_sql)?;
         edges.extend(self.collect_relates_to_edges(&in_sql)?);

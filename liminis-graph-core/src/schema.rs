@@ -57,10 +57,20 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
 }
 
 /// Creates the RELATES_TO and MENTIONS relationship tables.
+///
+/// RELATES_TO declares three FROM-TO pairs:
+///   Entity→Entity (Rust write path — carries all properties)
+///   Entity→RelatesToNode_ and RelatesToNode_→Entity (two-hop links — property-free)
+/// All reads use the two-hop pattern; the Entity→Entity pair is kept for schema compatibility.
+/// Note: `IF NOT EXISTS` is a no-op on Python-populated workspaces (schema already created
+/// without the Entity→Entity pair). Old Rust-only databases without two-hop links will return
+/// empty results from reads — they should be rebuilt.
 pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
     conn.raw_query(
         "CREATE REL TABLE IF NOT EXISTS RELATES_TO (\
          FROM Entity TO Entity, \
+         FROM Entity TO RelatesToNode_, \
+         FROM RelatesToNode_ TO Entity, \
          uuid STRING, \
          name STRING, \
          group_id STRING, \
