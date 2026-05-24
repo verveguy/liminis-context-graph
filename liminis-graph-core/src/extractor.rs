@@ -120,9 +120,15 @@ impl AnthropicExtractor {
             json!(system_text)
         };
 
+        // Why 8192: a single chunk can yield many entities + edges; the JSON list
+        // grew past 1024 tokens on real corpora and Sonnet would truncate mid-list,
+        // failing serde_json::from_str with "EOF while parsing a list". 8192 is the
+        // current Sonnet output ceiling and absorbs realistic chunk variance.
+        // The retry-with-larger-budget / tool_use-structured-output direction is
+        // tracked separately as the durable fix.
         let body = json!({
             "model": &self.model,
-            "max_tokens": 1024,
+            "max_tokens": 8192,
             "system": system_value,
             "messages": [
                 {
