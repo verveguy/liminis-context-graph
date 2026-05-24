@@ -2,23 +2,26 @@ use std::sync::Arc;
 
 use liminis_graph_core::telemetry::{TelemetryEvent, TelemetrySink};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::task::JoinHandle;
 
 pub struct StderrSink {
     tx: UnboundedSender<TelemetryEvent>,
 }
 
 impl StderrSink {
-    /// Constructs `StderrSink`, spawns a background drain task, and returns `Arc<Self>`.
-    pub fn start() -> Arc<Self> {
+    /// Constructs `StderrSink`, spawns a background drain task, and returns
+    /// `(Arc<Self>, JoinHandle<()>)`. The caller must await the handle after dropping
+    /// all `Arc<StderrSink>` clones to ensure the final telemetry event flushes before exit.
+    pub fn start() -> (Arc<Self>, JoinHandle<()>) {
         let (tx, mut rx) = unbounded_channel::<TelemetryEvent>();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 if let Ok(json) = serde_json::to_string(&event) {
                     eprintln!("{json}");
                 }
             }
         });
-        Arc::new(Self { tx })
+        (Arc::new(Self { tx }), handle)
     }
 }
 
