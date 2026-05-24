@@ -249,7 +249,10 @@ fn test_flush_pending_recreates_deleted_wal_dir() {
     // Write one chunk to establish at least one file.
     w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'a'})", json!({}), "db"))
         .unwrap();
-    assert!(wal_dir.exists(), "WAL directory should exist after first write");
+    assert!(
+        wal_dir.exists(),
+        "WAL directory should exist after first write"
+    );
     let files_before = fs::read_dir(&wal_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -271,7 +274,10 @@ fn test_flush_pending_recreates_deleted_wal_dir() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
         .count();
-    assert!(files_after >= 1, "at least one .jsonl file must exist after recovery");
+    assert!(
+        files_after >= 1,
+        "at least one .jsonl file must exist after recovery"
+    );
 }
 
 /// Filename must match the pattern YYYYMMDD_HHMMSS_<6hex>_0000.jsonl
