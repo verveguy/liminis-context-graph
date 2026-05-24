@@ -68,6 +68,7 @@ Emitted when `do_extract` detects a `stop_reason: "max_tokens"` response and tri
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `ts_ms` | integer | Unix timestamp in milliseconds |
 | `model` | string | Anthropic model identifier that triggered the overflow |
 | `chunk_len_bytes` | integer | Length of the episode body chunk in bytes |
 | `initial_max_tokens` | integer | The `max_tokens` value used for the first (overflowing) attempt |
