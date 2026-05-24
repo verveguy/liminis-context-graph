@@ -44,6 +44,14 @@ pub enum TelemetryEvent {
         duration_ms: u64,
         throughput_eps: f64,
     },
+    ServiceState {
+        ts_ms: u64,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
 pub fn now_ms() -> u64 {
