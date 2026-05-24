@@ -21,7 +21,7 @@ Source: specs/001-rust-knowledge-graph/spec.md
 
 ### I. IPC Parity During Migration (NON-NEGOTIABLE)
 
-While the Python `graphiti_service.py` is still in production in any liminis-framework release, every change to the Unix-socket IPC surface MUST preserve byte-compatibility with the Python service's request/response shapes. Parity tests against a recorded request/response corpus gate merges. The "Python is the oracle" period ends only by explicit constitution amendment.
+While the upstream Python graphiti-core service (`graphiti_service.py`) is still in production in any liminis-framework release, every change to the Unix-socket IPC surface MUST preserve byte-compatibility with the Python service's request/response shapes. Parity tests against a recorded request/response corpus gate merges. The "Python is the oracle" period ends only by explicit constitution amendment.
 
 **Rationale**: The repo's reason to exist is a staged, reversible migration. Drifting the IPC surface mid-migration removes the ability to A/B against a live oracle and turns rollback into a data-migration problem.
 
@@ -35,7 +35,7 @@ The crate's library API is the source of truth; the binary is a thin wrapper aro
 
 The graph store is a load-bearing dependency, not an interchangeable backend. There is no driver abstraction. Code MAY use LadybugDB-specific Cypher dialect, schema features, and index APIs directly. If a different store is wanted, fork.
 
-**Rationale**: graphiti's driver abstraction across FalkorDB/Neo4j/Kuzu/Ladybug is the single largest source of complexity in the codebase we are replacing, and we have never shipped a non-Ladybug deployment.
+**Rationale**: The upstream graphiti-core library's driver abstraction across FalkorDB/Neo4j/Kuzu/Ladybug is the single largest source of complexity in the codebase we are replacing, and we have never shipped a non-Ladybug deployment.
 
 ### IV. WAL Is Authoritative
 

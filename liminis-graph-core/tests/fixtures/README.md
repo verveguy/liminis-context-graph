@@ -2,7 +2,7 @@
 
 This directory contains the request/response corpus used by the IPC parity test
 (`tests/ipc_parity.rs`). Each fixture records the exact JSON-RPC wire shapes
-produced by the Python `graphiti_service.py` against the `baseline_db/` snapshot.
+produced by the upstream Python graphiti-core service (`graphiti_service.py`) against the `baseline_db/` snapshot.
 
 ## Directory layout
 
@@ -46,7 +46,7 @@ Error responses use `"error"` instead of `"result"`.
 
 ### Prerequisites
 
-1. Python graphiti_service.py running against a fresh database
+1. Upstream Python graphiti-core service (`graphiti_service.py`) running against a fresh database
 2. Python `record_corpus.py` script (see below)
 3. `liminis-graph-core/tests/fixtures/baseline_db/` empty or absent
 
@@ -54,13 +54,13 @@ Error responses use `"error"` instead of `"result"`.
 
 ```bash
 # 1. Start the Python service against a fresh DB
-GRAPHITI_DB_PATH=/tmp/baseline.db python graphiti_service.py &
+LCG_DB_PATH=/tmp/baseline.db python graphiti_service.py &
 PYTHON_PID=$!
 
 # 2. Run the capture script
 cd liminis-graph-core
 python scripts/record_corpus.py \
-  --socket /tmp/graphiti/service.sock \
+  --socket /tmp/lcg/service.sock \
   --output tests/fixtures/ipc_corpus/ \
   --golden tests/fixtures/golden_queries.json
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-record_corpus.py — capture IPC parity fixtures from the live Python graphiti_service.
+record_corpus.py — capture IPC parity fixtures from the upstream Python graphiti-core service.
 
 Usage:
     python scripts/record_corpus.py \
-        --socket /tmp/graphiti/service.sock \
+        --socket /tmp/lcg/service.sock \
         --output tests/fixtures/ipc_corpus/ \
         --golden tests/fixtures/golden_queries.json
 
 Prerequisites:
-    1. Python graphiti_service.py running: GRAPHITI_DB_PATH=/tmp/baseline.db python graphiti_service.py
+    1. Python graphiti_service.py running: LCG_DB_PATH=/tmp/baseline.db python graphiti_service.py
     2. The baseline DB should be freshly populated with a representative episode set.
 
 After capture:
