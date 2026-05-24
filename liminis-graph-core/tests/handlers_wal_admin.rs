@@ -2,7 +2,7 @@
 // knowledge_prepare_checkpoint, knowledge_rebuild_from_wal, knowledge_rebuild_status
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +52,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -72,6 +73,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     })
 }
 

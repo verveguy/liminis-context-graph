@@ -6,7 +6,7 @@
 // docs/telemetry.md.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
@@ -50,6 +50,7 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     })
 }
 

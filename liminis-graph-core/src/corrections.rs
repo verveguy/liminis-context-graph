@@ -641,6 +641,7 @@ mod tests {
     use std::io::Write;
     use tempfile::TempDir;
 
+    #[allow(dead_code)]
     fn write_corrections(dir: &TempDir, content: &str) -> PathBuf {
         let liminis_dir = dir.path().join(".liminis");
         std::fs::create_dir_all(&liminis_dir).unwrap();

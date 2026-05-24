@@ -6,7 +6,7 @@
 // write-guard-only-around-DB-commit design (ADR-042) does not block reads.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -50,6 +50,7 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     })
 }
 

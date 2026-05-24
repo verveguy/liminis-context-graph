@@ -2,7 +2,7 @@
 // FR-010: recovery from degraded mode via drop_lbug_wal strategy
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
@@ -51,6 +51,7 @@ fn make_degraded_state_with_capture(
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     })
 }
 
@@ -271,6 +272,7 @@ async fn test_recovery_unknown_strategy() {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     });
 
     let resp = dispatch_val(
@@ -310,6 +312,7 @@ async fn test_recovery_missing_strategy() {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;

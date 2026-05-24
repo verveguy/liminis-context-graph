@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
@@ -37,6 +37,11 @@ pub struct AppState {
     pub wal_writer: Arc<Mutex<Option<WalWriter>>>,
     pub active_writes: Arc<AtomicUsize>,
     pub rebuild_jobs: Arc<Mutex<HashMap<String, RebuildJob>>>,
+    /// Tracks whether HNSW vector indices have been built in this session.
+    /// Set to `true` after the first successful `build_indices_and_constraints` call
+    /// (whether explicit via `knowledge_build_indices` or auto-triggered on first search).
+    /// Reset to `false` in `handle_clear_all` so the first post-clear search self-heals.
+    pub indices_built: Arc<AtomicBool>,
     /// Workspace root for locating `.liminis/knowledge-corrections.yaml`.
     /// Read from `LIMINIS_WORKSPACE_ROOT` env var. All corrections methods return
     /// an error if this is `None`.
@@ -93,6 +98,7 @@ impl AppState {
             active_writes: Arc::new(AtomicUsize::new(0)),
             rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
             workspace_root,
+            indices_built: Arc::new(AtomicBool::new(false)),
         }
     }
 }

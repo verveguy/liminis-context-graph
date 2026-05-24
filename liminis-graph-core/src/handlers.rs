@@ -21,6 +21,47 @@ use crate::{
 
 const DEFAULT_GROUP_ID: &str = "liminis";
 
+const MISSING_INDEX_USER_MSG: &str =
+    "Knowledge graph indices not yet built. Call knowledge_build_indices to resolve.";
+
+fn is_missing_index_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("Binder exception:") && s.contains("doesn't have an index with name")
+}
+
+/// Acquires the write lock and calls `build_indices_and_constraints`, then sets the
+/// `indices_built` flag so subsequent searches skip the auto-heal path (FR-003).
+/// Called at most once per session per DB lifecycle event.
+async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
+    let _guard = state.write_lock.write().await;
+    // Double-check inside the lock: another task may have completed the build while we waited.
+    if state.indices_built.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Load DB after acquiring the lock so we build on the current instance, not a stale
+    // snapshot that predates a concurrent clear_all swap.
+    let db = load_db(state)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        conn.build_indices_and_constraints()
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            // Set flag while still holding the write lock to eliminate the window between
+            // guard release and flag update that would allow redundant builds.
+            state.indices_built.store(true, Ordering::Release);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(Error::Ipc(format!(
+            "Auto-build of knowledge graph indices failed: {e}"
+        ))),
+        Err(e) => Err(Error::Ipc(format!(
+            "Auto-build of knowledge graph indices failed: {e}"
+        ))),
+    }
+}
+
 /// Dispatches an IPC request to the appropriate library function. [IPC]
 ///
 /// `progress_tx` is `Some` when the caller detected `_progress_token` in the request params;
@@ -365,10 +406,42 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
-    let db = load_db(&state)?;
-    let entities =
-        search::hybrid_entity_search(db, Arc::clone(&state.embedder), &query, group_ids, limit)
-            .await?;
+    let result = search::hybrid_entity_search(
+        load_db(&state)?,
+        Arc::clone(&state.embedder),
+        &query,
+        group_ids.clone(),
+        limit,
+    )
+    .await;
+
+    let entities = match result {
+        Ok(e) => e,
+        Err(e) if is_missing_index_error(&e) => {
+            if !state.indices_built.load(Ordering::Acquire) {
+                build_indices_once(&state).await?;
+                search::hybrid_entity_search(
+                    load_db(&state)?,
+                    Arc::clone(&state.embedder),
+                    &query,
+                    group_ids,
+                    limit,
+                )
+                .await
+                .map_err(|e2| {
+                    if is_missing_index_error(&e2) {
+                        Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                    } else {
+                        e2
+                    }
+                })?
+            } else {
+                return Err(Error::Ipc(MISSING_INDEX_USER_MSG.to_string()));
+            }
+        }
+        Err(e) => return Err(e),
+    };
+
     Ok(serde_json::to_value(entities)?)
 }
 
@@ -378,10 +451,42 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
-    let db = load_db(&state)?;
-    let edges =
-        search::hybrid_edge_search(db, Arc::clone(&state.embedder), &query, group_ids, limit)
-            .await?;
+    let result = search::hybrid_edge_search(
+        load_db(&state)?,
+        Arc::clone(&state.embedder),
+        &query,
+        group_ids.clone(),
+        limit,
+    )
+    .await;
+
+    let edges = match result {
+        Ok(e) => e,
+        Err(e) if is_missing_index_error(&e) => {
+            if !state.indices_built.load(Ordering::Acquire) {
+                build_indices_once(&state).await?;
+                search::hybrid_edge_search(
+                    load_db(&state)?,
+                    Arc::clone(&state.embedder),
+                    &query,
+                    group_ids,
+                    limit,
+                )
+                .await
+                .map_err(|e2| {
+                    if is_missing_index_error(&e2) {
+                        Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                    } else {
+                        e2
+                    }
+                })?
+            } else {
+                return Err(Error::Ipc(MISSING_INDEX_USER_MSG.to_string()));
+            }
+        }
+        Err(e) => return Err(e),
+    };
+
     Ok(serde_json::to_value(edges)?)
 }
 
@@ -508,6 +613,9 @@ async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
     .await??;
     drop(_guard);
 
+    state
+        .indices_built
+        .store(true, std::sync::atomic::Ordering::Release);
     Ok(json!({"status": "ok"}))
 }
 
@@ -524,16 +632,44 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = load_db(&state)?;
-    let passages = search::search_passages(
-        db,
+    let result = search::search_passages(
+        load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
-        group_ids,
+        group_ids.clone(),
         num_results,
         min_score,
     )
-    .await?;
+    .await;
+
+    let passages = match result {
+        Ok(p) => p,
+        Err(e) if is_missing_index_error(&e) => {
+            if !state.indices_built.load(Ordering::Acquire) {
+                build_indices_once(&state).await?;
+                search::search_passages(
+                    load_db(&state)?,
+                    Arc::clone(&state.embedder),
+                    &query,
+                    group_ids,
+                    num_results,
+                    min_score,
+                )
+                .await
+                .map_err(|e2| {
+                    if is_missing_index_error(&e2) {
+                        Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                    } else {
+                        e2
+                    }
+                })?
+            } else {
+                return Err(Error::Ipc(MISSING_INDEX_USER_MSG.to_string()));
+            }
+        }
+        Err(e) => return Err(e),
+    };
+
     let count = passages.len();
     Ok(json!({ "passages": passages, "count": count }))
 }
@@ -831,6 +967,9 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     };
 
     state.db.store(Some(Arc::new(new_db)));
+    state
+        .indices_built
+        .store(false, std::sync::atomic::Ordering::Release);
     drop(_guard);
 
     Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))

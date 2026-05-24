@@ -451,6 +451,25 @@ impl Extractor for MockExtractor {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+fn extract_json_block(s: &str) -> &str {
+    if let Some(start) = s.find("```json") {
+        let after = &s[start + 7..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim();
+        }
+    }
+    if let Some(start) = s.find("```") {
+        let after = &s[start + 3..];
+        if let Some(end) = after.find("```") {
+            return after[..end].trim();
+        }
+    }
+    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
+        return &s[start..=end];
+    }
+    s.trim()
+}
+
 // ── unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -631,23 +650,4 @@ mod tests {
             ToolOutcome::ParseError(_)
         ));
     }
-}
-
-fn extract_json_block(s: &str) -> &str {
-    if let Some(start) = s.find("```json") {
-        let after = &s[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
-        }
-    }
-    if let Some(start) = s.find("```") {
-        let after = &s[start + 3..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
-        }
-    }
-    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
-        return &s[start..=end];
-    }
-    s.trim()
 }
