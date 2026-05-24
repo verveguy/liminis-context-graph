@@ -66,8 +66,9 @@ impl AppState {
                 Arc::new(PassthroughDedupAdapter)
             };
         // deprecated: remove in Phase B (see #59)
-        let wal_dir =
-            lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").ok().map(PathBuf::from);
+        let wal_dir = lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
+            .ok()
+            .map(PathBuf::from);
         let wal_writer = wal_dir
             .as_deref()
             .and_then(|dir| WalWriter::new(dir, 10_000).ok());

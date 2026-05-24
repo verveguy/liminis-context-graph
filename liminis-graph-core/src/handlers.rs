@@ -898,9 +898,10 @@ async fn handle_rebuild_from_wal(
     let from_seq = validate_from_seq(&p["from_seq"])?;
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
 
-    let wal_dir = state.wal_dir.clone().ok_or_else(|| {
-        Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string())
-    })?;
+    let wal_dir = state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
 
     if !wal_dir.exists() || !has_jsonl_files(&wal_dir) {
         return Err(Error::Ipc(format!(

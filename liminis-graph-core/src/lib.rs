@@ -1,9 +1,9 @@
 pub mod app_state;
-pub mod env;
 pub mod corrections;
 pub mod db;
 pub mod dedup_adapter;
 pub mod embedder;
+pub mod env;
 pub mod episode;
 pub mod error;
 pub mod extractor;
