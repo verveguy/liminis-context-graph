@@ -5,6 +5,7 @@ use std::sync::Arc;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
+    env::lcg_env_var,
     handlers,
     ipc::IpcRequest,
     telemetry::{now_ms, TelemetryEvent},
@@ -18,14 +19,33 @@ use tokio::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = std::env::var("GRAPHITI_SOCKET_PATH")
-        .unwrap_or_else(|_| ".graphiti/service.sock".to_string());
-    let db_path =
-        std::env::var("GRAPHITI_DB_PATH").unwrap_or_else(|_| ".graphiti/db/liminis.db".to_string());
-    let embedding_dim: usize = std::env::var("GRAPHITI_EMBEDDING_DIM")
+    // deprecated: remove in Phase B (see #59)
+    let socket_path = lcg_env_var("LCG_SOCKET_PATH", "GRAPHITI_SOCKET_PATH")
+        .unwrap_or_else(|_| ".lcg/service.sock".to_string());
+    // deprecated: remove in Phase B (see #59)
+    let db_path = lcg_env_var("LCG_DB_PATH", "GRAPHITI_DB_PATH")
+        .unwrap_or_else(|_| ".lcg/db/liminis.db".to_string());
+    // deprecated: remove in Phase B (see #59)
+    let embedding_dim: usize = lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(768);
+
+    // Phase A workspace dir auto-migration: rename .graphiti/ → .lcg/ on first run.
+    // Must execute before create_dir_all so the absence of .lcg/ is detectable.
+    if std::path::Path::new(".graphiti").exists() && !std::path::Path::new(".lcg").exists() {
+        match std::fs::rename(".graphiti", ".lcg") {
+            Ok(()) => eprintln!(
+                "[liminis-context-graph] DEPRECATED: workspace directory \".graphiti\" has been \
+                 renamed to \".lcg\". Update your configuration to use LCG_* env vars. \
+                 The .graphiti fallback will be removed in Phase B (see issue #59)."
+            ),
+            Err(e) => eprintln!(
+                "[liminis-context-graph] WARNING: could not auto-migrate .graphiti/ → .lcg/: {e}. \
+                 Continuing without migration."
+            ),
+        }
+    }
 
     // Ensure parent directories exist
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
@@ -39,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // when the DB is in a degraded state. See ADR-0046.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
-    eprintln!("liminis-graph: listening on {socket_path}");
+    eprintln!("liminis-context-graph: listening on {socket_path}");
 
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
