@@ -159,7 +159,7 @@
   - On `knowledge_close` response sent, drain connection and exit process cleanly
   - `#[tokio::main]` entry point
 
-**Checkpoint**: `cargo build --release -p liminis-graph` succeeds; `./target/release/liminis-graph` starts and listens without error; manual `echo '{"jsonrpc":"2.0","id":1,"method":"knowledge_build_indices","params":{}}' | nc -U .lcg/service.sock` returns a valid JSON-RPC response
+**Checkpoint**: `cargo build --release -p liminis-context-graph` succeeds; `./target/release/liminis-context-graph` starts and listens without error; manual `echo '{"jsonrpc":"2.0","id":1,"method":"knowledge_build_indices","params":{}}' | nc -U .lcg/service.sock` returns a valid JSON-RPC response
 
 ---
 

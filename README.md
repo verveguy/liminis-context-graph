@@ -46,8 +46,8 @@ specs/                       # feature specifications
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `LCG_SOCKET_PATH` | Yes | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
-| `LCG_DB_PATH` | Yes | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
+| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
+| `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
 | `LCG_EMBEDDING_URL` | No | Base URL for the HTTP embedder sidecar (default `http://127.0.0.1:8765`) |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name (default `bge-base-en-v1.5`) |
 | `LCG_EMBEDDING_DIM` | No | Embedding vector dimension (default 768) |
