@@ -128,6 +128,8 @@ impl WalWriter {
             return Ok(());
         }
 
+        fs::create_dir_all(&self.wal_dir)?;
+
         // Rotate if: no file open, or appending chunk would exceed max_events_per_file.
         let needs_new_file = self.current_file.is_none()
             || (self.events_in_current_file > 0
