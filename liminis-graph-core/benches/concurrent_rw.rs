@@ -124,7 +124,7 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                             tokio::spawn(async move {
                                 let t = Instant::now();
                                 let _ = search::hybrid_entity_search(
-                                    s.db.load_full(),
+                                    s.db.load_full().expect("bench requires healthy DB"),
                                     Arc::clone(&s.embedder),
                                     "Alice",
                                     vec!["bench".to_string()],

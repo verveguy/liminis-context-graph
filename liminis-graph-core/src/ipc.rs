@@ -56,12 +56,7 @@ impl IpcResponse {
         }
     }
 
-    pub fn err_with_data(
-        id: Value,
-        code: i32,
-        message: impl Into<String>,
-        data: Value,
-    ) -> Self {
+    pub fn err_with_data(id: Value, code: i32, message: impl Into<String>, data: Value) -> Self {
         IpcResponse::Err {
             jsonrpc: "2.0".to_string(),
             id,

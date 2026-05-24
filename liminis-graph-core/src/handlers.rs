@@ -366,14 +366,9 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let db = load_db(&state)?;
-    let entities = search::hybrid_entity_search(
-        db,
-        Arc::clone(&state.embedder),
-        &query,
-        group_ids,
-        limit,
-    )
-    .await?;
+    let entities =
+        search::hybrid_entity_search(db, Arc::clone(&state.embedder), &query, group_ids, limit)
+            .await?;
     Ok(serde_json::to_value(entities)?)
 }
 
@@ -384,14 +379,9 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let db = load_db(&state)?;
-    let edges = search::hybrid_edge_search(
-        db,
-        Arc::clone(&state.embedder),
-        &query,
-        group_ids,
-        limit,
-    )
-    .await?;
+    let edges =
+        search::hybrid_edge_search(db, Arc::clone(&state.embedder), &query, group_ids, limit)
+            .await?;
     Ok(serde_json::to_value(edges)?)
 }
 
@@ -1283,14 +1273,8 @@ struct RecoverOutcome {
     restart_required: bool,
 }
 
-async fn handle_knowledge_recover(
-    req: &IpcRequest,
-    state: Arc<AppState>,
-) -> Result<Value, Error> {
-    let strategy = req.params["strategy"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
+async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let strategy = req.params["strategy"].as_str().unwrap_or("").to_string();
     if strategy.is_empty() {
         return Err(Error::Ipc("strategy is required".to_string()));
     }
@@ -1308,8 +1292,7 @@ async fn handle_knowledge_recover(
     let result = match strategy.as_str() {
         "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
         "rebuild_from_workspace_wal" => {
-            let wal_dir = wal_dir
-                .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+            let wal_dir = wal_dir.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
             recover_rebuild_from_workspace_wal(&db_path, &wal_dir, embedding_dim).await
         }
         "restore_from_backup" => recover_restore_from_backup(&db_path, embedding_dim).await,
@@ -1341,8 +1324,7 @@ async fn handle_knowledge_recover(
             restart_required: true,
             ..
         }) => {
-            let resp =
-                json!({"strategy": strategy, "success": true, "restart_required": true});
+            let resp = json!({"strategy": strategy, "success": true, "restart_required": true});
             // Exit after brief delay so the response can be sent first
             tokio::spawn(async {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
