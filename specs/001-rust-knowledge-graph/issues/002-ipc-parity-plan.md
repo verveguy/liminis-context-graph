@@ -26,7 +26,7 @@ The IPC server (`liminis-graph/src/main.rs`) uses `tokio::net::UnixListener`. Th
 
 ### AD-2: JSON-RPC 2.0, newline-delimited, over Unix socket
 
-Wire format: one UTF-8 JSON object per line. Requests: `{"jsonrpc":"2.0","id":<int>,"method":"knowledge_*","params":{...}}`. Responses: `{"jsonrpc":"2.0","id":<int>,"result":<any>}` or `{"jsonrpc":"2.0","id":<int>,"error":{"code":<int>,"message":"..."}}`. Socket path from `GRAPHITI_SOCKET_PATH` env var, defaulting to `.graphiti/service.sock` relative to the working directory. The server creates parent dirs if missing.
+Wire format: one UTF-8 JSON object per line. Requests: `{"jsonrpc":"2.0","id":<int>,"method":"knowledge_*","params":{...}}`. Responses: `{"jsonrpc":"2.0","id":<int>,"result":<any>}` or `{"jsonrpc":"2.0","id":<int>,"error":{"code":<int>,"message":"..."}}`. Socket path from `LCG_SOCKET_PATH` env var, defaulting to `.lcg/service.sock` relative to the working directory. The server creates parent dirs if missing.
 
 Wire method names (matching Python service):
 
@@ -102,7 +102,7 @@ During `add_episode`, each extracted entity is deduped against existing entities
 
 ### AD-5: Adapters are out-of-process, reached via HTTP; no trait objects required
 
-`embedder::Embedder` is a plain struct that calls `POST $GRAPHITI_EMBEDDING_URL/embed` with `{"text": ..., "model": $GRAPHITI_EMBEDDING_MODEL}` and expects `{"embedding": [...]}`. `extractor::Extractor` is a plain struct that calls Anthropic `/v1/messages` using `ANTHROPIC_API_KEY`. Both are constructed once at startup and passed by reference. No trait objects needed for the parity tests — the parity test exercises the full stack. Principle V: no `tch`/`candle`/`onnxruntime` in Cargo.toml.
+`embedder::Embedder` is a plain struct that calls `POST $LCG_EMBEDDING_URL/embed` with `{"text": ..., "model": $LCG_EMBEDDING_MODEL}` and expects `{"embedding": [...]}`. `extractor::Extractor` is a plain struct that calls Anthropic `/v1/messages` using `ANTHROPIC_API_KEY`. Both are constructed once at startup and passed by reference. No trait objects needed for the parity tests — the parity test exercises the full stack. Principle V: no `tch`/`candle`/`onnxruntime` in Cargo.toml.
 
 ### AD-6: group_id default of "liminis" applied at the IPC dispatch layer
 

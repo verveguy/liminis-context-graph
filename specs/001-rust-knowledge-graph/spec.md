@@ -3,13 +3,13 @@
 **Feature Branch**: `001-rust-knowledge-graph`
 **Created**: 2026-05-18
 **Status**: Draft
-**Input**: User description: "Replace the Python graphiti service with a thin Rust service over LadybugDB's native bindings, preserving the surface that liminis-framework already uses, and packaged as a standalone library/service reusable by other projects."
+**Input**: User description: "Replace the upstream Python graphiti-core service with a thin Rust service over LadybugDB's native bindings, preserving the surface that liminis-framework already uses, and packaged as a standalone library/service reusable by other projects."
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Drop-in service replacement for ingest + search (Priority: P1)
 
-A Liminis workspace currently spawns the Python `graphiti_service.py` over a Unix socket to ingest episodes and answer search queries. The Rust service must implement the same IPC contract so the existing in-process MCP servers (knowledge-reader, knowledge-writer, semantic-search) and the chat agent's retrieval calls keep working without any client-side change.
+A Liminis workspace currently spawns the upstream Python graphiti-core service over a Unix socket to ingest episodes and answer search queries. The Rust service must implement the same IPC contract so the existing in-process MCP servers (knowledge-reader, knowledge-writer, semantic-search) and the chat agent's retrieval calls keep working without any client-side change.
 
 **Why this priority**: Without parity on the existing IPC, nothing in the desktop app keeps working. This is the gate that lets the rewrite be staged behind a feature flag.
 
@@ -19,17 +19,17 @@ A Liminis workspace currently spawns the Python `graphiti_service.py` over a Uni
 
 1. **Given** an empty workspace, **When** the app onboards a sample notebook of ~500 episodes, **Then** Entity and Episodic nodes plus RELATES_TO and MENTIONS edges are persisted and queryable, with identical group_id scoping to the Python service.
 2. **Given** a populated workspace, **When** the chat agent calls hybrid node search (RRF) for an entity name, **Then** the Rust service returns results ordered consistent with the Python service to within rank-correlation ≥ 0.9 on a fixed 50-query golden set.
-3. **Given** a workspace populated by the Python service, **When** the Rust service is started against that same `.graphiti/db`, **Then** all reads (search, get_by_group_ids, raw Cypher) succeed without any schema migration.
+3. **Given** a workspace populated by the Python service, **When** the Rust service is started against that same `.lcg/db`, **Then** all reads (search, get_by_group_ids, raw Cypher) succeed without any schema migration.
 
 ---
 
 ### User Story 2 - WAL parity for git-friendly persistence (Priority: P1)
 
-The current service writes a JSONL WAL under `.graphiti/wal/` that is checked into the workspace's git repo. The Rust service must produce a byte-compatible WAL stream so existing workspaces' commits stay diff-readable, and must replay an existing WAL into a fresh DB on cold boot.
+The current service writes a JSONL WAL under `.lcg/wal/` that is checked into the workspace's git repo. The Rust service must produce a byte-compatible WAL stream so existing workspaces' commits stay diff-readable, and must replay an existing WAL into a fresh DB on cold boot.
 
 **Why this priority**: WAL files are user data already on disk in every shipped workspace. Breaking the format breaks every existing workspace.
 
-**Independent Test**: Take a workspace with a non-trivial WAL, delete `.graphiti/db`, boot the Rust service; verify the resulting DB matches the Python-rebuilt DB by node/edge counts and a deterministic hash of (sorted) UUIDs.
+**Independent Test**: Take a workspace with a non-trivial WAL, delete `.lcg/db`, boot the Rust service; verify the resulting DB matches the Python-rebuilt DB by node/edge counts and a deterministic hash of (sorted) UUIDs.
 
 **Acceptance Scenarios**:
 
@@ -88,7 +88,7 @@ The service should emit per-call timing, token usage by role, fallback events, a
 
 ### Edge Cases
 
-- WAL contains lines from a graphiti version newer than the Rust service understands — must skip-with-warning, not crash, and surface unknown line types in a structured error.
+- WAL contains lines from a graphiti-core library version newer than the Rust service understands — must skip-with-warning, not crash, and surface unknown line types in a structured error.
 - LadybugDB DB file open by another process (stale lock from a killed Python service) — must detect and surface a clear error, not silently corrupt.
 - Embedding dimension changes (e.g., user swaps bge-base for a 1024-dim model) — must refuse to write into a graph whose existing embedding dim differs, unless an explicit rebuild flag is set.
 - Anthropic API returning a 529 (overloaded) mid-extraction — must back off, not poison the WAL with partial episode state.
@@ -107,7 +107,7 @@ The service should emit per-call timing, token usage by role, fallback events, a
 - **FR-006**: Service MUST support multi-label freeform entity classification (no closed `entity_types` ontology required) with the Entity-first label-order invariant.
 - **FR-007**: Service MUST append a WAL line per mutation in JSONL, format-compatible with the existing `replay_wal_ladybug` reader and the `wal_chunk()` buffering contract.
 - **FR-008**: Service MUST replay an existing WAL on cold boot, with chunked buffering, recovering from truncated final lines.
-- **FR-009**: Service MUST allow extraction LLM, dedup LLM, and embedding model to be configured independently via env vars (`GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, `GRAPHITI_EMBEDDING_MODEL`) and support a primary→fallback chain per role.
+- **FR-009**: Service MUST allow extraction LLM, dedup LLM, and embedding model to be configured independently via env vars (`LCG_EXTRACTION_LLM`, `LCG_DEDUP_LLM`, `LCG_EMBEDDING_MODEL`) and support a primary→fallback chain per role.
 - **FR-010**: Service MUST support the existing roster: Anthropic (Sonnet/Haiku) over HTTP for extraction; a local model for dedup via an out-of-process adapter (initially MLX qwen via subprocess or local HTTP); bge-base-en-v1.5 embeddings via an out-of-process adapter (initially Python sentence-transformers).
 - **FR-011**: Service MUST implement a reader/writer split: write operations serialized per workspace, reads never blocked by an in-flight write.
 - **FR-012**: Service MUST use LadybugDB native HNSW + full-text indices for dedup candidate generation when present, with brute-force cosine fallback when index population is below a configurable threshold.
@@ -163,4 +163,4 @@ The service should emit per-call timing, token usage by role, fallback events, a
 
 - `/Users/bpja/dev/liminis-project/graphiti/graphiti_core/` — surface to preserve (especially `driver/ladybugdriver.py`, `nodes.py`, `edges.py`, `search/`).
 - `/Users/bpja/dev/liminis-project/liminis-framework/framework/src/skills/knowledge-graph/scripts/graphiti_service.py` — the call sites and IPC contract this service must serve.
-- ADR-042 (concurrent read/write split), ADR-052 (LadybugDB migration), `project_graphiti_caching_2026_04_30.md`, `project_hnsw_migration.md`, `project_qr_leak_fix.md`.
+- ADR-042 (concurrent read/write split), ADR-052 (LadybugDB migration), `project_context_graph_caching_2026_04_30.md`, `project_hnsw_migration.md`, `project_qr_leak_fix.md`.

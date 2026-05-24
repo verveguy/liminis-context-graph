@@ -7,7 +7,7 @@
 
 ## Background
 
-This is Tier 3 of the staged Rust reimplementation of the Python `graphiti_service.py`. It adds three correction-related JSON-RPC methods to the liminis-graph daemon that power the corrections UI in liminis-app:
+This is Tier 3 of the staged Rust reimplementation of the upstream Python graphiti-core service. It adds three correction-related JSON-RPC methods to the liminis-graph daemon that power the corrections UI in liminis-app:
 
 - **`knowledge_validate_corrections`** — schema-validates the workspace corrections file, checks referenced entities/edges exist in the live graph, and detects circular alias chains. Called by the corrections UI before showing the Apply button.
 - **`knowledge_apply_corrections`** — reads `.liminis/knowledge-corrections.yaml`, applies un-applied corrections (entity merging via `same_as`, fact invalidation via `retract`). Supports `dry_run`. Has 5 call sites in liminis-app.
@@ -114,7 +114,7 @@ Entities extracted before the freeform classification work still have only the g
 - **FR-011**: Accepts `dry_run` (bool, default `false`).
 - **FR-012**: Reads the corrections file; for each entry without `applied_at`, processes it based on `type`.
 - **FR-013**: `same_as` (non-dry-run): merges alias entities into the canonical. The merge logic moves edges from aliases onto the canonical (de-duplicating) and marks alias entities as merged (NOT hard-deleted, to preserve provenance).
-- **FR-014**: `retract` (non-dry-run): marks the named edge/fact as invalidated (graphiti's retract operation; sets an invalidation timestamp rather than hard-deleting).
+- **FR-014**: `retract` (non-dry-run): marks the named edge/fact as invalidated (graphiti-core's retract operation; sets an invalidation timestamp rather than hard-deleting).
 - **FR-015**: `dry_run: true` validates each correction (same per-type checks as FR-007–FR-009) without applying. The corrections file MUST NOT be modified. Response shape is the same as a real run, with `applied: 0` and `skipped` counting already-applied entries.
 - **FR-016**: On successful application of a correction, the entry's `applied_at` field is set to an ISO-8601 UTC timestamp and the corrections file is rewritten **atomically** (write to temp + rename) so a crash mid-write doesn't corrupt the file.
 - **FR-017**: Errors processing one correction (unknown type, missing required field, target not found) MUST NOT abort the run. The error is captured in `errors[]` and processing continues with the remaining corrections.
@@ -156,7 +156,7 @@ Entities extracted before the freeform classification work still have only the g
 - The corrections file format (YAML schema with `corrections: [{id, type, ...}]`) is the canonical contract — defined by the existing Python implementation. Schema documentation lives in the corrections UI / framework docs; this spec defers to that.
 - liminis-graph receives the workspace root at service init (per the audit, the Python service takes it as a CLI arg). If not, that's a Tier 1a integration concern, not Tier 3.
 - LLM extraction for `knowledge_reprocess_entity_types` uses the same configured extractor as `add_episode` (Sonnet per `[[project-llm-routing]]`).
-- The graphiti `reprocess_entity_types` utility used by Python is **not** directly portable to Rust — the spec describes the behaviour to replicate, not the code to translate. Implementation chooses how to bulk-classify (likely via batched extractor calls).
+- The graphiti-core `reprocess_entity_types` utility used by Python is **not** directly portable to Rust — the spec describes the behaviour to replicate, not the code to translate. Implementation chooses how to bulk-classify (likely via batched extractor calls).
 - "Merge" in `same_as` is semantic: edges move, alias is marked merged. Hard-delete is **not** acceptable — it loses provenance and breaks the audit trail.
 - "Retract" in `retract` is semantic: invalidation timestamp, **not** hard-delete.
 - The corrections file may have manual hand-edits between calls. The implementation MUST tolerate reformatting and YAML comment additions — the file is the canonical record, not an opaque database.

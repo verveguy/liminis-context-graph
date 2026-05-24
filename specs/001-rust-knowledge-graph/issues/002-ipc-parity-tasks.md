@@ -50,9 +50,9 @@
 
 **Purpose**: Implement the two out-of-process adapters (embedding + extraction). Can proceed in parallel with Phase 2.
 
-- [ ] T007 [P] [US1] [ADAPTER] Create `liminis-graph-core/src/embedder.rs` — `pub struct Embedder { url: String, model: String, dim: usize }` with `Embedder::from_env() -> Self` reading `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`), `GRAPHITI_EMBEDDING_MODEL` (default `bge-base-en-v1.5`), `GRAPHITI_EMBEDDING_DIM` (default `768`); `pub async fn embed(&self, text: &str) -> Result<Vec<f32>, Error>` that POSTs `{"text": ..., "model": ...}` and deserializes `{"embedding": [...]}` response; validate no ML crate added to Cargo.toml
+- [ ] T007 [P] [US1] [ADAPTER] Create `liminis-graph-core/src/embedder.rs` — `pub struct Embedder { url: String, model: String, dim: usize }` with `Embedder::from_env() -> Self` reading `LCG_EMBEDDING_URL` (default `http://127.0.0.1:8765`), `LCG_EMBEDDING_MODEL` (default `bge-base-en-v1.5`), `LCG_EMBEDDING_DIM` (default `768`); `pub async fn embed(&self, text: &str) -> Result<Vec<f32>, Error>` that POSTs `{"text": ..., "model": ...}` and deserializes `{"embedding": [...]}` response; validate no ML crate added to Cargo.toml
 
-- [ ] T008 [P] [US1] [ADAPTER] Create `liminis-graph-core/src/extractor.rs` — `pub struct Extractor { api_key: String, model: String }` with `Extractor::from_env() -> Self` reading `ANTHROPIC_API_KEY`, `GRAPHITI_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`); `pub async fn extract(&self, episode_body: &str, group_id: &str) -> Result<ExtractionResult, Error>` that calls Anthropic `/v1/messages` with a structured-output prompt returning `ExtractionResult`; system message placed in `system` field for prompt-cache eligibility (per FR-015); deserializes content JSON from the assistant turn
+- [ ] T008 [P] [US1] [ADAPTER] Create `liminis-graph-core/src/extractor.rs` — `pub struct Extractor { api_key: String, model: String }` with `Extractor::from_env() -> Self` reading `ANTHROPIC_API_KEY`, `LCG_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`); `pub async fn extract(&self, episode_body: &str, group_id: &str) -> Result<ExtractionResult, Error>` that calls Anthropic `/v1/messages` with a structured-output prompt returning `ExtractionResult`; system message placed in `system` field for prompt-cache eligibility (per FR-015); deserializes content JSON from the assistant turn
 
 **Checkpoint**: `cargo build -p liminis-graph-core` clean; `cargo tree -p liminis-graph-core | grep -E "tch|candle|onnxruntime"` returns empty
 
@@ -151,7 +151,7 @@
 **Purpose**: Wire the tokio UnixListener event loop in the binary. Depends on T020 (handlers).
 
 - [ ] T022 [US1] [IPC] Update `liminis-graph/Cargo.toml` to add `tokio = { workspace = true }`, `serde_json = { workspace = true }`, `liminis-graph-core = { path = "../liminis-graph-core" }`; rewrite `liminis-graph/src/main.rs`:
-  - Read `GRAPHITI_SOCKET_PATH` (default `.graphiti/service.sock`), `GRAPHITI_DB_PATH` (default `.graphiti/db/liminis.db`)
+  - Read `LCG_SOCKET_PATH` (default `.lcg/service.sock`), `LCG_DB_PATH` (default `.lcg/db/liminis.db`)
   - Open DB and connect; call `conn.init_schema(dim)` (idempotent)
   - Construct `Arc<Embedder>` and `Arc<Extractor>` from env
   - Bind `tokio::net::UnixListener`; accept loop spawns a task per connection
@@ -159,7 +159,7 @@
   - On `knowledge_close` response sent, drain connection and exit process cleanly
   - `#[tokio::main]` entry point
 
-**Checkpoint**: `cargo build --release -p liminis-graph` succeeds; `./target/release/liminis-graph` starts and listens without error; manual `echo '{"jsonrpc":"2.0","id":1,"method":"knowledge_build_indices","params":{}}' | nc -U .graphiti/service.sock` returns a valid JSON-RPC response
+**Checkpoint**: `cargo build --release -p liminis-graph` succeeds; `./target/release/liminis-graph` starts and listens without error; manual `echo '{"jsonrpc":"2.0","id":1,"method":"knowledge_build_indices","params":{}}' | nc -U .lcg/service.sock` returns a valid JSON-RPC response
 
 ---
 
@@ -167,7 +167,7 @@
 
 **Purpose**: Record request/response corpus and implement the parity replay test. Depends on Phase 8 being runnable.
 
-**⚠️ NOTE on T023**: Fixture JSON files MUST be recorded from the live Python graphiti service against a shared baseline DB (see `tests/fixtures/README.md` capture procedure). They cannot be synthesized arbitrarily; they encode the exact Python wire shapes.
+**⚠️ NOTE on T023**: Fixture JSON files MUST be recorded from the live upstream Python graphiti-core service against a shared baseline DB (see `tests/fixtures/README.md` capture procedure). They cannot be synthesized arbitrarily; they encode the exact Python wire shapes.
 
 - [ ] T023 [US1] [IPC] Capture parity fixture corpus:
   - Create `liminis-graph-core/tests/fixtures/README.md` documenting the capture procedure (run Python service against `baseline_db`, record each method call/response pair with a small Python script)

@@ -37,7 +37,7 @@ An operator configures extraction, dedup, and embedding to different providers v
 
 **Why P1**: Ops levers for provider routing and graceful degradation on API failure are required from day one; without them a single misconfigured key or transient outage takes down the entire ingest pipeline.
 
-**Independent test**: Set `GRAPHITI_EXTRACTION_LLM` to an invalid key; trigger extraction; verify the fallback model is used and exactly one error line is written to the log.
+**Independent test**: Set `LCG_EXTRACTION_LLM` to an invalid key; trigger extraction; verify the fallback model is used and exactly one error line is written to the log.
 
 **Acceptance scenarios**:
 
@@ -53,11 +53,11 @@ Repeated extraction runs against similar corpora hit the Anthropic prompt cache 
 
 **Why P2**: Cache misses on the Sonnet path add latency and token cost; the caching audit already paid the cost of establishing the right prompt structure — this issue must not regress it.
 
-**Independent test**: Run a fixed extraction corpus 10 times; assert the Anthropic-reported cache hit rate (from response headers or API metadata) meets the baseline from `project_graphiti_caching_2026_04_30.md`.
+**Independent test**: Run a fixed extraction corpus 10 times; assert the Anthropic-reported cache hit rate (from response headers or API metadata) meets the baseline from `project_context_graph_caching_2026_04_30.md`.
 
 **Acceptance scenarios**:
 
-1. **Given** the Sonnet extraction path, **When** repeated extractions run on similar content, **Then** Anthropic prompt-cache hit-rate meets or exceeds the baseline documented in `project_graphiti_caching_2026_04_30.md`.
+1. **Given** the Sonnet extraction path, **When** repeated extractions run on similar content, **Then** Anthropic prompt-cache hit-rate meets or exceeds the baseline documented in `project_context_graph_caching_2026_04_30.md`.
 2. **Given** the Haiku or local-model paths, **When** prompt caching is not applicable, **Then** no cache-control headers are sent and no cache-hit metric is recorded.
 
 ---
@@ -67,7 +67,7 @@ Repeated extraction runs against similar corpora hit the Anthropic prompt cache 
 ### In scope
 
 - Reader/writer split: write operations serialized per workspace; reads never blocked by an in-flight write (per ADR-042).
-- Per-role LLM routing via env vars `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, `GRAPHITI_EMBEDDING_MODEL`; each var accepts a primary and optional fallback identifier.
+- Per-role LLM routing via env vars `LCG_EXTRACTION_LLM`, `LCG_DEDUP_LLM`, `LCG_EMBEDDING_MODEL`; each var accepts a primary and optional fallback identifier.
 - Adapters (all out-of-process per Principle V):
   - Anthropic HTTP client for extraction (Sonnet/Haiku).
   - Local-model adapter for dedup — initially MLX qwen reached via subprocess or local HTTP.
@@ -90,7 +90,7 @@ Repeated extraction runs against similar corpora hit the Anthropic prompt cache 
 ### Functional Requirements
 
 - **FR-001**: Service MUST implement a reader/writer split where write operations are serialized per workspace and reads are never blocked by an in-flight write, as specified in ADR-042.
-- **FR-002**: Service MUST accept `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, and `GRAPHITI_EMBEDDING_MODEL` env vars to configure each role's provider independently.
+- **FR-002**: Service MUST accept `LCG_EXTRACTION_LLM`, `LCG_DEDUP_LLM`, and `LCG_EMBEDDING_MODEL` env vars to configure each role's provider independently.
 - **FR-003**: Each role env var MUST support a primary and an optional fallback provider; if the primary fails, the service MUST use the fallback without restarting.
 - **FR-004**: On primary-provider failure for a role, the service MUST log the failure exactly once per process lifetime (not once per request).
 - **FR-005**: Service MUST implement an Anthropic HTTP adapter for extraction supporting at minimum `claude-sonnet-4-5` (or current Sonnet) and `claude-haiku-4-5` (or current Haiku).
@@ -119,7 +119,7 @@ Repeated extraction runs against similar corpora hit the Anthropic prompt cache 
 
 - **SC-001**: p95 search latency ≤ 500 ms under a concurrent 100-episode extraction backlog, as proven by the bench in `benches/`.
 - **SC-002**: A misconfigured primary-extraction provider logs exactly one error line per process lifetime and falls back cleanly; no extraction requests fail visible to callers.
-- **SC-003**: Anthropic prompt-cache hit rate on the Sonnet extraction path meets or exceeds the baseline in `project_graphiti_caching_2026_04_30.md` on a fixed replay corpus.
+- **SC-003**: Anthropic prompt-cache hit rate on the Sonnet extraction path meets or exceeds the baseline in `project_context_graph_caching_2026_04_30.md` on a fixed replay corpus.
 - **SC-004**: Per-role token-usage telemetry is emitted and countable for a known extraction workload.
 - **SC-005**: No ML-runtime crate (`tch`, `candle`, `onnxruntime`, etc.) appears in `cargo tree` output after this issue lands.
 
@@ -127,11 +127,11 @@ Repeated extraction runs against similar corpora hit the Anthropic prompt cache 
 
 ## Assumptions
 
-- **Fallback chain format**: `GRAPHITI_EXTRACTION_LLM` (and sibling vars) accept a colon-separated list, e.g. `claude-sonnet-4-5:claude-haiku-4-5`, where the first entry is primary and the second is fallback. A single value means no fallback. The Plan stage will confirm or revise this format.
+- **Fallback chain format**: `LCG_EXTRACTION_LLM` (and sibling vars) accept a colon-separated list, e.g. `claude-sonnet-4-5:claude-haiku-4-5`, where the first entry is primary and the second is fallback. A single value means no fallback. The Plan stage will confirm or revise this format.
 - **"Once per session"** means once per process lifetime (from service start to stop). The per-role error deduplification is in-memory and is not persisted across restarts.
-- **Prompt-cache baseline** is defined in `project_graphiti_caching_2026_04_30.md` in the broader `liminis-project` tree. The Plan stage is responsible for reading and quoting the exact hit-rate figure into the bench assertion.
+- **Prompt-cache baseline** is defined in `project_context_graph_caching_2026_04_30.md` in the broader `liminis-project` tree. The Plan stage is responsible for reading and quoting the exact hit-rate figure into the bench assertion.
 - **ADR-042** (reader/writer split) is a design decision that must be authored as part of this issue's deliverables (it is referenced but does not yet exist in `docs/adr/`).
-- **Local adapter endpoints** are configurable via env vars (e.g. `GRAPHITI_DEDUP_ADAPTER_URL`, `GRAPHITI_EMBEDDING_ADAPTER_URL`) with defaults appropriate for local development; these details are resolved in the Plan stage.
+- **Local adapter endpoints** are configurable via env vars (e.g. `LCG_DEDUP_ADAPTER_URL`, `LCG_EMBEDDING_ADAPTER_URL`) with defaults appropriate for local development; these details are resolved in the Plan stage.
 - **Telemetry output format** is structured log lines (same channel as existing service logging) since the full telemetry surface (US6) is deferred; no separate metrics server is introduced here.
 - The reader/writer split applies per workspace (i.e. per `group_id`-scoped DB file), not globally across all workspaces.
 - All adapters are reached over localhost; no TLS or authentication is required for the local adapters in v1.

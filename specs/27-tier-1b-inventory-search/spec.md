@@ -3,14 +3,14 @@
 **Feature Branch**: `fabrik/issue-27`
 **Created**: 2026-05-22
 **Status**: Draft
-**Input**: User description: "Tier 1b of the liminis-graph ↔ liminis integration. Five read-only methods that power the entity/relationship browsing, semantic passage search, and 1-hop graph navigation that liminis-app's GraphitiPanel + chat surfaces depend on."
+**Input**: User description: "Tier 1b of the liminis-graph ↔ liminis integration. Five read-only methods that power the entity/relationship browsing, semantic passage search, and 1-hop graph navigation that liminis-app's ContextGraphPanel + chat surfaces depend on."
 
 ## Background
 
-This is Tier 1b of the staged Rust reimplementation of the Python `graphiti_service.py`. It adds five read-only JSON-RPC methods to the liminis-graph daemon that power the core browsing, search, and navigation surfaces in liminis-app:
+This is Tier 1b of the staged Rust reimplementation of the upstream Python graphiti-core service. It adds five read-only JSON-RPC methods to the liminis-graph daemon that power the core browsing, search, and navigation surfaces in liminis-app:
 
 - **`knowledge_search_passages`** — vector-cosine passage search (11 call sites in liminis-app; drives the chat "find relevant context" UX and the panel's search box)
-- **`knowledge_list_entities`** — entity inventory with optional group filter (used by GraphitiPanel and the corrections workflow)
+- **`knowledge_list_entities`** — entity inventory with optional group filter (used by ContextGraphPanel and the corrections workflow)
 - **`knowledge_list_relationships`** — edge inventory with optional group filter (companion to list_entities)
 - **`knowledge_get_entity_neighbors`** — 1-hop graph traversal from a named entity (7 call sites; drives "what does X relate to?" in chat and click-to-explore in panel)
 - **`knowledge_get_entities_by_source`** — filter entities by source document (powers "delete everything I learned from this file")
@@ -39,7 +39,7 @@ A user types a search query in the chat or panel; liminis-app calls `knowledge_s
 
 ### User Story 2 — User browses indexed entities and relationships (Priority: P2)
 
-The GraphitiPanel's entity list and the corrections workflow call `knowledge_list_entities` to enumerate entities. The companion `knowledge_list_relationships` enumerates edges. Both support `num_results` capping and optional `group_ids` filter.
+The ContextGraphPanel's entity list and the corrections workflow call `knowledge_list_entities` to enumerate entities. The companion `knowledge_list_relationships` enumerates edges. Both support `num_results` capping and optional `group_ids` filter.
 
 **Why this priority**: Core panel browsing; without this, operators cannot inspect the graph state or diagnose entity quality issues.
 

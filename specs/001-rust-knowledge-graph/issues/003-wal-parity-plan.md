@@ -4,13 +4,13 @@
 
 ## Summary
 
-Add two new modules to `liminis-graph-core` — `wal.rs` (appender) and `replay.rs` (cold-boot replayer) — that produce and consume JSONL WAL files format-compatible with the Python `graphiti_core/driver/wal.py` implementation. Every mutation appends to `.graphiti/wal/` before the DB write commits (Principle IV). On cold boot with the DB absent, the replayer reads all JSONL files in lexicographic order and re-executes mutations against a fresh LadybugDB connection, tolerating truncated final lines. TDD is mandatory for all WAL code.
+Add two new modules to `liminis-graph-core` — `wal.rs` (appender) and `replay.rs` (cold-boot replayer) — that produce and consume JSONL WAL files format-compatible with the Python `graphiti_core/driver/wal.py` implementation. Every mutation appends to `.lcg/wal/` before the DB write commits (Principle IV). On cold boot with the DB absent, the replayer reads all JSONL files in lexicographic order and re-executes mutations against a fresh LadybugDB connection, tolerating truncated final lines. TDD is mandatory for all WAL code.
 
 ## Technical Context
 
 **Language/Version**: Rust (stable, 2021 edition)  
 **Primary Dependencies**: `lbug = "=0.16.1"` (existing), `serde` + `serde_json` (JSON), `chrono` (ISO-8601 timestamps), `uuid` (session IDs)  
-**Storage**: LadybugDB — local file, `.graphiti/wal/` JSONL files alongside the DB  
+**Storage**: LadybugDB — local file, `.lcg/wal/` JSONL files alongside the DB  
 **Testing**: `cargo test` — integration tests in `liminis-graph-core/tests/`; TDD mandatory per R-09  
 **Target Platform**: Linux (ubuntu-latest) + macOS (macos-latest) via GitHub Actions  
 **Project Type**: Library extension — two new modules in `liminis-graph-core`, no binary changes  

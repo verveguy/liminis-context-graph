@@ -7,12 +7,12 @@
 
 ## Background
 
-liminis-graph is a Rust replacement for the Python `graphiti_service.py` daemon. The Python `reader_server.py` and `writer_server.py` clients connect to the daemon over a Unix socket (JSON-RPC 2.0) and call a fixed set of IPC methods. Without an exact wire-compatible implementation of these methods in Rust, the Python clients cannot switch to the Rust backend.
+liminis-graph is a Rust replacement for the upstream Python graphiti-core service daemon. The Python `reader_server.py` and `writer_server.py` clients connect to the daemon over a Unix socket (JSON-RPC 2.0) and call a fixed set of IPC methods. Without an exact wire-compatible implementation of these methods in Rust, the Python clients cannot switch to the Rust backend.
 
 Tier 1a covers the three methods every client calls before doing any substantive work:
 
-1. **`health_check`** — liveness probe called at startup to distinguish "daemon not running" from "daemon slow to start." Without it, the GraphitiPanel in liminis-app renders as "service down" during a slow boot.
-2. **`knowledge_status`** — polled every few seconds by liminis-app to drive the GraphitiPanel (entity/edge/episode counts, WAL state, DB path, embedding model). It is the highest-traffic method in the entire IPC surface (31 call sites in the Python client layer).
+1. **`health_check`** — liveness probe called at startup to distinguish "daemon not running" from "daemon slow to start." Without it, the ContextGraphPanel in liminis-app renders as "service down" during a slow boot.
+2. **`knowledge_status`** — polled every few seconds by liminis-app to drive the ContextGraphPanel (entity/edge/episode counts, WAL state, DB path, embedding model). It is the highest-traffic method in the entire IPC surface (31 call sites in the Python client layer).
 3. **`knowledge_process_chunk`** — the primary ingest method called by the indexing queue. The Rust service already has an equivalent handler (`knowledge_add_episode`) with different parameter names; this is a thin translation alias with a richer response shape.
 
 The JSON-RPC 2.0 transport over Unix socket is already implemented. This feature adds three new dispatch handlers and any supporting DB query methods, without touching the transport layer.
@@ -23,7 +23,7 @@ The JSON-RPC 2.0 transport over Unix socket is already implemented. This feature
 
 A liminis client opens a Unix-socket connection and calls `health_check` before forwarding any tool calls. If the daemon is up and its DB is queryable, the client proceeds. If the daemon is up but DB initialisation failed, the client surfaces an actionable error rather than hanging or misreporting "service down."
 
-**Why this priority**: Without this method, slow daemon startup is indistinguishable from a crashed daemon. GraphitiPanel renders erroneously and the user has no recovery path.
+**Why this priority**: Without this method, slow daemon startup is indistinguishable from a crashed daemon. ContextGraphPanel renders erroneously and the user has no recovery path.
 
 **Independent Test**: Start liminis-graph against a temp LadybugDB, send a JSON-RPC `health_check` request over the Unix socket, and assert the response is `{"ok": true}` within 10 ms of the request being dispatched on a warm service.
 
@@ -36,11 +36,11 @@ A liminis client opens a Unix-socket connection and calls `health_check` before 
 
 ---
 
-### User Story 2 — GraphitiPanel Renders Live Service State (Priority: P1)
+### User Story 2 — ContextGraphPanel Renders Live Service State (Priority: P1)
 
-liminis-app polls `knowledge_status` every few seconds to display entity/edge/episode counts, WAL state, DB path, and embedding model in the GraphitiPanel. The renderer cannot switch from the Python backend without a response shape that matches what it already parses.
+liminis-app polls `knowledge_status` every few seconds to display entity/edge/episode counts, WAL state, DB path, and embedding model in the ContextGraphPanel. The renderer cannot switch from the Python backend without a response shape that matches what it already parses.
 
-**Why this priority**: Highest-traffic method (31 call sites). Any shape mismatch or missing field causes GraphitiPanel to silently mis-render or throw parse errors.
+**Why this priority**: Highest-traffic method (31 call sites). Any shape mismatch or missing field causes ContextGraphPanel to silently mis-render or throw parse errors.
 
 **Independent Test**: Populate a LadybugDB fixture with known counts (e.g., 50 entities, 120 edges, 30 episodes), call `knowledge_status`, and assert that every enumerated field in FR-003 matches the fixture exactly.
 
@@ -119,7 +119,7 @@ The indexing queue calls `knowledge_process_chunk` for each document chunk. The 
 ## Assumptions
 
 - JSON-RPC 2.0 framing over Unix socket is already implemented in the `handlers.rs` / `main.rs` IPC layer. This feature adds handler functions and DB query methods; it does not modify the transport.
-- The existing `episode::add_episode` function is functionally equivalent to the Python `_graphiti.add_episode` pipeline (embed → LLM extract → dedup → write). `knowledge_process_chunk` delegates to it.
+- The existing `episode::add_episode` function is functionally equivalent to the Python graphiti-core `add_episode` pipeline (embed → LLM extract → dedup → write). `knowledge_process_chunk` delegates to it.
 - LadybugDB supports `COUNT(*)` on entity, edge, and episode tables with latency acceptable for interactive polling (< 100 ms on a 10 k-entity DB). Any count that cannot meet this bar is deferred and documented.
 - The Python `knowledge_status` field set (as returned by `graphiti_service.py`) is the canonical contract for field names, types, and semantics.
 - LLM cost fields present in Python's `knowledge_status` response are **out of scope**; they will be listed as deferred in the release notes.

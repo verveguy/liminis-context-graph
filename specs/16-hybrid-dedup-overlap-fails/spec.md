@@ -9,7 +9,7 @@
 
 The `hybrid_dedup_similar_entity` function (HNSW + BM25 + RRF) was implemented in issue #5 to replace the O(N) brute-force cosine path for large workspaces. The constitution requires ≥ 95% decision overlap with brute-force and ≤ 30% wall time of the Python baseline at 50k entities (Performance & Resource Budgets, v1.0.0).
 
-With the `-rdynamic` build flag and `INSTALL`/`LOAD` infrastructure bugs fixed (issues preceding #16), the `dedup_overlap_check` bench can now exercise the hybrid path end-to-end for the first time. It reveals the algorithmic problem: 64% overlap vs. the 95% required. In production this means ~36% of entity merges that brute-force would perform are silently skipped, creating duplicate entities and regressing quality relative to the Python `graphiti` baseline.
+With the `-rdynamic` build flag and `INSTALL`/`LOAD` infrastructure bugs fixed (issues preceding #16), the `dedup_overlap_check` bench can now exercise the hybrid path end-to-end for the first time. It reveals the algorithmic problem: 64% overlap vs. the 95% required. In production this means ~36% of entity merges that brute-force would perform are silently skipped, creating duplicate entities and regressing quality relative to the Python graphiti-core baseline.
 
 The bench at `liminis-graph-core/benches/search.rs:281` is deterministic and serves as the acceptance gate for this fix.
 
