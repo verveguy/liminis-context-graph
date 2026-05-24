@@ -10,6 +10,7 @@ use crate::{
     db::Db,
     dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter},
     embedder::{Embedder, HttpEmbedder},
+    env::lcg_env_var,
     extractor::Extractor,
     llm_router::LlmRouter,
     rebuild_job::RebuildJob,
@@ -45,10 +46,10 @@ pub struct AppState {
 impl AppState {
     /// Builds `AppState` from environment variables.
     ///
-    /// - `GRAPHITI_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
-    /// - `GRAPHITI_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
-    /// - `GRAPHITI_WAL_DIR`: optional WAL directory path.
-    /// - `GRAPHITI_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
+    /// - `LCG_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
+    /// - `LCG_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
+    /// - `LCG_WAL_DIR`: optional WAL directory path.
+    /// - `LCG_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
     pub fn from_env(
         sink: Arc<dyn TelemetrySink>,
         db: Option<Arc<Db>>,
@@ -57,16 +58,21 @@ impl AppState {
     ) -> Self {
         let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
         let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
-        let dedup: Arc<dyn DedupAdapter> = if std::env::var("GRAPHITI_DEDUP_LLM").is_ok() {
-            Arc::new(LocalDedupAdapter::from_env())
-        } else {
-            Arc::new(PassthroughDedupAdapter)
-        };
-        let wal_dir = std::env::var("GRAPHITI_WAL_DIR").ok().map(PathBuf::from);
+        // deprecated: remove in Phase B (see #59)
+        let dedup: Arc<dyn DedupAdapter> =
+            if lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM").is_ok() {
+                Arc::new(LocalDedupAdapter::from_env())
+            } else {
+                Arc::new(PassthroughDedupAdapter)
+            };
+        // deprecated: remove in Phase B (see #59)
+        let wal_dir =
+            lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").ok().map(PathBuf::from);
         let wal_writer = wal_dir
             .as_deref()
             .and_then(|dir| WalWriter::new(dir, 10_000).ok());
-        let embedding_model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
+        // deprecated: remove in Phase B (see #59)
+        let embedding_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
         let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT")
             .ok()

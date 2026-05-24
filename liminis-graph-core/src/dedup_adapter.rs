@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde_json::json;
 
 use crate::{
+    env::lcg_env_var,
     error::Error,
     types::{EntityRow, ExtractedEntity},
 };
@@ -19,7 +20,7 @@ pub trait DedupAdapter: Send + Sync {
 
 // ── PassthroughDedupAdapter ───────────────────────────────────────────────────
 
-/// Always returns `Ok(true)` — preserves cosine-only dedup behavior when GRAPHITI_DEDUP_LLM unset.
+/// Always returns `Ok(true)` — preserves cosine-only dedup behavior when LCG_DEDUP_LLM unset.
 pub struct PassthroughDedupAdapter;
 
 impl DedupAdapter for PassthroughDedupAdapter {
@@ -36,7 +37,7 @@ impl DedupAdapter for PassthroughDedupAdapter {
 
 /// Calls an out-of-process local model via local HTTP for dedup verification (Principle V).
 ///
-/// Configured via `GRAPHITI_DEDUP_ADAPTER_URL` (default: `http://127.0.0.1:8767`).
+/// Configured via `LCG_DEDUP_ADAPTER_URL` (default: `http://127.0.0.1:8767`).
 pub struct LocalDedupAdapter {
     url: String,
     client: Client,
@@ -44,7 +45,8 @@ pub struct LocalDedupAdapter {
 
 impl LocalDedupAdapter {
     pub fn from_env() -> Self {
-        let url = std::env::var("GRAPHITI_DEDUP_ADAPTER_URL")
+        // deprecated: remove in Phase B (see #59)
+        let url = lcg_env_var("LCG_DEDUP_ADAPTER_URL", "GRAPHITI_DEDUP_ADAPTER_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8767".to_string());
         Self {
             url,

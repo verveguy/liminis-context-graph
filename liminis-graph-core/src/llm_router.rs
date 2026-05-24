@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::{
+    env::lcg_env_var,
     error::Error,
     extractor::{AnthropicExtractor, Extractor},
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
@@ -12,7 +13,7 @@ use crate::{
 
 /// Routes extraction calls to a primary LLM with optional fallback (AD-5).
 ///
-/// Parses `GRAPHITI_EXTRACTION_LLM` on `:` — first token is the primary model,
+/// Parses `LCG_EXTRACTION_LLM` on `:` — first token is the primary model,
 /// second (optional) is the fallback model. Both use the same `ANTHROPIC_API_KEY`.
 ///
 /// When a fallback is configured: on the first primary failure, emits
@@ -55,7 +56,8 @@ impl LlmRouter {
 
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        let spec = std::env::var("GRAPHITI_EXTRACTION_LLM")
+        // deprecated: remove in Phase B (see #59)
+        let spec = lcg_env_var("LCG_EXTRACTION_LLM", "GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
 
         let mut parts = spec.splitn(2, ':');

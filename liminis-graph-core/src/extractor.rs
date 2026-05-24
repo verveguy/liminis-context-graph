@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::{
+    env::lcg_env_var,
     error::Error,
     telemetry::{cost_for_usage, now_ms, TelemetryEvent, TelemetrySink},
     types::ExtractionResult,
@@ -49,12 +50,13 @@ impl AnthropicExtractor {
     /// Constructs from environment variables.
     ///
     /// - `ANTHROPIC_API_KEY` (required)
-    /// - `GRAPHITI_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`)
+    /// - `LCG_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`)
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
-        // GRAPHITI_EXTRACTION_LLM may be "primary:fallback" format (consumed by LlmRouter).
+        // LCG_EXTRACTION_LLM may be "primary:fallback" format (consumed by LlmRouter).
         // AnthropicExtractor::from_env only needs the primary token.
-        let model = std::env::var("GRAPHITI_EXTRACTION_LLM")
+        // deprecated: remove in Phase B (see #59)
+        let model = lcg_env_var("LCG_EXTRACTION_LLM", "GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string())
             .split(':')
             .next()
