@@ -17,8 +17,8 @@ For OSS distribution, the typical user is a developer who wants to drop a knowle
 **A. MCP embedded in the Rust binary, as a second transport mode**
 
 ```
-liminis-graph --mcp-stdio --db ~/.lcg/db    # for MCP clients
-liminis-graph --socket /path/to.sock --db ...    # for embedded apps
+liminis-context-graph --mcp-stdio --db ~/.lcg/db    # for MCP clients
+liminis-context-graph --socket /path/to.sock --db ...    # for embedded apps
 ```
 
 The handler layer (`handlers::dispatch`) is transport-agnostic today. MCP stdio becomes a new transport that maps each `knowledge_*` method to an MCP `tool()`. Uses `rmcp` (official Rust MCP SDK). Single binary, two modes, dispatched by CLI flag.
@@ -29,7 +29,7 @@ The handler layer (`handlers::dispatch`) is transport-agnostic today. MCP stdio 
 **B. Out-of-process companion MCP wrapper (separate process)**
 
 ```
-Claude Desktop → stdio → python-mcp-wrapper → Unix socket → liminis-graph → DB
+Claude Desktop → stdio → python-mcp-wrapper → Unix socket → liminis-context-graph → DB
 ```
 
 A small Python or TS shim speaks MCP on one end and JSON-RPC over socket to liminis-graph on the other. This is the canonical MCP pattern (most published MCP servers are language-specific shims wrapping a backend service).

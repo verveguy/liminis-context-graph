@@ -86,7 +86,7 @@ Both `HttpEmbedder` (Rust caller) and the sidecar read a single `LCG_EMBEDDING_U
 
 ## Consequences
 
-- **`HttpEmbedder` requires a running sidecar** — any deployment of the liminis-graph binary must also start `embedder_server.py` before accepting connections. Failing to start the sidecar is now an explicit deployment error, not a silent misconfiguration.
+- **`HttpEmbedder` requires a running sidecar** — any deployment of the liminis-context-graph binary must also start `embedder_server.py` before accepting connections. Failing to start the sidecar is now an explicit deployment error, not a silent misconfiguration.
 - **L2 normalization is load-bearing** — future sidecar implementations (GPU, ANE/MLX) must also normalize. This constraint must be documented in any replacement implementation.
 - **Basename normalization is the contract** — callers and sidecar operators who set `LCG_EMBEDDING_MODEL` should use consistent values (either both with or both without the `BAAI/` prefix). The basename normalization is a compatibility shim for the default case, not a license to use arbitrary prefixes.
 - **`LCG_EMBEDDING_PATH` is a new env var** — not present in any prior Rust or Python code. Its default `/` is consistent with `HttpEmbedder`'s default URL (bare host:port with no path component).
