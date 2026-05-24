@@ -62,6 +62,22 @@ Example:
 {"type":"token_usage","ts_ms":1716100000001,"role":"extraction","model":"claude-haiku-4-5-20251001","input_tokens":512,"output_tokens":128,"cache_read_tokens":384,"cache_creation_tokens":0,"estimated_cost_usd":0.000512}
 ```
 
+### `extraction_truncated`
+
+Emitted when `do_extract` detects a `stop_reason: "max_tokens"` response and triggers a budget-doubling retry. Emitted once per chunk, after the retry resolves (either with success or with a second budget overflow). If `retry_succeeded` is `false`, the chunk was lost and an error was returned to the caller.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Anthropic model identifier that triggered the overflow |
+| `chunk_len_bytes` | integer | Length of the episode body chunk in bytes |
+| `initial_max_tokens` | integer | The `max_tokens` value used for the first (overflowing) attempt |
+| `retry_succeeded` | bool | `true` if the doubled-budget retry produced a valid result; `false` if the retry also overflowed |
+
+Example:
+```json
+{"type":"extraction_truncated","ts_ms":1716100000050,"model":"claude-sonnet-4-6","chunk_len_bytes":12480,"initial_max_tokens":8192,"retry_succeeded":true}
+```
+
 ### `llm_fallback`
 
 Emitted when the primary LLM is unavailable and extraction falls back to a secondary model. **Not yet emitted** — pending FR-009 (primary→fallback chain implementation).
