@@ -1345,7 +1345,7 @@ fn value_as_str_list(v: &lbug::Value) -> Vec<String> {
 }
 
 fn format_datetime(dt: time::OffsetDateTime) -> String {
-    // Format as "YYYY-MM-DD HH:MM:SS" (matches Python graphiti wire format)
+    // Format as "YYYY-MM-DD HH:MM:SS" (matches Python graphiti-core wire format)
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         dt.year(),
