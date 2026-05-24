@@ -1,5 +1,5 @@
 [package]
-name = "liminis-graph"
+name = "liminis-context-graph"
 version = "0.1.0"
 edition = "2021"
 description = "LadybugDB knowledge-graph IPC binary"

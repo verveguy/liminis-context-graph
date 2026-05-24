@@ -20,7 +20,7 @@ pub struct WalLine {
     pub params: serde_json::Value,
 }
 
-/// Appends WAL lines atomically per chunk to `.graphiti/wal/` JSONL files.
+/// Appends WAL lines atomically per chunk to `.lcg/wal/` JSONL files.
 pub struct WalWriter {
     wal_dir: PathBuf,
     global_seq: u64,
