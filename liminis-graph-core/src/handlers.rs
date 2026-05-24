@@ -191,6 +191,12 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             .ok()
             .and_then(|g| g.clone())
             .unwrap_or_else(|| "unknown".to_string());
+        // Only advertise rebuild_from_workspace_wal when a WAL dir is actually configured;
+        // otherwise clients would offer an option that always fails immediately.
+        let mut recovery_available = vec!["drop_lbug_wal"];
+        if state.wal_dir.is_some() {
+            recovery_available.push("rebuild_from_workspace_wal");
+        }
         return Ok(json!({
             "running": true,
             "degraded": true,
@@ -198,7 +204,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "graphiti_initialized": false,
             "connected": false,
             "initializing": false,
-            "recovery_available": ["drop_lbug_wal", "rebuild_from_workspace_wal"],
+            "recovery_available": recovery_available,
         }));
     }
     let db = db_opt.unwrap();
@@ -1408,8 +1414,10 @@ async fn recover_rebuild_from_workspace_wal(
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
         // Remove existing DB and siblings
         let path = std::path::Path::new(&db_path);
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else if path.exists() {
+            std::fs::remove_file(path)?;
         }
         for ext in &[".wal", ".lock"] {
             let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
@@ -1466,6 +1474,12 @@ async fn recover_restore_from_backup(
         let backup_path = best
             .ok_or_else(|| Error::Ipc("No backup file found".to_string()))?
             .1;
+        // Remove stale WAL/lock files before overwriting the DB file.
+        // If a corrupt WAL is left in place lbug will attempt to replay it against
+        // the restored checkpoint, causing immediate re-corruption on open.
+        for ext in &[".wal", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
+        }
         std::fs::copy(&backup_path, &db_path)
             .map_err(|e| Error::Ipc(format!("Failed to restore backup: {e}")))?;
 
