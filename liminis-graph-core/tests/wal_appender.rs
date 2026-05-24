@@ -7,8 +7,8 @@ fn open_writer(dir: &TempDir, max_events: usize) -> WalWriter {
     WalWriter::new(dir.path(), max_events).expect("WalWriter::new")
 }
 
-fn jsonl_files(dir: &TempDir) -> Vec<std::path::PathBuf> {
-    let mut files: Vec<_> = fs::read_dir(dir.path())
+fn jsonl_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files: Vec<_> = fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
@@ -46,7 +46,7 @@ fn test_with_chunk_writes_file_on_success() {
     })
     .expect("with_chunk");
 
-    let files = jsonl_files(&dir);
+    let files = jsonl_files(dir.path());
     assert_eq!(files.len(), 1, "expected exactly one JSONL file");
     assert_eq!(count_lines(&files[0]), 3, "expected 3 lines");
 }
@@ -66,7 +66,7 @@ fn test_with_chunk_discards_on_error() {
     });
 
     assert!(
-        jsonl_files(&dir).is_empty(),
+        jsonl_files(dir.path()).is_empty(),
         "no files must be written on chunk error"
     );
 }
@@ -82,7 +82,7 @@ fn test_seq_monotonic_across_chunks() {
             .unwrap();
     }
 
-    let files = jsonl_files(&dir);
+    let files = jsonl_files(dir.path());
     let mut seqs: Vec<u64> = files
         .iter()
         .flat_map(|f| {
@@ -122,7 +122,7 @@ fn test_seq_resumes_from_existing_wal() {
         .unwrap();
 
     // Find the new file (the one with a different session_id).
-    let all_files = jsonl_files(&dir);
+    let all_files = jsonl_files(dir.path());
     let new_file = all_files
         .iter()
         .find(|f| {
@@ -151,7 +151,7 @@ fn test_file_rotation_on_max_events() {
         .unwrap();
     }
 
-    let files = jsonl_files(&dir);
+    let files = jsonl_files(dir.path());
     assert_eq!(files.len(), 2, "expected 2 files after rotation");
 }
 
@@ -165,7 +165,7 @@ fn test_mutation_filter_excludes_reads() {
         .unwrap();
 
     assert!(
-        jsonl_files(&dir).is_empty(),
+        jsonl_files(dir.path()).is_empty(),
         "MATCH must not produce a WAL file"
     );
 }
@@ -186,7 +186,7 @@ fn test_mutation_filter_excludes_index_ddl() {
     .unwrap();
 
     assert!(
-        jsonl_files(&dir).is_empty(),
+        jsonl_files(dir.path()).is_empty(),
         "CREATE_VECTOR_INDEX must not produce a WAL file"
     );
 }
@@ -235,7 +235,7 @@ fn test_rotate_forces_new_file() {
     w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'b'})", json!({}), "db"))
         .unwrap();
 
-    let files = jsonl_files(&dir);
+    let files = jsonl_files(dir.path());
     assert_eq!(files.len(), 2, "rotate must force a new file on next write");
 }
 
@@ -253,12 +253,11 @@ fn test_flush_pending_recreates_deleted_wal_dir() {
         wal_dir.exists(),
         "WAL directory should exist after first write"
     );
-    let files_before = fs::read_dir(&wal_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .count();
-    assert_eq!(files_before, 1, "expected one file after first write");
+    assert_eq!(
+        jsonl_files(&wal_dir).len(),
+        1,
+        "expected one file after first write"
+    );
 
     // Delete the WAL directory out from under the running writer.
     fs::remove_dir_all(&wal_dir).unwrap();
@@ -269,13 +268,8 @@ fn test_flush_pending_recreates_deleted_wal_dir() {
         .expect("with_chunk must succeed after directory deletion");
 
     assert!(wal_dir.exists(), "WAL directory must be recreated");
-    let files_after = fs::read_dir(&wal_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-        .count();
     assert!(
-        files_after >= 1,
+        !jsonl_files(&wal_dir).is_empty(),
         "at least one .jsonl file must exist after recovery"
     );
 }
@@ -289,7 +283,7 @@ fn test_filename_format() {
     w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'x'})", json!({}), "db"))
         .unwrap();
 
-    let files = jsonl_files(&dir);
+    let files = jsonl_files(dir.path());
     let name = files[0].file_name().unwrap().to_str().unwrap();
     let re = regex::Regex::new(r"^\d{8}_\d{6}_[0-9a-f]{6}_0000\.jsonl$").unwrap();
     assert!(
