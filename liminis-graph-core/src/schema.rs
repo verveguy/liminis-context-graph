@@ -93,7 +93,7 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     // Errors mean "already exists" — suppress them for idempotency.
-    // Index names and covered columns match the Python graphiti service (canonical source).
+    // Index names and covered columns match the upstream Python graphiti-core service (canonical source).
     let _ = conn
         .raw_query("CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])");
     let _ = conn.raw_query(

@@ -917,11 +917,11 @@ async fn test_get_entity_neighbors_after_ingest() {
 // These tests open the Python-populated baseline_db fixture without any schema
 // init or index creation, then call every method that queries an index by name.
 // They guard against the class of bug in issue #49: Rust using a different index
-// name than the Python graphiti service used when creating the DB.
+// name than the upstream Python graphiti-core service used when creating the DB.
 //
 // The fixture at tests/fixtures/baseline_db/liminis.db is NOT committed to git.
 // These tests skip gracefully when the file is absent. To populate it, run
-// scripts/record_corpus.py against a live Python graphiti service
+// scripts/record_corpus.py against a live upstream Python graphiti-core service
 // (see tests/fixtures/README.md).
 
 /// Copies the baseline_db fixture into a fresh TempDir and returns the path
