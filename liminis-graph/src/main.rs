@@ -2,7 +2,14 @@ mod sink;
 
 use std::sync::Arc;
 
-use liminis_graph_core::{app_state::AppState, db::Db, handlers, ipc::IpcRequest, IpcResponse};
+use liminis_graph_core::{
+    app_state::AppState,
+    db::Db,
+    handlers,
+    ipc::IpcRequest,
+    telemetry::{now_ms, TelemetryEvent},
+    IpcResponse,
+};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -20,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(768);
 
-    // Ensure parent directory exists
+    // Ensure parent directories exist
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -28,28 +35,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Open database and initialise schema (idempotent).
-    // Vector indexes are NOT created here — HNSW blocks in-place writes.
-    // The caller must issue knowledge_build_indices after bulk ingestion.
-    let db = Arc::new(Db::open(&db_path)?);
-    {
-        let conn = db.connect()?;
-        conn.init_schema(embedding_dim)?;
-    }
+    // Bind socket FIRST — this allows health_check and recovery IPC to work even
+    // when the DB is in a degraded state. See ADR-0046.
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)?;
+    eprintln!("liminis-graph: listening on {socket_path}");
 
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
 
+    // Attempt to open database and initialize schema. Classify errors:
+    //   - Recoverable (lbug WAL corruption, permission denied, missing file) → degraded mode
+    //   - Fatal (everything else) → propagate via ? and let the process exit
+    let (maybe_db, degraded_reason): (Option<Arc<Db>>, Option<String>) = {
+        let open_result = (|| -> Result<Db, Box<dyn std::error::Error>> {
+            let db = Db::open(&db_path)?;
+            {
+                let conn = db.connect()?;
+                conn.init_schema(embedding_dim)?;
+            }
+            Ok(db)
+        })();
+
+        match open_result {
+            Ok(db) => (Some(Arc::new(db)), None),
+            Err(e) => {
+                let msg = e.to_string();
+                let is_recoverable = msg.contains("Corrupted wal file")
+                    || msg.contains("Permission denied")
+                    || msg.contains("No such file or directory");
+
+                if is_recoverable {
+                    let reason = "lbug_wal_corrupt".to_string();
+                    telemetry_sink.emit(TelemetryEvent::ServiceState {
+                        ts_ms: now_ms(),
+                        state: "degraded".to_string(),
+                        reason: Some(reason.clone()),
+                        detail: Some(msg),
+                    });
+                    (None, Some(reason))
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    };
+
     let state = Arc::new(AppState::from_env(
         Arc::clone(&telemetry_sink),
-        db,
+        maybe_db,
+        degraded_reason,
         db_path.clone(),
     ));
-
-    // Remove stale socket file
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
-    eprintln!("liminis-graph: listening on {socket_path}");
 
     loop {
         let (stream, _) = listener.accept().await?;
