@@ -26,6 +26,9 @@ pub enum Error {
 
     #[error("WAL JSON error: {0}")]
     WalJson(String),
+
+    #[error("DB unavailable, recovery required: {0}")]
+    DbUnavailable(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
