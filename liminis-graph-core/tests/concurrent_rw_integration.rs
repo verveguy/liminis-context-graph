@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -97,7 +97,8 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 async fn concurrent_add_episode_no_write_conflict() {
     let (db, _dir) = make_db(4);
     let state = Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
