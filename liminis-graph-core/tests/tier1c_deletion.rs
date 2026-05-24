@@ -53,6 +53,7 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     })
 }
 
