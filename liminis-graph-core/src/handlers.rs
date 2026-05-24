@@ -1163,10 +1163,12 @@ async fn handle_rebuild_from_wal(
     let db = load_db(&state)?;
     let write_lock = Arc::clone(&state.write_lock);
     let rebuild_jobs = Arc::clone(&state.rebuild_jobs);
+    let rebuild_jobs_handle_store = Arc::clone(&state.rebuild_jobs);
     let job_id_task = job_id.clone();
+    let job_id_handle_store = job_id.clone();
     let wal_dir_c = wal_dir.clone();
 
-    tokio::spawn(async move {
+    let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
         let _write_guard = if !dry_run {
             Some(write_lock.write_owned().await)
@@ -1229,6 +1231,13 @@ async fn handle_rebuild_from_wal(
             }
         }
     });
+
+    // Store the JoinHandle in the job record so shutdown can abort and await it.
+    if let Ok(mut jobs) = rebuild_jobs_handle_store.lock() {
+        if let Some(job) = jobs.get_mut(&job_id_handle_store) {
+            job.spawn_handle = Some(spawn_handle);
+        }
+    }
 
     Ok(json!({
         "success": true,

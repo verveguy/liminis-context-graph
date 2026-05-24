@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 /// Status of a background `rebuild_from_wal` job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ impl JobStatus {
 }
 
 /// In-memory record of a background WAL rebuild job (not persisted across restarts).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RebuildJob {
     pub job_id: String,
     pub status: JobStatus,
@@ -29,6 +30,9 @@ pub struct RebuildJob {
     pub start_time: DateTime<Utc>,
     pub error: Option<String>,
     pub result: Option<Value>,
+    /// Handle for the background tokio task. Stored so shutdown can abort and await
+    /// it, ensuring Arc<Db> reaches refcount 0 before the WAL checkpoint destructor fires.
+    pub spawn_handle: Option<JoinHandle<()>>,
 }
 
 impl RebuildJob {
@@ -41,6 +45,7 @@ impl RebuildJob {
             start_time: Utc::now(),
             error: None,
             result: None,
+            spawn_handle: None,
         }
     }
 
