@@ -31,6 +31,8 @@ pub enum IpcResponse {
 pub struct IpcError {
     pub code: i32,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl IpcResponse {
@@ -49,6 +51,24 @@ impl IpcResponse {
             error: IpcError {
                 code,
                 message: message.into(),
+                data: None,
+            },
+        }
+    }
+
+    pub fn err_with_data(
+        id: Value,
+        code: i32,
+        message: impl Into<String>,
+        data: Value,
+    ) -> Self {
+        IpcResponse::Err {
+            jsonrpc: "2.0".to_string(),
+            id,
+            error: IpcError {
+                code,
+                message: message.into(),
+                data: Some(data),
             },
         }
     }
