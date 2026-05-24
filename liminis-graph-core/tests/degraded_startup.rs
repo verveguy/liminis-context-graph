@@ -95,8 +95,7 @@ async fn test_degraded_mode_from_corrupt_wal() {
     // Simulate what main.rs does: classify as recoverable, create degraded AppState
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
     let reason = "lbug_wal_corrupt".to_string();
-    let state =
-        make_degraded_state_with_capture(&reason, db_path.clone(), Arc::clone(&sink));
+    let state = make_degraded_state_with_capture(&reason, db_path.clone(), Arc::clone(&sink));
 
     // Verify the state is actually degraded
     assert!(
@@ -122,8 +121,7 @@ async fn test_degraded_mode_from_corrupt_wal() {
     assert_eq!(resp["result"]["reason"], "lbug_wal_corrupt");
 
     // knowledge_status should also work and include recovery options
-    let status_resp =
-        dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    let status_resp = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
     assert_eq!(status_resp["jsonrpc"], "2.0");
     assert!(status_resp.get("result").is_some());
     assert_eq!(status_resp["result"]["degraded"], true);
@@ -139,12 +137,12 @@ async fn test_degraded_mode_from_corrupt_wal() {
     )
     .await;
     assert_eq!(entity_resp["jsonrpc"], "2.0");
-    assert!(entity_resp.get("error").is_some(), "Should return error when degraded");
-    assert_eq!(entity_resp["error"]["code"], -32001);
-    assert_eq!(
-        entity_resp["error"]["data"]["reason"],
-        "lbug_wal_corrupt"
+    assert!(
+        entity_resp.get("error").is_some(),
+        "Should return error when degraded"
     );
+    assert_eq!(entity_resp["error"]["code"], -32001);
+    assert_eq!(entity_resp["error"]["data"]["reason"], "lbug_wal_corrupt");
 }
 
 // ── FR-010: Recovery from degraded mode ──────────────────────────────────────
@@ -171,11 +169,8 @@ async fn test_recovery_drop_lbug_wal() {
 
     // Create degraded state with CaptureSink for telemetry verification
     let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
-    let state = make_degraded_state_with_capture(
-        "lbug_wal_corrupt",
-        db_path.clone(),
-        Arc::clone(&sink),
-    );
+    let state =
+        make_degraded_state_with_capture("lbug_wal_corrupt", db_path.clone(), Arc::clone(&sink));
 
     // Call knowledge_recover with drop_lbug_wal strategy
     let recover_resp = dispatch_val(
@@ -194,10 +189,7 @@ async fn test_recovery_drop_lbug_wal() {
     );
     let result = &recover_resp["result"];
     assert_eq!(result["strategy"], "drop_lbug_wal");
-    assert_eq!(
-        result["success"], true,
-        "Recovery should succeed: {result}"
-    );
+    assert_eq!(result["success"], true, "Recovery should succeed: {result}");
 
     // (a) The original .wal file should be renamed (not exist at original path)
     assert!(
@@ -209,11 +201,7 @@ async fn test_recovery_drop_lbug_wal() {
     let corrupt_files: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .contains(".wal.corrupt-")
-        })
+        .filter(|e| e.file_name().to_string_lossy().contains(".wal.corrupt-"))
         .collect();
     assert!(
         !corrupt_files.is_empty(),
@@ -243,8 +231,7 @@ async fn test_recovery_drop_lbug_wal() {
     );
 
     // (d) Subsequent health_check should return {ok: true}
-    let health_resp =
-        dispatch_val(11, "health_check", json!({}), Arc::clone(&state)).await;
+    let health_resp = dispatch_val(11, "health_check", json!({}), Arc::clone(&state)).await;
     assert_eq!(health_resp["jsonrpc"], "2.0");
     assert!(
         health_resp.get("result").is_some(),
@@ -325,13 +312,7 @@ async fn test_recovery_missing_strategy() {
         workspace_root: None,
     });
 
-    let resp = dispatch_val(
-        1,
-        "knowledge_recover",
-        json!({}),
-        Arc::clone(&state),
-    )
-    .await;
+    let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;
 
     assert_eq!(resp["jsonrpc"], "2.0");
     assert!(
