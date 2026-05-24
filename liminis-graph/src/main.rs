@@ -13,20 +13,16 @@ use liminis_graph_core::{
     IpcResponse,
 };
 use serde_json::Value;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
     sync::Notify,
     task::JoinSet,
 };
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 
-async fn handle_connection(
-    stream: UnixStream,
-    state: Arc<AppState>,
-    shutdown_notify: Arc<Notify>,
-) {
+async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
@@ -294,12 +290,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // R2/R5: Await in-flight connection tasks under the inner timeout.
-    let drain_result = tokio::time::timeout(
-        Duration::from_millis(shutdown_timeout_ms),
-        async {
-            while join_set.join_next().await.is_some() {}
-        },
-    )
+    let drain_result = tokio::time::timeout(Duration::from_millis(shutdown_timeout_ms), async {
+        while join_set.join_next().await.is_some() {}
+    })
     .await;
 
     if drain_result.is_err() {
