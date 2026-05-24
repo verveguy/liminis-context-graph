@@ -1,7 +1,7 @@
 // T014 integration tests: LlmRouter fallback, PassthroughDedupAdapter default, write serialization.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
@@ -111,6 +111,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
     });
 
     let s1 = Arc::clone(&state);
