@@ -365,8 +365,8 @@ async fn test_knowledge_status_empty_db() {
         "expected numeric embedding_dim: {v}"
     );
     assert_eq!(
-        r["graphiti_initialized"], true,
-        "expected graphiti_initialized:true: {v}"
+        r["context_graph_initialized"], true,
+        "expected context_graph_initialized:true: {v}"
     );
     assert_eq!(r["connected"], true, "expected connected:true: {v}");
     assert_eq!(r["initializing"], false, "expected initializing:false: {v}");
@@ -410,8 +410,8 @@ async fn test_knowledge_status_counts() {
         "expected 1 RELATES_TO relationship: {v}"
     );
     assert_eq!(
-        r["graphiti_initialized"], true,
-        "expected graphiti_initialized:true: {v}"
+        r["context_graph_initialized"], true,
+        "expected context_graph_initialized:true: {v}"
     );
     assert!(
         r["last_index_time"].as_str().is_some(),
