@@ -1,4 +1,4 @@
-# ADR-0046: Auto-Heal Write-Lock Acquisition from Search Handlers
+# ADR-0047: Auto-Heal Write-Lock Acquisition from Search Handlers
 
 **Status:** Accepted  
 **Date:** 2026-05-24  
