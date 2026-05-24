@@ -7,7 +7,7 @@
 
 ## Background
 
-Tier 1c of the liminis-graph ↔ liminis integration. Three WRITE methods that let the client remove content from the graph — either targeted (one chunk's episode, all episodes for one file) or wholesale (clear everything). The Python reference implementations live in `graphiti_service.py` lines 1872–1960 and 2517–2540.
+Tier 1c of the liminis-graph ↔ liminis integration. Three WRITE methods that let the client remove content from the graph — either targeted (one chunk's episode, all episodes for one file) or wholesale (clear everything). The Python reference implementations live in the upstream graphiti-core service (`graphiti_service.py`) at lines 1872–1960 and 2517–2540.
 
 These are the most destructive methods in the API surface. They must acquire the writer lock (ADR-042), must be idempotent, and `clear_all` must refuse to act without explicit confirmation. All three must return structured JSON-RPC errors on failure — never crashing the daemon, never leaving the graph in a partially-deleted state.
 
@@ -153,7 +153,7 @@ The corrections and rebuild flows occasionally need to nuke the graph and start 
 
 ## Source References
 
-- `graphiti_service.py` lines 1872–1960 and 2517–2540 — Python reference implementations
+- upstream graphiti-core `graphiti_service.py` lines 1872–1960 and 2517–2540 — Python reference implementations
 - `docs/adr/0042-reader-writer-split.md` — writer lock specification
 - Issue #26 (Tier 1a) — IPC handler-dispatch pattern and error-shape conventions (blocking dependency)
 - Constitution Principle I (IPC Parity) and Principle IV (WAL Is Authoritative)

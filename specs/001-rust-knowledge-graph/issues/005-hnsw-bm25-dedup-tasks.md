@@ -48,7 +48,7 @@ implementation directly.
 
 - [x] T006 [US4] [HOT] Create `liminis-graph-core/benches/python_baseline_ns.json` with pre-measured Python brute-force wall-time nanoseconds at 1k, 10k, 50k entities.  
   Format: `{"1k": <ns>, "10k": <ns>, "50k": <ns>}`.  
-  These are measured offline from `graphiti_service.py` against a deterministic synthetic corpus. Commit the file with a comment in `benches/search.rs` explaining the measurement machine and date.
+  These are measured offline from the upstream graphiti-core `graphiti_service.py` against a deterministic synthetic corpus. Commit the file with a comment in `benches/search.rs` explaining the measurement machine and date.
 
 - [x] T007 [US4] [HOT] Extend `liminis-graph-core/benches/search.rs` with a `setup_bench_db_n(n, dim)` helper that seeds exactly `n` entities with deterministic embeddings and builds both HNSW and FTS indexes. Replace the existing hard-coded 100-entity setup.
 

@@ -63,7 +63,7 @@ At 50k entities the count query adds negligible overhead relative to the dedup q
 
 ### AD-5: Python baseline committed as `benches/python_baseline_ns.json`
 
-The Python brute-force cosine path (`graphiti_service.py`) is measured offline against the
+The upstream Python graphiti-core brute-force cosine path (`graphiti_service.py`) is measured offline against the
 same fixed synthetic corpus (deterministic entity embeddings). Baseline wall-time nanoseconds
 per scale (1k, 10k, 50k) are committed in a JSON file. The Criterion bench loads this file,
 computes `rust_ns / baseline_ns`, and uses a custom `criterion` measurement (via

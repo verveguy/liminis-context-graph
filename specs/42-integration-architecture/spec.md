@@ -85,11 +85,11 @@ The Claude Agent SDK still sees two MCP server names (`knowledge-reader`, `knowl
 
 ### User Story 5 — Knowledge Graph Ships in the App Bundle, Not Per-Workspace (Priority: P1)
 
-liminis-app bundles the `liminis-graph` binary and the embedder sidecar in app resources. Workspaces stop shipping `.claude/skills/knowledge-graph/scripts/*.py`. Workspaces hold data (`.lcg/db`, `.lcg/wal`); the app owns the implementation.
+liminis-app bundles the `liminis-context-graph` binary and the embedder sidecar in app resources. Workspaces stop shipping `.claude/skills/knowledge-graph/scripts/*.py`. Workspaces hold data (`.lcg/db`, `.lcg/wal`); the app owns the implementation.
 
 **Why this priority**: Strategic ownership shift — knowledge graph is core tech, not a workspace extension. Per-workspace shipping creates version skew, deployment complexity, and an impossible upgrade path.
 
-**Independent Test**: Onboard a fresh workspace (no `.claude/skills/knowledge-graph/` present). The app spawns liminis-graph + embedder from bundled resources. The workspace gets a populated `.lcg/db` on first ingestion.
+**Independent Test**: Onboard a fresh workspace (no `.claude/skills/knowledge-graph/` present). The app spawns liminis-context-graph + embedder from bundled resources. The workspace gets a populated `.lcg/db` on first ingestion.
 
 **Acceptance Scenarios**:
 
@@ -104,10 +104,10 @@ liminis-app bundles the `liminis-graph` binary and the embedder sidecar in app r
 - **Connection pool exhaustion**: if all socket connections to the Rust binary are busy when a new call arrives, the call queues locally with a configurable timeout (default 30s); if the timeout expires, the call rejects with a typed `ConnectionPoolTimeout` error. No new connections are opened beyond the defined pool size.
 - **Pipelining at the socket**: a writer connection sends one request at a time (pipeline depth = 1). The caller awaits the response before sending the next request. This preserves back-pressure and prevents the Rust binary's `write_lock` queue from growing unbounded.
 - **Reader connection during write commit**: tokio's RwLock is write-preferring under contention; a queued writer blocks new readers. Separate reader connections per high-frequency caller (renderer-read, agent-read) limit worst-case reader latency to one Phase-D commit window (~100ms).
-- **Lifecycle restart**: when liminis-graph crashes and restarts, the TS client detects the broken socket, rejects all in-flight requests with a typed `ServiceRestarted` error, and reconnects all pool connections before serving subsequent calls.
+- **Lifecycle restart**: when liminis-context-graph crashes and restarts, the TS client detects the broken socket, rejects all in-flight requests with a typed `ServiceRestarted` error, and reconnects all pool connections before serving subsequent calls.
 - **MCP provider error vs. direct client error**: errors from the in-process MCP provider propagate as MCP tool errors (visible to agent via SDK error surface); errors from the direct client propagate as TS exceptions (caught by renderer/queue). Both originate from the same socket errors but are surfaced differently.
 - **Workspace migration**: existing workspaces with `.claude/skills/knowledge-graph/scripts/` are tolerated at runtime. The app emits a one-time deprecation log line per workspace open and ignores the scripts. File removal is left to the user.
-- **Bundle size impact**: liminis-graph binary ~28MB. Embedder sidecar + model weights (per #39) could add 100–500MB. Accepted for a desktop app bundle; the embedder model is not lazy-downloaded (bundled for offline use). Revisit if bundle size becomes a distribution problem.
+- **Bundle size impact**: liminis-context-graph binary ~28MB. Embedder sidecar + model weights (per #39) could add 100–500MB. Accepted for a desktop app bundle; the embedder model is not lazy-downloaded (bundled for offline use). Revisit if bundle size becomes a distribution problem.
 - **`knowledge_rebuild_from_wal` streaming**: this is an admin-only operation. It is not exposed as an MCP tool. It is only callable via `ContextGraphSocketClient.rebuildFromWal(progressCallback)` on the `lifecycle` connection.
 
 ## Requirements *(mandatory)*
@@ -150,7 +150,7 @@ liminis-app bundles the `liminis-graph` binary and the embedder sidecar in app r
 
 #### App Bundling
 
-- **FR-020**: `liminis-graph` Rust binary is built and copied into `liminis-app/resources/` (or platform-equivalent) during `pnpm build`. Path resolves at runtime via `process.resourcesPath`.
+- **FR-020**: `liminis-context-graph` Rust binary is built and copied into `liminis-app/resources/` (or platform-equivalent) during `pnpm build`. Path resolves at runtime via `process.resourcesPath`.
 - **FR-021**: Embedder sidecar (per #39) is similarly bundled and spawned by lifecycle when `backend = rust`.
 - **FR-022**: `context-graph-lifecycle.ts` resolves the binary path from app resources, not from a workspace-relative `.claude/skills/` path.
 - **FR-023**: Existing workspaces with `.claude/skills/knowledge-graph/scripts/` are tolerated at runtime. The app ignores those scripts and emits a one-time deprecation log line per workspace open.
@@ -158,7 +158,7 @@ liminis-app bundles the `liminis-graph` binary and the embedder sidecar in app r
 #### Framework Boundary
 
 - **FR-024**: `liminis-framework` no longer ships `graphiti_service.py`, `reader_server.py`, `writer_server.py`, `service_protocol.py`, `service_client.py`, or `common.py` from the knowledge-graph skill. The deprecation happens in a follow-up release after the cutover is validated.
-- **FR-025**: The cut-release flow (`release_process.md`) shrinks from 4 repos to 3: liminis-app (which embeds liminis-graph binary), remarkable, clipper. The framework still exists but no longer owns knowledge-graph.
+- **FR-025**: The cut-release flow (`release_process.md`) shrinks from 4 repos to 3: liminis-app (which embeds liminis-context-graph binary), remarkable, clipper. The framework still exists but no longer owns knowledge-graph.
 
 ## Pre-Implementation Spikes (Research Stage)
 
@@ -178,13 +178,13 @@ These must be completed and filed as findings before the Plan stage:
 - **SC-004**: Agent tool calls through the in-process MCP providers behave identically to the current Python implementation: same tool names, parameters, response shapes, error shapes.
 - **SC-005**: `.claude/settings.json` permission rules work unchanged after the refactor.
 - **SC-006**: Onboarding a fresh workspace (no `.claude/skills/knowledge-graph/`) produces a working knowledge graph using bundled resources only.
-- **SC-007**: The cut-release of liminis-app embeds the liminis-graph binary; the installed app works against an existing demo-notebook workspace without any framework-shipped Python scripts present.
+- **SC-007**: The cut-release of liminis-app embeds the liminis-context-graph binary; the installed app works against an existing demo-notebook workspace without any framework-shipped Python scripts present.
 - **SC-008**: No `mcpDirectInvoker.callTool(KNOWLEDGE_*, ...)` call sites remain in `liminis-app/src/`.
 
 ## Assumptions
 
 - Claude Agent SDK's in-process MCP API exists and is stable in the TS SDK. (Verify in spike 1.)
-- tokio::sync::RwLock semantics in liminis-graph give the right read/write isolation — multiple concurrent readers, one writer, brief Phase-D-only hold. (Verify in spike 2.)
+- tokio::sync::RwLock semantics in liminis-context-graph give the right read/write isolation — multiple concurrent readers, one writer, brief Phase-D-only hold. (Verify in spike 2.)
 - The Rust binary's main loop handles multiple concurrent connections without contention beyond the DB write_lock. (Already confirmed — per-connection tokio::spawn pattern in `main.rs:54-58`.)
 - Bundle-with-app is the right ownership boundary for the knowledge graph (strategic decision).
 - liminis-framework can lose the knowledge-graph skill without losing its reason to exist. If false, the deprecation step in FR-024 should be deferred or reshaped.
@@ -198,7 +198,7 @@ These must be completed and filed as findings before the Plan stage:
 - Reorganization of liminis-framework's other skills (only the knowledge-graph skill is affected).
 - Permission rule changes in `.claude/settings.json` — the existing scoping is preserved.
 - Renderer UI changes — the ContextGraphPanel and corrections UI consume the new direct client transparently.
-- Cross-workspace concurrent access to one liminis-graph instance — out of scope; one instance per workspace as today.
+- Cross-workspace concurrent access to one liminis-context-graph instance — out of scope; one instance per workspace as today.
 
 ## Source References
 
