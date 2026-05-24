@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
     extractor::MockExtractor, handlers, ipc::IpcRequest, telemetry::NoopSink, EntityRow,
@@ -36,7 +36,8 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         conn.init_schema(dim).unwrap();
     }
     let state = Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(dim)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -62,7 +63,7 @@ async fn find_entities_auto_heals_on_fresh_db() {
     // Insert an entity directly to ensure the HNSW index lookup is exercised.
     // Without data in the table, lbug may return empty results before hitting the index.
     {
-        let db = state.db.load_full();
+        let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
         conn.insert_entity(&EntityRow {
             uuid: "test-entity-heal-1".to_string(),
@@ -124,7 +125,7 @@ async fn find_entities_second_search_skips_auto_heal() {
 
     // Insert entity so the HNSW lookup is triggered.
     {
-        let db = state.db.load_full();
+        let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
         conn.insert_entity(&EntityRow {
             uuid: "test-entity-heal-2".to_string(),
