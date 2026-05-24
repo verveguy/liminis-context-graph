@@ -111,11 +111,11 @@ Example:
 
 ### `service_state`
 
-Emitted when the daemon enters or exits a degraded state. Produced on startup if the lbug DB fails to open with a recoverable error, and again after successful in-process recovery.
+Emitted when the daemon changes operational state: on degraded startup, after successful recovery, and during graceful shutdown.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `state` | string | `"degraded"` or `"healthy"` |
+| `state` | string | One of `"degraded"`, `"healthy"`, `"shutting_down"`, or `"stopped"` |
 | `reason` | string or absent | Machine-readable reason code (e.g. `"lbug_wal_corrupt"`). Present when `state = "degraded"`. |
 | `detail` | string or absent | Human-readable detail, typically the lbug error string. Present when `state = "degraded"` |
 
@@ -129,7 +129,17 @@ Healthy example (emitted after successful `knowledge_recover`):
 {"type":"service_state","ts_ms":1716523260000,"state":"healthy"}
 ```
 
-The renderer uses this event to update the recovery UI state without polling `knowledge_status`.
+Shutting-down example (emitted at the start of graceful shutdown, before in-flight tasks are drained):
+```json
+{"type":"service_state","ts_ms":1716523270000,"state":"shutting_down"}
+```
+
+Stopped example (emitted immediately before `exit(0)`, after the WAL checkpoint completes):
+```json
+{"type":"service_state","ts_ms":1716523271000,"state":"stopped"}
+```
+
+The renderer uses this event to update the recovery UI state without polling `knowledge_status`. On every clean exit, the telemetry stream ends with `"shutting_down"` → `"stopped"`.
 
 ### `wal_replay_complete`
 
@@ -192,3 +202,4 @@ Rates are in USD per million tokens. Models not present in the table produce `"e
 |----------|---------|-------------|
 | `LIMINIS_LLM_COST_TABLE_PATH` | *(built-in)* | Path to a JSON pricing table; overrides the compiled-in defaults |
 | `LIMINIS_TELEMETRY_SOCKET` | *(unset)* | UNIX socket path for telemetry output (**not yet implemented**) |
+| `LCG_SHUTDOWN_TIMEOUT_MS` | `30000` | Inner shutdown timeout in milliseconds; process aborts in-flight tasks after this and exits (best-effort WAL checkpoint). Sized to leave headroom under the liminis-app outer budget of 60 s. |
