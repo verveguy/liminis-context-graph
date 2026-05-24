@@ -2,7 +2,7 @@ use futures::future::BoxFuture;
 use reqwest::Client;
 use serde_json::json;
 
-use crate::{error::Error, types::EmbeddingResult};
+use crate::{env::lcg_env_var, error::Error, types::EmbeddingResult};
 
 // ── Embedder trait ────────────────────────────────────────────────────────────
 
@@ -30,15 +30,18 @@ pub struct HttpEmbedder {
 impl HttpEmbedder {
     /// Constructs from environment variables with sensible defaults.
     ///
-    /// - `GRAPHITI_EMBEDDING_URL` (default `http://127.0.0.1:8765`)
-    /// - `GRAPHITI_EMBEDDING_MODEL` (default `bge-base-en-v1.5`)
-    /// - `GRAPHITI_EMBEDDING_DIM` (default `768`)
+    /// - `LCG_EMBEDDING_URL` (default `http://127.0.0.1:8765`)
+    /// - `LCG_EMBEDDING_MODEL` (default `bge-base-en-v1.5`)
+    /// - `LCG_EMBEDDING_DIM` (default `768`)
     pub fn from_env() -> Self {
-        let url = std::env::var("GRAPHITI_EMBEDDING_URL")
+        // deprecated: remove in Phase B (see #59)
+        let url = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8765".to_string());
-        let model = std::env::var("GRAPHITI_EMBEDDING_MODEL")
+        // deprecated: remove in Phase B (see #59)
+        let model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
-        let dim = std::env::var("GRAPHITI_EMBEDDING_DIM")
+        // deprecated: remove in Phase B (see #59)
+        let dim = lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
