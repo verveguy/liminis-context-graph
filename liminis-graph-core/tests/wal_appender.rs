@@ -239,6 +239,41 @@ fn test_rotate_forces_new_file() {
     assert_eq!(files.len(), 2, "rotate must force a new file on next write");
 }
 
+/// flush_pending self-heals when the WAL directory is deleted mid-process.
+#[test]
+fn test_flush_pending_recreates_deleted_wal_dir() {
+    let dir = TempDir::new().unwrap();
+    let wal_dir = dir.path().join("wal");
+    let mut w = WalWriter::new(&wal_dir, 50).expect("WalWriter::new");
+
+    // Write one chunk to establish at least one file.
+    w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'a'})", json!({}), "db"))
+        .unwrap();
+    assert!(wal_dir.exists(), "WAL directory should exist after first write");
+    let files_before = fs::read_dir(&wal_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .count();
+    assert_eq!(files_before, 1, "expected one file after first write");
+
+    // Delete the WAL directory out from under the running writer.
+    fs::remove_dir_all(&wal_dir).unwrap();
+    assert!(!wal_dir.exists(), "WAL directory should be gone");
+
+    // The next write must succeed and recreate the directory + file.
+    w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'b'})", json!({}), "db"))
+        .expect("with_chunk must succeed after directory deletion");
+
+    assert!(wal_dir.exists(), "WAL directory must be recreated");
+    let files_after = fs::read_dir(&wal_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .count();
+    assert!(files_after >= 1, "at least one .jsonl file must exist after recovery");
+}
+
 /// Filename must match the pattern YYYYMMDD_HHMMSS_<6hex>_0000.jsonl
 #[test]
 fn test_filename_format() {
