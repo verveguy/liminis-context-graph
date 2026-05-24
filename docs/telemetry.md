@@ -92,6 +92,28 @@ Example:
 {"type":"wal_append","ts_ms":1716100000003,"duration_us":180,"bytes":1024}
 ```
 
+### `service_state`
+
+Emitted when the daemon enters or exits a degraded state. Produced on startup if the lbug DB fails to open with a recoverable error, and again after successful in-process recovery.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state` | string | `"degraded"` or `"healthy"` |
+| `reason` | string or absent | Machine-readable reason code (e.g. `"lbug_wal_corrupt"`). Present when `state = "degraded"`. |
+| `detail` | string or absent | Human-readable detail, typically the lbug error string. Present when `state = "degraded"` |
+
+Degraded example (emitted at startup when lbug WAL is corrupt):
+```json
+{"type":"service_state","ts_ms":1716523200000,"state":"degraded","reason":"lbug_wal_corrupt","detail":"database error: Lbug(Runtime exception: Corrupted wal file. Read out invalid WAL record type.)"}
+```
+
+Healthy example (emitted after successful `knowledge_recover`):
+```json
+{"type":"service_state","ts_ms":1716523260000,"state":"healthy"}
+```
+
+The renderer uses this event to update the recovery UI state without polling `knowledge_status`.
+
 ### `wal_replay_complete`
 
 Emitted once when WAL replay finishes at startup. **Not yet emitted** — pending issue #3 (WAL implementation).
