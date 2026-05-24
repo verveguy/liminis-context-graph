@@ -255,7 +255,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         "relationship_count": edge_count,
         "episode_count": episode_count,
         "last_index_time": last_index_time,
-        "graphiti_initialized": true,
+        "context_graph_initialized": true,
         "connected": true,
         "initializing": false,
         "wal": {
@@ -899,7 +899,7 @@ async fn handle_rebuild_from_wal(
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
 
     let wal_dir = state.wal_dir.clone().ok_or_else(|| {
-        Error::Ipc("No WAL directory configured (set GRAPHITI_WAL_DIR)".to_string())
+        Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string())
     })?;
 
     if !wal_dir.exists() || !has_jsonl_files(&wal_dir) {
