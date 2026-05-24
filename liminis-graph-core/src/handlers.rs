@@ -1310,8 +1310,8 @@ async fn handle_knowledge_recover(
         other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
     };
 
-    drop(_write_guard);
-
+    // Hold write guard through the db.store() call — see ADR-0042.
+    // _write_guard drops at end of match arm (end of function scope).
     match result {
         Ok(RecoverOutcome {
             db: Some(new_db),
