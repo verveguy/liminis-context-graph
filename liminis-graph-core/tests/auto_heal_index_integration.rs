@@ -142,19 +142,19 @@ async fn find_entities_second_search_skips_auto_heal() {
     let response = handlers::dispatch(request, Arc::clone(&state), None).await;
     let v: Value = serde_json::to_value(&response).unwrap();
 
-    // With indices_built=true and no actual HNSW index, the handler must return
-    // a human-readable error (not a raw binder trace).
-    if let Some(err) = v.get("error") {
-        let msg = err["message"].as_str().unwrap_or("");
-        assert!(
-            !msg.contains("Binder exception:"),
-            "Raw binder error must not be surfaced (FR-007), got: {msg}"
-        );
-        assert!(
-            msg.contains("knowledge_build_indices"),
-            "Error must name the recovery step (FR-007), got: {msg}"
-        );
-    }
-    // If there's a result, that means lbug returned empty results without the HNSW index
-    // (acceptable — the important property is no raw binder error reached the caller).
+    // With indices_built=true and data in the DB, lbug will attempt the HNSW lookup,
+    // encounter the missing index, and surface a binder error — which the handler must
+    // rewrite to MISSING_INDEX_USER_MSG rather than returning the raw trace (FR-003, FR-007).
+    let err = v
+        .get("error")
+        .expect("Expected error response when indices_built=true and HNSW index is missing");
+    let msg = err["message"].as_str().unwrap_or("");
+    assert!(
+        !msg.contains("Binder exception:"),
+        "Raw binder error must not be surfaced (FR-007), got: {msg}"
+    );
+    assert!(
+        msg.contains("knowledge_build_indices"),
+        "Error must name the recovery step (FR-007), got: {msg}"
+    );
 }
