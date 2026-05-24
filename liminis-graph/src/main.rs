@@ -88,7 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("liminis-context-graph: listening on {socket_path}");
 
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
-    let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = sink::StderrSink::start();
+    let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
+    let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = stderr_sink;
 
     // Attempt to open database and initialize schema. Classify errors:
     //   - Recoverable (lbug WAL corruption, permission denied, missing file) → degraded mode
