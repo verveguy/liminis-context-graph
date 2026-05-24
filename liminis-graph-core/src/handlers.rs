@@ -1064,6 +1064,10 @@ async fn handle_rebuild_from_wal(
         let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let tx = progress_tx;
+        // Clone sender for the post-spawn shutdown cancel notification (R9).
+        let tx_notify = tx.clone();
+        let shutdown_flag = Arc::clone(&state.shutdown);
+        let shutdown_flag_cancel = Arc::clone(&state.shutdown);
 
         // Write lock held in async scope; guard released after spawn_blocking completes.
         let _write_guard = if !dry_run {
@@ -1075,18 +1079,36 @@ async fn handle_rebuild_from_wal(
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
+                // Composite cancel: fire on client disconnect OR service shutdown (R9).
+                let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
+                    let t = t.clone();
+                    let flag = Arc::clone(&shutdown_flag_cancel);
+                    let f: crate::replay::CancelFn =
+                        Box::new(move || t.is_closed() || flag.load(Ordering::Relaxed));
+                    f
+                });
                 WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
                         from_seq,
                         dry_run,
-                        cancel_fn: tx.as_ref().map(build_cancel_fn),
+                        cancel_fn,
                         progress_fn: build_progress_fn(tx),
                     },
                 )
             })
             .await??;
         drop(_write_guard);
+
+        // R9: if shutdown triggered the cancel, emit a final progress event before returning.
+        if shutdown_flag.load(Ordering::Relaxed) {
+            if let Some(ref notify_tx) = tx_notify {
+                let _ = notify_tx.send(json!({
+                    "cancelled": true,
+                    "message": "Rebuild cancelled (service shutdown)"
+                }));
+            }
+        }
 
         let mut result = json!({
             "success": true,
@@ -1678,11 +1700,6 @@ fn has_jsonl_files(dir: &std::path::Path) -> bool {
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
         })
         .unwrap_or(false)
-}
-
-fn build_cancel_fn(tx: &UnboundedSender<Value>) -> Box<dyn Fn() -> bool + Send> {
-    let tx = tx.clone();
-    Box::new(move || tx.is_closed())
 }
 
 fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
