@@ -5,7 +5,7 @@
 pub fn lcg_env_var(new_name: &str, old_name: &str) -> Result<String, std::env::VarError> {
     match std::env::var(new_name) {
         Ok(v) => Ok(v),
-        Err(_) => match std::env::var(old_name) {
+        Err(std::env::VarError::NotPresent) => match std::env::var(old_name) {
             Ok(v) => {
                 eprintln!(
                     "[liminis-context-graph] DEPRECATED: env var {old_name} is deprecated; \
@@ -15,5 +15,6 @@ pub fn lcg_env_var(new_name: &str, old_name: &str) -> Result<String, std::env::V
             }
             Err(e) => Err(e),
         },
+        Err(e) => Err(e),
     }
 }
