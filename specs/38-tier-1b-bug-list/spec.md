@@ -7,15 +7,15 @@
 
 ## Background
 
-When liminis-graph runs against a real workspace populated by the Python graphiti service (e.g., `~/dev/liminis-project/demo-notebook`), two Tier 1b JSON-RPC methods fail with:
+When liminis-graph runs against a real workspace populated by the upstream Python graphiti-core service (e.g., `~/dev/liminis-project/demo-notebook`), two Tier 1b JSON-RPC methods fail with:
 
 ```
 Binder exception: Cannot find property uuid for r.
 ```
 
-The root cause is an inconsistency between the LadybugDB schema as written by the Python graphiti service and the Cypher queries used by some read methods in `liminis-graph-core/src/db.rs`.
+The root cause is an inconsistency between the LadybugDB schema as written by the upstream Python graphiti-core service and the Cypher queries used by some read methods in `liminis-graph-core/src/db.rs`.
 
-**Dual-encoding in `insert_relates_to_edge`**: The Rust write path creates both a `RelatesToNode_` shadow node (holding all edge properties: `uuid`, `name`, `fact`, `fact_embedding`, etc.) and a direct `[:RELATES_TO]` relationship between Entity nodes (with property copies). The Python graphiti service does **not** create the direct `Entity→Entity RELATES_TO` relationship — it uses the two-hop pattern `(src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity)`, as verified by the Research stage against `graphiti_core/driver/ladybug_driver.py` (schema) and `graphiti_core/driver/ladybug/hnsw_safe_writes.py` (write path).
+**Dual-encoding in `insert_relates_to_edge`**: The Rust write path creates both a `RelatesToNode_` shadow node (holding all edge properties: `uuid`, `name`, `fact`, `fact_embedding`, etc.) and a direct `[:RELATES_TO]` relationship between Entity nodes (with property copies). The upstream Python graphiti-core service does **not** create the direct `Entity→Entity RELATES_TO` relationship — it uses the two-hop pattern `(src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity)`, as verified by the Research stage against `graphiti_core/driver/ladybug_driver.py` (schema) and `graphiti_core/driver/ladybug/hnsw_safe_writes.py` (write path).
 
 **The symptom**: Read queries that pattern-match `(src:Entity)-[r:RELATES_TO]->(dst:Entity)` and then access `r.uuid` / `r.name` crash on Python-populated workspaces because either (a) no `RELATES_TO` relationship exists, or (b) it exists without the expected properties. This affects:
 
@@ -32,7 +32,7 @@ This bug causes `knowledge_list_relationships` and `knowledge_get_entity_neighbo
 
 ### User Story 1 — Browse relationships in a real workspace (Priority: P1)
 
-A user navigates to the GraphitiPanel in liminis-app and requests the edge list. liminis-app calls `knowledge_list_relationships`. Against a real workspace, this currently returns a JSON-RPC error instead of the 231 edges reported by `knowledge_status`.
+A user navigates to the ContextGraphPanel in liminis-app and requests the edge list. liminis-app calls `knowledge_list_relationships`. Against a real workspace, this currently returns a JSON-RPC error instead of the 231 edges reported by `knowledge_status`.
 
 **Why this priority**: Core browsing is broken in production. The edge count is known (231), so the fix is verifiable against real data.
 
@@ -43,13 +43,13 @@ A user navigates to the GraphitiPanel in liminis-app and requests the edge list.
 1. **Given** a workspace with 231 edges (per `knowledge_status`) and a live service, **When** `knowledge_list_relationships` is called with `num_results=10`, **Then** the response is `{facts: [10 edge objects], count: 10}` with each edge object containing `uuid`, `name`, `fact`, `group_id`, `valid_at`, `invalid_at`, and source/target entity UUIDs — not a JSON-RPC error.
 2. **Given** `group_ids: ["some-group"]` that contains edges, **When** called, **Then** only edges belonging to that group are returned.
 3. **Given** an empty DB, **When** called, **Then** `{facts: [], count: 0}` is returned — not an error.
-4. **Given** a workspace populated entirely by the Python graphiti service (no Rust-written edges), **When** called, **Then** the method succeeds and returns edges — confirming schema compatibility.
+4. **Given** a workspace populated entirely by the upstream Python graphiti-core service (no Rust-written edges), **When** called, **Then** the method succeeds and returns edges — confirming schema compatibility.
 
 ---
 
 ### User Story 2 — Explore 1-hop graph from a known entity (Priority: P1)
 
-A user clicks an entity in the GraphitiPanel or asks "what does X relate to?" in chat. liminis-app calls `knowledge_get_entity_neighbors` with the entity's UUID. Against a real workspace, this currently returns a Cypher binder error.
+A user clicks an entity in the ContextGraphPanel or asks "what does X relate to?" in chat. liminis-app calls `knowledge_get_entity_neighbors` with the entity's UUID. Against a real workspace, this currently returns a Cypher binder error.
 
 **Why this priority**: Graph navigation is completely broken in production; 7 call sites in liminis-app depend on this method.
 
@@ -59,7 +59,7 @@ A user clicks an entity in the GraphitiPanel or asks "what does X relate to?" in
 
 1. **Given** entity UUID `ff65e71d-46a1-4a14-aefb-b4086d10964c` which exists in demo-notebook with at least one edge, **When** `knowledge_get_entity_neighbors` is called, **Then** response is `{center_uuid: "ff65e71d-...", nodes: [...], edges: [...], node_count: N, edge_count: N}` with N ≥ 1.
 2. **Given** an entity UUID that exists but has no edges, **When** called, **Then** `{center_uuid, nodes: [], edges: [], node_count: 0, edge_count: 0}` — not an error.
-3. **Given** a workspace populated entirely by the Python graphiti service, **When** called, **Then** the method succeeds — confirming schema compatibility.
+3. **Given** a workspace populated entirely by the upstream Python graphiti-core service, **When** called, **Then** the method succeeds — confirming schema compatibility.
 
 ---
 
@@ -73,7 +73,7 @@ No automated test currently catches this class of schema mismatch because existi
 
 **Acceptance Scenarios**:
 
-1. **Given** a test that calls `add_episode` with content that causes graphiti to extract at least one entity pair and one edge, **When** the episode is added and then `knowledge_list_relationships` is called, **Then** the response contains at least one edge whose fields are fully populated — confirming that edges stored through the canonical `add_episode` path are queryable by the list method.
+1. **Given** a test that calls `add_episode` with content that causes the context graph service to extract at least one entity pair and one edge, **When** the episode is added and then `knowledge_list_relationships` is called, **Then** the response contains at least one edge whose fields are fully populated — confirming that edges stored through the canonical `add_episode` path are queryable by the list method.
 2. **Given** the same setup, **When** `knowledge_get_entity_neighbors` is called with the UUID of one of the extracted entities, **Then** the response contains at least one edge and one neighbor node.
 
 ---
@@ -89,9 +89,9 @@ No automated test currently catches this class of schema mismatch because existi
 
 ### Functional Requirements
 
-- **FR-001**: `list_relationships` MUST return correct results against a LadybugDB populated by the Python graphiti service (i.e., where edges are stored as `RelatesToNode_` nodes using the Python traversal pattern). It MUST use `RelatesToNode_` as the primary node for edge-property access.
+- **FR-001**: `list_relationships` MUST return correct results against a LadybugDB populated by the upstream Python graphiti-core service (i.e., where edges are stored as `RelatesToNode_` nodes using the Python traversal pattern). It MUST use `RelatesToNode_` as the primary node for edge-property access.
 - **FR-002**: `get_entity_neighbors` MUST return correct results against a Python-populated DB. It MUST NOT access edge properties through a direct `[r:RELATES_TO]` relationship pattern that does not exist or lacks properties in the Python schema.
-- **FR-003**: The Research stage MUST verify the exact Cypher traversal pattern used by the Python graphiti `EntityEdge` ORM (likely `(src:Entity)-[:MENTIONS]->(n:RelatesToNode_)-[:MENTIONS]->(dst:Entity)`) by inspecting the Python source and the live demo-notebook DB, and this pattern MUST inform the corrected Cypher in `db.rs`.
+- **FR-003**: The Research stage MUST verify the exact Cypher traversal pattern used by the Python graphiti-core `EntityEdge` ORM (likely `(src:Entity)-[:MENTIONS]->(n:RelatesToNode_)-[:MENTIONS]->(dst:Entity)`) by inspecting the Python source and the live demo-notebook DB, and this pattern MUST inform the corrected Cypher in `db.rs`.
 - **FR-004**: All `db.rs` methods that perform a Cypher `MATCH ... [r:RELATES_TO] ...` and access properties on `r` MUST be audited. Any method that fails against a Python-populated DB MUST be corrected.
 - **FR-005**: Methods corrected under FR-001/FR-002/FR-004 MUST continue to work against a Rust-populated DB (where both the shadow node and the direct relationship exist). No double-counting of edges is permitted.
 - **FR-006**: A new integration test MUST be added (or an existing Tier 1b test extended) that:
@@ -102,9 +102,9 @@ No automated test currently catches this class of schema mismatch because existi
 
 ### Key Entities
 
-- **`RelatesToNode_`**: The shadow node in LadybugDB that holds all edge properties (`uuid`, `name`, `fact`, `fact_embedding`, `group_id`, `valid_at`, `invalid_at`, `attributes`). Created by both Rust (`insert_relates_to_edge`) and Python graphiti. The canonical source of truth for edge data.
+- **`RelatesToNode_`**: The shadow node in LadybugDB that holds all edge properties (`uuid`, `name`, `fact`, `fact_embedding`, `group_id`, `valid_at`, `invalid_at`, `attributes`). Created by both Rust (`insert_relates_to_edge`) and the upstream Python graphiti-core service. The canonical source of truth for edge data.
 - **`[:RELATES_TO]`**: A direct relationship in LadybugDB between two `Entity` nodes. Created by Rust `insert_relates_to_edge` with property copies, but absent or property-free in Python-populated workspaces.
-- **`[:MENTIONS]`**: A candidate relationship type used in the Python schema to link `Entity` nodes to `RelatesToNode_` (Research must confirm). Present in the Python graphiti traversal pattern.
+- **`[:MENTIONS]`**: A candidate relationship type used in the Python schema to link `Entity` nodes to `RelatesToNode_` (Research must confirm). Present in the Python graphiti-core traversal pattern.
 
 ## Success Criteria *(mandatory)*
 
@@ -118,8 +118,8 @@ No automated test currently catches this class of schema mismatch because existi
 
 ## Assumptions
 
-- The Python graphiti service does NOT create a direct `[:RELATES_TO]` relationship with properties between `Entity` nodes; it uses only the `RelatesToNode_` shadow node (and possibly `[:MENTIONS]` links). This must be confirmed by Research.
-- The demo-notebook DB at `~/dev/liminis-project/demo-notebook/.graphiti/db` is accessible and contains real Python-populated data including the 231 edges reported by `knowledge_status`.
+- The upstream Python graphiti-core service does NOT create a direct `[:RELATES_TO]` relationship with properties between `Entity` nodes; it uses only the `RelatesToNode_` shadow node (and possibly `[:MENTIONS]` links). This must be confirmed by Research.
+- The demo-notebook DB at `~/dev/liminis-project/demo-notebook/.lcg/db` is accessible and contains real Python-populated data including the 231 edges reported by `knowledge_status`.
 - `count_relates_to_edges` and `get_relates_to_by_uuids` (the known-working methods) are correct models for the access pattern. Research should derive the fix from these.
 - The fix does not change the JSON-RPC response contract for `knowledge_list_relationships` or `knowledge_get_entity_neighbors` — only the internal Cypher changes.
 - `add_episode` stores edges via `insert_relates_to_edge`, which creates both the shadow node and the direct relationship. This means a test using `add_episode` will exercise both — the fix must handle both storage patterns.

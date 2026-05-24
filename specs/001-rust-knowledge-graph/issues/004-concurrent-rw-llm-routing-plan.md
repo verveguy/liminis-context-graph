@@ -78,15 +78,15 @@ pub trait DedupAdapter: Send + Sync {
     ) -> futures::future::BoxFuture<'a, Result<bool, Error>>;
 }
 
-/// Always returns `true` — preserves cosine-only behavior when GRAPHITI_DEDUP_LLM is unset.
+/// Always returns `true` — preserves cosine-only behavior when LCG_DEDUP_LLM is unset.
 pub struct PassthroughDedupAdapter;
 
 /// Calls an out-of-process local model via local HTTP.
-/// Configured via GRAPHITI_DEDUP_ADAPTER_URL (default: http://127.0.0.1:8767).
+/// Configured via LCG_DEDUP_ADAPTER_URL (default: http://127.0.0.1:8767).
 pub struct LocalDedupAdapter { ... }
 ```
 
-`AppState::dedup` is `Arc<dyn DedupAdapter>`. If `GRAPHITI_DEDUP_LLM` is unset, `AppState` uses `PassthroughDedupAdapter` (existing cosine-only behavior preserved). If set, it uses `LocalDedupAdapter`.
+`AppState::dedup` is `Arc<dyn DedupAdapter>`. If `LCG_DEDUP_LLM` is unset, `AppState` uses `PassthroughDedupAdapter` (existing cosine-only behavior preserved). If set, it uses `LocalDedupAdapter`.
 
 `LocalDedupAdapter` sends a JSON POST to the configured URL:
 
@@ -154,7 +154,7 @@ pub struct LlmRouter {
    - If `fallback.is_none()`, return the original error.
 4. On subsequent calls after `primary_failed` is `true`: skip primary entirely, call fallback directly.
 
-Env var parsing: `GRAPHITI_EXTRACTION_LLM` is split on `:` — first token is primary model, second (optional) is fallback model. Both resolve to `AnthropicExtractor` instances (same API key, different model names). A future issue can introduce a non-Anthropic fallback path; for now both primary and fallback are Anthropic.
+Env var parsing: `LCG_EXTRACTION_LLM` is split on `:` — first token is primary model, second (optional) is fallback model. Both resolve to `AnthropicExtractor` instances (same API key, different model names). A future issue can introduce a non-Anthropic fallback path; for now both primary and fallback are Anthropic.
 
 `main.rs` builds `LlmRouter::from_env(sink)` and wraps it in `Arc<dyn Extractor>`.
 
@@ -175,7 +175,7 @@ The static system prompt content must remain unchanged across calls (no variable
 
 Token usage parsing (`cache_read_input_tokens`, `cache_creation_input_tokens`) is already implemented in `emit_token_usage`; no change needed.
 
-**SC-003 deferral**: The quantitative cache hit-rate assertion (against `project_graphiti_caching_2026_04_30.md`) is deferred because the baseline file does not exist in this repo. The structural changes (headers, cache_control) are the deliverable. Deferral is documented in ADR-042 and tracked in a follow-up issue filed as part of this plan.
+**SC-003 deferral**: The quantitative cache hit-rate assertion (against `project_context_graph_caching_2026_04_30.md`) is deferred because the baseline file does not exist in this repo. The structural changes (headers, cache_control) are the deliverable. Deferral is documented in ADR-042 and tracked in a follow-up issue filed as part of this plan.
 
 ### AD-7: HTTP 529 backoff in `AnthropicExtractor`
 
@@ -233,7 +233,7 @@ Note: the bench proves the RwLock contention model — it does not simulate real
 - **Context**: lbug returns `Error::FailedQuery` on concurrent write connections; extraction (30s) must not block search (p95 ≤ 500 ms).
 - **Decision**: `tokio::sync::RwLock<()>` in `AppState`. Write guard acquired immediately before the DB commit `spawn_blocking`, after all async HTTP work completes. Read guard acquired before any read `spawn_blocking`. Both guards move into the closure and are dropped on completion.
 - **Consequences**: p95 search latency bounded by DB-commit duration (milliseconds), not LLM call duration (30s). Write throughput is single-writer; concurrent extractions queue on the write guard. Phase B (dedup HTTP) runs without a lock, so N concurrent extractions can overlap on dedup while serializing only on DB commit.
-- **Deferral note**: SC-003 (quantitative prompt-cache hit rate ≥ baseline) is deferred pending `project_graphiti_caching_2026_04_30.md` being available in-repo. A follow-up issue must establish the baseline.
+- **Deferral note**: SC-003 (quantitative prompt-cache hit rate ≥ baseline) is deferred pending `project_context_graph_caching_2026_04_30.md` being available in-repo. A follow-up issue must establish the baseline.
 
 ---
 
@@ -296,10 +296,10 @@ liminis-graph-core/tests/
 
 | Var | Default | Notes |
 |-----|---------|-------|
-| `GRAPHITI_EXTRACTION_LLM` | `claude-haiku-4-5-20251001` | `primary:fallback` colon-separated |
-| `GRAPHITI_DEDUP_LLM` | unset | If unset, `PassthroughDedupAdapter` used |
-| `GRAPHITI_DEDUP_ADAPTER_URL` | `http://127.0.0.1:8767` | URL for `LocalDedupAdapter` |
-| `GRAPHITI_EMBEDDING_MODEL` | `bge-base-en-v1.5` | Existing env var, unchanged |
+| `LCG_EXTRACTION_LLM` | `claude-haiku-4-5-20251001` | `primary:fallback` colon-separated |
+| `LCG_DEDUP_LLM` | unset | If unset, `PassthroughDedupAdapter` used |
+| `LCG_DEDUP_ADAPTER_URL` | `http://127.0.0.1:8767` | URL for `LocalDedupAdapter` |
+| `LCG_EMBEDDING_MODEL` | `bge-base-en-v1.5` | Existing env var, unchanged |
 
 ---
 
@@ -478,5 +478,5 @@ No constitution violations.
 
 | Note | Detail |
 |------|--------|
-| SC-003 deferred | `project_graphiti_caching_2026_04_30.md` absent from repo; structural caching changes only; ADR-042 records the deferral; follow-up issue to be filed |
+| SC-003 deferred | `project_context_graph_caching_2026_04_30.md` absent from repo; structural caching changes only; ADR-042 records the deferral; follow-up issue to be filed |
 | Write guard held post-Phase-B | Dedup adds one async HTTP round-trip per extracted entity (typically 2–5 per episode) before the write guard is acquired; this is acceptable latency on the write path and does not affect read paths |

@@ -40,18 +40,18 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 - [x] T005 Create `liminis-graph-core/src/dedup_adapter.rs` [ADAPTER]:
   - Define `DedupAdapter` trait with `fn is_duplicate<'a>(&'a self, candidate: &'a EntityRow, incoming: &'a ExtractedEntity) -> futures::future::BoxFuture<'a, Result<bool, Error>>`
   - Implement `PassthroughDedupAdapter` (always returns `Ok(true)`)
-  - Implement `LocalDedupAdapter { url: String, client: reqwest::Client }` with `from_env()` reading `GRAPHITI_DEDUP_ADAPTER_URL` (default `http://127.0.0.1:8767`)
+  - Implement `LocalDedupAdapter { url: String, client: reqwest::Client }` with `from_env()` reading `LCG_DEDUP_ADAPTER_URL` (default `http://127.0.0.1:8767`)
   - `LocalDedupAdapter::is_duplicate` POSTs `{"candidate": {...}, "incoming": {...}}` and parses `{"is_duplicate": bool}`
   - Add `pub mod dedup_adapter` and re-exports to `lib.rs`
 
 - [x] T006 Create `liminis-graph-core/src/app_state.rs`:
   - `AppState { db: Arc<Db>, embedder: Arc<Embedder>, extractor: Arc<dyn Extractor>, dedup: Arc<dyn DedupAdapter>, write_lock: Arc<tokio::sync::RwLock<()>>, sink: Arc<dyn TelemetrySink> }`
-  - `AppState::from_env(sink, db)`: reads `GRAPHITI_DEDUP_LLM` to choose `PassthroughDedupAdapter` vs `LocalDedupAdapter`; always builds `LlmRouter` for extraction
+  - `AppState::from_env(sink, db)`: reads `LCG_DEDUP_LLM` to choose `PassthroughDedupAdapter` vs `LocalDedupAdapter`; always builds `LlmRouter` for extraction
   - Add `pub mod app_state` to `lib.rs`
 
 - [x] T007 Create `liminis-graph-core/src/llm_router.rs` [ADAPTER]:
   - `LlmRouter { primary: AnthropicExtractor, fallback: Option<AnthropicExtractor>, primary_failed: AtomicBool, sink: Arc<dyn TelemetrySink> }`
-  - `LlmRouter::from_env(sink)`: parses `GRAPHITI_EXTRACTION_LLM` on `:` to get primary and optional fallback model names; builds two `AnthropicExtractor` instances (same key, different models)
+  - `LlmRouter::from_env(sink)`: parses `LCG_EXTRACTION_LLM` on `:` to get primary and optional fallback model names; builds two `AnthropicExtractor` instances (same key, different models)
   - Implement `Extractor for LlmRouter`: try primary; on any error and `primary_failed` CAS from false→true, emit `TelemetryEvent::LlmFallback` + `eprintln!` exactly once; on subsequent calls with `primary_failed=true`, skip primary; if no fallback, propagate error
   - Add `pub mod llm_router` and re-export to `lib.rs`
 
@@ -117,7 +117,7 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 - [x] T014 [US2] [ADAPTER] Write integration tests in `liminis-graph-core/tests/concurrent_rw_integration.rs`:
   - Test 1 — **fallback once-per-session**: construct `LlmRouter` with a primary `AnthropicExtractor` pointing at an invalid URL; call `extract()` twice; assert `TelemetryEvent::LlmFallback` emitted exactly once (use `CaptureSink`); assert fallback `AnthropicExtractor` is called both times after first failure (can use a second invalid URL to force a known error shape and verify error propagation)
-  - Test 2 — **PassthroughDedupAdapter default**: verify `AppState::from_env` with `GRAPHITI_DEDUP_LLM` unset produces `PassthroughDedupAdapter` behavior (is_duplicate always returns true for any candidate)
+  - Test 2 — **PassthroughDedupAdapter default**: verify `AppState::from_env` with `LCG_DEDUP_LLM` unset produces `PassthroughDedupAdapter` behavior (is_duplicate always returns true for any candidate)
   - Test 3 — **write serialization**: two concurrent `add_episode` calls on the same `AppState` with `MockExtractor` complete without error (no lbug `-32000`); verify both episodes inserted
 
 **Checkpoint**: `cargo test --test concurrent_rw_integration` passes.

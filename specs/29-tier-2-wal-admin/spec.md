@@ -129,7 +129,7 @@ For the non-streaming rebuild flow, liminis-app polls `knowledge_rebuild_status`
 
 ### Key Entities
 
-- **WAL file** (`.jsonl`): A single append-only log file in `{workspace_root}/.graphiti/wal/`. The WAL directory layout must match the Python implementation; if liminis-graph uses a different path, that path must be documented and both sides aligned.
+- **WAL file** (`.jsonl`): A single append-only log file in `{workspace_root}/.lcg/wal/`. The WAL directory layout must match the Python implementation; if liminis-graph uses a different path, that path must be documented and both sides aligned.
 - **Job** (`rebuild_status` job): In-memory record of a `rebuild_from_wal` background task, keyed by a UUID assigned at creation time.
 - **Progress line**: A `\n`-terminated JSON object emitted on the socket during a streaming rebuild, before the terminal response.
 
@@ -151,7 +151,7 @@ For the non-streaming rebuild flow, liminis-app polls `knowledge_rebuild_status`
 - The WAL appender in `wal.rs` either already exposes a flush/rotate operation suitable for `prepare_checkpoint`, or adding one is in scope for this issue.
 - The writer lock from ADR-042 serializes writes; `prepare_checkpoint` and non-dry-run `rebuild_from_wal` both take it. `rebuild_status` does not.
 - The streaming IPC framing (`{type: "progress", ...}` lines before terminal response) does not require backward-compatibility handling — both streaming and non-streaming variants are introduced together, and non-streaming clients simply use the non-streaming variant.
-- WAL directory layout matches Python: `{workspace_root}/.graphiti/wal/*.jsonl`. If liminis-graph uses a different path, Research/Plan stages must document the actual path and determine how to align.
+- WAL directory layout matches Python: `{workspace_root}/.lcg/wal/*.jsonl`. If liminis-graph uses a different path, Research/Plan stages must document the actual path and determine how to align.
 - The handler-dispatch pattern and JSON-RPC error shape from Tier 1a (#26) are available on the branch before implementation begins.
 
 ## Out of Scope

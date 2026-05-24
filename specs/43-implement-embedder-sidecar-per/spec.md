@@ -64,7 +64,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 
 ### Edge Cases
 
-- `GRAPHITI_EMBEDDING_URL` env var overrides the default bind address and port (both host and port are extracted from the URL).
+- `LCG_EMBEDDING_URL` env var overrides the default bind address and port (both host and port are extracted from the URL).
 - `POST /` received while the model is still loading → HTTP 503, not a crash or hang.
 - Malformed JSON body → HTTP 400 with a message; the sidecar keeps running.
 - `"text"` field present but empty string → HTTP 400.
@@ -77,7 +77,7 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 ### Functional Requirements
 
 - **FR-001**: The sidecar MUST be a single Python file (`embedder_server.py`) with PEP 723 inline dependency metadata so it can be invoked directly with `uv run embedder_server.py` without any prior environment setup.
-- **FR-002**: The sidecar MUST bind to `127.0.0.1:8765` by default. The bind address and port MUST be overrideable via the `GRAPHITI_EMBEDDING_URL` environment variable (the sidecar extracts host and port from the URL). This supersedes the originally-proposed `EMBEDDER_HOST`/`EMBEDDER_PORT` split — using a single URL keeps the sidecar and `HttpEmbedder` (Rust) in lockstep, since both read `GRAPHITI_EMBEDDING_URL`. See ADR-044 Implementation Notes.
+- **FR-002**: The sidecar MUST bind to `127.0.0.1:8765` by default. The bind address and port MUST be overrideable via the `LCG_EMBEDDING_URL` environment variable (the sidecar extracts host and port from the URL). This supersedes the originally-proposed `EMBEDDER_HOST`/`EMBEDDER_PORT` split — using a single URL keeps the sidecar and `HttpEmbedder` (Rust) in lockstep, since both read `LCG_EMBEDDING_URL`. See ADR-044 Implementation Notes.
 - **FR-003**: The sidecar MUST serve `POST /` accepting `application/json` body `{"text": "<string>", "model": "<string>"}` and returning `{"embedding": [<N floats>]}` with HTTP 200. The `text` and `model` fields are both required.
 - **FR-004**: The sidecar MUST load `BAAI/bge-base-en-v1.5` via `sentence-transformers`. The returned embedding MUST have exactly 768 dimensions, matching the dimension expected by liminis-graph's `HttpEmbedder`.
 - **FR-005**: The sidecar MUST serve `GET /health`. While the model is loading, this endpoint MUST return HTTP 503 with body `{"ok": false}`. Once the model is ready, it MUST return HTTP 200 with body `{"ok": true}`. The ready state MUST NOT revert to 503 after the model has loaded.
