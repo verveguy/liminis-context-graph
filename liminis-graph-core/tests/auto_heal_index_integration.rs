@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use liminis_graph_core::{
@@ -24,11 +24,18 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
+// lbug installs vector/fts extensions into a global directory (~/.lbdb/extension/) on the
+// first Db::open call. Concurrent opens race on directory creation. Serialize them here.
+static DB_OPEN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
 fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("auto_heal_test.db");
     let db_path_str = db_path.to_str().unwrap().to_string();
-    let db = Arc::new(Db::open(&db_path_str).unwrap());
+    let db = {
+        let _open_guard = DB_OPEN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        Arc::new(Db::open(&db_path_str).unwrap())
+    };
     {
         let conn = db.connect().unwrap();
         // init_schema creates tables and FTS indexes but intentionally NOT HNSW vector indexes.
