@@ -1,6 +1,7 @@
 mod sink;
 
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
+use std::time::Duration;
 
 use liminis_graph_core::{
     app_state::AppState,
@@ -14,8 +15,107 @@ use liminis_graph_core::{
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixListener,
+    net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
+    sync::Notify,
+    task::JoinSet,
 };
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
+
+async fn handle_connection(
+    stream: UnixStream,
+    state: Arc<AppState>,
+    shutdown_notify: Arc<Notify>,
+) {
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        let req: IpcRequest = match serde_json::from_str(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                write_parse_error(&mut writer, e).await;
+                continue;
+            }
+        };
+
+        let is_close = req.method == "knowledge_close";
+        let is_streaming = req
+            .params
+            .get("_progress_token")
+            .map(|v| !v.is_null())
+            .unwrap_or(false);
+
+        let resp = if is_streaming {
+            handle_streaming_request(req, Arc::clone(&state), &mut writer).await
+        } else {
+            Some(handlers::dispatch(req, Arc::clone(&state), None).await)
+        };
+
+        if let Some(resp) = resp {
+            let json = serde_json::to_string(&resp).unwrap_or_default();
+            let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+        }
+
+        if is_close {
+            // Trigger graceful shutdown instead of std::process::exit(0) (R3).
+            shutdown_notify.notify_one();
+            return;
+        }
+    }
+}
+
+async fn write_parse_error(writer: &mut OwnedWriteHalf, e: serde_json::Error) {
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {"code": -32700, "message": format!("Parse error: {e}")}
+    });
+    let json = serde_json::to_string(&response).unwrap_or_default();
+    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+}
+
+/// Returns `Some(response)` if the streaming dispatch produced a final response, or `None` if the
+/// client disconnected and the dispatch task was aborted.
+async fn handle_streaming_request(
+    req: IpcRequest,
+    state: Arc<AppState>,
+    writer: &mut OwnedWriteHalf,
+) -> Option<IpcResponse> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req_id = req.id.clone();
+    let dispatch_handle = tokio::spawn(handlers::dispatch(req, state, Some(tx)));
+
+    let mut client_ok = true;
+    while let Some(val) = rx.recv().await {
+        let json = serde_json::to_string(&val).unwrap_or_default();
+        if writer
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .is_err()
+        {
+            client_ok = false;
+            break;
+        }
+    }
+
+    if client_ok {
+        Some(
+            dispatch_handle
+                .await
+                .unwrap_or_else(|_| IpcResponse::err(req_id, -32000, "Internal error")),
+        )
+    } else {
+        drop(rx);
+        dispatch_handle.abort();
+        None
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -81,6 +181,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Inner shutdown timeout: caps in-flight task drain to leave headroom under the
+    // outer 60s budget (liminis-app SHUTDOWN_TIMEOUT_MS). Default: 30s.
+    let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(30_000);
+
     // Bind socket FIRST — this allows health_check and recovery IPC to work even
     // when the DB is in a degraded state. See ADR-0046.
     let _ = std::fs::remove_file(&socket_path);
@@ -135,87 +242,109 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db_path.clone(),
     ));
 
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let state = Arc::clone(&state);
+    // ── Signal handler setup (R1: installed BEFORE the accept loop) ───────────
+    // SIGTERM: captured via tokio's unix signal infrastructure. The OS-level handler
+    // is registered synchronously when signal() is called — the async task just drains it.
+    let shutdown_notify = Arc::new(Notify::new());
 
+    #[cfg(unix)]
+    {
+        let mut sigterm_stream = signal(SignalKind::terminate())?;
+        let notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                let line = line.trim().to_string();
-                if line.is_empty() {
-                    continue;
-                }
-
-                let req: IpcRequest = match serde_json::from_str(&line) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": null,
-                            "error": {"code": -32700, "message": format!("Parse error: {e}")}
-                        });
-                        let json = serde_json::to_string(&response).unwrap_or_default();
-                        let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-                        continue;
-                    }
-                };
-
-                let is_close = req.method == "knowledge_close";
-                let is_streaming = req
-                    .params
-                    .get("_progress_token")
-                    .map(|v| !v.is_null())
-                    .unwrap_or(false);
-
-                let resp = if is_streaming {
-                    // Streaming: drain progress lines before writing terminal response
-                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-                    let state_clone = Arc::clone(&state);
-                    let req_id = req.id.clone();
-                    let dispatch_handle =
-                        tokio::spawn(handlers::dispatch(req, state_clone, Some(tx)));
-
-                    // Drain progress lines until channel closes (tx dropped inside dispatch)
-                    let mut client_ok = true;
-                    while let Some(val) = rx.recv().await {
-                        let json = serde_json::to_string(&val).unwrap_or_default();
-                        if writer
-                            .write_all(format!("{json}\n").as_bytes())
-                            .await
-                            .is_err()
-                        {
-                            // Client disconnected; drop rx so cancel_fn detects closed channel,
-                            // then abort the dispatch task to clean up the async wrapper.
-                            client_ok = false;
-                            break;
-                        }
-                    }
-
-                    if client_ok {
-                        dispatch_handle
-                            .await
-                            .unwrap_or_else(|_| IpcResponse::err(req_id, -32000, "Internal error"))
-                    } else {
-                        // Drop rx before aborting so cancel_fn sees the closed channel promptly
-                        drop(rx);
-                        dispatch_handle.abort();
-                        continue;
-                    }
-                } else {
-                    handlers::dispatch(req, Arc::clone(&state), None).await
-                };
-
-                let json = serde_json::to_string(&resp).unwrap_or_default();
-                let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-
-                if is_close {
-                    // Exit process cleanly — matches Python service behaviour.
-                    std::process::exit(0);
-                }
-            }
+            sigterm_stream.recv().await;
+            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            notify.notify_one();
         });
     }
+    {
+        let notify = Arc::clone(&shutdown_notify);
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("liminis-context-graph: received SIGINT, shutting down");
+            notify.notify_one();
+        });
+    }
+
+    // ── Accept loop ───────────────────────────────────────────────────────────
+    let mut join_set: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                let (stream, _) = result?;
+                let state_clone = Arc::clone(&state);
+                let notify_clone = Arc::clone(&shutdown_notify);
+                join_set.spawn(handle_connection(stream, state_clone, notify_clone));
+            }
+            _ = shutdown_notify.notified() => {
+                break;
+            }
+        }
+    }
+
+    // ── Graceful shutdown sequence (R2, R4, R5, R6) ───────────────────────────
+    // R6: Emit shutting_down state.
+    state.shutdown.store(true, Ordering::Relaxed);
+    telemetry_sink.emit(TelemetryEvent::ServiceState {
+        ts_ms: now_ms(),
+        state: "shutting_down".to_string(),
+        reason: None,
+        detail: None,
+    });
+
+    // R2/R5: Await in-flight connection tasks under the inner timeout.
+    let drain_result = tokio::time::timeout(
+        Duration::from_millis(shutdown_timeout_ms),
+        async {
+            while join_set.join_next().await.is_some() {}
+        },
+    )
+    .await;
+
+    if drain_result.is_err() {
+        eprintln!(
+            "liminis-context-graph: shutdown timeout ({shutdown_timeout_ms}ms) exceeded, aborting tasks"
+        );
+        join_set.abort_all();
+        while join_set.join_next().await.is_some() {}
+    }
+
+    // Abort any background rebuild tasks (they hold Arc<Db> clones).
+    {
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        if let Ok(mut jobs) = state.rebuild_jobs.lock() {
+            for job in jobs.values_mut() {
+                if let Some(handle) = job.spawn_handle.take() {
+                    handles.push(handle);
+                }
+            }
+        }
+        for handle in handles {
+            handle.abort();
+            // Await to let the tokio runtime reclaim the task slot; JoinError expected on abort.
+            let _ = handle.await;
+        }
+    }
+
+    // R2: Drop AppState — drops Arc<Db>. If refcount reaches 0, the cxx::UniquePtr<ffi::Database>
+    // destructor fires the LadybugDB WAL checkpoint. Connection tasks were awaited above.
+    // Note: spawn_blocking threads inside aborted tasks hold Arc<Db> until they finish naturally;
+    // the WAL checkpoint fires when those threads complete (best-effort per R5).
+    drop(state);
+
+    // R6: Emit stopped state before exiting.
+    telemetry_sink.emit(TelemetryEvent::ServiceState {
+        ts_ms: now_ms(),
+        state: "stopped".to_string(),
+        reason: None,
+        detail: None,
+    });
+
+    // Drop last sender so the drain task sees channel close and exits its loop.
+    drop(telemetry_sink);
+    // Await drain task to flush the "stopped" event to stderr before exit.
+    sink_drain_handle.await.ok();
+
+    std::process::exit(0);
 }
