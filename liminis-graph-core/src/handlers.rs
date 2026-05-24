@@ -34,9 +34,12 @@ fn is_missing_index_error(err: &Error) -> bool {
 /// Called at most once per session per DB lifecycle event.
 async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
     let _guard = state.write_lock.write().await;
+    // Double-check inside the lock: another task may have completed the build while we waited.
     if state.indices_built.load(Ordering::Acquire) {
         return Ok(());
     }
+    // Load DB after acquiring the lock so we build on the current instance, not a stale
+    // snapshot that predates a concurrent clear_all swap.
     let db = load_db(state)?;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -45,6 +48,8 @@ async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
     .await;
     match result {
         Ok(Ok(())) => {
+            // Set flag while still holding the write lock to eliminate the window between
+            // guard release and flag update that would allow redundant builds.
             state.indices_built.store(true, Ordering::Release);
             Ok(())
         }
