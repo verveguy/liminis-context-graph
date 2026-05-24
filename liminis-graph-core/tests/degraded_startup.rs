@@ -126,7 +126,7 @@ async fn test_degraded_mode_from_corrupt_wal() {
     assert!(status_resp.get("result").is_some());
     assert_eq!(status_resp["result"]["degraded"], true);
     assert_eq!(status_resp["result"]["running"], true);
-    assert_eq!(status_resp["result"]["graphiti_initialized"], false);
+    assert_eq!(status_resp["result"]["context_graph_initialized"], false);
 
     // Any other method should return -32001 (DB unavailable)
     let entity_resp = dispatch_val(

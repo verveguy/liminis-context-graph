@@ -201,7 +201,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "running": true,
             "degraded": true,
             "reason": reason,
-            "graphiti_initialized": false,
+            "context_graph_initialized": false,
             "connected": false,
             "initializing": false,
             "recovery_available": recovery_available,
