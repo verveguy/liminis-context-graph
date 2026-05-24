@@ -2,5 +2,5 @@
   "1k": 2000000,
   "10k": 20000000,
   "50k": 100000000,
-  "_note": "Python brute-force cosine wall-time nanoseconds, measured on Apple M2 (2026-05-19) against deterministic 8-dim synthetic corpus. Graphiti graphiti_service.py brute-force path. For reference only — CI assertions use in-process Rust brute-force timing to stay environment-agnostic."
+  "_note": "Python brute-force cosine wall-time nanoseconds, measured on Apple M2 (2026-05-19) against deterministic 8-dim synthetic corpus. Upstream Python graphiti-core service brute-force path. For reference only — CI assertions use in-process Rust brute-force timing to stay environment-agnostic."
 }

@@ -6,7 +6,7 @@ This document captures the architectural questions, options, and trade-offs that
 
 ## Context
 
-liminis-graph today is the Rust knowledge graph engine used by liminis-app (Electron) via Unix-socket JSON-RPC. liminis-app provides the MCP layer in-process (TS providers calling `GraphitiSocketClient`) and bundles a Python embedder sidecar. The Rust binary itself only speaks one transport (socket) and assumes its peers handle MCP, embedding, LLM, etc.
+liminis-graph today is the Rust knowledge graph engine used by liminis-app (Electron) via Unix-socket JSON-RPC. liminis-app provides the MCP layer in-process (TS providers calling `ContextGraphSocketClient`) and bundles a Python embedder sidecar. The Rust binary itself only speaks one transport (socket) and assumes its peers handle MCP, embedding, LLM, etc.
 
 For OSS distribution, the typical user is a developer who wants to drop a knowledge-graph backend into their AI agent workflow — most plausibly via Claude Desktop / Claude Code / Cline / other MCP-aware clients. They want a single binary they download, point at, and use. They do not have liminis-app, do not want a Python sidecar, do not want a multi-process setup.
 
@@ -17,7 +17,7 @@ For OSS distribution, the typical user is a developer who wants to drop a knowle
 **A. MCP embedded in the Rust binary, as a second transport mode**
 
 ```
-liminis-graph --mcp-stdio --db ~/.graphiti/db    # for MCP clients
+liminis-graph --mcp-stdio --db ~/.lcg/db    # for MCP clients
 liminis-graph --socket /path/to.sock --db ...    # for embedded apps
 ```
 
@@ -79,7 +79,7 @@ Mac-only. Fast and lightweight. Doesn't help Linux/Windows OSS users.
 **e. Make embedder pluggable via HTTP, document several deployment patterns**
 - Python sentence-transformers sidecar (cross-platform, current default)
 - CoreML Swift sidecar (Mac, fast)
-- Cloud embedding API (OpenAI, Voyage, Cohere) — just point `GRAPHITI_EMBEDDING_URL` at the right endpoint
+- Cloud embedding API (OpenAI, Voyage, Cohere) — just point `LCG_EMBEDDING_URL` at the right endpoint
 - Native embedder mode (if Principle V is relaxed)
 
 Recommend `e` as the framing. The Rust binary stays embedder-agnostic; users pick the deployment that fits their setup.
@@ -141,7 +141,7 @@ In dependency order:
 
 ## References
 
-- Audit: `~/.claude/projects/-Users-bpja-dev-liminis-project/memory/project_graphiti_integration_audit_2026_05_21.md`
+- Audit: `~/.claude/projects/-Users-bpja-dev-liminis-project/memory/project_context_graph_integration_audit_2026_05_21.md`
 - ANE strategy doc: `liminis/docs/project_notes/designs/apple-neural-engine-opportunities.md`
 - CoreML spike: `liminis#787` (merged with GO decision)
 - Extraction-quality eval: `~/.claude/projects/-Users-bpja-dev-liminis-project/memory/project_extraction_eval_results.md`
