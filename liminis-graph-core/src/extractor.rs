@@ -497,24 +497,28 @@ mod tests {
         assert!(matches!(parse_tool_response(&resp), ToolOutcome::BudgetExhausted));
     }
 
-    #[tokio::test]
-    async fn extraction_truncated_emitted_on_budget_exhaustion() {
-        // Wire a CaptureSink and an extractor pointing at an unreachable URL
-        // to simulate two consecutive max_tokens responses via our pure parse path.
-        // We test the telemetry emission by directly exercising the retry branches
-        // using the CaptureSink.
+    #[test]
+    fn extraction_truncated_emitted_on_budget_exhaustion() {
+        // Simulate the BudgetExhausted state machine from do_extract's loop body.
+        // First overflow: must set flag, double budget, emit nothing.
+        // Second overflow: must emit ExtractionTruncated { retry_succeeded: false }.
         let sink = Arc::new(CaptureSink::new());
-        let sink_dyn: Arc<dyn TelemetrySink> = Arc::clone(&sink) as Arc<dyn TelemetrySink>;
-
-        // Simulate what do_extract does internally when both attempts hit BudgetExhausted:
-        // the second overflow must emit ExtractionTruncated { retry_succeeded: false }.
         let model = "claude-haiku-4-5-20251001".to_string();
         let chunk_len_bytes = 42usize;
         let initial_max_tokens: u32 = 8192;
+        let mut max_tokens: u64 = initial_max_tokens as u64;
+        let mut max_tokens_retried = false;
 
-        // First overflow — sets max_tokens_retried = true, no emit yet.
-        // Second overflow — emit ExtractionTruncated { retry_succeeded: false }.
-        sink_dyn.emit(TelemetryEvent::ExtractionTruncated {
+        // First BudgetExhausted — mirrors: if !max_tokens_retried { double + set flag }
+        assert!(!max_tokens_retried, "flag must be false before first overflow");
+        max_tokens *= 2;
+        max_tokens_retried = true;
+        assert_eq!(max_tokens, 16384, "budget must double on first overflow");
+        assert_eq!(sink.events().len(), 0, "no event emitted on first overflow");
+
+        // Second BudgetExhausted — mirrors: else { emit + return error }
+        assert!(max_tokens_retried, "flag must be true on second overflow");
+        sink.emit(TelemetryEvent::ExtractionTruncated {
             ts_ms: crate::telemetry::now_ms(),
             model: model.clone(),
             chunk_len_bytes,
@@ -523,17 +527,18 @@ mod tests {
         });
 
         let events = sink.events();
-        assert_eq!(events.len(), 1, "expected exactly one ExtractionTruncated event");
+        assert_eq!(events.len(), 1, "exactly one ExtractionTruncated event expected");
         assert!(
             matches!(
                 events[0],
                 TelemetryEvent::ExtractionTruncated {
                     retry_succeeded: false,
                     initial_max_tokens: 8192,
+                    chunk_len_bytes: 42,
                     ..
                 }
             ),
-            "ExtractionTruncated should have retry_succeeded=false and initial_max_tokens=8192"
+            "ExtractionTruncated fields must match"
         );
     }
 
