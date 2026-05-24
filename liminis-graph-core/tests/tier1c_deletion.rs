@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -38,7 +38,8 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -50,13 +50,34 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     // Methods that call embed() will fail with -32000 — that's expected for those tests.
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+    })
+}
+
+fn make_degraded_state(reason: &str) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(None),
+        degraded_reason: Arc::new(Mutex::new(Some(reason.to_string()))),
+        embedder: Arc::new(HttpEmbedder::from_env()),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test-degraded.db".to_string(),
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
         wal_writer: Arc::new(Mutex::new(None)),
@@ -262,7 +283,8 @@ async fn parity_find_relationships_requires_embedder() {
 fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -281,7 +303,8 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
 fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(HttpEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),

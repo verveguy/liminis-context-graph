@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
@@ -38,7 +38,8 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     let wal_writer = WalWriter::new(&wal_dir, 10_000).ok();
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
@@ -57,7 +58,8 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
 fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
-        db: ArcSwap::from(db),
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(4)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
