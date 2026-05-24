@@ -67,6 +67,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     })
 }
 
+#[allow(dead_code)]
 fn make_degraded_state(reason: &str) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
