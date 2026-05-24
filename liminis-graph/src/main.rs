@@ -19,6 +19,34 @@ use tokio::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Phase A workspace dir auto-migration: rename .graphiti/ → .lcg/ on first run.
+    // Executed before path resolution so deprecated GRAPHITI_* paths that point at
+    // .graphiti/... can be rewritten after migration, preventing create_dir_all from
+    // silently recreating an empty .graphiti/ alongside the migrated .lcg/.
+    let migrated = if std::path::Path::new(".graphiti").exists()
+        && !std::path::Path::new(".lcg").exists()
+    {
+        match std::fs::rename(".graphiti", ".lcg") {
+            Ok(()) => {
+                eprintln!(
+                    "[liminis-context-graph] DEPRECATED: workspace directory \".graphiti\" has been \
+                     renamed to \".lcg\". Update your configuration to use LCG_* env vars. \
+                     The .graphiti fallback will be removed in Phase B (see issue #59)."
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "[liminis-context-graph] WARNING: could not auto-migrate .graphiti/ → .lcg/: {e}. \
+                     Continuing without migration."
+                );
+                false
+            }
+        }
+    } else {
+        false
+    };
+
     // deprecated: remove in Phase B (see #59)
     let socket_path = lcg_env_var("LCG_SOCKET_PATH", "GRAPHITI_SOCKET_PATH")
         .unwrap_or_else(|_| ".lcg/service.sock".to_string());
@@ -31,21 +59,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(768);
 
-    // Phase A workspace dir auto-migration: rename .graphiti/ → .lcg/ on first run.
-    // Must execute before create_dir_all so the absence of .lcg/ is detectable.
-    if std::path::Path::new(".graphiti").exists() && !std::path::Path::new(".lcg").exists() {
-        match std::fs::rename(".graphiti", ".lcg") {
-            Ok(()) => eprintln!(
-                "[liminis-context-graph] DEPRECATED: workspace directory \".graphiti\" has been \
-                 renamed to \".lcg\". Update your configuration to use LCG_* env vars. \
-                 The .graphiti fallback will be removed in Phase B (see issue #59)."
-            ),
-            Err(e) => eprintln!(
-                "[liminis-context-graph] WARNING: could not auto-migrate .graphiti/ → .lcg/: {e}. \
-                 Continuing without migration."
-            ),
-        }
-    }
+    // After a successful migration, rewrite any .graphiti/-prefixed path to .lcg/.
+    // This handles the case where deprecated GRAPHITI_* env vars pointed at .graphiti/...
+    // paths — without this, create_dir_all would recreate an empty .graphiti/ dir.
+    let socket_path = if migrated && socket_path.starts_with(".graphiti/") {
+        format!(".lcg/{}", &socket_path[".graphiti/".len()..])
+    } else {
+        socket_path
+    };
+    let db_path = if migrated && db_path.starts_with(".graphiti/") {
+        format!(".lcg/{}", &db_path[".graphiti/".len()..])
+    } else {
+        db_path
+    };
 
     // Ensure parent directories exist
     if let Some(parent) = std::path::Path::new(&socket_path).parent() {
