@@ -36,7 +36,21 @@ pub async fn dispatch(
 
     let (response, success) = match handle(&req, Arc::clone(&state), progress_tx).await {
         Ok(result) => (IpcResponse::ok(req.id, result), true),
-        Err(e) => (IpcResponse::err(req.id, -32000, e.to_string()), false),
+        Err(e) => {
+            use crate::error::Error;
+            match e {
+                Error::DbUnavailable(ref reason) => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32001,
+                        "DB unavailable, recovery required",
+                        json!({"reason": reason}),
+                    ),
+                    false,
+                ),
+                _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
+            }
+        }
     };
 
     state.sink.emit(TelemetryEvent::IpcCall {
@@ -55,6 +69,22 @@ async fn handle(
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
+    // Degraded-mode guard: reject all methods except the recovery-safe subset
+    // when the DB is unavailable. See ADR-0046.
+    let exempt_in_degraded = matches!(
+        req.method.as_str(),
+        "health_check" | "knowledge_status" | "knowledge_recover" | "knowledge_close"
+    );
+    if !exempt_in_degraded && state.db.load_full().is_none() {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Err(Error::DbUnavailable(reason));
+    }
+
     match req.method.as_str() {
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state).await,
@@ -75,6 +105,7 @@ async fn handle(
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
+        "knowledge_recover" => handle_knowledge_recover(req, state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
         "knowledge_search_passages" => handle_search_passages(req, state).await,
         "knowledge_list_entities" => handle_list_entities(req, state).await,
@@ -115,15 +146,28 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
 }
 
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = state.db.load_full();
-    let _guard = state.write_lock.read().await;
-    tokio::task::spawn_blocking(move || {
-        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        conn.probe().map_err(|e| Error::Ipc(format!("db: {e}")))
-    })
-    .await??;
-    drop(_guard);
-    Ok(json!({ "ok": true, "healthy": true }))
+    let db_opt = state.db.load_full();
+    match db_opt {
+        None => {
+            let reason = state
+                .degraded_reason
+                .lock()
+                .ok()
+                .and_then(|g| g.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            Ok(json!({"ok": false, "healthy": false, "state": "degraded", "reason": reason}))
+        }
+        Some(db) => {
+            let _guard = state.write_lock.read().await;
+            tokio::task::spawn_blocking(move || {
+                let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+                conn.probe().map_err(|e| Error::Ipc(format!("db: {e}")))
+            })
+            .await??;
+            drop(_guard);
+            Ok(json!({"ok": true, "healthy": true, "state": "healthy"}))
+        }
+    }
 }
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task.
@@ -139,7 +183,25 @@ type StatusFields = (
 );
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = state.db.load_full();
+    let db_opt = state.db.load_full();
+    if db_opt.is_none() {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        return Ok(json!({
+            "running": true,
+            "degraded": true,
+            "reason": reason,
+            "graphiti_initialized": false,
+            "connected": false,
+            "initializing": false,
+            "recovery_available": ["drop_lbug_wal", "rebuild_from_workspace_wal"],
+        }));
+    }
+    let db = db_opt.unwrap();
     let db_path = state.db_path.clone();
     let embedding_model = state.embedding_model.clone();
     let embedding_dim = state.embedder.dim();
@@ -297,8 +359,9 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
+    let db = load_db(&state)?;
     let entities = search::hybrid_entity_search(
-        state.db.load_full(),
+        db,
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -314,8 +377,9 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let group_ids = extract_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
+    let db = load_db(&state)?;
     let edges = search::hybrid_edge_search(
-        state.db.load_full(),
+        db,
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -338,7 +402,7 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         .to_string();
     let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let episodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -356,7 +420,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
         .unwrap_or("")
         .to_string();
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -371,7 +435,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
 async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_group_ids(&req.params["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -387,7 +451,7 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_group_ids(&req.params["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -410,7 +474,7 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
         })
         .unwrap_or_default();
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -426,7 +490,7 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
 async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let query = req.params["query"].as_str().unwrap_or("").to_string();
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let rows = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -439,7 +503,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 }
 
 async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -464,8 +528,9 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
+    let db = load_db(&state)?;
     let passages = search::search_passages(
-        state.db.load_full(),
+        db,
         Arc::clone(&state.embedder),
         &query,
         group_ids,
@@ -486,7 +551,7 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -516,7 +581,7 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let facts = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -550,7 +615,7 @@ async fn handle_get_entity_neighbors(
     let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let (edges, nodes) = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -596,7 +661,7 @@ async fn handle_get_entities_by_source(
     let num_results = p["num_results"].as_u64().unwrap_or(100) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -629,7 +694,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
 
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -668,7 +733,7 @@ async fn handle_delete_chunk_episode(
 
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
@@ -769,7 +834,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         }
     };
 
-    state.db.store(Arc::new(new_db));
+    state.db.store(Some(Arc::new(new_db)));
     drop(_guard);
 
     Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))
@@ -860,7 +925,7 @@ async fn handle_rebuild_from_wal(
             }
         }
 
-        let db = state.db.load_full();
+        let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let tx = progress_tx;
 
@@ -911,7 +976,7 @@ async fn handle_rebuild_from_wal(
 
     // Non-streaming dry_run: run synchronously and return stats immediately
     if dry_run {
-        let db = state.db.load_full();
+        let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
@@ -959,7 +1024,7 @@ async fn handle_rebuild_from_wal(
     };
 
     // Spawn background task; write lock acquired inside the task
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let write_lock = Arc::clone(&state.write_lock);
     let rebuild_jobs = Arc::clone(&state.rebuild_jobs);
     let job_id_task = job_id.clone();
@@ -1071,7 +1136,7 @@ async fn handle_validate_corrections(state: Arc<AppState>) -> Result<Value, Erro
         Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string())
     })?;
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -1100,7 +1165,7 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
 
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -1140,7 +1205,7 @@ async fn handle_reprocess_entity_types(
         .to_string();
 
     // Phase A (read lock): list all generic-only entities for the group
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let group_id_a = group_id.clone();
     let _read_guard = state.write_lock.read().await;
     let entities = tokio::task::spawn_blocking(move || {
@@ -1189,7 +1254,7 @@ async fn handle_reprocess_entity_types(
         .map(|(e, t)| (e.uuid.clone(), t.clone()))
         .collect();
 
-    let db = state.db.load_full();
+    let db = load_db(&state)?;
     let _write_guard = state.write_lock.write().await;
     let reclassified = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -1205,7 +1270,235 @@ async fn handle_reprocess_entity_types(
     }))
 }
 
+// ── Recovery handler ─────────────────────────────────────────────────────────
+
+struct RecoverOutcome {
+    db: Option<Db>,
+    restart_required: bool,
+}
+
+async fn handle_knowledge_recover(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let strategy = req.params["strategy"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    if strategy.is_empty() {
+        return Err(Error::Ipc("strategy is required".to_string()));
+    }
+
+    // Serialize recovery via write_lock (try_write for concurrent callers)
+    let _write_guard = state
+        .write_lock
+        .try_write()
+        .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
+
+    let db_path = state.db_path.clone();
+    let wal_dir = state.wal_dir.clone();
+    let embedding_dim = state.embedder.dim();
+
+    let result = match strategy.as_str() {
+        "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
+        "rebuild_from_workspace_wal" => {
+            let wal_dir = wal_dir
+                .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+            recover_rebuild_from_workspace_wal(&db_path, &wal_dir, embedding_dim).await
+        }
+        "restore_from_backup" => recover_restore_from_backup(&db_path, embedding_dim).await,
+        other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
+    };
+
+    drop(_write_guard);
+
+    match result {
+        Ok(RecoverOutcome {
+            db: Some(new_db),
+            restart_required: false,
+        }) => {
+            state.db.store(Some(Arc::new(new_db)));
+            // Clear degraded reason
+            if let Ok(mut g) = state.degraded_reason.lock() {
+                *g = None;
+            }
+            // Emit healthy telemetry
+            state.sink.emit(TelemetryEvent::ServiceState {
+                ts_ms: now_ms(),
+                state: "healthy".to_string(),
+                reason: None,
+                detail: None,
+            });
+            Ok(json!({"strategy": strategy, "success": true, "restart_required": false}))
+        }
+        Ok(RecoverOutcome {
+            restart_required: true,
+            ..
+        }) => {
+            let resp =
+                json!({"strategy": strategy, "success": true, "restart_required": true});
+            // Exit after brief delay so the response can be sent first
+            tokio::spawn(async {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                std::process::exit(0);
+            });
+            Ok(resp)
+        }
+        Ok(RecoverOutcome {
+            db: None,
+            restart_required: false,
+        }) => Ok(json!({
+            "strategy": strategy,
+            "success": false,
+            "error": "Recovery operation succeeded but DB did not reopen",
+            "restart_required": false,
+        })),
+        Err(e) => Ok(json!({
+            "strategy": strategy,
+            "success": false,
+            "error": e.to_string(),
+            "restart_required": false,
+        })),
+    }
+}
+
+async fn recover_drop_lbug_wal(
+    db_path: &str,
+    embedding_dim: usize,
+) -> Result<RecoverOutcome, Error> {
+    let db_path = db_path.to_string();
+    tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
+        let wal_path = format!("{}.wal", db_path);
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let corrupt_path = format!("{}.wal.corrupt-{}", db_path, ts);
+
+        if std::path::Path::new(&wal_path).exists() {
+            match std::fs::rename(&wal_path, &corrupt_path) {
+                Ok(_) => {}
+                Err(_) => {
+                    // Can't rename (file locked?); must restart
+                    return Ok(RecoverOutcome {
+                        db: None,
+                        restart_required: true,
+                    });
+                }
+            }
+        }
+
+        let db = Db::open(&db_path)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+        }
+        Ok(RecoverOutcome {
+            db: Some(db),
+            restart_required: false,
+        })
+    })
+    .await?
+}
+
+async fn recover_rebuild_from_workspace_wal(
+    db_path: &str,
+    wal_dir: &std::path::Path,
+    embedding_dim: usize,
+) -> Result<RecoverOutcome, Error> {
+    let db_path = db_path.to_string();
+    let wal_dir = wal_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
+        // Remove existing DB and siblings
+        let path = std::path::Path::new(&db_path);
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        for ext in &[".wal", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
+        }
+        // Ensure parent dir exists
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let db = Db::open(&db_path)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
+        }
+        Ok(RecoverOutcome {
+            db: Some(db),
+            restart_required: false,
+        })
+    })
+    .await?
+}
+
+async fn recover_restore_from_backup(
+    db_path: &str,
+    embedding_dim: usize,
+) -> Result<RecoverOutcome, Error> {
+    let db_path = db_path.to_string();
+    tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
+        // Scan for backup files
+        let db_dir = std::path::Path::new(&db_path)
+            .parent()
+            .ok_or_else(|| Error::Ipc("Cannot determine DB directory".to_string()))?;
+
+        let mut best: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+        if let Ok(rd) = std::fs::read_dir(db_dir) {
+            for entry in rd.flatten() {
+                let fname = entry.file_name();
+                let fname_str = fname.to_string_lossy();
+                if fname_str.contains(".pre-") && fname_str.ends_with("-backup") {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            let is_better = best.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true);
+                            if is_better {
+                                best = Some((mtime, entry.path()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let backup_path = best
+            .ok_or_else(|| Error::Ipc("No backup file found".to_string()))?
+            .1;
+        std::fs::copy(&backup_path, &db_path)
+            .map_err(|e| Error::Ipc(format!("Failed to restore backup: {e}")))?;
+
+        let db = Db::open(&db_path)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+        }
+        Ok(RecoverOutcome {
+            db: Some(db),
+            restart_required: false,
+        })
+    })
+    .await?
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Extract `Arc<Db>` from the `ArcSwapOption`, returning `Error::DbUnavailable` if `None`.
+///
+/// The degraded-mode guard in `handle()` prevents most handlers from reaching this point
+/// when the DB is unavailable, so this acts as a safety net for internal calls.
+fn load_db(state: &AppState) -> Result<Arc<Db>, Error> {
+    state.db.load_full().ok_or_else(|| {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        Error::DbUnavailable(reason)
+    })
+}
 
 fn validate_from_seq(v: &Value) -> Result<u64, Error> {
     match v {

@@ -85,9 +85,18 @@ pub async fn add_episode(
 
     // ── Phase B: async dedup (no lock) ────────────────────────────────────────
     // Fetch cosine candidates in a blocking pass, then verify each with DedupAdapter.
-    let db_b = state.db.load_full();
+    let db_shared = state.db.load_full().ok_or_else(|| {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        Error::DbUnavailable(reason)
+    })?;
     let gid_b = group_id.to_string();
     let name_embs_b = name_embeddings.clone();
+    let db_b = Arc::clone(&db_shared);
     let entity_count = tokio::task::spawn_blocking(move || {
         let conn = db_b.connect()?;
         conn.entity_count_in_group(&gid_b)
@@ -95,7 +104,7 @@ pub async fn add_episode(
     .await??;
 
     let use_hybrid = entity_count >= hybrid_threshold();
-    let db_b = state.db.load_full();
+    let db_b = Arc::clone(&db_shared);
     let gid_b = group_id.to_string();
     let entity_names_b = entity_names.clone();
     let candidates: Vec<Option<EntityRow>> = tokio::task::spawn_blocking(move || {
@@ -183,7 +192,15 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
-    let db_c = state.db.load_full();
+    let db_c = state.db.load_full().ok_or_else(|| {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        Error::DbUnavailable(reason)
+    })?;
 
     // Guard stays in async scope; spawn_blocking completes while it is held.
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
