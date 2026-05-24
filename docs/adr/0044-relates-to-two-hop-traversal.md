@@ -5,7 +5,7 @@
 
 ## Context
 
-liminis-graph operates against workspaces that may have been initialised by either the Python graphiti service or by the Rust binary itself. The two runtimes encode RELATES_TO edges differently:
+liminis-graph operates against workspaces that may have been initialised by either the upstream Python graphiti-core service or by the Rust binary itself. The two runtimes encode RELATES_TO edges differently:
 
 **Python schema** (LadybugDB driver in `graphiti_core/driver/ladybug_driver.py`):
 ```sql

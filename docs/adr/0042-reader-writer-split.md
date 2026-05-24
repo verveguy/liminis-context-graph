@@ -42,7 +42,7 @@ This means:
 
 ## SC-003 Deferral Note
 
-Acceptance criterion SC-003 requires that the Anthropic prompt-cache hit rate on the Sonnet extraction path meets or exceeds the baseline in `project_graphiti_caching_2026_04_30.md`. That file does not exist in this repository.
+Acceptance criterion SC-003 requires that the Anthropic prompt-cache hit rate on the Sonnet extraction path meets or exceeds the baseline in `project_context_graph_caching_2026_04_30.md`. That file does not exist in this repository.
 
 **This issue (Issue #4) delivers the structural prompt-caching changes only**:
 - `anthropic-beta: prompt-caching-2024-07-31` header on the Sonnet path.

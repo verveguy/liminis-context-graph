@@ -1,4 +1,4 @@
-# ADR 0045: Named Multi-Connection Pool for GraphitiSocketClient
+# ADR 0045: Named Multi-Connection Pool for ContextGraphSocketClient
 
 **Date**: 2026-05-22
 **Status**: Accepted
@@ -6,7 +6,7 @@
 
 ## Context
 
-The liminis-app integrated with the Graphiti knowledge graph through Python stdio MCP servers
+The liminis-app integrated with the Liminis Context Graph through Python stdio MCP servers
 (`reader_server.py`, `writer_server.py`) proxied via `mcpDirectInvoker`. Each stdio server entry
 enforced one-in-flight-at-a-time serialization via an `inFlight` flag. This meant:
 
@@ -22,15 +22,15 @@ server via separate, independently-owned connections — one per logical subsyst
 
 ## Decision
 
-`GraphitiSocketClient` manages **6 fixed, named connections** to the Rust binary's Unix socket:
+`ContextGraphSocketClient` manages **6 fixed, named connections** to the Rust binary's Unix socket:
 
 | Connection Name   | Owner / Caller               | Semantics                                    |
 |-------------------|------------------------------|----------------------------------------------|
 | `indexing-write`  | IndexingQueue                | One chunk in-flight at a time (explicit await) |
 | `agent-write`     | In-process knowledge-writer MCP provider | Serialized at Rust write_lock       |
 | `agent-read`      | In-process knowledge-reader MCP provider | Concurrent reads                    |
-| `renderer-read`   | IPC graphiti/graph handlers  | Concurrent reads                             |
-| `renderer-write`  | IPC graphiti/graph handlers  | Serialized at Rust write_lock                |
+| `renderer-read`   | IPC contextGraph/graph handlers  | Concurrent reads                             |
+| `renderer-write`  | IPC contextGraph/graph handlers  | Serialized at Rust write_lock                |
 | `lifecycle`       | Lifecycle manager            | health_check, prepare_checkpoint, rebuildFromWal |
 
 The 6 connections are fixed at construction — no dynamic pool growth. Adding a new call site
@@ -61,7 +61,7 @@ Worst case with both `indexing-write` and `agent-write` in Phase C simultaneousl
 
 WAL rebuild (`knowledge_rebuild_from_wal`) runs on the `lifecycle` connection and streams progress
 lines per ADR-043. During a rebuild, live `knowledge_status` calls on `renderer-read` would return
-stale data. `GraphitiSocketClient` exposes `isRebuilding: boolean`, set synchronously on entry to
+stale data. `ContextGraphSocketClient` exposes `isRebuilding: boolean`, set synchronously on entry to
 `rebuildFromWal()` and cleared on exit. Callers check this to skip live status polls and return
 cached data with `rebuilding: true`.
 
@@ -77,7 +77,7 @@ controlled operation, not an error state.
 Six tools from the Python servers (`knowledge_index_document`, `knowledge_process_document`,
 `knowledge_list_sources`, `knowledge_preview_chunks`, `knowledge_suggest_duplicates`,
 `knowledge_entity_edge_analysis`) are not yet implemented in the Rust binary. They are included in
-the in-process MCP providers and the `GraphitiSocketClient` method surface, but the Rust binary
+the in-process MCP providers and the `ContextGraphSocketClient` method surface, but the Rust binary
 returns `-32000 Method not found` for them. Callers handle this gracefully. A follow-up issue will
 add these methods to the Rust binary.
 
