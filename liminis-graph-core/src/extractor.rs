@@ -198,7 +198,7 @@ impl AnthropicExtractor {
             let resp: Value = http_resp.error_for_status()?.json().await?;
             self.emit_token_usage(&resp);
 
-            match parse_tool_response(&resp) {
+            match parse_tool_response(resp) {
                 ToolOutcome::Success(result) => {
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
@@ -216,6 +216,7 @@ impl AnthropicExtractor {
                         let current = body["max_tokens"].as_u64().unwrap_or(INITIAL_MAX_TOKENS as u64);
                         body["max_tokens"] = json!(current * 2);
                         max_tokens_retried = true;
+                        attempt = 0;
                         continue;
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
@@ -368,29 +369,32 @@ enum ToolOutcome {
     ParseError(Error),
 }
 
-fn parse_tool_response(resp: &Value) -> ToolOutcome {
+fn parse_tool_response(mut resp: Value) -> ToolOutcome {
     if resp["stop_reason"].as_str() == Some("max_tokens") {
         return ToolOutcome::BudgetExhausted;
     }
 
-    let tool_block = resp["content"]
-        .as_array()
-        .and_then(|arr| arr.iter().find(|b| b["type"].as_str() == Some("tool_use")));
+    let tool_block = resp["content"].as_array_mut().and_then(|arr| {
+        let idx = arr.iter().position(|b| {
+            b["type"].as_str() == Some("tool_use") && b["name"].as_str() == Some("extract")
+        })?;
+        Some(arr.remove(idx))
+    });
 
-    let Some(block) = tool_block else {
+    let Some(mut block) = tool_block else {
         return ToolOutcome::ParseError(Error::Ipc(
             "extraction response missing tool_use block".to_string(),
         ));
     };
 
-    let input = &block["input"];
+    let input = block["input"].take();
     if input.is_null() {
         return ToolOutcome::ParseError(Error::Ipc(
             "extraction tool_use block has null input".to_string(),
         ));
     }
 
-    match serde_json::from_value::<ExtractionResult>(input.clone()) {
+    match serde_json::from_value::<ExtractionResult>(input) {
         Ok(result) => ToolOutcome::Success(result),
         Err(e) => ToolOutcome::ParseError(Error::Json(e)),
     }
@@ -483,7 +487,7 @@ mod tests {
             "stop_reason": "max_tokens",
             "content": []
         });
-        assert!(matches!(parse_tool_response(&resp), ToolOutcome::BudgetExhausted));
+        assert!(matches!(parse_tool_response(resp), ToolOutcome::BudgetExhausted));
     }
 
     #[test]
@@ -494,7 +498,7 @@ mod tests {
             "content": [{"type": "tool_use", "id": "x", "name": "extract", "input": null}]
         });
         // stop_reason is checked first — result is BudgetExhausted regardless of content.
-        assert!(matches!(parse_tool_response(&resp), ToolOutcome::BudgetExhausted));
+        assert!(matches!(parse_tool_response(resp), ToolOutcome::BudgetExhausted));
     }
 
     #[test]
@@ -577,7 +581,7 @@ mod tests {
             ]
         });
 
-        match parse_tool_response(&resp) {
+        match parse_tool_response(resp) {
             ToolOutcome::Success(result) => {
                 assert_eq!(result.entities.len(), 101, "expected 101 entities");
                 assert_eq!(result.edges.len(), 1, "expected 1 edge");
@@ -593,7 +597,7 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "some text"}]
         });
-        assert!(matches!(parse_tool_response(&resp), ToolOutcome::ParseError(_)));
+        assert!(matches!(parse_tool_response(resp), ToolOutcome::ParseError(_)));
     }
 
     #[test]
@@ -602,7 +606,7 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [{"type": "tool_use", "id": "x", "name": "extract", "input": null}]
         });
-        assert!(matches!(parse_tool_response(&resp), ToolOutcome::ParseError(_)));
+        assert!(matches!(parse_tool_response(resp), ToolOutcome::ParseError(_)));
     }
 }
 
