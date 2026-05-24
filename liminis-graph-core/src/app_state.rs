@@ -46,6 +46,9 @@ pub struct AppState {
     /// Read from `LIMINIS_WORKSPACE_ROOT` env var. All corrections methods return
     /// an error if this is `None`.
     pub workspace_root: Option<PathBuf>,
+    /// Set to `true` when graceful shutdown begins. Streaming handlers check this
+    /// to emit a cancellation progress event instead of continuing replay.
+    pub shutdown: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -99,6 +102,7 @@ impl AppState {
             rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
             workspace_root,
             indices_built: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 }

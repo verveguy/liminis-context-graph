@@ -51,6 +51,7 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::new(AtomicBool::new(false)),
     });
     (state, dir)
 }
