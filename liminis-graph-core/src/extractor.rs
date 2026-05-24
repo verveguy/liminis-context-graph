@@ -213,7 +213,9 @@ impl AnthropicExtractor {
                 }
                 ToolOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
-                        let current = body["max_tokens"].as_u64().unwrap_or(INITIAL_MAX_TOKENS as u64);
+                        let current = body["max_tokens"]
+                            .as_u64()
+                            .unwrap_or(INITIAL_MAX_TOKENS as u64);
                         body["max_tokens"] = json!(current * 2);
                         max_tokens_retried = true;
                         attempt = 0;
@@ -487,7 +489,10 @@ mod tests {
             "stop_reason": "max_tokens",
             "content": []
         });
-        assert!(matches!(parse_tool_response(resp), ToolOutcome::BudgetExhausted));
+        assert!(matches!(
+            parse_tool_response(resp),
+            ToolOutcome::BudgetExhausted
+        ));
     }
 
     #[test]
@@ -498,7 +503,10 @@ mod tests {
             "content": [{"type": "tool_use", "id": "x", "name": "extract", "input": null}]
         });
         // stop_reason is checked first — result is BudgetExhausted regardless of content.
-        assert!(matches!(parse_tool_response(resp), ToolOutcome::BudgetExhausted));
+        assert!(matches!(
+            parse_tool_response(resp),
+            ToolOutcome::BudgetExhausted
+        ));
     }
 
     #[test]
@@ -514,7 +522,10 @@ mod tests {
         let mut max_tokens_retried = false;
 
         // First BudgetExhausted — mirrors: if !max_tokens_retried { double + set flag }
-        assert!(!max_tokens_retried, "flag must be false before first overflow");
+        assert!(
+            !max_tokens_retried,
+            "flag must be false before first overflow"
+        );
         max_tokens *= 2;
         max_tokens_retried = true;
         assert_eq!(max_tokens, 16384, "budget must double on first overflow");
@@ -531,7 +542,11 @@ mod tests {
         });
 
         let events = sink.events();
-        assert_eq!(events.len(), 1, "exactly one ExtractionTruncated event expected");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one ExtractionTruncated event expected"
+        );
         assert!(
             matches!(
                 events[0],
@@ -597,7 +612,10 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [{"type": "text", "text": "some text"}]
         });
-        assert!(matches!(parse_tool_response(resp), ToolOutcome::ParseError(_)));
+        assert!(matches!(
+            parse_tool_response(resp),
+            ToolOutcome::ParseError(_)
+        ));
     }
 
     #[test]
@@ -606,7 +624,10 @@ mod tests {
             "stop_reason": "end_turn",
             "content": [{"type": "tool_use", "id": "x", "name": "extract", "input": null}]
         });
-        assert!(matches!(parse_tool_response(resp), ToolOutcome::ParseError(_)));
+        assert!(matches!(
+            parse_tool_response(resp),
+            ToolOutcome::ParseError(_)
+        ));
     }
 }
 
