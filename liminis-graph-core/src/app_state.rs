@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
+use arc_swap::ArcSwapOption;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -18,10 +18,13 @@ use crate::{
 };
 
 pub struct AppState {
-    /// ArcSwap allows `clear_all` to atomically replace the live Db under the write lock
-    /// without holding an inner Mutex. All other handlers call `db.load_full()` to get a
-    /// snapshot Arc<Db> — a lock-free read. See ADR-0043.
-    pub db: ArcSwap<Db>,
+    /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
+    /// under the write lock without holding an inner Mutex. `None` represents degraded state
+    /// (DB unavailable). All handlers call `db.load_full()` to get a snapshot — a lock-free read.
+    /// See ADR-0043 and ADR-0046.
+    pub db: ArcSwapOption<Db>,
+    /// Set at startup when DB open fails recoverably; cleared after successful recovery.
+    pub degraded_reason: Arc<Mutex<Option<String>>>,
     pub embedder: Arc<dyn Embedder>,
     pub extractor: Arc<dyn Extractor>,
     pub dedup: Arc<dyn DedupAdapter>,
@@ -46,7 +49,12 @@ impl AppState {
     /// - `GRAPHITI_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
     /// - `GRAPHITI_WAL_DIR`: optional WAL directory path.
     /// - `GRAPHITI_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
-    pub fn from_env(sink: Arc<dyn TelemetrySink>, db: Arc<Db>, db_path: String) -> Self {
+    pub fn from_env(
+        sink: Arc<dyn TelemetrySink>,
+        db: Option<Arc<Db>>,
+        degraded_reason: Option<String>,
+        db_path: String,
+    ) -> Self {
         let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
         let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
         let dedup: Arc<dyn DedupAdapter> = if std::env::var("GRAPHITI_DEDUP_LLM").is_ok() {
@@ -64,7 +72,8 @@ impl AppState {
             .ok()
             .map(PathBuf::from);
         Self {
-            db: ArcSwap::from(db),
+            db: ArcSwapOption::from(db),
+            degraded_reason: Arc::new(Mutex::new(degraded_reason)),
             embedder,
             extractor,
             dedup,
