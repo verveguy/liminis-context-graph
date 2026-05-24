@@ -52,6 +52,13 @@ pub enum TelemetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    ExtractionTruncated {
+        ts_ms: u64,
+        model: String,
+        chunk_len_bytes: usize,
+        initial_max_tokens: u32,
+        retry_succeeded: bool,
+    },
 }
 
 pub fn now_ms() -> u64 {
