@@ -5,7 +5,8 @@ use crate::{
     app_state::AppState,
     db::escape_pub,
     error::Error,
-    types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
+    extractor::ExtractOptions,
+    types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
 
@@ -53,6 +54,7 @@ enum DedupDecision {
 /// Phase C: commit (exclusive write lock) — apply dedup decisions, insert edges, episodic, MENTIONS.
 ///
 /// Returns the episode UUID.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_episode(
     state: Arc<AppState>,
     name: &str,
@@ -61,17 +63,26 @@ pub async fn add_episode(
     source_description: &str,
     reference_time: &str,
     group_id: &str,
+    source_type: SourceType,
+    custom_instructions: Option<&str>,
 ) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
+    let opts = ExtractOptions {
+        episode_body: body,
+        group_id,
+        source_type,
+        custom_instructions,
+        reference_time,
+    };
     let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
         result = async {
             tokio::try_join!(
                 state.embedder.embed(body),
-                state.extractor.extract(body, group_id)
+                state.extractor.extract(opts)
             )
         } => result?,
         _ = state.cancel_token.cancelled() => {
@@ -293,23 +304,43 @@ pub async fn add_episode(
         for (i, edge) in extraction.edges.iter().enumerate() {
             let src_uuid = match name_to_uuid.get(&edge.source_name) {
                 Some(u) => u.clone(),
-                None => continue,
+                None => {
+                    eprintln!(
+                        "liminis-graph: dropping edge — source {:?} has no UUID in name_to_uuid map",
+                        edge.source_name
+                    );
+                    continue;
+                }
             };
             let dst_uuid = match name_to_uuid.get(&edge.target_name) {
                 Some(u) => u.clone(),
-                None => continue,
+                None => {
+                    eprintln!(
+                        "liminis-graph: dropping edge — target {:?} has no UUID in name_to_uuid map",
+                        edge.target_name
+                    );
+                    continue;
+                }
+            };
+            let relation = if edge.relation_type.is_empty() {
+                "RELATES_TO"
+            } else {
+                &edge.relation_type
             };
             conn.insert_relates_to_edge(&RelatesToEdge {
                 uuid: uuid::Uuid::new_v4().to_string(),
-                name: format!("{} → {}", edge.source_name, edge.target_name),
+                name: format!(
+                    "{} --[{}]--> {}",
+                    edge.source_name, relation, edge.target_name
+                ),
                 source_node_uuid: src_uuid,
                 target_node_uuid: dst_uuid,
                 group_id: gid_owned.clone(),
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: Some(ref_time_owned.clone()),
-                invalid_at: None,
+                valid_at: edge.valid_at.clone().or_else(|| Some(ref_time_owned.clone())),
+                invalid_at: edge.invalid_at.clone(),
                 attributes: "{}".to_string(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],

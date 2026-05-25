@@ -18,6 +18,7 @@ use crate::{
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     search,
     telemetry::{now_ms, TelemetryEvent},
+    types::SourceType,
     wal_exec,
 };
 
@@ -173,6 +174,14 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .as_str()
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
+    let source_type = p["source_type"]
+        .as_str()
+        .map(SourceType::from_str_lossy)
+        .unwrap_or_default();
+    let custom_instructions: Option<String> = p["custom_extraction_instructions"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let result = episode::add_episode(
         state,
@@ -182,6 +191,8 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         &source_desc,
         &ref_time,
         &group_id,
+        source_type,
+        custom_instructions.as_deref(),
     )
     .await?;
 
@@ -376,6 +387,15 @@ async fn handle_knowledge_process_chunk(
         None => chrono::Utc::now().to_rfc3339(),
     };
 
+    let source_type = p["source_type"]
+        .as_str()
+        .map(SourceType::from_str_lossy)
+        .unwrap_or_default();
+    let custom_instructions: Option<String> = p["custom_extraction_instructions"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let start = Instant::now();
     let source_desc = format!("{}:{}", source_file, chunk_id);
     let result = episode::add_episode(
@@ -386,6 +406,8 @@ async fn handle_knowledge_process_chunk(
         &source_desc,
         &ref_time,
         &group_id,
+        source_type,
+        custom_instructions.as_deref(),
     )
     .await?;
 
