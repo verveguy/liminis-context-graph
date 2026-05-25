@@ -1,7 +1,7 @@
 // In-process cancellation tests for the fast clean shutdown feature (issue #78).
 //
 // Tests verify that add_episode responds to CancellationToken at phase boundaries:
-//   - cancelled during Phase A (HTTP call) → Err(Error::Cancelled) within ~10ms
+//   - cancelled during Phase A (HTTP call) → Err(Error::Cancelled) within ~500ms
 //   - cancelled before add_episode begins → immediate Err(Error::Cancelled)
 //   - no cancellation → add_episode completes normally
 
