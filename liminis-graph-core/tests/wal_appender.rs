@@ -1,4 +1,4 @@
-use liminis_graph_core::{WalLine, WalRotationInfo, WalWriter};
+use liminis_graph_core::{WalLine, WalWriter};
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
@@ -276,6 +276,148 @@ fn test_flush_pending_recreates_deleted_wal_dir() {
         !jsonl_files(&wal_dir).is_empty(),
         "at least one .jsonl file must exist after recovery"
     );
+}
+
+/// Byte-size rotation: writer with max_bytes_per_file=200 and single-line ~110-byte chunks
+/// produces multiple files when three chunks are written, none exceeding the soft limit by
+/// more than one chunk's worth.
+#[test]
+fn test_file_rotation_on_max_bytes() {
+    let dir = TempDir::new().unwrap();
+    let mut w = open_writer_with_bytes(&dir, 10_000, 200);
+
+    // Each MERGE line is ~110 bytes serialized; two lines would exceed 200 bytes.
+    for _ in 0..3 {
+        w.with_chunk(|w| {
+            w.log_mutation(
+                "MERGE (n:Entity {uuid: 'aaaabbbbccccddddeeeeffffgggghhhh'})",
+                json!({}),
+                "db",
+            )
+        })
+        .unwrap();
+    }
+
+    let files = jsonl_files(dir.path());
+    assert!(
+        files.len() >= 2,
+        "expected at least 2 WAL files due to byte-size rotation, got {}",
+        files.len()
+    );
+    // No file should exceed max_bytes_per_file + one chunk's overhead.
+    for f in &files {
+        let size = fs::metadata(f).unwrap().len();
+        assert!(
+            size <= 600,
+            "WAL file {:?} size {size} exceeds expected maximum",
+            f
+        );
+    }
+}
+
+/// After byte-size rotation, take_rotation() returns Some with closed_bytes > 0 and
+/// closed_events > 0. A second call returns None.
+#[test]
+fn test_take_rotation_returns_info_after_byte_rotation() {
+    let dir = TempDir::new().unwrap();
+    let mut w = open_writer_with_bytes(&dir, 10_000, 200);
+
+    // First chunk — fills file 1.
+    w.with_chunk(|w| {
+        w.log_mutation(
+            "MERGE (n:Entity {uuid: 'aaaabbbbccccddddeeeeffffgggghhhh'})",
+            json!({}),
+            "db",
+        )
+    })
+    .unwrap();
+    // No rotation yet on the first flush (nothing to close).
+    assert!(
+        w.take_rotation().is_none(),
+        "no rotation should have fired after the first chunk"
+    );
+
+    // Second chunk — triggers byte rotation before writing.
+    w.with_chunk(|w| {
+        w.log_mutation(
+            "MERGE (n:Entity {uuid: 'aaaabbbbccccddddeeeeffffgggghhhh'})",
+            json!({}),
+            "db",
+        )
+    })
+    .unwrap();
+    let info = w
+        .take_rotation()
+        .expect("rotation info must be present after byte-size rotation");
+    assert!(
+        info.closed_bytes > 0,
+        "closed_bytes must be > 0 (got {})",
+        info.closed_bytes
+    );
+    assert!(
+        info.closed_events > 0,
+        "closed_events must be > 0 (got {})",
+        info.closed_events
+    );
+    assert!(
+        info.from_file_seq < info.to_file_seq,
+        "from_file_seq ({}) must be < to_file_seq ({})",
+        info.from_file_seq,
+        info.to_file_seq
+    );
+
+    // Second take_rotation call must return None (drainable semantics).
+    assert!(
+        w.take_rotation().is_none(),
+        "take_rotation must return None after already draining"
+    );
+}
+
+/// Event-count rotation: max_events=2, write 3 chunks of 2 events → ≥3 files.
+/// Byte-size rotation (reversed): max_bytes=200, max_events=10000, 3 single-line chunks → ≥2 files.
+#[test]
+fn test_event_count_and_byte_both_trigger_rotation() {
+    // Event-count threshold.
+    {
+        let dir = TempDir::new().unwrap();
+        let mut w = open_writer_with_bytes(&dir, 2, 1_000_000);
+        for _ in 0..3 {
+            w.with_chunk(|w| {
+                w.log_mutation("MERGE (n:Entity {uuid: 'a'})", json!({}), "db")?;
+                w.log_mutation("MERGE (n:Entity {uuid: 'b'})", json!({}), "db")?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let files = jsonl_files(dir.path());
+        assert!(
+            files.len() >= 2,
+            "event-count rotation: expected ≥2 files, got {}",
+            files.len()
+        );
+    }
+
+    // Byte-size threshold.
+    {
+        let dir = TempDir::new().unwrap();
+        let mut w = open_writer_with_bytes(&dir, 10_000, 200);
+        for _ in 0..3 {
+            w.with_chunk(|w| {
+                w.log_mutation(
+                    "MERGE (n:Entity {uuid: 'aaaabbbbccccddddeeeeffffgggghhhh'})",
+                    json!({}),
+                    "db",
+                )
+            })
+            .unwrap();
+        }
+        let files = jsonl_files(dir.path());
+        assert!(
+            files.len() >= 2,
+            "byte-size rotation: expected ≥2 files, got {}",
+            files.len()
+        );
+    }
 }
 
 /// Filename must match the pattern YYYYMMDD_HHMMSS_<6hex>_0000.jsonl

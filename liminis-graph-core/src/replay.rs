@@ -99,7 +99,16 @@ impl WalReplayer {
                 }
             }
 
-            let file = fs::File::open(file_path)?;
+            let file = match fs::File::open(file_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!(
+                        "[WAL WARN] skipping unreadable WAL file {:?}: {e}",
+                        file_path
+                    );
+                    continue;
+                }
+            };
             let reader = BufReader::new(file);
             let mut mutations_in_file: u64 = 0;
 

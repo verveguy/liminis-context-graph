@@ -338,6 +338,51 @@ fn test_replay_opts_progress_callback() {
     );
 }
 
+/// Replay skips a file that cannot be opened (broken symlink) and continues with the rest.
+/// The valid files must still be replayed and replay() must return Ok.
+#[test]
+#[cfg(unix)]
+fn test_replay_skips_unreadable_file_and_continues() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Two valid WAL files.
+    fs::write(
+        wal_dir.path().join("20260519_010000_aaa111_0000.jsonl"),
+        make_entity_line(0, "readable-a") + "\n",
+    )
+    .unwrap();
+    fs::write(
+        wal_dir.path().join("20260519_030000_ccc333_0002.jsonl"),
+        make_entity_line(2, "readable-c") + "\n",
+    )
+    .unwrap();
+
+    // One broken symlink in lexicographic middle — File::open will return Err.
+    std::os::unix::fs::symlink(
+        "/nonexistent/path/that/does/not/exist.jsonl",
+        wal_dir.path().join("20260519_020000_bbb222_0001.jsonl"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must return Ok even with one unreadable file");
+
+    assert!(
+        stats.lines_replayed >= 2,
+        "both valid files must be replayed (lines_replayed={})",
+        stats.lines_replayed
+    );
+    // The unreadable file's stats.files_read still counts it (we incremented before open).
+    assert_eq!(stats.files_read, 3, "all 3 files were attempted");
+}
+
 /// progress_fn returning false aborts replay after current file.
 #[test]
 fn test_replay_opts_progress_abort() {
