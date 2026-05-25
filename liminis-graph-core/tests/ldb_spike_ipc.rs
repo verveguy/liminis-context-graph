@@ -36,6 +36,7 @@ fn test_rel_table_creation_and_query() {
         name_embedding: zero_vec(DIM),
         summary: "Alice summary".to_string(),
         attributes: "{}".to_string(),
+        ..Default::default()
     })
     .unwrap();
     conn.insert_entity(&EntityRow {
@@ -47,6 +48,7 @@ fn test_rel_table_creation_and_query() {
         name_embedding: zero_vec(DIM),
         summary: "Bob summary".to_string(),
         attributes: "{}".to_string(),
+        ..Default::default()
     })
     .unwrap();
 
@@ -101,6 +103,7 @@ fn test_fts_index_creation_and_query() {
             name_embedding: zero_vec(DIM),
             summary: format!("{name} summary"),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .unwrap();
     }
@@ -141,6 +144,7 @@ fn test_hnsw_vector_query() {
             name_embedding: unit_vec(DIM, i % DIM),
             summary: format!("Summary {i}"),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .unwrap();
     }

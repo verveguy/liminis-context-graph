@@ -920,6 +920,308 @@ async fn test_get_entity_neighbors_after_ingest() {
     );
 }
 
+// ── Tier 1b: source-info enrichment (episode_uuids / source_descriptions) ────
+//
+// These tests ingest an episode with a known source_description, then call all
+// four Tier 1b list/neighbor methods and assert that each returned node and edge
+// carries non-empty episode_uuids and source_descriptions arrays that include the
+// expected episode UUID and source_description value.
+
+#[tokio::test]
+async fn test_source_info_enrichment_list_entities() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        70,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-src-01",
+            "source_file": "enrich.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 70);
+    let ep_uuid = ingest["result"]["episode_uuid"]
+        .as_str()
+        .expect("expected episode_uuid")
+        .to_string();
+    // source_description is "<source_file>:<chunk_id>"
+    let expected_src_desc = "enrich.txt:chunk-src-01";
+
+    let v = dispatch_val(71, "knowledge_list_entities", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 71);
+    let nodes = v["result"]["nodes"]
+        .as_array()
+        .expect("expected nodes array");
+    assert!(!nodes.is_empty(), "expected ≥1 node after ingest: {v}");
+    for node in nodes {
+        let ep_uuids = node["episode_uuids"]
+            .as_array()
+            .expect("episode_uuids must be an array");
+        let src_descs = node["source_descriptions"]
+            .as_array()
+            .expect("source_descriptions must be an array");
+        assert!(
+            !ep_uuids.is_empty(),
+            "expected non-empty episode_uuids for node: {node}"
+        );
+        assert_eq!(
+            ep_uuids.len(),
+            src_descs.len(),
+            "episode_uuids and source_descriptions must be same length: {node}"
+        );
+        assert!(
+            ep_uuids.iter().any(|u| u.as_str() == Some(&ep_uuid)),
+            "expected episode_uuid {ep_uuid} in node episode_uuids: {node}"
+        );
+        assert!(
+            src_descs
+                .iter()
+                .any(|d| d.as_str() == Some(expected_src_desc)),
+            "expected source_description {expected_src_desc} in node: {node}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_source_info_enrichment_list_relationships() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        72,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-src-02",
+            "source_file": "enrich.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 72);
+    let ep_uuid = ingest["result"]["episode_uuid"]
+        .as_str()
+        .expect("expected episode_uuid")
+        .to_string();
+    let expected_src_desc = "enrich.txt:chunk-src-02";
+
+    let v = dispatch_val(
+        73,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 73);
+    let facts = v["result"]["facts"]
+        .as_array()
+        .expect("expected facts array");
+    assert!(
+        !facts.is_empty(),
+        "expected ≥1 relationship after ingest: {v}"
+    );
+    for fact in facts {
+        let ep_uuids = fact["episode_uuids"]
+            .as_array()
+            .expect("episode_uuids must be an array");
+        let src_descs = fact["source_descriptions"]
+            .as_array()
+            .expect("source_descriptions must be an array");
+        assert!(
+            !ep_uuids.is_empty(),
+            "expected non-empty episode_uuids for edge: {fact}"
+        );
+        assert_eq!(
+            ep_uuids.len(),
+            src_descs.len(),
+            "episode_uuids and source_descriptions must be same length: {fact}"
+        );
+        assert!(
+            ep_uuids.iter().any(|u| u.as_str() == Some(&ep_uuid)),
+            "expected episode_uuid {ep_uuid} in edge episode_uuids: {fact}"
+        );
+        assert!(
+            src_descs
+                .iter()
+                .any(|d| d.as_str() == Some(expected_src_desc)),
+            "expected source_description {expected_src_desc} in edge: {fact}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_source_info_enrichment_get_entity_neighbors() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        74,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-src-03",
+            "source_file": "enrich.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 74);
+    let ep_uuid = ingest["result"]["episode_uuid"]
+        .as_str()
+        .expect("expected episode_uuid")
+        .to_string();
+    let expected_src_desc = "enrich.txt:chunk-src-03";
+
+    // Get a source entity UUID via list_relationships.
+    let lr = dispatch_val(
+        75,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&lr, 75);
+    let facts = lr["result"]["facts"].as_array().expect("expected facts");
+    assert!(!facts.is_empty(), "expected ≥1 relationship: {lr}");
+    let src_uuid = facts[0]["source_node_uuid"]
+        .as_str()
+        .expect("expected source_node_uuid")
+        .to_string();
+
+    let v = dispatch_val(
+        76,
+        "knowledge_get_entity_neighbors",
+        json!({"entity_uuid": src_uuid}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 76);
+    let nodes = v["result"]["nodes"].as_array().expect("expected nodes");
+    let edges = v["result"]["edges"].as_array().expect("expected edges");
+    assert!(
+        !nodes.is_empty() || !edges.is_empty(),
+        "expected results after ingest: {v}"
+    );
+
+    for node in nodes {
+        let ep_uuids = node["episode_uuids"]
+            .as_array()
+            .expect("episode_uuids must be an array");
+        let src_descs = node["source_descriptions"]
+            .as_array()
+            .expect("source_descriptions must be an array");
+        assert_eq!(
+            ep_uuids.len(),
+            src_descs.len(),
+            "positional alignment: {node}"
+        );
+        assert!(
+            ep_uuids.iter().any(|u| u.as_str() == Some(&ep_uuid)),
+            "expected episode_uuid {ep_uuid} in neighbor node: {node}"
+        );
+        assert!(
+            src_descs
+                .iter()
+                .any(|d| d.as_str() == Some(expected_src_desc)),
+            "expected source_description in neighbor node: {node}"
+        );
+    }
+
+    for edge in edges {
+        let ep_uuids = edge["episode_uuids"]
+            .as_array()
+            .expect("episode_uuids must be an array");
+        let src_descs = edge["source_descriptions"]
+            .as_array()
+            .expect("source_descriptions must be an array");
+        assert_eq!(
+            ep_uuids.len(),
+            src_descs.len(),
+            "positional alignment: {edge}"
+        );
+        assert!(
+            ep_uuids.iter().any(|u| u.as_str() == Some(&ep_uuid)),
+            "expected episode_uuid {ep_uuid} in neighbor edge: {edge}"
+        );
+        assert!(
+            src_descs
+                .iter()
+                .any(|d| d.as_str() == Some(expected_src_desc)),
+            "expected source_description in neighbor edge: {edge}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_source_info_enrichment_get_entities_by_source() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        77,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-src-04",
+            "source_file": "unique-enrich.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 77);
+    let ep_uuid = ingest["result"]["episode_uuid"]
+        .as_str()
+        .expect("expected episode_uuid")
+        .to_string();
+    let expected_src_desc = "unique-enrich.txt:chunk-src-04";
+
+    let v = dispatch_val(
+        78,
+        "knowledge_get_entities_by_source",
+        json!({"source": "unique-enrich.txt"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 78);
+    let nodes = v["result"]["nodes"].as_array().expect("expected nodes");
+    assert!(!nodes.is_empty(), "expected ≥1 node for source match: {v}");
+    for node in nodes {
+        let ep_uuids = node["episode_uuids"]
+            .as_array()
+            .expect("episode_uuids must be an array");
+        let src_descs = node["source_descriptions"]
+            .as_array()
+            .expect("source_descriptions must be an array");
+        assert!(
+            !ep_uuids.is_empty(),
+            "expected non-empty episode_uuids: {node}"
+        );
+        assert_eq!(
+            ep_uuids.len(),
+            src_descs.len(),
+            "positional alignment: {node}"
+        );
+        assert!(
+            ep_uuids.iter().any(|u| u.as_str() == Some(&ep_uuid)),
+            "expected episode_uuid {ep_uuid} in node: {node}"
+        );
+        assert!(
+            src_descs
+                .iter()
+                .any(|d| d.as_str() == Some(expected_src_desc)),
+            "expected source_description {expected_src_desc} in node: {node}"
+        );
+    }
+}
+
 // ── Python-DB index name regression tests (FR-005) ───────────────────────────
 //
 // These tests open the Python-populated baseline_db fixture without any schema

@@ -75,6 +75,7 @@ async fn find_entities_auto_heals_on_fresh_db() {
             name_embedding: vec![0.0f32; dim],
             summary: "Entity inserted before indices are built".to_string(),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .unwrap();
     }
@@ -137,6 +138,7 @@ async fn find_entities_second_search_skips_auto_heal() {
             name_embedding: vec![0.0f32; dim],
             summary: "Second test entity".to_string(),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .unwrap();
     }

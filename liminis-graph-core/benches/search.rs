@@ -25,6 +25,7 @@ fn setup_bench_db_n(n: usize, dim: usize) -> (Arc<Db>, tempfile::TempDir) {
                 name_embedding: emb,
                 summary: format!("Summary for entity {i}"),
                 attributes: "{}".to_string(),
+                ..Default::default()
             })
             .unwrap();
         }

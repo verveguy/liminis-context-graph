@@ -27,6 +27,7 @@ fn insert_test_entities(conn: &liminis_graph_core::Conn<'_>, n: usize, dim: usiz
             name_embedding: emb,
             summary: format!("Summary {i}"),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .unwrap();
     }

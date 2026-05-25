@@ -25,6 +25,7 @@ fn build_db_with_entities(n: usize, dim: usize) -> (Db, tempfile::TempDir) {
                 name_embedding: emb,
                 summary: format!("Summary {i}"),
                 attributes: "{}".to_string(),
+                ..Default::default()
             })
             .unwrap();
         }

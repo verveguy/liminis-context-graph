@@ -37,6 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name_embedding: embedding.clone(),
                 summary: summary.to_string(),
                 attributes: "{}".to_string(),
+                ..Default::default()
             })?;
         }
 
