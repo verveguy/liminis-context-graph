@@ -60,7 +60,8 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
 
 fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf, db_path: &str) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000).ok();
+    let wal_writer =
+        Some(WalWriter::new(&wal_dir, 10_000).expect("failed to initialize WalWriter for test"));
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),

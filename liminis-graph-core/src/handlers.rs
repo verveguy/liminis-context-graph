@@ -904,8 +904,15 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     let _guard = state.write_lock.write().await;
 
     if !preserve_wal {
-        // Close the WalWriter before deleting the WAL directory to eliminate the orphaned-fd window.
-        drop(state.wal_writer.lock().unwrap().take());
+        // Reset wal_writer to None before deleting the WAL directory so that subsequent writes
+        // lazily re-initialize the writer and don't target a deleted path.
+        drop(
+            state
+                .wal_writer
+                .lock()
+                .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?
+                .take(),
+        );
     }
 
     // Phase 1: delete DB files (and optionally WAL directory) — point of no return
