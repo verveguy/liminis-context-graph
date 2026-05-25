@@ -48,7 +48,7 @@ specs/                       # feature specifications
 |----------|----------|-------------|
 | `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
-| `LCG_EMBEDDING_URL` | No | Fallback HTTP URL when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket is absent (default `http://127.0.0.1:8765/v1/embeddings`) |
+| `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
 | `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe) |
 | `LCG_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
