@@ -332,15 +332,15 @@ impl AnthropicExtractor {
                     }
                     // Normalize relation_type to SCREAMING_SNAKE_CASE.
                     for edge in &mut edges {
-                        if let Some(ref rt) = edge.relation_type.clone() {
+                        if let Some(rt) = edge.relation_type.as_ref() {
                             let normalized = normalize_relation_type(rt);
                             if normalized != *rt {
                                 eprintln!(
                                     "liminis-graph: relation_type normalized: '{}' → '{}'",
                                     rt, normalized
                                 );
+                                edge.relation_type = Some(normalized);
                             }
-                            edge.relation_type = Some(normalized);
                         }
                     }
                     return Ok(edges);

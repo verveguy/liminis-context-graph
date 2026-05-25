@@ -1,6 +1,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
+use chrono::DateTime;
+
 use crate::{
     app_state::AppState,
     db::escape_pub,
@@ -46,6 +48,27 @@ enum DedupDecision {
     Insert {
         row: EntityRow,
     },
+}
+
+/// Validates and returns a timestamp string from LLM output.
+///
+/// Returns `None` for empty strings or values that cannot be parsed as RFC 3339,
+/// so invalid LLM output does not reach the DB's `timestamp()` call.
+fn validate_llm_timestamp(s: Option<String>) -> Option<String> {
+    let s = s?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if DateTime::parse_from_rfc3339(trimmed).is_ok() {
+        Some(trimmed.to_string())
+    } else {
+        eprintln!(
+            "liminis-graph: dropping invalid LLM timestamp: {:?}",
+            trimmed
+        );
+        None
+    }
 }
 
 /// Runs the full add_episode pipeline in three async phases (AD-4).
@@ -129,7 +152,7 @@ pub async fn add_episode(
         let entity_name_set: std::collections::HashSet<String> = extraction
             .entities
             .iter()
-            .map(|e| e.name.to_lowercase())
+            .map(|e| e.name.trim().to_lowercase())
             .collect();
         extraction.edges.retain(|edge| {
             if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
@@ -380,11 +403,9 @@ pub async fn add_episode(
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: edge
-                    .valid_at
-                    .clone()
+                valid_at: validate_llm_timestamp(edge.valid_at.clone())
                     .or_else(|| Some(ref_time_owned.clone())),
-                invalid_at: edge.invalid_at.clone(),
+                invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
                 attributes: "{}".to_string(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
