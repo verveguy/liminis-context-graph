@@ -45,8 +45,26 @@ async fn llm_router_fallback_emitted_once_per_session() {
     );
 
     // Both calls will fail (connection refused) — we only care about the LlmFallback event count.
-    let _ = router.extract(ExtractOptions { episode_body: "episode 1", group_id: "grp", source_type: SourceType::Text, custom_instructions: None, reference_time: "2026-01-01T00:00:00Z", ontology: None }).await;
-    let _ = router.extract(ExtractOptions { episode_body: "episode 2", group_id: "grp", source_type: SourceType::Text, custom_instructions: None, reference_time: "2026-01-01T00:00:00Z", ontology: None }).await;
+    let _ = router
+        .extract(ExtractOptions {
+            episode_body: "episode 1",
+            group_id: "grp",
+            source_type: SourceType::Text,
+            custom_instructions: None,
+            reference_time: "2026-01-01T00:00:00Z",
+            ontology: None,
+        })
+        .await;
+    let _ = router
+        .extract(ExtractOptions {
+            episode_body: "episode 2",
+            group_id: "grp",
+            source_type: SourceType::Text,
+            custom_instructions: None,
+            reference_time: "2026-01-01T00:00:00Z",
+            ontology: None,
+        })
+        .await;
 
     let events = sink.events();
     let fallback_count = events

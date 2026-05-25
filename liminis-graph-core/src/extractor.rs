@@ -119,7 +119,10 @@ impl AnthropicExtractor {
         self.model.to_lowercase().contains("sonnet")
     }
 
-    async fn do_extract_entities(&self, opts: &ExtractOptions<'_>) -> Result<Vec<ExtractedEntity>, Error> {
+    async fn do_extract_entities(
+        &self,
+        opts: &ExtractOptions<'_>,
+    ) -> Result<Vec<ExtractedEntity>, Error> {
         let system_text = prompts::entity_system_prompt(opts.source_type, opts.ontology);
         let user_text = prompts::entity_user_prompt_for(
             opts.source_type,
@@ -527,8 +530,7 @@ fn parse_entity_response(mut resp: Value) -> EntityOutcome {
 
     let tool_block = resp["content"].as_array_mut().and_then(|arr| {
         let idx = arr.iter().position(|b| {
-            b["type"].as_str() == Some("tool_use")
-                && b["name"].as_str() == Some("extract_entities")
+            b["type"].as_str() == Some("tool_use") && b["name"].as_str() == Some("extract_entities")
         })?;
         Some(arr.remove(idx))
     });

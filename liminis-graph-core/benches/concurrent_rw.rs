@@ -23,7 +23,7 @@ use liminis_graph_core::{
     extractor::MockExtractor,
     search,
     telemetry::NoopSink,
-    types::EntityRow,
+    types::{EntityRow, SourceType},
 };
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
@@ -118,6 +118,8 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                                     "bench source",
                                     "2026-01-01 00:00:00",
                                     "bench",
+                                    SourceType::Text,
+                                    None,
                                 )
                                 .await;
                             })
