@@ -80,11 +80,6 @@ pub struct ExtractedEdge {
     pub fact: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct EmbeddingResult {
-    pub embedding: Vec<f32>,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct PassageResult {
     pub uuid: String,

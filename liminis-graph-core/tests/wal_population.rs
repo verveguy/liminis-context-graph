@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
@@ -57,7 +59,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
-        indices_built: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
@@ -81,7 +83,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
-        indices_built: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,

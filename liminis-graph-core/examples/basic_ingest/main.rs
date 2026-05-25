@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use liminis_graph_core::{
     db::Db,
-    embedder::{Embedder, HttpEmbedder},
+    embedder::{Embedder, OaiEmbedder},
     search,
     types::{EntityRow, EpisodicRow},
 };
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Hybrid search: requires LCG_EMBEDDING_URL to be set to a running
     // embedding service. Falls back gracefully if the service is unavailable.
-    let embedder: Arc<dyn Embedder> = Arc::new(HttpEmbedder::from_env());
+    let embedder: Arc<dyn Embedder> = Arc::new(OaiEmbedder::from_env());
     println!("\nHybrid entity search for 'distributed systems':");
     match search::hybrid_entity_search(
         Arc::clone(&db),
