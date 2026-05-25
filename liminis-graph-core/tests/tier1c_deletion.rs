@@ -16,6 +16,7 @@ use liminis_graph_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
+    WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -49,6 +50,29 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         wal_dir: None,
         embedding_model: "bge-base-en-v1.5".to_string(),
         wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        shutdown: Arc::new(AtomicBool::new(false)),
+    })
+}
+
+fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf, db_path: &str) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    let wal_writer = WalWriter::new(&wal_dir, 10_000).ok();
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: db_path.to_string(),
+        wal_dir: Some(wal_dir),
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(wal_writer)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -354,4 +378,34 @@ async fn clear_all_followed_by_process_chunk() {
 
     let (_, ep_count, _) = status_counts(3, Arc::clone(&state)).await;
     assert_eq!(ep_count, 1, "new episode should appear after clear_all");
+}
+
+#[tokio::test]
+async fn clear_all_drops_wal_writer() {
+    let (db, dir) = make_db(4);
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let state = make_state_with_wal(db, wal_dir, &db_path);
+
+    // Confirm the WAL writer is Some before clear_all
+    assert!(
+        state.wal_writer.lock().unwrap().is_some(),
+        "wal_writer should be Some before clear_all"
+    );
+
+    let v = dispatch_val(
+        1,
+        "knowledge_clear_all",
+        json!({"confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 1);
+
+    // After clear_all, wal_writer must be None so the next write triggers lazy re-init
+    assert!(
+        state.wal_writer.lock().unwrap().is_none(),
+        "wal_writer must be None after clear_all"
+    );
 }
