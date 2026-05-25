@@ -48,9 +48,9 @@ specs/                       # feature specifications
 |----------|----------|-------------|
 | `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
-| `LCG_EMBEDDING_URL` | No | Base URL for the HTTP embedder sidecar (default `http://127.0.0.1:8765`) |
-| `LCG_EMBEDDING_MODEL` | No | Embedding model name (default `bge-base-en-v1.5`) |
-| `LCG_EMBEDDING_DIM` | No | Embedding vector dimension (default 768) |
+| `LCG_EMBEDDING_URL` | No | Fallback HTTP URL when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket is absent (default `http://127.0.0.1:8765/v1/embeddings`) |
+| `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
+| `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe) |
 | `LCG_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
 | `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
 | `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
@@ -135,7 +135,24 @@ No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — em
 
 ## Embedder Sidecar
 
-`HttpEmbedder` delegates embedding to an external HTTP service. You must start the embedder sidecar **before** starting the liminis-context-graph binary. Without it, the following five IPC methods fail immediately with an HTTP connection error:
+`OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
+`POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
+
+```
+liminis-context-graph --embedder-uds /tmp/liminis-inference.sock   # Unix domain socket (default on macOS)
+liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings  # HTTP
+```
+
+**Default behaviour** (no flags): the binary looks for the Swift CoreML sidecar socket at
+`/tmp/liminis-inference.sock`. If absent, it falls back to `LCG_EMBEDDING_URL` (HTTP). If
+neither exists, it exits with a clear error.
+
+The binary probes the embedder at startup to confirm it is reachable and auto-detect the
+embedding dimension. If the probe fails and `LCG_EMBEDDING_DIM` is not set, the process
+exits with an error rather than failing silently on the first embed request.
+
+You must start the embedder sidecar **before** starting the liminis-context-graph binary.
+Without it, the following five IPC methods fail immediately with an embedding error:
 
 - `knowledge_find_entities`
 - `knowledge_find_relationships`
@@ -143,36 +160,27 @@ No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — em
 - `knowledge_process_chunk`
 - `knowledge_reprocess_entity_types`
 
-Read-only methods that do not call the embedder (`health_check`, `knowledge_status`, `knowledge_list_entities`, `knowledge_get_episodes`) continue to work without the sidecar.
+Read-only methods that do not call the embedder (`health_check`, `knowledge_status`,
+`knowledge_list_entities`, `knowledge_get_episodes`) continue to work without the sidecar.
 
-### Sidecar location
+### macOS: Swift CoreML sidecar (default)
 
-The sidecar script lives in the `liminis-framework` repository at:
+On macOS, the Liminis app bundles a Swift CoreML sidecar that serves `/v1/embeddings` over
+UDS at `/tmp/liminis-inference.sock`. When using the bundled app, the sidecar is managed
+automatically and `liminis-context-graph` connects to it by default.
 
-```
-framework/src/skills/knowledge-graph/scripts/embedder_server.py
-```
+### HTTP transport (CI / Linux / custom embedders)
 
-### Starting manually
-
-```bash
-# From the liminis-framework checkout:
-uv run framework/src/skills/knowledge-graph/scripts/embedder_server.py
-```
-
-The sidecar binds to `LCG_EMBEDDING_URL` (default `http://127.0.0.1:8765`). It logs model loading progress to stderr.
-
-**Cold-start time**: `bge-base-en-v1.5` takes typically **5–15 s** to load on CPU (warm HuggingFace cache). The first run includes a ~500 MB model download from HuggingFace Hub, which adds variable time depending on network speed.
-
-Poll `GET /health` to confirm readiness before starting liminis-context-graph:
+For environments without the Swift sidecar, pass `--embedder-http` pointing at any
+OpenAI-compatible embedding endpoint (local or remote):
 
 ```bash
-until curl -sf http://127.0.0.1:8765/health | grep -q '"ok": *true'; do
-  echo "waiting for embedder…"; sleep 1
-done
+liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings
 ```
 
-See [ADR 0044](docs/adr/0044-embedder-http-contract.md) for the full HTTP contract specification.
+See [ADR 0044](docs/adr/0044-embedder-http-contract.md) and
+[ADR 0048](docs/adr/0048-oai-embedding-contract-uds-transport.md) for the wire contract
+specification and transport decision record.
 
 ## Architecture decisions
 
