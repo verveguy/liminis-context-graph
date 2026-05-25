@@ -6,7 +6,7 @@ use std::time::Duration;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
-    embedder::{Embedder, OaiEmbedder},
+    embedder::{is_transport_error, Embedder, OaiEmbedder},
     env::lcg_env_var,
     handlers,
     ipc::IpcRequest,
@@ -223,10 +223,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--embedder-uds is only supported on Unix platforms".into());
         }
     } else if let Some(http_url) = cli_http {
-        // FR-011: validate URL is parseable
-        if !http_url.starts_with("http://") && !http_url.starts_with("https://") {
+        // FR-011: validate URL format — must have a scheme and a non-empty host.
+        let host_part = http_url
+            .strip_prefix("https://")
+            .or_else(|| http_url.strip_prefix("http://"));
+        if host_part.map(|h| h.is_empty()).unwrap_or(true) {
             return Err(format!(
-                "Invalid --embedder-http URL: {http_url:?}. Expected http:// or https:// prefix."
+                "Invalid --embedder-http URL: {http_url:?}. \
+                 Must start with http:// or https:// and include a host."
             )
             .into());
         }
@@ -314,7 +318,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (embedding_dim, embedding_model_probed) = match probe_embedder.probe().await {
         Ok(result) => result,
+        Err(e) if is_transport_error(&e) => {
+            // FR-011: transport/connectivity failures are always fatal at startup.
+            // LCG_EMBEDDING_DIM cannot override an unreachable embedder.
+            return Err(format!(
+                "embedder unreachable at startup: {e}. \
+                 Ensure the embedder sidecar is running before starting liminis-context-graph."
+            )
+            .into());
+        }
         Err(e) => {
+            // Non-transport probe failure (e.g., unexpected response shape).
+            // LCG_EMBEDDING_DIM can override this per FR-008.
             if let Some(dim) = embedding_dim_override {
                 eprintln!(
                     "liminis-context-graph: embedder probe failed ({e}), \
