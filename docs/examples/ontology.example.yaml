@@ -1,0 +1,65 @@
+# Workspace ontology example — scientific paper domain
+#
+# Place this file at .lcg/ontology.yaml in your workspace root.
+# Restart the liminis-graph service to pick up changes.
+#
+# Reference: docs/examples/ontology.example.yaml
+
+# mode: open | strict
+#
+# open (default):  Declared types are preferred; the LLM may invent new types
+#                  for entities/relationships that clearly don't fit any listed type.
+# strict:          Only declared types are used. Entities and edges that don't
+#                  match a declared type are dropped post-extraction (server-side gate).
+mode: strict
+
+# entity_types: the node labels the LLM should assign.
+# Each entry: name (required) + description (optional).
+# Names are normalized to PascalCase at load time.
+entity_types:
+  - name: Person
+    description: >
+      A human individual, including researchers, authors, and collaborators.
+      Not an organization or a role title.
+
+  - name: Organization
+    description: >
+      A company, university, research lab, or other institution.
+      Use for named bodies, not for teams or roles.
+
+  - name: Paper
+    description: >
+      A peer-reviewed scientific publication, proceedings paper, or technical report.
+      Not a blog post, preprint, or informal writeup.
+
+  - name: Experiment
+    description: >
+      A scientific experiment or empirical study, including ablations and benchmarks.
+      Identified by a method or dataset name.
+
+# relation_types: the edge labels the LLM should assign.
+# Each entry: name (required) + description (optional) +
+#             source_type/target_type (optional signature constraint).
+# Names are normalized to SCREAMING_SNAKE_CASE at load time.
+# Signature constraints are informational in v1 (strict-mode edge filtering
+# requires ExtractedEdge.relation_type from issue #82).
+relation_types:
+  - name: AUTHORED
+    description: A person wrote or co-authored a paper.
+    source_type: Person
+    target_type: Paper
+
+  - name: AFFILIATED_WITH
+    description: A person is or was employed by or a member of an organization.
+    source_type: Person
+    target_type: Organization
+
+  - name: CITES
+    description: A paper references or builds on another paper.
+    source_type: Paper
+    target_type: Paper
+
+  - name: CONDUCTED
+    description: A person or organization ran or performed an experiment.
+    source_type: Person
+    target_type: Experiment

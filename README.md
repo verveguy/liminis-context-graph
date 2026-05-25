@@ -64,6 +64,66 @@ specs/                       # feature specifications
 >
 > **Workspace directory**: Fresh installs create `.lcg/` in the working directory. Existing workspaces with `.graphiti/` are automatically renamed to `.lcg/` on first startup.
 
+## Ontology
+
+liminis-graph supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
+
+### File location
+
+Place the ontology at `{LIMINIS_WORKSPACE_ROOT}/.lcg/ontology.yaml`. The older path `.graphiti/ontology.yaml` is also accepted as a fallback.
+
+**Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
+
+### Format
+
+```yaml
+# mode: open | strict
+# open (default): declared types are preferred; free-form fallback allowed
+# strict: entities and edges outside the vocabulary are dropped post-extraction
+mode: strict
+
+entity_types:
+  - name: Person           # normalized to PascalCase
+    description: A human individual, not a role or title.
+  - name: Organization
+  - name: Paper
+
+relation_types:
+  - name: AUTHORED         # normalized to SCREAMING_SNAKE_CASE
+    description: A person wrote a paper.
+    source_type: Person    # optional signature constraint (informational in v1)
+    target_type: Paper
+  - name: AFFILIATED_WITH
+    source_type: Person
+    target_type: Organization
+```
+
+See [`docs/examples/ontology.example.yaml`](docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
+
+### Modes
+
+| Mode | Entity types | Relation types |
+|------|-------------|----------------|
+| `open` (default) | Preferred by the LLM; free-form fallback allowed | Same |
+| `strict` | Out-of-vocabulary entities dropped post-extraction | Out-of-vocabulary edges dropped (requires #82) |
+
+### `knowledge_status` summary
+
+The `knowledge_status` IPC response always includes an `ontology` field:
+
+```json
+{
+  "ontology": {
+    "present": true,
+    "mode": "strict",
+    "entity_type_count": 4,
+    "relation_type_count": 4
+  }
+}
+```
+
+When no ontology is loaded, `present` is `false` and counts are `0`.
+
 ## Dependencies
 
 | Crate | Version | Role |
