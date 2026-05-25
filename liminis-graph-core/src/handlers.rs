@@ -18,6 +18,7 @@ use crate::{
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     search,
     telemetry::{now_ms, TelemetryEvent},
+    wal_exec,
 };
 
 const DEFAULT_GROUP_ID: &str = "liminis";
@@ -523,10 +524,13 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
         .to_string();
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _guard = state.write_lock.write().await;
-    tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
-        conn.remove_episode(&episode_uuid)
+        conn.remove_episode(&episode_uuid)?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        Ok(())
     })
     .await??;
     drop(_guard);
@@ -593,10 +597,13 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     let query = req.params["query"].as_str().unwrap_or("").to_string();
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _guard = state.write_lock.read().await;
-    let rows = tokio::task::spawn_blocking(move || {
+    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<String>>, Error> {
         let conn = db.connect()?;
-        conn.cypher_query(&query)
+        let rows = conn.cypher_query(&query)?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        Ok(rows)
     })
     .await??;
     drop(_guard);
@@ -870,13 +877,16 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || {
+    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Option<Vec<&str>> = group_ids_owned
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())
+        let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        Ok(uuids)
     })
     .await??;
     drop(_guard);
@@ -909,13 +919,16 @@ async fn handle_delete_chunk_episode(
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || {
+    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Option<Vec<&str>> = group_ids_owned
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())
+        let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        Ok(uuids)
     })
     .await??;
     drop(_guard);
@@ -1410,14 +1423,15 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        Ok::<_, Error>(corrections::apply_corrections_file(
-            &conn,
-            &workspace_root,
-            dry_run,
-        ))
+        let apply_result = corrections::apply_corrections_file(&conn, &workspace_root, dry_run);
+        if !dry_run {
+            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        }
+        Ok::<_, Error>(apply_result)
     })
     .await??;
     drop(_guard);
@@ -1499,10 +1513,13 @@ async fn handle_reprocess_entity_types(
         .collect();
 
     let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     let _write_guard = state.write_lock.write().await;
-    let reclassified = tokio::task::spawn_blocking(move || {
+    let reclassified = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        corrections::apply_entity_type_labels(&conn, &updates)
+        let count = corrections::apply_entity_type_labels(&conn, &updates)?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        Ok(count)
     })
     .await??;
     drop(_write_guard);

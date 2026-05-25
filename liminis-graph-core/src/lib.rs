@@ -17,6 +17,7 @@ pub mod search;
 pub mod telemetry;
 pub mod types;
 pub mod wal;
+pub(crate) mod wal_exec;
 
 pub use app_state::AppState;
 pub use db::{Conn, Db};
