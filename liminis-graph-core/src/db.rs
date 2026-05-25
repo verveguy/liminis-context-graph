@@ -1197,7 +1197,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid = '{}' \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
             escape(uuid),
         );
         let mut rows = self.collect_relates_to_edges(&sql)?;
@@ -1210,12 +1210,12 @@ impl<'db> Conn<'db> {
         let out_sql = format!(
             "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
         );
         let in_sql = format!(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
         );
         let mut edges = self.collect_relates_to_edges(&out_sql)?;
         edges.extend(self.collect_relates_to_edges(&in_sql)?);
