@@ -4,10 +4,8 @@
 // with JSONL mutation lines, and that WAL replay reconstructs the DB state.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
-
-use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
