@@ -226,6 +226,23 @@ type StatusFields = (
 );
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    let ontology_summary = {
+        match &state.ontology {
+            Some(o) => json!({
+                "present": true,
+                "mode": o.mode.to_string(),
+                "entity_type_count": o.entity_types.len(),
+                "relation_type_count": o.relation_types.len(),
+            }),
+            None => json!({
+                "present": false,
+                "mode": null,
+                "entity_type_count": 0,
+                "relation_type_count": 0,
+            }),
+        }
+    };
+
     let db_opt = state.db.load_full();
     if db_opt.is_none() {
         let reason = state
@@ -248,6 +265,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "connected": false,
             "initializing": false,
             "recovery_available": recovery_available,
+            "ontology": ontology_summary,
         }));
     }
     let db = db_opt.unwrap();
@@ -310,6 +328,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     if let Some(t) = index_created_at {
         result["index_created_at"] = json!(t);
     }
+    result["ontology"] = ontology_summary;
     Ok(result)
 }
 
