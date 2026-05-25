@@ -134,7 +134,7 @@ Shutting-down example (emitted at the start of graceful shutdown, before in-flig
 {"type":"service_state","ts_ms":1716523270000,"state":"shutting_down"}
 ```
 
-Stopped example (emitted immediately before `exit(0)`, after the WAL checkpoint completes):
+Stopped example (emitted immediately before `exit(0)`, after initiating the WAL checkpoint; if the inner shutdown timeout was exceeded, in-flight tasks may still be winding down and the checkpoint is best-effort):
 ```json
 {"type":"service_state","ts_ms":1716523271000,"state":"stopped"}
 ```
