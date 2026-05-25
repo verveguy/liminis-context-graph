@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 use liminis_graph_core::{
     app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
     episode, error::Error, extractor::{ExtractOptions, MockExtractor}, telemetry::NoopSink,
-    types::{ExtractionResult, SourceType}, Extractor, Ontology,
+    types::{ExtractionResult, SourceType}, Extractor,
 };
 use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
