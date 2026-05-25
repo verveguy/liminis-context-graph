@@ -218,6 +218,11 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         }
     };
 
+    // An empty or whitespace-only file is intentionally "no ontology" — don't log a parse error.
+    if text.trim().is_empty() {
+        return None;
+    }
+
     let file: OntologyFile = match serde_yaml::from_str(&text) {
         Ok(f) => f,
         Err(e) => {
@@ -237,26 +242,34 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
     let entity_types: Vec<EntityTypeDef> = file
         .entity_types
         .into_iter()
-        .map(|raw| {
+        .filter_map(|raw| {
             let normalized = normalize_entity_type(&raw.name);
+            if normalized.is_empty() {
+                eprintln!("liminis-graph: ontology: skipping entity type with blank name");
+                return None;
+            }
             if normalized != raw.name {
                 eprintln!(
                     "liminis-graph: ontology: entity type '{}' normalized to '{}'",
                     raw.name, normalized
                 );
             }
-            EntityTypeDef {
+            Some(EntityTypeDef {
                 name: normalized,
                 description: raw.description,
-            }
+            })
         })
         .collect();
 
     let relation_types: Vec<RelationTypeDef> = file
         .relation_types
         .into_iter()
-        .map(|raw| {
+        .filter_map(|raw| {
             let normalized = normalize_relation_type(&raw.name);
+            if normalized.is_empty() {
+                eprintln!("liminis-graph: ontology: skipping relation type with blank name");
+                return None;
+            }
             if normalized != raw.name {
                 eprintln!(
                     "liminis-graph: ontology: relation type '{}' normalized to '{}'",
@@ -265,12 +278,12 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
             }
             let source_type = raw.source_type.map(|s| normalize_entity_type(&s));
             let target_type = raw.target_type.map(|s| normalize_entity_type(&s));
-            RelationTypeDef {
+            Some(RelationTypeDef {
                 name: normalized,
                 description: raw.description,
                 source_type,
                 target_type,
-            }
+            })
         })
         .collect();
 

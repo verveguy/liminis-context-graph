@@ -98,10 +98,16 @@ pub async fn add_episode(
                     false
                 }
             });
+            // Rewrite entity_type to the canonical normalized form so DB labels are consistent.
+            for e in extraction.entities.iter_mut() {
+                e.entity_type = normalize_entity_type(&e.entity_type);
+            }
             if extraction.entities.is_empty() {
                 eprintln!(
                     "liminis-graph: ontology strict: no entities remain after vocabulary filtering for this chunk"
                 );
+                // Clear edges to avoid wasted embedding work; endpoints are gone.
+                extraction.edges.clear();
             }
         }
     }
