@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use tokio_util::sync::CancellationToken;
+
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
@@ -51,7 +53,8 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     });
     (state, dir)
 }

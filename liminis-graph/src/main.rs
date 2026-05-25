@@ -1,6 +1,6 @@
 mod sink;
 
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use liminis_graph_core::{
@@ -178,11 +178,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Inner shutdown timeout: caps in-flight task drain to leave headroom under the
-    // outer 60s budget (liminis-app SHUTDOWN_TIMEOUT_MS). Default: 30s.
+    // outer 60s budget (liminis-app SHUTDOWN_TIMEOUT_MS). Default: 5s — cancellation
+    // makes fast exit the common case; this is a fallback for misbehaving handlers.
     let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(30_000);
+        .unwrap_or(5_000);
 
     // Bind socket FIRST — this allows health_check and recovery IPC to work even
     // when the DB is in a degraded state. See ADR-0046.
@@ -221,7 +222,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ts_ms: now_ms(),
                         state: "degraded".to_string(),
                         reason: Some(reason.clone()),
-                        detail: Some(msg),
+                        detail: Some(serde_json::Value::String(msg)),
                     });
                     (None, Some(reason))
                 } else {
@@ -283,8 +284,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── Graceful shutdown sequence (R2, R4, R5, R6) ───────────────────────────
+    // Cancel all in-flight async work so tasks exit at the next phase boundary
+    // rather than waiting out the full timeout on long HTTP calls.
+    state.cancel_token.cancel();
     // R6: Emit shutting_down state.
-    state.shutdown.store(true, Ordering::Relaxed);
     telemetry_sink.emit(TelemetryEvent::ServiceState {
         ts_ms: now_ms(),
         state: "shutting_down".to_string(),
@@ -293,18 +296,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // R2/R5: Await in-flight connection tasks under the inner timeout.
-    let drain_result = tokio::time::timeout(Duration::from_millis(shutdown_timeout_ms), async {
-        while join_set.join_next().await.is_some() {}
-    })
-    .await;
+    let drained = {
+        let drain_result =
+            tokio::time::timeout(Duration::from_millis(shutdown_timeout_ms), async {
+                let mut n = 0u64;
+                while join_set.join_next().await.is_some() {
+                    n += 1;
+                }
+                n
+            })
+            .await;
 
-    if drain_result.is_err() {
-        eprintln!(
-            "liminis-context-graph: shutdown timeout ({shutdown_timeout_ms}ms) exceeded, aborting tasks"
-        );
-        join_set.abort_all();
-        while join_set.join_next().await.is_some() {}
-    }
+        match drain_result {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "liminis-context-graph: shutdown timeout ({shutdown_timeout_ms}ms) exceeded, aborting tasks"
+                );
+                join_set.abort_all();
+                let mut n = 0u64;
+                while join_set.join_next().await.is_some() {
+                    n += 1;
+                }
+                n
+            }
+        }
+    };
 
     // Abort any background rebuild tasks (they hold Arc<Db> clones).
     {
@@ -323,18 +340,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Clone cancelled_chunks before drop(state) so the count survives the state drop.
+    let cancelled_chunks = Arc::clone(&state.cancelled_chunks);
     // R2: Drop AppState — drops Arc<Db>. If refcount reaches 0, the cxx::UniquePtr<ffi::Database>
     // destructor fires the LadybugDB WAL checkpoint. Connection tasks were awaited above.
     // Note: spawn_blocking threads inside aborted tasks hold Arc<Db> until they finish naturally;
     // the WAL checkpoint fires when those threads complete (best-effort per R5).
     drop(state);
 
+    let cancelled = cancelled_chunks.load(std::sync::atomic::Ordering::Relaxed) as u64;
     // R6: Emit stopped state before exiting.
     telemetry_sink.emit(TelemetryEvent::ServiceState {
         ts_ms: now_ms(),
         state: "stopped".to_string(),
         reason: None,
-        detail: None,
+        detail: Some(serde_json::json!({"drained": drained, "cancelled": cancelled})),
     });
 
     // Drop last sender so the drain task sees channel close and exits its loop.

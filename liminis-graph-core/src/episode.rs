@@ -66,24 +66,48 @@ pub async fn add_episode(
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
-    let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::try_join!(
-        state.embedder.embed(body),
-        state.extractor.extract(body, group_id),
-    )?;
+    let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
+        result = async {
+            tokio::try_join!(
+                state.embedder.embed(body),
+                state.extractor.extract(body, group_id)
+            )
+        } => result?,
+        _ = state.cancel_token.cancelled() => {
+            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Cancelled);
+        }
+    };
 
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
     let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
 
     let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
     for n in &entity_names {
-        name_embeddings.push(state.embedder.embed(n).await?);
+        name_embeddings.push(tokio::select! {
+            r = state.embedder.embed(n) => r?,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        });
     }
     let mut fact_embeddings: Vec<Vec<f32>> = Vec::with_capacity(edge_facts.len());
     for f in &edge_facts {
-        fact_embeddings.push(state.embedder.embed(f).await?);
+        fact_embeddings.push(tokio::select! {
+            r = state.embedder.embed(f) => r?,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        });
     }
 
     // ── Phase B: async dedup (no lock) ────────────────────────────────────────
+    if state.cancel_token.is_cancelled() {
+        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        return Err(Error::Cancelled);
+    }
     // Fetch cosine candidates in a blocking pass, then verify each with DedupAdapter.
     let db_shared = state.db.load_full().ok_or_else(|| {
         let reason = state
@@ -128,6 +152,10 @@ pub async fn add_episode(
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
     for (i, extracted) in extraction.entities.iter().enumerate() {
+        if state.cancel_token.is_cancelled() {
+            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Cancelled);
+        }
         let decision = if let Some(existing) = &candidates[i] {
             if state.dedup.is_duplicate(existing, extracted).await? {
                 DedupDecision::Merge {
@@ -208,7 +236,15 @@ pub async fn add_episode(
 
     // Guard stays in async scope; spawn_blocking completes while it is held.
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
-    let _write_guard = state.write_lock.write().await;
+    // Cancellation is checked here — once the write guard is acquired the commit runs to
+    // completion (FR-003: Phase C must not be torn mid-write).
+    let _write_guard = tokio::select! {
+        g = state.write_lock.write() => g,
+        _ = state.cancel_token.cancelled() => {
+            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Cancelled);
+        }
+    };
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db_c.connect()?;
 

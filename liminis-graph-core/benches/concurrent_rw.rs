@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
+
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
@@ -51,7 +53,8 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
