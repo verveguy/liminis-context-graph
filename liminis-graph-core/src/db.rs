@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::{
@@ -938,6 +939,44 @@ impl<'db> Conn<'db> {
             });
         }
         Ok(rows)
+    }
+
+    /// Batch-fetches episode info for a set of entity UUIDs via the MENTIONS relationship.
+    ///
+    /// Returns a map from entity UUID → (episode_uuids, source_descriptions), positionally
+    /// aligned. Short-circuits to an empty map when `entity_uuids` is empty.
+    /// Optional `group_ids` filter restricts which episodes are returned.
+    pub fn get_episode_info_for_entities(
+        &self,
+        entity_uuids: &[&str],
+        group_ids: Option<&[&str]>,
+    ) -> Result<HashMap<String, (Vec<String>, Vec<String>)>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let uuid_list = format_str_list(entity_uuids);
+        let gid_clause = match group_ids {
+            Some(gids) if !gids.is_empty() => {
+                format!(" AND ep.group_id IN {}", format_str_list(gids))
+            }
+            _ => String::new(),
+        };
+        let sql = format!(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE n.uuid IN {uuid_list}{gid_clause} \
+             RETURN n.uuid, ep.uuid, ep.source_description"
+        );
+        let result = self.inner.query(&sql)?;
+        let mut map: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+        for row in result {
+            let entity_uuid = value_as_string(&row[0]);
+            let ep_uuid = value_as_string(&row[1]);
+            let src_desc = value_as_string(&row[2]);
+            let entry = map.entry(entity_uuid).or_default();
+            entry.0.push(ep_uuid);
+            entry.1.push(src_desc);
+        }
+        Ok(map)
     }
 
     /// Fetches full RelatesToEdge rows for a slice of UUIDs from RelatesToNode_.
