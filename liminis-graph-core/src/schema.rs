@@ -50,7 +50,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          fact_embedding FLOAT[{dim}], \
          valid_at TIMESTAMP, \
          invalid_at TIMESTAMP, \
-         attributes STRING\
+         attributes STRING, \
+         relation_type STRING\
          )"
     ))?;
     Ok(())
@@ -89,6 +90,17 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
          )",
     )?;
     Ok(())
+}
+
+/// Applies additive schema migrations to existing workspaces.
+///
+/// Runs ALTER TABLE statements idempotently — errors are suppressed (logged at warn level)
+/// because the column may already exist or the DB engine may not support ALTER TABLE ADD.
+/// New workspaces get the column from the CREATE TABLE DDL above; this only upgrades old ones.
+pub fn migrate(conn: &Conn<'_>) {
+    if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
+        eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal — column may already exist)");
+    }
 }
 
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {

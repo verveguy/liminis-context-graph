@@ -127,7 +127,9 @@ impl<'db> Conn<'db> {
 
     /// Creates the Entity and Episodic node tables. Call once after connecting.
     pub fn init_schema(&self, embedding_dim: usize) -> Result<(), Error> {
-        crate::schema::init(self, embedding_dim)
+        crate::schema::init(self, embedding_dim)?;
+        crate::schema::migrate(self);
+        Ok(())
     }
 
     /// Creates HNSW vector indexes and FTS indexes; idempotent.
@@ -193,10 +195,17 @@ impl<'db> Conn<'db> {
             .map(|t| format!("timestamp('{}')", escape(t)))
             .unwrap_or_else(|| "null".to_string());
 
+        let relation_type_val = edge
+            .relation_type
+            .as_deref()
+            .map(|rt| format!("'{}'", escape(rt)))
+            .unwrap_or_else(|| "null".to_string());
+
         let node_sql = format!(
             "CREATE (:RelatesToNode_ {{uuid: '{}', name: '{}', group_id: '{}', \
              created_at: timestamp('{}'), fact: '{}', fact_embedding: {}, \
-             valid_at: {valid_at}, invalid_at: {invalid_at}, attributes: '{}'}})",
+             valid_at: {valid_at}, invalid_at: {invalid_at}, attributes: '{}', \
+             relation_type: {relation_type_val}}})",
             escape(&edge.uuid),
             escape(&edge.name),
             escape(&edge.group_id),
@@ -424,7 +433,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.group_id IN {gid_list} \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
         );
         self.collect_relates_to_edges(&sql)
     }
@@ -439,7 +448,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid IN {uuid_list} \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
         );
         self.collect_relates_to_edges(&sql)
     }
@@ -458,6 +467,7 @@ impl<'db> Conn<'db> {
                 valid_at: value_as_optional_timestamp_str(&row[6]),
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
+                relation_type: value_as_optional_string(&row[9]),
                 ..Default::default()
             });
         }
@@ -634,13 +644,13 @@ impl<'db> Conn<'db> {
                     "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                      WHERE rn.group_id IN {gid_list} \
                      RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                     rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {limit}"
+                     rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {limit}"
                 )
             }
             _ => format!(
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {limit}"
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {limit}"
             ),
         };
         self.collect_relates_to_edges(&sql)
@@ -666,13 +676,13 @@ impl<'db> Conn<'db> {
             "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {num_results}"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {num_results}"
         );
         let in_sql = format!(
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes ORDER BY rn.uuid DESC LIMIT {num_results}"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {num_results}"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql)?;
@@ -1016,7 +1026,7 @@ impl<'db> Conn<'db> {
              OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
              OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
-             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes"
+             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
         );
         let result = self.inner.query(&sql)?;
         let mut rows = Vec::new();
@@ -1031,6 +1041,7 @@ impl<'db> Conn<'db> {
                 valid_at: value_as_optional_timestamp_str(&row[6]),
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
+                relation_type: value_as_optional_string(&row[9]),
                 ..Default::default()
             });
         }
@@ -1119,13 +1130,13 @@ impl<'db> Conn<'db> {
         let out_sql = format!(
             "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type"
         );
         // Incoming edges (entity is target)
         let in_sql = format!(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type"
         );
         let mut edges = self.collect_full_relates_to_edges(&out_sql)?;
         edges.extend(self.collect_full_relates_to_edges(&in_sql)?);
@@ -1148,6 +1159,7 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[8]),
                 fact_embedding: value_as_float_array(&row[9]),
                 created_at: value_as_timestamp_str(&row[10]),
+                relation_type: value_as_optional_string(&row[11]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             });
@@ -1368,6 +1380,14 @@ fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String> {
     match v {
         lbug::Value::Null(_) => None,
         other => Some(value_as_timestamp_str(other)),
+    }
+}
+
+fn value_as_optional_string(v: &lbug::Value) -> Option<String> {
+    match v {
+        lbug::Value::Null(_) => None,
+        lbug::Value::String(s) if s.is_empty() => None,
+        other => Some(value_as_string(other)),
     }
 }
 

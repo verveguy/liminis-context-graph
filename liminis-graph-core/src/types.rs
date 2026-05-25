@@ -71,6 +71,8 @@ pub struct RelatesToEdge {
     pub invalid_at: Option<String>,
     pub attributes: String,
     #[serde(default)]
+    pub relation_type: Option<String>,
+    #[serde(default)]
     pub episode_uuids: Vec<String>,
     #[serde(default)]
     pub source_descriptions: Vec<String>,
