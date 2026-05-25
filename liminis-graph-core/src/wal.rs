@@ -231,7 +231,7 @@ fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
 /// Handles `\'` escape sequences inside literals.  Used by `log_mutation` to prevent DML
 /// keywords that happen to appear inside stored string values from being misclassified as
 /// mutation queries.
-fn strip_quoted_literals(s: &str) -> String {
+pub(crate) fn strip_quoted_literals(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(ch) = chars.next() {
