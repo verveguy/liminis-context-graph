@@ -75,16 +75,17 @@ impl WalWriter {
             return Ok(());
         }
 
-        let first_token = cypher
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_uppercase();
-
-        let is_mutation = matches!(
-            first_token.as_str(),
-            "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
-        );
+        // Scan all tokens outside single-quoted literals for mutation keywords.
+        // MATCH-prefixed writes (e.g. "MATCH (...) DETACH DELETE" or "MATCH (...) SET ...")
+        // don't start with the DML verb, so a first-token check misses them. Stripping quoted
+        // literals first prevents entity names that happen to contain DML words from being
+        // treated as mutations.
+        let is_mutation = strip_quoted_literals(&upper).split_whitespace().any(|t| {
+            matches!(
+                t,
+                "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
+            )
+        });
         if !is_mutation {
             return Ok(());
         }
@@ -224,6 +225,34 @@ fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
     }
 
     Ok(max_seq.map(|s| s + 1).unwrap_or(0))
+}
+
+/// Returns a copy of `s` with Cypher single-quoted string literals replaced by a single space.
+/// Handles `\'` escape sequences inside literals.  Used by `log_mutation` to prevent DML
+/// keywords that happen to appear inside stored string values from being misclassified as
+/// mutation queries.
+pub(crate) fn strip_quoted_literals(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            // Consume until the matching closing quote, skipping \X escape sequences.
+            loop {
+                match chars.next() {
+                    None => break,
+                    Some('\\') => {
+                        chars.next(); // skip the escaped char
+                    }
+                    Some('\'') => break,
+                    _ => {}
+                }
+            }
+            result.push(' ');
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.

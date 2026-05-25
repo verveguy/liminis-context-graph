@@ -161,9 +161,9 @@ fn test_replay_golden_fixture_counts() {
         .replay(&conn)
         .expect("replay fixture");
 
-    // Line 4 (MATCH ... SET) has first token MATCH, skipped by replayer.
-    assert_eq!(stats.lines_replayed, 4, "4 mutation lines replayed");
-    assert_eq!(stats.lines_skipped, 1, "1 MATCH line skipped");
+    // Line 4 (MATCH ... SET) contains SET keyword so is correctly replayed.
+    assert_eq!(stats.lines_replayed, 5, "5 mutation lines replayed");
+    assert_eq!(stats.lines_skipped, 0, "no lines skipped");
 
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();

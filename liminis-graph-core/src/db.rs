@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -15,6 +16,10 @@ pub struct Db {
 
 pub struct Conn<'db> {
     inner: lbug::Connection<'db>,
+    /// Cypher strings recorded after each successful `raw_query` / `cypher_query` call.
+    /// Callers drain this after a write operation and pass the strings to a WAL-flush helper.
+    /// See `wal_exec.rs` for the flush helpers and the drain-and-flush pattern (ADR-001).
+    executed_cyphers: RefCell<Vec<String>>,
 }
 
 impl Db {
@@ -69,14 +74,19 @@ impl Db {
     /// per-connection serializes every connect() and races concurrent callers.
     pub fn connect(&self) -> Result<Conn<'_>, Error> {
         let conn = lbug::Connection::new(&self.inner)?;
-        Ok(Conn { inner: conn })
+        Ok(Conn {
+            inner: conn,
+            executed_cyphers: RefCell::new(Vec::new()),
+        })
     }
 }
 
 impl<'db> Conn<'db> {
     /// Runs a raw Cypher statement returning no rows; used internally and for testing.
+    /// Records the statement in `executed_cyphers` on success for WAL flushing by callers.
     pub(crate) fn raw_query(&self, sql: &str) -> Result<(), Error> {
         let _ = self.inner.query(sql)?;
+        self.executed_cyphers.borrow_mut().push(sql.to_string());
         Ok(())
     }
 
@@ -95,13 +105,24 @@ impl<'db> Conn<'db> {
     }
 
     /// Runs a raw Cypher SELECT and returns rows as string columns (T012 pass-through).
+    /// Records the statement in `executed_cyphers` on success so `handle_query_cypher`
+    /// can WAL-log mutation queries issued via this escape hatch.
     pub fn cypher_query(&self, sql: &str) -> Result<Vec<Vec<String>>, Error> {
         let result = self.inner.query(sql)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(row.iter().map(value_as_string).collect());
         }
+        self.executed_cyphers.borrow_mut().push(sql.to_string());
         Ok(rows)
+    }
+
+    /// Drains and returns all Cypher strings recorded since the last drain (or since the
+    /// connection was opened). Pass the result to `wal_exec::wal_flush_chunk` or
+    /// `wal_exec::wal_flush_ungrouped` to append mutations to the application WAL.
+    /// Non-mutations are silently filtered inside `WalWriter::log_mutation`.
+    pub fn drain_cyphers(&self) -> Vec<String> {
+        std::mem::take(&mut *self.executed_cyphers.borrow_mut())
     }
 
     /// Creates the Entity and Episodic node tables. Call once after connecting.

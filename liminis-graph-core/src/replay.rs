@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::db::Conn;
 use crate::error::Error;
-use crate::wal::WalLine;
+use crate::wal::{strip_quoted_literals, WalLine};
 
 /// Statistics returned from a WAL replay run.
 pub struct ReplayStats {
@@ -141,20 +141,22 @@ impl WalReplayer {
                     continue;
                 }
 
-                let first_token = wal_line
-                    .cypher
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_uppercase();
-
-                let is_known = matches!(
-                    first_token.as_str(),
-                    "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
-                );
+                // Mirror the writer's mutation detection: scan all tokens outside
+                // single-quoted literals so MATCH-prefixed writes (MATCH ... DETACH DELETE,
+                // MATCH ... SET) are replayed correctly.
+                let upper = wal_line.cypher.to_uppercase();
+                let is_known = strip_quoted_literals(&upper).split_whitespace().any(|t| {
+                    matches!(
+                        t,
+                        "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
+                    )
+                });
 
                 if !is_known {
-                    eprintln!("[WAL WARN] skipping unknown op: {first_token}");
+                    eprintln!(
+                        "[WAL WARN] skipping unrecognised mutation: {}",
+                        &wal_line.cypher[..wal_line.cypher.len().min(80)]
+                    );
                     stats.lines_skipped += 1;
                     continue;
                 }

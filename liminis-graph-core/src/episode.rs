@@ -6,6 +6,7 @@ use crate::{
     db::escape_pub,
     error::Error,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
+    wal_exec,
 };
 
 #[derive(Debug)]
@@ -206,6 +207,7 @@ pub async fn add_episode(
         Error::DbUnavailable(reason)
     })?;
 
+    let wal_writer_c = Arc::clone(&state.wal_writer);
     // Guard stays in async scope; spawn_blocking completes while it is held.
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
     let _write_guard = state.write_lock.write().await;
@@ -293,7 +295,7 @@ pub async fn add_episode(
             })?;
         }
 
-        // Step 7: TODO issue #3 — append WAL line and emit TelemetryEvent::WalAppend { duration_us, bytes } via sink
+        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_cyphers());
 
         Ok(())
     })
