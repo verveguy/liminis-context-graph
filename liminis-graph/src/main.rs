@@ -276,6 +276,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = shutdown_notify.notified() => {
                 break;
             }
+            // Reap completed connection tasks so the JoinSet doesn't grow unbounded
+            // over long uptimes with many short-lived connections.
+            Some(_) = join_set.join_next() => {}
         }
     }
 
