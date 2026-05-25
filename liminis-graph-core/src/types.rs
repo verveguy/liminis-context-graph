@@ -1,5 +1,32 @@
 use serde::{Deserialize, Serialize};
 
+/// Source type of the episode being ingested. Selects the appropriate extraction prompt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceType {
+    #[default]
+    Text,
+    Message,
+    Json,
+}
+
+impl SourceType {
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "message" => SourceType::Message,
+            "json" => SourceType::Json,
+            "text" => SourceType::Text,
+            other => {
+                eprintln!(
+                    "liminis-graph: unknown source_type {:?}; falling back to Text",
+                    other
+                );
+                SourceType::Text
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityRow {
     pub uuid: String,
@@ -78,6 +105,12 @@ pub struct ExtractedEdge {
     pub source_name: String,
     pub target_name: String,
     pub fact: String,
+    #[serde(default)]
+    pub relation_type: String,
+    #[serde(default)]
+    pub valid_at: Option<String>,
+    #[serde(default)]
+    pub invalid_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
