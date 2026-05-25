@@ -45,11 +45,44 @@ mod clean_shutdown_tests {
             .expect("kill command failed");
     }
 
+    /// Spawns a minimal stub HTTP embedder on a random OS-assigned port.
+    /// Returns the port. The stub serves one valid OAI embedding response per connection.
+    fn spawn_stub_embedder() -> u16 {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            let embedding = format!("[{}]", vec!["0.0"; 768].join(","));
+            let body = format!(
+                r#"{{"object":"list","data":[{{"object":"embedding","embedding":{embedding},"index":0}}],"model":"stub-model","usage":{{"prompt_tokens":1,"total_tokens":1}}}}"#
+            );
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 4096];
+                let _ = Read::read(&mut s, &mut buf);
+                let _ = Write::write_all(&mut s, http_response.as_bytes());
+            }
+        });
+
+        port
+    }
+
     #[test]
     fn sigterm_produces_clean_exit_and_no_wal_corruption() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         let socket_path = dir.path().join("service.sock");
+
+        let embedder_port = spawn_stub_embedder();
+        let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
         let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
         let mut child = Command::new(binary)
@@ -57,6 +90,9 @@ mod clean_shutdown_tests {
             .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
             // Short shutdown timeout so the test finishes quickly.
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
+            // Provide a stub embedder so the startup probe succeeds on CI
+            // (no Swift sidecar or LCG_EMBEDDING_URL available in the test environment).
+            .args(["--embedder-http", &embedder_url])
             .spawn()
             .expect("failed to spawn liminis-context-graph");
 
