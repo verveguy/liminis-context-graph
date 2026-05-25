@@ -1,0 +1,30 @@
+# Workspace-wide cargo configuration.
+#
+# LBUG_BUILD_FROM_SOURCE: force lbug to build its C++ archive from source
+# rather than downloading the prebuilt static archive. The prebuilt download
+# (as of lbug 0.16.1) ships only liblbug.a — it does NOT ship the third-party
+# static archives (yyjson, zstd, antlr4, re2, ...) that liblbug.a references
+# at link time. When the prebuilt path is taken, integration-test binaries
+# fail to link on macOS with:
+#
+#     ld: symbol(s) not found for architecture arm64
+#     Undefined symbols: _yyjson_*, _zstd_*, ...
+#
+# Building from source emits link directives for every transitive dep and
+# avoids the gap. lbug.build.rs has no `rerun-if-env-changed=LBUG_BUILD_FROM_SOURCE`,
+# so changing this value requires `rm -rf target/{debug,release}/build/lbug-*`
+# plus `rm -rf ~/.cargo/registry/src/*/lbug-*/.cache` to take effect on a
+# previously-cached build.
+#
+# RUST_TEST_THREADS: lbug mmaps an 8 TB virtual region per Db::open(). On
+# macOS the per-process virtual-memory ceiling is lower than on Linux, and
+# default cargo-test parallelism (= CPU cores, ~8-16) exhausts it with:
+#
+#     Lbug(Buffer manager exception: Mmap for size 8796093022208 failed.)
+#
+# 4 threads is a compromise: keeps the test wall-clock reasonable while
+# staying under the macOS VM ceiling. Override with RUST_TEST_THREADS=N for
+# faster runs on machines with more VM headroom; set to 1 if 4 still fails.
+[env]
+LBUG_BUILD_FROM_SOURCE = "1"
+RUST_TEST_THREADS = "4"
