@@ -903,6 +903,11 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     let _guard = state.write_lock.write().await;
 
+    if !preserve_wal {
+        // Close the WalWriter before deleting the WAL directory to eliminate the orphaned-fd window.
+        drop(state.wal_writer.lock().unwrap().take());
+    }
+
     // Phase 1: delete DB files (and optionally WAL directory) — point of no return
     let db_path_del = db_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
