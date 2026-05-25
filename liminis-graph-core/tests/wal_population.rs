@@ -312,11 +312,19 @@ async fn test_wal_rebuild_reproduces_counts() {
         let conn = db.connect().unwrap();
         conn.count_nodes("Episodic").unwrap()
     };
+    let edge_count_orig = {
+        let conn = db.connect().unwrap();
+        conn.count_relates_to_edges().unwrap()
+    };
 
     assert!(entity_count_orig > 0, "original DB must have entities");
     assert_eq!(
         episodic_count_orig, 2,
         "original DB must have 2 episodic nodes"
+    );
+    assert!(
+        edge_count_orig > 0,
+        "original DB must have RELATES_TO edges"
     );
 
     // WAL must be populated before attempting rebuild.
@@ -356,6 +364,10 @@ async fn test_wal_rebuild_reproduces_counts() {
         let conn = rebuild_db.connect().unwrap();
         conn.count_nodes("Episodic").unwrap()
     };
+    let edge_count_rebuilt = {
+        let conn = rebuild_db.connect().unwrap();
+        conn.count_relates_to_edges().unwrap()
+    };
 
     assert_eq!(
         entity_count_orig, entity_count_rebuilt,
@@ -364,5 +376,9 @@ async fn test_wal_rebuild_reproduces_counts() {
     assert_eq!(
         episodic_count_orig, episodic_count_rebuilt,
         "rebuilt DB episodic count must match original (orig={episodic_count_orig}, rebuilt={episodic_count_rebuilt})"
+    );
+    assert_eq!(
+        edge_count_orig, edge_count_rebuilt,
+        "rebuilt DB RELATES_TO edge count must match original (orig={edge_count_orig}, rebuilt={edge_count_rebuilt})"
     );
 }
