@@ -1,10 +1,14 @@
-use liminis_graph_core::{WalLine, WalWriter};
+use liminis_graph_core::{WalLine, WalRotationInfo, WalWriter};
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
 
 fn open_writer(dir: &TempDir, max_events: usize) -> WalWriter {
-    WalWriter::new(dir.path(), max_events).expect("WalWriter::new")
+    WalWriter::new(dir.path(), max_events, 0).expect("WalWriter::new")
+}
+
+fn open_writer_with_bytes(dir: &TempDir, max_events: usize, max_bytes: u64) -> WalWriter {
+    WalWriter::new(dir.path(), max_events, max_bytes).expect("WalWriter::new")
 }
 
 fn jsonl_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -244,7 +248,7 @@ fn test_rotate_forces_new_file() {
 fn test_flush_pending_recreates_deleted_wal_dir() {
     let dir = TempDir::new().unwrap();
     let wal_dir = dir.path().join("wal");
-    let mut w = WalWriter::new(&wal_dir, 50).expect("WalWriter::new");
+    let mut w = WalWriter::new(&wal_dir, 50, 0).expect("WalWriter::new");
 
     // Write one chunk to establish at least one file.
     w.with_chunk(|w| w.log_mutation("MERGE (n:Entity {uuid: 'a'})", json!({}), "db"))

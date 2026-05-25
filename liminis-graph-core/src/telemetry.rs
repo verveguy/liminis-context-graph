@@ -59,6 +59,13 @@ pub enum TelemetryEvent {
         initial_max_tokens: u32,
         retry_succeeded: bool,
     },
+    WalRotated {
+        ts_ms: u64,
+        from_file_seq: u32,
+        to_file_seq: u32,
+        closed_bytes: u64,
+        closed_events: u64,
+    },
 }
 
 pub fn now_ms() -> u64 {
