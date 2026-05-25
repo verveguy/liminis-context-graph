@@ -17,12 +17,31 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::json;
 
-use crate::wal::WalWriter;
+use crate::{
+    telemetry::{now_ms, TelemetryEvent, TelemetrySink},
+    wal::WalWriter,
+};
+
+fn emit_rotation_if_any(writer: &mut WalWriter, sink: &Arc<dyn TelemetrySink>) {
+    if let Some(info) = writer.take_rotation() {
+        sink.emit(TelemetryEvent::WalRotated {
+            ts_ms: now_ms(),
+            from_file_seq: info.from_file_seq,
+            to_file_seq: info.to_file_seq,
+            closed_bytes: info.closed_bytes,
+            closed_events: info.closed_events as u64,
+        });
+    }
+}
 
 /// Flushes `cyphers` to WAL as a single chunk-atomic group.
 ///
 /// Use for episode Phase C where all mutations for one chunk should land atomically.
-pub(crate) fn wal_flush_chunk(wal: &Arc<Mutex<Option<WalWriter>>>, cyphers: Vec<String>) {
+pub(crate) fn wal_flush_chunk(
+    wal: &Arc<Mutex<Option<WalWriter>>>,
+    cyphers: Vec<String>,
+    sink: &Arc<dyn TelemetrySink>,
+) {
     if cyphers.is_empty() {
         return;
     }
@@ -40,8 +59,9 @@ pub(crate) fn wal_flush_chunk(wal: &Arc<Mutex<Option<WalWriter>>>, cyphers: Vec<
             }
             Ok(())
         });
-        if let Err(e) = result {
-            eprintln!("liminis-graph: wal_flush_chunk: write failed (non-fatal): {e}");
+        match result {
+            Ok(_) => emit_rotation_if_any(writer, sink),
+            Err(e) => eprintln!("liminis-graph: wal_flush_chunk: write failed (non-fatal): {e}"),
         }
     }
 }
@@ -49,7 +69,11 @@ pub(crate) fn wal_flush_chunk(wal: &Arc<Mutex<Option<WalWriter>>>, cyphers: Vec<
 /// Flushes `cyphers` to WAL as individual ungrouped mutations (one `with_chunk` per cypher).
 ///
 /// Use for delete handlers, corrections, and `handle_query_cypher`.
-pub(crate) fn wal_flush_ungrouped(wal: &Arc<Mutex<Option<WalWriter>>>, cyphers: Vec<String>) {
+pub(crate) fn wal_flush_ungrouped(
+    wal: &Arc<Mutex<Option<WalWriter>>>,
+    cyphers: Vec<String>,
+    sink: &Arc<dyn TelemetrySink>,
+) {
     if cyphers.is_empty() {
         return;
     }
@@ -63,8 +87,11 @@ pub(crate) fn wal_flush_ungrouped(wal: &Arc<Mutex<Option<WalWriter>>>, cyphers: 
     if let Some(ref mut writer) = *guard {
         for c in &cyphers {
             let result = writer.with_chunk(|w| w.log_mutation(c, json!({}), ""));
-            if let Err(e) = result {
-                eprintln!("liminis-graph: wal_flush_ungrouped: write failed (non-fatal): {e}");
+            match result {
+                Ok(_) => emit_rotation_if_any(writer, sink),
+                Err(e) => {
+                    eprintln!("liminis-graph: wal_flush_ungrouped: write failed (non-fatal): {e}")
+                }
             }
         }
     }
