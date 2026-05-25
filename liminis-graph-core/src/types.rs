@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// Classifies the origin format of an episode body for prompt dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceType {
+    #[default]
+    Text,
+    Message,
+    Json,
+}
+
+impl SourceType {
+    /// Maps a string label to a SourceType; defaults to Text for unknown values.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_lowercase().as_str() {
+            "json" => Self::Json,
+            "message" => Self::Message,
+            _ => Self::Text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EntityRow {
     pub uuid: String,
@@ -78,6 +98,12 @@ pub struct ExtractedEdge {
     pub source_name: String,
     pub target_name: String,
     pub fact: String,
+    #[serde(default)]
+    pub relation_type: Option<String>,
+    #[serde(default)]
+    pub valid_at: Option<String>,
+    #[serde(default)]
+    pub invalid_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

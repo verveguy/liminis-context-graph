@@ -5,8 +5,9 @@ use crate::{
     app_state::AppState,
     db::escape_pub,
     error::Error,
+    extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
-    types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
+    types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
 
@@ -62,6 +63,8 @@ pub async fn add_episode(
     source_description: &str,
     reference_time: &str,
     group_id: &str,
+    source_type: SourceType,
+    custom_instructions: Option<&str>,
 ) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
@@ -69,11 +72,19 @@ pub async fn add_episode(
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     let ontology_ref = state.ontology.as_deref();
+    let extract_opts = ExtractOptions {
+        episode_body: body,
+        group_id,
+        source_type,
+        custom_instructions,
+        reference_time,
+        ontology: ontology_ref,
+    };
     let (content_embedding, mut extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
         result = async {
             tokio::try_join!(
                 state.embedder.embed(body),
-                state.extractor.extract(body, group_id, ontology_ref)
+                state.extractor.extract(extract_opts)
             )
         } => result?,
         _ = state.cancel_token.cancelled() => {
@@ -110,6 +121,34 @@ pub async fn add_episode(
                 extraction.edges.clear();
             }
         }
+    }
+
+    // Post-extraction edge validation: drop self-referential and unresolvable edges.
+    {
+        let entity_name_set: std::collections::HashSet<String> = extraction
+            .entities
+            .iter()
+            .map(|e| e.name.to_lowercase())
+            .collect();
+        extraction.edges.retain(|edge| {
+            if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
+                eprintln!(
+                    "liminis-graph: dropping self-referential edge: '{}' → '{}'",
+                    edge.source_name, edge.target_name
+                );
+                return false;
+            }
+            let src_ok = entity_name_set.contains(&edge.source_name.trim().to_lowercase());
+            let dst_ok = entity_name_set.contains(&edge.target_name.trim().to_lowercase());
+            if !src_ok || !dst_ok {
+                eprintln!(
+                    "liminis-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_in_list={}, dst_in_list={})",
+                    edge.source_name, edge.target_name, src_ok, dst_ok
+                );
+                return false;
+            }
+            true
+        });
     }
 
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
@@ -340,8 +379,8 @@ pub async fn add_episode(
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: Some(ref_time_owned.clone()),
-                invalid_at: None,
+                valid_at: edge.valid_at.clone().or_else(|| Some(ref_time_owned.clone())),
+                invalid_at: edge.invalid_at.clone(),
                 attributes: "{}".to_string(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],

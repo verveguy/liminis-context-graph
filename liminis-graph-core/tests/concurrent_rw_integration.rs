@@ -13,10 +13,10 @@ use liminis_graph_core::{
     dedup_adapter::{DedupAdapter, PassthroughDedupAdapter},
     embedder::MockEmbedder,
     episode,
-    extractor::{AnthropicExtractor, Extractor, MockExtractor},
+    extractor::{AnthropicExtractor, ExtractOptions, Extractor, MockExtractor},
     llm_router::LlmRouter,
     telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink},
-    types::{EntityRow, ExtractedEntity},
+    types::{EntityRow, ExtractedEntity, SourceType},
 };
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -45,8 +45,8 @@ async fn llm_router_fallback_emitted_once_per_session() {
     );
 
     // Both calls will fail (connection refused) — we only care about the LlmFallback event count.
-    let _ = router.extract("episode 1", "grp", None).await;
-    let _ = router.extract("episode 2", "grp", None).await;
+    let _ = router.extract(ExtractOptions { episode_body: "episode 1", group_id: "grp", source_type: SourceType::Text, custom_instructions: None, reference_time: "2026-01-01T00:00:00Z", ontology: None }).await;
+    let _ = router.extract(ExtractOptions { episode_body: "episode 2", group_id: "grp", source_type: SourceType::Text, custom_instructions: None, reference_time: "2026-01-01T00:00:00Z", ontology: None }).await;
 
     let events = sink.events();
     let fallback_count = events
@@ -132,6 +132,8 @@ async fn concurrent_add_episode_no_write_conflict() {
             "desc",
             "2026-01-01 00:00:00",
             "grp",
+            SourceType::Text,
+            None,
         )
         .await
     });
@@ -144,6 +146,8 @@ async fn concurrent_add_episode_no_write_conflict() {
             "desc",
             "2026-01-01 00:00:00",
             "grp",
+            SourceType::Text,
+            None,
         )
         .await
     });
