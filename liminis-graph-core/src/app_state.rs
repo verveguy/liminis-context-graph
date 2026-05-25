@@ -82,9 +82,29 @@ impl AppState {
         let wal_dir = lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
             .ok()
             .map(PathBuf::from);
+        let max_events_per_file: usize = lcg_env_var("LCG_WAL_MAX_EVENTS_PER_FILE", "LCG_WAL_MAX_EVENTS_PER_FILE")
+            .ok()
+            .and_then(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    eprintln!(
+                        "liminis-graph: LCG_WAL_MAX_EVENTS_PER_FILE={v:?} is not a valid usize; using default 10000"
+                    );
+                }).ok()
+            })
+            .unwrap_or(10_000);
+        let max_bytes_per_file: u64 = lcg_env_var("LCG_WAL_MAX_BYTES_PER_FILE", "LCG_WAL_MAX_BYTES_PER_FILE")
+            .ok()
+            .and_then(|v| {
+                v.parse::<u64>().map_err(|_| {
+                    eprintln!(
+                        "liminis-graph: LCG_WAL_MAX_BYTES_PER_FILE={v:?} is not a valid u64; using default 5242880"
+                    );
+                }).ok()
+            })
+            .unwrap_or(5 * 1024 * 1024);
         let wal_writer = wal_dir
             .as_deref()
-            .and_then(|dir| WalWriter::new(dir, 10_000).ok());
+            .and_then(|dir| WalWriter::new(dir, max_events_per_file, max_bytes_per_file).ok());
         // deprecated: remove in Phase B (see #59)
         let embedding_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
             .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());

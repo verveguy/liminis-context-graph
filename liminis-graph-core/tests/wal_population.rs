@@ -42,7 +42,7 @@ fn make_db() -> (Arc<Db>, TempDir) {
 
 fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000).ok();
+    let wal_writer = WalWriter::new(&wal_dir, 10_000, 0).ok();
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),

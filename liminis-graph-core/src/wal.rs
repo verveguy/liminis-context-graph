@@ -8,6 +8,15 @@ use uuid::Uuid;
 
 use crate::error::Error;
 
+/// Metadata captured at the moment a WAL file is closed by rotation.
+#[derive(Debug, Clone)]
+pub struct WalRotationInfo {
+    pub from_file_seq: u32,
+    pub to_file_seq: u32,
+    pub closed_bytes: u64,
+    pub closed_events: usize,
+}
+
 /// One WAL record — five-field JSONL schema matching the Python `graphiti_core/driver/wal.py`.
 /// Fields are declared in `seq, ts, db, cypher, params` order; serde_json preserves
 /// struct field declaration order, matching Python's `json.dumps()` dict insertion order.
@@ -27,15 +36,24 @@ pub struct WalWriter {
     file_seq: u32,
     events_in_current_file: usize,
     max_events_per_file: usize,
+    max_bytes_per_file: u64,
+    bytes_in_current_file: u64,
     session_id: String,
     pending_lines: Vec<WalLine>,
     current_file: Option<PathBuf>,
+    last_rotation: Option<WalRotationInfo>,
 }
 
 impl WalWriter {
     /// Opens (or creates) the WAL directory and scans existing files to determine the
     /// starting global sequence number.
-    pub fn new(wal_dir: impl Into<PathBuf>, max_events_per_file: usize) -> Result<Self, Error> {
+    ///
+    /// `max_bytes_per_file = 0` disables byte-size rotation (only event-count applies).
+    pub fn new(
+        wal_dir: impl Into<PathBuf>,
+        max_events_per_file: usize,
+        max_bytes_per_file: u64,
+    ) -> Result<Self, Error> {
         let wal_dir = wal_dir.into();
         fs::create_dir_all(&wal_dir)?;
 
@@ -53,9 +71,12 @@ impl WalWriter {
             file_seq: 0,
             events_in_current_file: 0,
             max_events_per_file,
+            max_bytes_per_file,
+            bytes_in_current_file: 0,
             session_id,
             pending_lines: Vec::new(),
             current_file: None,
+            last_rotation: None,
         })
     }
 
@@ -131,21 +152,49 @@ impl WalWriter {
 
         fs::create_dir_all(&self.wal_dir)?;
 
-        // Rotate if: no file open, or appending chunk would exceed max_events_per_file.
+        // Pre-serialize all lines so we can compute chunk_bytes for byte-size rotation.
+        let jsons: Vec<String> = self
+            .pending_lines
+            .iter()
+            .map(|l| serde_json::to_string(l).map_err(|e| Error::WalJson(e.to_string())))
+            .collect::<Result<_, _>>()?;
+        // Each line occupies json.len() + 1 bytes (the '\n').
+        let chunk_bytes: u64 = jsons.iter().map(|s| (s.len() + 1) as u64).sum();
+
+        if self.max_bytes_per_file > 0 && chunk_bytes > self.max_bytes_per_file {
+            eprintln!(
+                "[WAL WARN] chunk ({chunk_bytes} bytes) exceeds max_bytes_per_file ({}); writing anyway",
+                self.max_bytes_per_file
+            );
+        }
+
+        // Rotate if: no file open, event count would exceed max, or byte size would exceed max.
         let needs_new_file = self.current_file.is_none()
             || (self.events_in_current_file > 0
-                && self.events_in_current_file + chunk_len > self.max_events_per_file);
+                && self.events_in_current_file + chunk_len > self.max_events_per_file)
+            || (self.max_bytes_per_file > 0
+                && self.bytes_in_current_file > 0
+                && self.bytes_in_current_file + chunk_bytes > self.max_bytes_per_file);
 
         if needs_new_file {
+            // Capture rotation info before resetting counters.
+            if self.current_file.is_some() {
+                self.last_rotation = Some(WalRotationInfo {
+                    from_file_seq: self.file_seq - 1,
+                    to_file_seq: self.file_seq,
+                    closed_bytes: self.bytes_in_current_file,
+                    closed_events: self.events_in_current_file,
+                });
+            }
             self.current_file = Some(self.make_new_file_path());
             self.events_in_current_file = 0;
+            self.bytes_in_current_file = 0;
         }
 
         let path = self.current_file.as_ref().unwrap();
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let mut writer = BufWriter::new(file);
-        for line in &self.pending_lines {
-            let json = serde_json::to_string(line).map_err(|e| Error::WalJson(e.to_string()))?;
+        for json in &jsons {
             writer.write_all(json.as_bytes())?;
             writer.write_all(b"\n")?;
         }
@@ -153,6 +202,7 @@ impl WalWriter {
         writer.get_ref().sync_all()?;
 
         self.events_in_current_file += chunk_len;
+        self.bytes_in_current_file += chunk_bytes;
         self.pending_lines.clear();
         Ok(())
     }
@@ -180,6 +230,12 @@ impl WalWriter {
         };
         let files_total = count_jsonl_files(&self.wal_dir);
         (files_rotated, files_total)
+    }
+
+    /// Drains and returns rotation info if a rotation occurred since the last call.
+    /// Returns `None` if no rotation has happened. Intended to be called after `with_chunk`.
+    pub fn take_rotation(&mut self) -> Option<WalRotationInfo> {
+        self.last_rotation.take()
     }
 
     /// Returns pending line count (for tests).
