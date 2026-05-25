@@ -45,8 +45,8 @@ async fn llm_router_fallback_emitted_once_per_session() {
     );
 
     // Both calls will fail (connection refused) — we only care about the LlmFallback event count.
-    let _ = router.extract("episode 1", "grp").await;
-    let _ = router.extract("episode 2", "grp").await;
+    let _ = router.extract("episode 1", "grp", None).await;
+    let _ = router.extract("episode 2", "grp", None).await;
 
     let events = sink.events();
     let fallback_count = events
