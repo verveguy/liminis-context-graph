@@ -92,7 +92,7 @@ Each entity type and relation type in the ontology MAY include a short descripti
 - **An entity matches multiple declared types** (e.g., a person who is also an organization). The LLM's one-best-fit choice is accepted; the prompt phrasing encourages single-type assignment. Multi-typing is out of scope for v1.
 - **Legacy `entity_types` env var** (from graphiti): not exposed in liminis-graph; if present in workspace `.env`, log a one-time hint pointing at the new ontology file.
 - **Ontology file uses unsupported features** (e.g., file includes, external references). Rejected at parse time with a clear error; service degrades to no-ontology mode.
-- **Entity type or relation type names with whitespace, mixed case, or punctuation.** Normalized at load time: entity types to PascalCase, relation types to SCREAMING_SNAKE_CASE. Any normalization that changes a value is logged.
+- **Entity type or relation type names with whitespace, underscores, hyphens, or mixed case.** Normalized at load time: entity types to PascalCase, relation types to SCREAMING_SNAKE_CASE. Split boundaries are underscores, hyphens, spaces, and CamelCase transitions. Other punctuation is left in place and treated as part of the word. Any normalization that changes a value is logged. Blank names (empty after normalization) are skipped and logged.
 
 ## Requirements *(mandatory)*
 
@@ -110,7 +110,7 @@ Each entity type and relation type in the ontology MAY include a short descripti
 
 ### Key Entities
 
-- **Ontology**: The workspace-scoped vocabulary declaration. Loaded once at startup and held as `Option<Ontology>` in `AppState`. Nil when no file is present, empty, or malformed.
+- **Ontology**: The workspace-scoped vocabulary declaration. Loaded once at startup and held as `Option<Arc<Ontology>>` in `AppState`. `None` when no file is present, empty, or malformed.
 - **EntityType**: A declared node-classification label (PascalCase-normalized), with an optional disambiguating description.
 - **RelationType**: A declared edge-label (SCREAMING_SNAKE_CASE-normalized), with an optional description and an optional `(source_entity_type, target_entity_type)` signature constraint.
 - **Strictness mode**: Either `open` (free-form fallback allowed) or `strict` (out-of-vocabulary entities/edges are dropped post-extraction). A single mode applies to both axes.

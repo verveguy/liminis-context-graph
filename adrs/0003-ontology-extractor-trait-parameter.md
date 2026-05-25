@@ -35,7 +35,7 @@ The call site in `episode::add_episode` passes `state.ontology.as_deref()`.
 
 - **Consistent with ADR-0043**: `classify_entities` was added to the `Extractor` trait as a separate method when LLM call semantics differed. Adding `ontology` as a new parameter follows the same "extend the interface when input changes per-call" pattern rather than adding a new method.
 - **Keeps extractors stateless**: `AnthropicExtractor` and `MockExtractor` remain pure functions of their inputs. Stateless implementations are easier to test and reason about.
-- **Avoids reconstruction on ontology change**: v1.5 will add hot-reload support (FR-007). With call-time parameters, hot-reload is a simple `AppState.ontology.swap(...)` — no extractor reconstruction needed.
+- **Avoids reconstruction on ontology change**: v1.5 will add hot-reload support (FR-007). With call-time parameters, hot-reload requires only updating `AppState.ontology` (upgrading from `Option<Arc<Ontology>>` to `ArcSwapOption<Ontology>` for lock-free atomic swap) — no extractor reconstruction needed.
 - **Test simplicity**: Tests pass different `Option<&Ontology>` values without needing to construct new extractors per test case.
 
 ### Why not extractor-held state (rejected)
@@ -45,7 +45,7 @@ The call site in `episode::add_episode` passes `state.ontology.as_deref()`.
 
 ### Why not wrapper/adapter pattern (rejected)
 
-- Adds an indirection layer (`OntologyAwareExtractor<T: Extractor>`) that provides no benefit when all implementors are crate-internal. The trait is not a public extension point; `MockExtractor`, `AnthropicExtractor`, and `LlmRouter` are the only three implementations.
+- Adds an indirection layer (`OntologyAwareExtractor<T: Extractor>`) that provides no benefit given the three known implementors. `MockExtractor`, `AnthropicExtractor`, and `LlmRouter` are the only implementations today; although `Extractor` is re-exported from `lib.rs` for testing convenience, there are no downstream implementors that would benefit from the wrapper pattern.
 - Forces callers to wrap extractors at construction time, complicating `AppState::from_env`.
 
 ## `Option<Arc<Ontology>>` vs `ArcSwapOption<Ontology>` in `AppState`
