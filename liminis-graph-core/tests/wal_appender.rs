@@ -391,8 +391,8 @@ fn test_event_count_and_byte_both_trigger_rotation() {
         }
         let files = jsonl_files(dir.path());
         assert!(
-            files.len() >= 2,
-            "event-count rotation: expected ≥2 files, got {}",
+            files.len() >= 3,
+            "event-count rotation: expected ≥3 files, got {}",
             files.len()
         );
     }

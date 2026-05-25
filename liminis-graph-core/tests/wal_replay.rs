@@ -374,9 +374,9 @@ fn test_replay_skips_unreadable_file_and_continues() {
         .replay(&conn)
         .expect("replay must return Ok even with one unreadable file");
 
-    assert!(
-        stats.lines_replayed >= 2,
-        "both valid files must be replayed (lines_replayed={})",
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "exactly both valid files must be replayed (lines_replayed={})",
         stats.lines_replayed
     );
     // The unreadable file's stats.files_read still counts it (we incremented before open).
