@@ -782,10 +782,8 @@ async fn handle_get_entity_neighbors(
                 all_entity_uuids_owned.push(n.uuid.clone());
             }
         }
-        let all_entity_uuid_refs: Vec<&str> = all_entity_uuids_owned
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let all_entity_uuid_refs: Vec<&str> =
+            all_entity_uuids_owned.iter().map(String::as_str).collect();
         let ep_info = conn
             .get_episode_info_for_entities(&all_entity_uuid_refs, gid_slice)
             .unwrap_or_default();

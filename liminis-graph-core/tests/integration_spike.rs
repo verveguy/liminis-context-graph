@@ -30,6 +30,7 @@ fn round_trip_entity_and_episodic() {
             name_embedding: embedding.clone(),
             summary: format!("Summary {i}"),
             attributes: "{}".to_string(),
+            ..Default::default()
         })
         .expect("insert entity");
     }

@@ -78,6 +78,7 @@ fn setup_db() -> (Arc<Db>, TempDir) {
                 name_embedding: emb.clone(),
                 summary: format!("Seed entity number {i}"),
                 attributes: "{}".to_string(),
+                ..Default::default()
             })
             .unwrap();
         }

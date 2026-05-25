@@ -6,6 +6,9 @@ use crate::{
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
+/// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
+type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
+
 pub struct Db {
     inner: lbug::Database,
 }
@@ -950,7 +953,7 @@ impl<'db> Conn<'db> {
         &self,
         entity_uuids: &[&str],
         group_ids: Option<&[&str]>,
-    ) -> Result<HashMap<String, (Vec<String>, Vec<String>)>, Error> {
+    ) -> Result<EpisodeInfoMap, Error> {
         if entity_uuids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -967,7 +970,7 @@ impl<'db> Conn<'db> {
              RETURN n.uuid, ep.uuid, ep.source_description"
         );
         let result = self.inner.query(&sql)?;
-        let mut map: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+        let mut map: EpisodeInfoMap = HashMap::new();
         for row in result {
             let entity_uuid = value_as_string(&row[0]);
             let ep_uuid = value_as_string(&row[1]);

@@ -71,6 +71,7 @@ async fn passthrough_dedup_adapter_always_returns_true() {
         name_embedding: vec![],
         summary: "Alice is a person".to_string(),
         attributes: "{}".to_string(),
+        ..Default::default()
     };
     let incoming = ExtractedEntity {
         name: "Alice".to_string(),

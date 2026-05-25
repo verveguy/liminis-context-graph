@@ -30,6 +30,7 @@ fn insert_entity_with_adversarial_chars() {
         name_embedding: emb,
         summary: r#"Subject's work on "film" in the \arts\ domain."#.to_string(),
         attributes: r#"{"key": "O'Brien's value", "path": "C:\\dir"}"#.to_string(),
+        ..Default::default()
     });
 
     assert!(
