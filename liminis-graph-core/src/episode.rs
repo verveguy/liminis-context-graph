@@ -5,6 +5,7 @@ use crate::{
     app_state::AppState,
     db::escape_pub,
     error::Error,
+    ontology::{normalize_entity_type, OntologyMode},
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge},
     wal_exec,
 };
@@ -68,7 +69,7 @@ pub async fn add_episode(
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     let ontology_ref = state.ontology.as_deref();
-    let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
+    let (content_embedding, mut extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
         result = async {
             tokio::try_join!(
                 state.embedder.embed(body),
@@ -80,6 +81,30 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
+
+    // Strict-mode entity filtering: drop entities not in the declared vocabulary.
+    if let Some(onto) = ontology_ref {
+        if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
+            let vocab = onto.entity_type_names();
+            extraction.entities.retain(|e| {
+                let normalized = normalize_entity_type(&e.entity_type);
+                if vocab.contains(&normalized) {
+                    true
+                } else {
+                    eprintln!(
+                        "liminis-graph: ontology strict: dropping entity '{}' (type '{}' not in vocabulary)",
+                        e.name, e.entity_type
+                    );
+                    false
+                }
+            });
+            if extraction.entities.is_empty() {
+                eprintln!(
+                    "liminis-graph: ontology strict: no entities remain after vocabulary filtering for this chunk"
+                );
+            }
+        }
+    }
 
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
     let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
