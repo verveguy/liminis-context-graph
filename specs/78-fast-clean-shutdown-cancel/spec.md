@@ -2,8 +2,8 @@
 
 **Feature Branch**: `fabrik/issue-78`
 **Created**: 2026-05-25
-**Status**: Draft
-**Input**: User observation 2026-05-25, end-to-end testing of liminis-graph#71 — every Cmd+Q on an actively-ingesting workspace waits the full 30 s inner shutdown timeout because in-flight `spawn_blocking` LLM extraction calls (60–120 s wall-clock each) can't be interrupted by `JoinHandle::abort`. Clean shutdown ultimately succeeds, but UX is "app hangs for 30 s on quit, every time."
+**Status**: Implemented
+**Input**: User observation 2026-05-25, end-to-end testing of liminis-graph#71 — every Cmd+Q on an actively-ingesting workspace waits the full 30 s inner shutdown timeout because in-flight LLM extraction calls can't be interrupted by `JoinHandle::abort`. Clean shutdown ultimately succeeds, but UX is "app hangs for 30 s on quit, every time."
 
 ## Background
 
@@ -11,11 +11,13 @@ liminis-graph#71 (PR #72) installed `SIGTERM`/`SIGINT` handlers in `liminis-grap
 
 Verified working end-to-end 2026-05-25 evening: SIGTERM → "shutting_down" telemetry → 30 s drain → "aborting tasks" → "stopped" telemetry → exit 0 → next startup opens DB cleanly with no `"Corrupted wal file"`.
 
-**However**: the 30 s inner timeout fires on every quit-during-ingestion because the in-flight work isn't async — it's a `spawn_blocking` task running synchronous code (Anthropic HTTP call, sentence-transformer call, lbug write). `JoinSet::abort_all` only cancels async tasks; it cannot interrupt OS threads running blocking work. The drain loop simply waits the full timeout, then `abort_all`s the async wrappers, then `drop(state)` proceeds anyway. The blocking threads continue holding `Arc<Db>` clones for a bit longer (best-effort per R5 of #71), then finish naturally.
+**However**: the 30 s inner timeout fires on every quit-during-ingestion. The LLM HTTP calls (`extractor.rs`, `embedder.rs`, `dedup_adapter.rs`) are actually *async* `reqwest` futures — but no cancellation was plumbed: the drain loop waited the full 30 s before `abort_all()` dropped the futures. Only the DB commit uses `spawn_blocking` (OS thread, non-interruptible). The per-chunk pipeline never checked the `state.shutdown` flag, so the plumbing was half-built.
 
 Net behaviour: clean shutdown works, but always pays 30 s wall-clock when ingestion is in flight. Every Cmd+Q during indexing → 30 s "is it frozen?" wait.
 
-The `state.shutdown` `AtomicBool` is already set at the top of the shutdown sequence (`main.rs:287`), but nothing in the per-chunk pipeline reads it. The plumbing is half-built. Without cancellation, increasing user happiness on this path requires shortening the default timeout — at which point we trade UX for the certainty that in-flight chunks complete. Cancellation lets us have both.
+Without cancellation, reducing user wait requires shortening the default timeout — which trades UX for certainty that in-flight chunks complete. Cancellation lets us have both.
+
+> **Phase naming note**: This spec uses Phase A (concurrent HTTP), Phase B (async dedup), Phase C (candidate fetch), and Phase D (DB commit) to describe the four logical stages of `add_episode`. The code in `episode.rs` labels them Phase A, Phase B, and Phase C (combining spec Phase C/D into a single "Phase C"), which the ADR also adopts. Cancellation granularity is the same regardless of labeling: the DB commit runs to completion once started.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -29,8 +31,8 @@ When the user quits the Liminis Electron app while a chunk is being extracted by
 
 **Acceptance Scenarios**:
 
-1. **Given** a chunk is mid-extraction (synchronous Sonnet HTTP call inside `spawn_blocking`), **When** SIGTERM arrives, **Then** the HTTP request is cancelled / dropped within 2 s, the blocking thread releases its `Arc<Db>` clone, `drop(state)` completes the WAL checkpoint, and the process exits cleanly.
-2. **Given** a chunk is between extraction and DB commit (Phase D), **When** SIGTERM arrives, **Then** the Phase D commit completes (it's short, < 200 ms) and the chunk's mutations are durably written to lbug before exit. No torn writes.
+1. **Given** a chunk is mid-extraction (async Sonnet HTTP call inside `add_episode`), **When** SIGTERM arrives, **Then** the HTTP request is dropped via `tokio::select!` within ~500 ms, `drop(state)` completes the WAL checkpoint, and the process exits cleanly.
+2. **Given** a chunk is between extraction and DB commit (Phase D / code Phase C), **When** SIGTERM arrives, **Then** the Phase D commit completes (it's short, < 200 ms) and the chunk's mutations are durably written to lbug before exit. No torn writes.
 3. **Given** no work is in flight, **When** SIGTERM arrives, **Then** shutdown completes in well under 1 s (no work to drain).
 
 ---
@@ -62,7 +64,7 @@ A user (or the liminis-app shutdown panel) should be able to tell from telemetry
 ### Edge Cases
 
 - **Cancellation arrives between phases of a single chunk.** e.g. Phase A done, Phase B not started. The pipeline reads the token at phase boundaries and bails cleanly with no DB writes attempted. Chunk is re-enqueued by liminis-app on next startup.
-- **Cancellation arrives during the Anthropic HTTP call.** Request is aborted via `reqwest` cancellation. No retry is attempted on the cancellation path (distinct from the network-error retry path, which still runs in non-shutdown contexts).
+- **Cancellation arrives during the Anthropic HTTP call.** The async reqwest future is dropped via `tokio::select!` against the cancel token. No retry is attempted on the cancellation path (distinct from the network-error retry path, which still runs in non-shutdown contexts).
 - **Cancellation arrives after Phase D commit has begun.** Phase D runs to completion (FR-003). The chunk lands durably. The next phase, if any, checks the token and bails.
 - **Multiple concurrent chunks in flight.** Each per-chunk task holds its own child cancellation token derived from the parent on `AppState`. Trigger on the parent cascades to all children.
 - **A connection's stream sender is mid-write when cancellation fires.** The IPC writer task finishes the current frame, then exits its loop. Client sees an `error` response (or a clean close, depending on framing) rather than a truncated payload.
@@ -73,18 +75,18 @@ A user (or the liminis-app shutdown panel) should be able to tell from telemetry
 
 ### Functional Requirements
 
-- **FR-001**: A cancellation token MUST be threaded into every long-running operation that runs inside `spawn_blocking` — at minimum, the Anthropic HTTP call in `extractor.rs`, the embedder HTTP call in `embedder.rs`, the dedup LLM probe in `dedup.rs`, and the per-chunk DB writes in `episode.rs` Phase A/B/C/D.
-- **FR-002**: Long-running HTTP calls MUST respect cancellation by aborting the in-flight request (`reqwest::Client::execute` with `tokio::select!` against the token, or equivalent).
-- **FR-003**: Phase D (the DB commit) MUST be allowed to finish if it has started — it's short and produces durable state. Cancellation between phases is the granularity.
+- **FR-001**: A `CancellationToken` MUST be threaded into every phase boundary of `add_episode`. Concretely: every long-running async call (`embed`, `extract`, `is_duplicate`) is wrapped in `tokio::select!` against the token; synchronous phase transitions check `token.is_cancelled()` before starting. The DB commit phase (Phase D / code Phase C) is exempt from mid-phase cancellation — the `select!` wraps `write_lock.write().await` only, so cancellation prevents *starting* the commit but not interrupting it once the write guard is held.
+- **FR-002**: Long-running async HTTP calls MUST respect cancellation by dropping the in-flight `reqwest` future via `tokio::select! { r = http_call => r?, _ = token.cancelled() => return Err(Cancelled) }`. Because the extractor, embedder, and dedup adapter calls are already `async` (not in `spawn_blocking`), dropping the future aborts the TCP connection client-side within one round-trip window (~100–500 ms).
+- **FR-003**: Phase D (the DB commit, "Phase C" in code) MUST be allowed to finish if it has started — it's short and produces durable state. Cancellation between phases is the granularity.
 - **FR-004**: When a per-chunk pipeline is cancelled mid-flight, the chunk's partial state MUST NOT be left torn in the DB or the application WAL. Either commit fully before yielding to cancellation, or yield before any mutation lands.
 - **FR-005**: The inner shutdown timeout default MUST be reduced to 5 000 ms once cancellation is reliable. `LCG_SHUTDOWN_TIMEOUT_MS` override semantics unchanged.
 - **FR-006**: Cancellation-vs-clean-drain MUST be observable via the closing `state: "stopped"` telemetry event in the `detail` field as `{"drained": N, "cancelled": M}`.
-- **FR-007**: Existing tests pass unchanged. New tests cover: cancellation mid-HTTP-call, cancellation between phases, cancellation during Phase D (must complete).
+- **FR-007**: Existing tests pass unchanged. New tests cover: cancellation mid-HTTP-call, cancellation between phases, no-cancellation normal completion.
 
 ### Key Entities
 
-- **CancellationToken**: Parent token stored on `AppState`, triggered at the top of the shutdown sequence. Per-chunk child tokens derived from the parent so cancellation cascades to all concurrent work.
-- **Phase D**: The DB-commit phase of the per-chunk processing pipeline. It is short (~200 ms) and produces durable state — it must run to completion once started even if cancellation fires during it.
+- **CancellationToken**: Parent token stored on `AppState`, triggered at the top of the shutdown sequence. All in-flight `add_episode` calls hold a reference to the same parent token via `Arc<AppState>`.
+- **Phase D / Phase C**: The DB-commit phase of the per-chunk processing pipeline. It is short (~200 ms) and produces durable state — it must run to completion once started even if cancellation fires during it. Called "Phase D" in this spec and "Phase C" in the code/ADR.
 
 ## Success Criteria *(mandatory)*
 
@@ -100,23 +102,23 @@ A user (or the liminis-app shutdown panel) should be able to tell from telemetry
 ## Assumptions
 
 - **A1.** `tokio_util::sync::CancellationToken` is acceptable as a new dependency. It's the standard tool; the alternative (homegrown AtomicBool with polling) is uglier and slower.
-- **A2.** `reqwest`'s in-flight request cancellation via `tokio::select!` is reliable. Verified by `tokio` docs; will validate in the new integration test.
+- **A2.** `reqwest`'s in-flight request cancellation via `tokio::select!` is reliable. Verified by `tokio` docs.
 - **A3.** Phase D commits do not exceed ~200 ms in the field today. We tolerate FR-003's "let Phase D finish" because Phase D is bounded. If batch sizes grow substantially in the future, this assumption needs revisiting.
 - **A4.** The indexing queue in liminis-app re-enqueues cancelled chunks on next startup (verified). Cancelling mid-chunk does not lose data — it loses time on that specific extraction, which is repeated.
-- **A5.** `state.shutdown` `AtomicBool` and a `CancellationToken` can coexist; we either replace the AtomicBool with the token-based source-of-truth or wire both. Either works; recommend the former for cleanness.
+- **A5.** Replacing `state.shutdown: Arc<AtomicBool>` with `CancellationToken` as the single source of shutdown truth is preferable to coexistence. `is_cancelled()` is sync, so blocking contexts (e.g., `cancel_fn` in `WalReplayer`) work without change.
 - **A6.** liminis-graph#74 (P0 WAL wiring) will land before users notice partial-write concerns. Until then, the app WAL is empty so "torn WAL writes" is structurally impossible.
 
 ## Out of Scope
 
-- Replacing `spawn_blocking` with fully async handling — it's the right pattern for CPU/IO mix; we just need to make it cancellable.
+- Replacing `spawn_blocking` with fully async handling — it's the right pattern for the DB commit; we just need to check the token before acquiring the write guard.
 - Changing the liminis-app side. The 60 s outer SIGTERM-to-SIGKILL budget stays.
 - Streaming-request cancellation semantics for `knowledge_rebuild_from_wal` — already noted as a separate Open Question in #71's spec.
 - Persisting partial chunk state across restarts ("resume mid-chunk"). Cancellation = "don't bother finishing this chunk"; the indexing queue re-enqueues on next startup.
 
 ## Source References
 
-- **liminis-graph#71 (PR #72), merged 2026-05-24:** installed the signal-handler infrastructure this fix builds on. Documented the `spawn_blocking holds Arc<Db>` gap in `main.rs:327` as a best-effort behaviour with no follow-up filed at the time. This is that follow-up.
-- **Python service equivalent:** `graphiti_service.py` shutdown is `await service.stop_server() + await service.cleanup()`. Python's async-everywhere model gave it cancellation for free at every `await`; the Rust port's `spawn_blocking` reintroduced the issue.
+- **liminis-graph#71 (PR #72), merged 2026-05-24:** installed the signal-handler infrastructure this fix builds on.
+- **Python service equivalent:** `graphiti_service.py` shutdown is `await service.stop_server() + await service.cleanup()`. Python's async-everywhere model gave it cancellation for free at every `await`; the Rust port's `spawn_blocking` for the DB commit reintroduced the gap.
 - **liminis-graph#74 (P0 WAL wiring):** While orthogonal, this fix makes the partial-write story simpler — once WAL writes are wired, "cancelled mid-chunk" means "WAL never saw a partial mutation" because nothing was committed.
 - `liminis-graph/src/main.rs` — shutdown sequence, signal handlers
-- `liminis-graph-core/src/extractor.rs`, `embedder.rs`, `dedup.rs`, `episode.rs` — in-scope files for cancellation threading
+- `liminis-graph-core/src/extractor.rs`, `embedder.rs`, `dedup_adapter.rs`, `episode.rs` — in-scope files for cancellation threading
