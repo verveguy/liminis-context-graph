@@ -157,7 +157,14 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
         let decision = if let Some(existing) = &candidates[i] {
-            if state.dedup.is_duplicate(existing, extracted).await? {
+            let is_dup = tokio::select! {
+                r = state.dedup.is_duplicate(existing, extracted) => r?,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
+            };
+            if is_dup {
                 DedupDecision::Merge {
                     existing_uuid: existing.uuid.clone(),
                     merged_summary: format!("{} {}", existing.summary, extracted.summary),
