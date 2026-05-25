@@ -121,7 +121,15 @@ impl OaiEmbedder {
 
     async fn do_embed(&self, text: &str) -> Result<Vec<f32>, Error> {
         let resp = self.do_embed_raw(text).await?;
-        extract_embedding(resp)
+        let vec = extract_embedding(resp)?;
+        if vec.len() != self.dim {
+            return Err(Error::Ipc(format!(
+                "embedding response shape mismatch: expected {} dimensions, got {}",
+                self.dim,
+                vec.len()
+            )));
+        }
+        Ok(vec)
     }
 
     async fn do_embed_raw(&self, text: &str) -> Result<OaiEmbedResponse, Error> {
@@ -207,6 +215,23 @@ impl OaiEmbedder {
 
         serde_json::from_slice(&bytes)
             .map_err(|e| Error::Ipc(format!("parse UDS embed response: {e}")))
+    }
+}
+
+/// Returns `true` if the error is a transport/connectivity failure (not reachable).
+///
+/// Used in `main.rs` to distinguish "embedder unreachable" (always fatal at startup,
+/// per FR-011) from "embedder reachable but bad response" (can be bypassed by
+/// `LCG_EMBEDDING_DIM` per FR-008).
+pub fn is_transport_error(e: &Error) -> bool {
+    match e {
+        Error::Http(re) => re.is_connect() || re.is_timeout(),
+        Error::Ipc(msg) => {
+            msg.starts_with("UDS connect")
+                || msg.starts_with("UDS HTTP/1.1 handshake")
+                || msg.starts_with("UDS send request")
+        }
+        _ => false,
     }
 }
 
