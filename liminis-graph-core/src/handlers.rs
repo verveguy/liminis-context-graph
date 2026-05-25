@@ -892,6 +892,10 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             "Must set 'confirm' to true to clear graph".to_string(),
         ));
     }
+    // When true, the application WAL (.graphiti/wal/) is preserved so that
+    // knowledge_rebuild_from_wal can replay mutations after the DB is cleared.
+    // Default false preserves existing behavior (WAL deleted alongside the DB).
+    let preserve_wal = req.params["preserve_wal"].as_bool().unwrap_or(false);
 
     let db_path = state.db_path.clone();
     let wal_dir = state.wal_dir.clone();
@@ -899,7 +903,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     let _guard = state.write_lock.write().await;
 
-    // Phase 1: delete DB files and WAL directory (point of no return)
+    // Phase 1: delete DB files (and optionally WAL directory) — point of no return
     let db_path_del = db_path.clone();
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let path = std::path::Path::new(&db_path_del);
@@ -918,11 +922,13 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
                 let _ = std::fs::remove_file(format!("{}{}", db_path_del, ext));
             }
         }
-        if let Some(wal) = wal_dir {
-            if wal.exists() {
-                std::fs::remove_dir_all(&wal).map_err(|e| {
-                    Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display()))
-                })?;
+        if !preserve_wal {
+            if let Some(wal) = wal_dir {
+                if wal.exists() {
+                    std::fs::remove_dir_all(&wal).map_err(|e| {
+                        Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display()))
+                    })?;
+                }
             }
         }
         Ok(())
