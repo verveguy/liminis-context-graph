@@ -23,7 +23,7 @@ pub(crate) mod wal_exec;
 pub use app_state::AppState;
 pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
-pub use embedder::{Embedder, HttpEmbedder, MockEmbedder};
+pub use embedder::{Embedder, MockEmbedder, OaiEmbedder};
 pub use error::Error;
 pub use extractor::{AnthropicExtractor, Extractor, MockExtractor};
 pub use ipc::{IpcRequest, IpcResponse};

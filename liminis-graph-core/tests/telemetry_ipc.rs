@@ -16,7 +16,7 @@ use liminis_graph_core::{
     app_state::AppState,
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::HttpEmbedder,
+    embedder::OaiEmbedder,
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
@@ -40,7 +40,7 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
-        embedder: Arc::new(HttpEmbedder::from_env()),
+        embedder: Arc::new(OaiEmbedder::from_env()),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
