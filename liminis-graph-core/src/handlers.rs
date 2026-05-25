@@ -598,7 +598,9 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
-    let _guard = state.write_lock.read().await;
+    // Write lock required: this handler may execute mutations, and the WAL flush must
+    // be serialized with all other write paths to preserve replay order.
+    let _guard = state.write_lock.write().await;
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<String>>, Error> {
         let conn = db.connect()?;
         let rows = conn.cypher_query(&query)?;
