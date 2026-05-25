@@ -14,6 +14,7 @@ use crate::{
     env::lcg_env_var,
     extractor::Extractor,
     llm_router::LlmRouter,
+    ontology::{load_ontology, Ontology},
     rebuild_job::RebuildJob,
     telemetry::TelemetrySink,
     wal::WalWriter,
@@ -54,6 +55,10 @@ pub struct AppState {
     /// Counts the number of add_episode calls that were interrupted by cancellation.
     /// Cloned before drop(state) in main.rs to populate the "stopped" telemetry detail.
     pub cancelled_chunks: Arc<AtomicUsize>,
+    /// Workspace-scoped entity/relation vocabulary loaded from `.lcg/ontology.yaml`.
+    /// `None` when no file is present, empty, or malformed — free-form extraction applies.
+    /// Requires a service restart to pick up changes (FR-007; v1.5 will add hot-reload).
+    pub ontology: Option<Arc<Ontology>>,
 }
 
 impl AppState {
@@ -111,6 +116,18 @@ impl AppState {
         let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT")
             .ok()
             .map(PathBuf::from);
+        let ontology = load_ontology(workspace_root.as_deref()).map(Arc::new);
+        match &ontology {
+            Some(o) => eprintln!(
+                "liminis-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={}",
+                o.entity_types.len(),
+                o.relation_types.len(),
+                o.mode
+            ),
+            None => eprintln!(
+                "liminis-graph: ontology: none — free-form extraction (restart required to pick up changes)"
+            ),
+        }
         Self {
             db: ArcSwapOption::from(db),
             degraded_reason: Arc::new(Mutex::new(degraded_reason)),
@@ -129,6 +146,7 @@ impl AppState {
             indices_built: Arc::new(AtomicBool::new(false)),
             cancel_token: CancellationToken::new(),
             cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+            ontology,
         }
     }
 }

@@ -58,6 +58,7 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -83,6 +84,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf, db_path: &str) 
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 

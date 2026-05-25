@@ -55,6 +55,7 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     });
     (state, dir)
 }
