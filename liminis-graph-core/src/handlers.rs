@@ -897,6 +897,11 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     // Default false preserves existing behavior (WAL deleted alongside the DB).
     let preserve_wal = req.params["preserve_wal"].as_bool().unwrap_or(false);
 
+    // When true, the application WAL (.graphiti/wal/) is preserved so that
+    // knowledge_rebuild_from_wal can replay mutations after the DB is cleared.
+    // Default false preserves existing behavior (WAL deleted alongside the DB).
+    let preserve_wal = req.params["preserve_wal"].as_bool().unwrap_or(false);
+
     let db_path = state.db_path.clone();
     let wal_dir = state.wal_dir.clone();
     let embedding_dim = state.embedder.dim();
