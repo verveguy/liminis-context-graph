@@ -117,16 +117,10 @@ impl AppState {
             .ok()
             .map(PathBuf::from);
         let ontology = load_ontology(workspace_root.as_deref()).map(Arc::new);
-        match &ontology {
-            Some(o) => eprintln!(
-                "liminis-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={}",
-                o.entity_types.len(),
-                o.relation_types.len(),
-                o.mode
-            ),
-            None => eprintln!(
+        if ontology.is_none() {
+            eprintln!(
                 "liminis-graph: ontology: none — free-form extraction (restart required to pick up changes)"
-            ),
+            );
         }
         Self {
             db: ArcSwapOption::from(db),
