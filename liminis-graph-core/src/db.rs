@@ -967,7 +967,7 @@ impl<'db> Conn<'db> {
         let sql = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid IN {uuid_list}{gid_clause} \
-             RETURN n.uuid, ep.uuid, ep.source_description"
+             RETURN DISTINCT n.uuid, ep.uuid, ep.source_description"
         );
         let result = self.inner.query(&sql)?;
         let mut map: EpisodeInfoMap = HashMap::new();
