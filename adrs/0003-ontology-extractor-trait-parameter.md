@@ -60,3 +60,37 @@ The call site in `episode::add_episode` passes `state.ontology.as_deref()`.
 - All three `Extractor` implementors (`AnthropicExtractor`, `MockExtractor`, `LlmRouter`) must be updated when the trait signature changes — contained blast radius since all are crate-internal.
 - `MockExtractor` ignores the `ontology` parameter, returning its fixed result. Tests that exercise strict-mode filtering use the real filtering path in `episode::add_episode`, not the extractor.
 - When issue #82 lands and refactors `AnthropicExtractor::do_extract`'s prompt structure, the ontology injection point (currently an append to `system_text`) may need to move to a different injection location in the refactored prompt builder.
+
+### Update — Issue #92 (2026-05-25)
+
+Issue #92 finalized the design anticipated above. Three concrete outcomes:
+
+**1. `ontology` folded into `ExtractOptions<'a>`**
+
+The three-argument `extract(episode_body, group_id, ontology)` signature was replaced by a single `ExtractOptions<'a>` struct:
+
+```rust
+pub struct ExtractOptions<'a> {
+    pub episode_body: &'a str,
+    pub group_id: &'a str,
+    pub source_type: SourceType,
+    pub custom_instructions: Option<&'a str>,
+    pub reference_time: &'a str,
+    pub ontology: Option<&'a Ontology>,
+}
+```
+
+This co-locates all per-call extraction parameters in one place. `ExtractOptions` derives `Copy + Clone` (all fields are references or `Copy` enums) so `LlmRouter` can pass it to both primary and fallback without reconstruction.
+
+**2. Placeholder-based ontology injection in `.txt` files**
+
+The `prompts/` module uses compile-time `include_str!` for the five prompt files. Ontology types are injected via placeholder substitution at runtime:
+
+- `{{ENTITY_TYPES_SECTION}}` in `extract_text.txt`, `extract_message.txt`, and `extract_json.txt` — replaced with the workspace entity-type list (or the default 16-type list when no ontology is present)
+- `{{FACT_TYPES_SECTION}}` in `extract_edges.txt` — replaced with the workspace relation-type list (empty string when no relation types are declared)
+
+This avoids showing two competing type vocabularies to the LLM simultaneously, which the earlier append-based approach would have caused.
+
+**3. Two-call extraction pipeline**
+
+`AnthropicExtractor::do_extract` was split into `do_extract_entities` (entity call) and `do_extract_edges` (edge call, skipped when the entity list is empty). Post-extraction edge validation in `episode::add_episode` drops self-referential edges and edges whose endpoints are not in the episode's entity list before they reach the DB commit phase.

@@ -34,5 +34,7 @@ pub use rebuild_job::{JobStatus, RebuildJob};
 pub use replay::{ReplayOptions, ReplayProgress, ReplayStats, WalReplayer};
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink};
-pub use types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType};
+pub use types::{
+    EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType,
+};
 pub use wal::{WalLine, WalRotationInfo, WalWriter};

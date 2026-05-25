@@ -55,6 +55,7 @@ enum DedupDecision {
 /// Phase C: commit (exclusive write lock) — apply dedup decisions, insert edges, episodic, MENTIONS.
 ///
 /// Returns the episode UUID.
+#[allow(clippy::too_many_arguments)]
 pub async fn add_episode(
     state: Arc<AppState>,
     name: &str,
@@ -379,7 +380,10 @@ pub async fn add_episode(
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: edge.valid_at.clone().or_else(|| Some(ref_time_owned.clone())),
+                valid_at: edge
+                    .valid_at
+                    .clone()
+                    .or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: edge.invalid_at.clone(),
                 attributes: "{}".to_string(),
                 episode_uuids: vec![],

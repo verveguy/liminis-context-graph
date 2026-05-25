@@ -64,8 +64,9 @@ fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
         _ => return String::new(),
     };
 
-    let mut section =
-        String::from("<FACT_TYPES>\nThe following relation types are defined for this workspace:\n");
+    let mut section = String::from(
+        "<FACT_TYPES>\nThe following relation types are defined for this workspace:\n",
+    );
     for rt in &onto.relation_types {
         let sig = match (&rt.source_type, &rt.target_type) {
             (Some(s), Some(t)) => format!(" ({} → {})", s, t),

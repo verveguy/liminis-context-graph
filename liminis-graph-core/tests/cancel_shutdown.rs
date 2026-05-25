@@ -13,9 +13,16 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use futures::future::BoxFuture;
 use liminis_graph_core::{
-    app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
-    episode, error::Error, extractor::{ExtractOptions, MockExtractor}, telemetry::NoopSink,
-    types::{ExtractionResult, SourceType}, Extractor,
+    app_state::AppState,
+    db::Db,
+    dedup_adapter::PassthroughDedupAdapter,
+    embedder::MockEmbedder,
+    episode,
+    error::Error,
+    extractor::{ExtractOptions, MockExtractor},
+    telemetry::NoopSink,
+    types::{ExtractionResult, SourceType},
+    Extractor,
 };
 use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
@@ -122,7 +129,18 @@ async fn cancel_during_phase_a_returns_cancelled() {
     // Spawn add_episode; it will block in SlowExtractor::extract for 60 s.
     let s = Arc::clone(&state);
     let handle = tokio::spawn(async move {
-        episode::add_episode(s, "ep", "body", "src", "desc", "2026-01-01 00:00:00", "grp", SourceType::Text, None).await
+        episode::add_episode(
+            s,
+            "ep",
+            "body",
+            "src",
+            "desc",
+            "2026-01-01 00:00:00",
+            "grp",
+            SourceType::Text,
+            None,
+        )
+        .await
     });
 
     // Give the task a moment to enter the Phase A select!, then cancel.
