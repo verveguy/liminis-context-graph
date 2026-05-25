@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
@@ -65,7 +67,8 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -88,7 +91,8 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -303,7 +307,8 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -325,7 +330,8 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: Some(workspace_root),
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 

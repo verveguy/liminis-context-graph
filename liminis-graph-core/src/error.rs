@@ -29,6 +29,9 @@ pub enum Error {
 
     #[error("DB unavailable, recovery required: {0}")]
     DbUnavailable(String),
+
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 impl From<tokio::task::JoinError> for Error {

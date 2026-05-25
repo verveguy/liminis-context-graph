@@ -50,7 +50,7 @@ pub enum TelemetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        detail: Option<String>,
+        detail: Option<serde_json::Value>,
     },
     ExtractionTruncated {
         ts_ms: u64,

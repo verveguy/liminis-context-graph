@@ -1146,7 +1146,7 @@ async fn handle_rebuild_from_wal(
         // disconnect). Used to emit the R9 cancellation progress event only when shutdown
         // actually interrupted the replay, not when replay completed and shutdown started later.
         let shutdown_cancelled = Arc::new(AtomicBool::new(false));
-        let shutdown_flag_cancel = Arc::clone(&state.shutdown);
+        let shutdown_flag_cancel = state.cancel_token.clone();
         let shutdown_cancelled_inner = Arc::clone(&shutdown_cancelled);
 
         // Write lock held in async scope; guard released after spawn_blocking completes.
@@ -1162,11 +1162,11 @@ async fn handle_rebuild_from_wal(
                 // Composite cancel: fire on client disconnect OR service shutdown (R9).
                 let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
                     let t = t.clone();
-                    let flag = Arc::clone(&shutdown_flag_cancel);
+                    let flag = shutdown_flag_cancel.clone();
                     let cancelled = shutdown_cancelled_inner;
                     let f: crate::replay::CancelFn = Box::new(move || {
                         let client_gone = t.is_closed();
-                        let shutting_down = flag.load(Ordering::Relaxed);
+                        let shutting_down = flag.is_cancelled();
                         if shutting_down {
                             cancelled.store(true, Ordering::Relaxed);
                         }

@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
@@ -52,7 +54,8 @@ fn make_degraded_state_with_capture(
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
@@ -274,7 +277,8 @@ async fn test_recovery_unknown_strategy() {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     });
 
     let resp = dispatch_val(
@@ -315,7 +319,8 @@ async fn test_recovery_missing_strategy() {
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;

@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
+use tokio_util::sync::CancellationToken;
+
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
@@ -51,7 +53,8 @@ fn make_state_with_sink(db: Arc<Db>, sink: Arc<dyn TelemetrySink>) -> Arc<AppSta
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
         indices_built: Arc::new(AtomicBool::new(false)),
-        shutdown: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
     })
 }
 
