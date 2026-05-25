@@ -6,7 +6,7 @@ use futures::future::BoxFuture;
 use crate::{
     env::lcg_env_var,
     error::Error,
-    extractor::{AnthropicExtractor, Extractor},
+    extractor::{AnthropicExtractor, ExtractOptions, Extractor},
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
     types::ExtractionResult,
 };
@@ -128,11 +128,12 @@ impl LlmRouter {
         }
     }
 
-    async fn do_extract(&self, body: &str, group_id: &str) -> Result<ExtractionResult, Error> {
+    async fn do_extract<'a>(&'a self, opts: ExtractOptions<'a>) -> Result<ExtractionResult, Error> {
         // primary_failed is only ever set to true when a fallback is configured, so if it is
         // true here there must be a fallback to try.
+        // ExtractOptions is Copy, so it can be passed to both primary and fallback.
         if !self.primary_failed.load(Ordering::Acquire) {
-            match self.primary.extract(body, group_id).await {
+            match self.primary.extract(opts).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     if let Some(fb) = &self.fallback {
@@ -154,7 +155,7 @@ impl LlmRouter {
                                 self.primary_model_name, err, self.fallback_model_name
                             );
                         }
-                        return fb.extract(body, group_id).await;
+                        return fb.extract(opts).await;
                     }
                     // No fallback — return the error without setting primary_failed so that
                     // transient failures do not permanently disable the primary.
@@ -165,7 +166,7 @@ impl LlmRouter {
 
         // primary_failed is true, which means a fallback is configured.
         if let Some(fb) = &self.fallback {
-            fb.extract(body, group_id).await
+            fb.extract(opts).await
         } else {
             // Unreachable: primary_failed is only set when fallback.is_some().
             Err(Error::Ipc(
@@ -178,10 +179,9 @@ impl LlmRouter {
 impl Extractor for LlmRouter {
     fn extract<'a>(
         &'a self,
-        body: &'a str,
-        group_id: &'a str,
+        opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
-        Box::pin(self.do_extract(body, group_id))
+        Box::pin(self.do_extract(opts))
     }
 
     fn classify_entities<'a>(

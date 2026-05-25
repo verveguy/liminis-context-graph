@@ -1,27 +1,41 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::{
     env::lcg_env_var,
     error::Error,
+    prompts,
     telemetry::{cost_for_usage, now_ms, TelemetryEvent, TelemetrySink},
-    types::ExtractionResult,
+    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
 };
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+
+// ── ExtractOptions ─────────────────────────────────────────────────────────────
+
+/// Options for a single extraction call.
+#[derive(Copy, Clone)]
+pub struct ExtractOptions<'a> {
+    pub episode_body: &'a str,
+    pub group_id: &'a str,
+    pub source_type: SourceType,
+    pub custom_instructions: Option<&'a str>,
+    pub reference_time: &'a str,
+}
 
 // ── Extractor trait ───────────────────────────────────────────────────────────
 
 pub trait Extractor: Send + Sync {
     fn extract<'a>(
         &'a self,
-        episode_body: &'a str,
-        group_id: &'a str,
+        opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
 
     /// Classifies entity types for a batch of (name, summary) pairs.
@@ -33,6 +47,30 @@ pub trait Extractor: Send + Sync {
         &'a self,
         entities: &'a [(&'a str, &'a str)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
+}
+
+// ── Internal parse types ──────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct EntityCallResult {
+    entities: Vec<ExtractedEntity>,
+}
+
+#[derive(Deserialize)]
+struct EdgeCallResult {
+    edges: Vec<ExtractedEdge>,
+}
+
+enum EntityOutcome {
+    Success(Vec<ExtractedEntity>),
+    BudgetExhausted,
+    ParseError(Error),
+}
+
+enum EdgeOutcome {
+    Success(Vec<ExtractedEdge>),
+    BudgetExhausted,
+    ParseError(Error),
 }
 
 // ── AnthropicExtractor ────────────────────────────────────────────────────────
@@ -105,26 +143,30 @@ impl AnthropicExtractor {
         self.model.to_lowercase().contains("sonnet")
     }
 
-    async fn do_extract(
-        &self,
-        episode_body: &str,
-        _group_id: &str,
-    ) -> Result<ExtractionResult, Error> {
-        let system_text = "You are a knowledge graph extraction assistant. \
-            Extract named entities and relationships from the given text. \
-            Return ONLY valid JSON matching this schema exactly:\n\
-            {\"entities\":[{\"name\":\"string\",\"entity_type\":\"string\",\"summary\":\"string\"}],\
-            \"edges\":[{\"source_name\":\"string\",\"target_name\":\"string\",\"fact\":\"string\"}]}";
-
-        let system_value: Value = if self.is_sonnet() {
-            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+    fn system_value(&self, text: &str) -> Value {
+        if self.is_sonnet() {
+            json!([{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}])
         } else {
-            json!(system_text)
-        };
+            json!(text)
+        }
+    }
 
-        let extract_tool = json!({
-            "name": "extract",
-            "description": "Extract named entities and relationships from the text.",
+    async fn do_extract_entities(
+        &self,
+        opts: &ExtractOptions<'_>,
+    ) -> Result<Vec<ExtractedEntity>, Error> {
+        let system_text = prompts::entity_system_prompt(opts.source_type);
+        let system_value = self.system_value(system_text);
+
+        let user_content = prompts::entity_user_prompt_for(
+            opts.source_type,
+            opts.episode_body,
+            opts.custom_instructions,
+        );
+
+        let entity_tool = json!({
+            "name": "extract_entities",
+            "description": "Extract named entities from the text.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -139,39 +181,22 @@ impl AnthropicExtractor {
                             },
                             "required": ["name", "entity_type", "summary"]
                         }
-                    },
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "source_name": {"type": "string"},
-                                "target_name": {"type": "string"},
-                                "fact": {"type": "string"}
-                            },
-                            "required": ["source_name", "target_name", "fact"]
-                        }
                     }
                 },
-                "required": ["entities", "edges"]
+                "required": ["entities"]
             }
         });
 
-        const INITIAL_MAX_TOKENS: u32 = 8192;
-        let chunk_len_bytes = episode_body.len();
+        const INITIAL_MAX_TOKENS: u32 = 4096;
+        let chunk_len_bytes = opts.episode_body.len();
 
         let mut body = json!({
             "model": &self.model,
             "max_tokens": INITIAL_MAX_TOKENS,
             "system": system_value,
-            "tools": [extract_tool],
-            "tool_choice": {"type": "tool", "name": "extract"},
-            "messages": [
-                {
-                    "role": "user",
-                    "content": format!("Extract entities and relationships from:\n\n{episode_body}")
-                }
-            ]
+            "tools": [entity_tool],
+            "tool_choice": {"type": "tool", "name": "extract_entities"},
+            "messages": [{"role": "user", "content": user_content}]
         });
 
         let mut attempt = 0u32;
@@ -182,17 +207,14 @@ impl AnthropicExtractor {
                 .post(&self.url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", "2023-06-01");
-
             if self.is_sonnet() {
                 req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
             }
 
             let http_resp = req.json(&body).send().await?;
             let status = http_resp.status();
-
             if (status == 429 || status == 529) && attempt < 3 {
-                let delay = Duration::from_secs(1u64 << attempt);
-                sleep(delay).await;
+                sleep(Duration::from_secs(1u64 << attempt)).await;
                 attempt += 1;
                 continue;
             }
@@ -200,20 +222,20 @@ impl AnthropicExtractor {
             let resp: Value = http_resp.error_for_status()?.json().await?;
             self.emit_token_usage(&resp);
 
-            match parse_tool_response(resp) {
-                ToolOutcome::Success(result) => {
+            match parse_entity_response(resp) {
+                EntityOutcome::Success(entities) => {
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
-                            ts_ms: crate::telemetry::now_ms(),
+                            ts_ms: now_ms(),
                             model: self.model.clone(),
                             chunk_len_bytes,
                             initial_max_tokens: INITIAL_MAX_TOKENS,
                             retry_succeeded: true,
                         });
                     }
-                    return Ok(result);
+                    return Ok(entities);
                 }
-                ToolOutcome::BudgetExhausted => {
+                EntityOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
                         let current = body["max_tokens"]
                             .as_u64()
@@ -224,19 +246,164 @@ impl AnthropicExtractor {
                         continue;
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
-                        ts_ms: crate::telemetry::now_ms(),
+                        ts_ms: now_ms(),
                         model: self.model.clone(),
                         chunk_len_bytes,
                         initial_max_tokens: INITIAL_MAX_TOKENS,
                         retry_succeeded: false,
                     });
                     return Err(Error::Ipc(
-                        "extraction budget exhausted after retry".to_string(),
+                        "entity extraction budget exhausted after retry".to_string(),
                     ));
                 }
-                ToolOutcome::ParseError(e) => return Err(e),
+                EntityOutcome::ParseError(e) => return Err(e),
             }
         }
+    }
+
+    async fn do_extract_edges(
+        &self,
+        opts: &ExtractOptions<'_>,
+        entities: &[ExtractedEntity],
+    ) -> Result<Vec<ExtractedEdge>, Error> {
+        let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
+        let system_text = prompts::edge_system_prompt();
+        let system_value = self.system_value(system_text);
+
+        let user_content = prompts::edge_user_prompt(
+            &entity_names,
+            opts.reference_time,
+            opts.episode_body,
+            opts.custom_instructions,
+        );
+
+        let edge_tool = json!({
+            "name": "extract_edges",
+            "description": "Extract factual relationships between the extracted entities.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "edges": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_name": {"type": "string"},
+                                "target_name": {"type": "string"},
+                                "relation_type": {"type": "string"},
+                                "fact": {"type": "string"},
+                                "valid_at": {"type": ["string", "null"]},
+                                "invalid_at": {"type": ["string", "null"]}
+                            },
+                            "required": ["source_name", "target_name", "relation_type", "fact"]
+                        }
+                    }
+                },
+                "required": ["edges"]
+            }
+        });
+
+        const INITIAL_MAX_TOKENS: u32 = 4096;
+        let chunk_len_bytes = opts.episode_body.len();
+
+        let mut body = json!({
+            "model": &self.model,
+            "max_tokens": INITIAL_MAX_TOKENS,
+            "system": system_value,
+            "tools": [edge_tool],
+            "tool_choice": {"type": "tool", "name": "extract_edges"},
+            "messages": [{"role": "user", "content": user_content}]
+        });
+
+        let mut attempt = 0u32;
+        let mut max_tokens_retried = false;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+            if (status == 429 || status == 529) && attempt < 3 {
+                sleep(Duration::from_secs(1u64 << attempt)).await;
+                attempt += 1;
+                continue;
+            }
+
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+
+            match parse_edge_response(resp) {
+                EdgeOutcome::Success(edges) => {
+                    if max_tokens_retried {
+                        self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                            ts_ms: now_ms(),
+                            model: self.model.clone(),
+                            chunk_len_bytes,
+                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            retry_succeeded: true,
+                        });
+                    }
+                    return Ok(edges);
+                }
+                EdgeOutcome::BudgetExhausted => {
+                    if !max_tokens_retried {
+                        let current = body["max_tokens"]
+                            .as_u64()
+                            .unwrap_or(INITIAL_MAX_TOKENS as u64);
+                        body["max_tokens"] = json!(current * 2);
+                        max_tokens_retried = true;
+                        attempt = 0;
+                        continue;
+                    }
+                    self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        chunk_len_bytes,
+                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        retry_succeeded: false,
+                    });
+                    return Err(Error::Ipc(
+                        "edge extraction budget exhausted after retry".to_string(),
+                    ));
+                }
+                EdgeOutcome::ParseError(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
+        // Phase 1: extract entities.
+        let mut entities = self.do_extract_entities(&opts).await?;
+
+        // Trim entity names.
+        for e in &mut entities {
+            e.name = e.name.trim().to_string();
+        }
+
+        // Skip edge pass if no entities were extracted.
+        if entities.is_empty() {
+            return Ok(ExtractionResult {
+                entities,
+                edges: vec![],
+            });
+        }
+
+        // Phase 2: extract edges with entity list for validation guidance.
+        let raw_edges = self.do_extract_edges(&opts, &entities).await?;
+
+        // Post-extraction filters.
+        let filtered_edges = apply_edge_filters(raw_edges, &entities);
+
+        Ok(ExtractionResult {
+            entities,
+            edges: filtered_edges,
+        })
     }
 
     async fn do_classify_entities(&self, entities: &[(&str, &str)]) -> Result<Vec<String>, Error> {
@@ -244,17 +411,8 @@ impl AnthropicExtractor {
             return Ok(vec![]);
         }
 
-        let system_text = "You are a knowledge graph entity classifier. Given a list of entities \
-            (name and summary), assign each a specific entity type label. Use concise PascalCase \
-            labels such as Person, Organization, Location, Concept, Product, Event, Technology. \
-            Return ONLY valid JSON: an array of strings, one per input entity, in the same order \
-            as the input. Use an empty string for an entity whose type cannot be determined.";
-
-        let system_value: Value = if self.is_sonnet() {
-            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
-        } else {
-            json!(system_text)
-        };
+        let system_text = prompts::classify_system_prompt();
+        let system_value = self.system_value(system_text);
 
         let input: Vec<Value> = entities
             .iter()
@@ -263,7 +421,7 @@ impl AnthropicExtractor {
 
         let body = json!({
             "model": &self.model,
-            "max_tokens": 512,
+            "max_tokens": 2048,
             "system": system_value,
             "messages": [
                 {
@@ -351,10 +509,9 @@ impl AnthropicExtractor {
 impl Extractor for AnthropicExtractor {
     fn extract<'a>(
         &'a self,
-        episode_body: &'a str,
-        group_id: &'a str,
+        opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
-        Box::pin(self.do_extract(episode_body, group_id))
+        Box::pin(self.do_extract(opts))
     }
 
     fn classify_entities<'a>(
@@ -365,14 +522,169 @@ impl Extractor for AnthropicExtractor {
     }
 }
 
-// ── ToolOutcome ───────────────────────────────────────────────────────────────
+// ── Post-extraction filters ───────────────────────────────────────────────────
 
+/// Apply quality filters to extracted edges:
+/// 1. Normalize relation_type to SCREAMING_SNAKE_CASE.
+/// 2. Drop self-referential edges (source == target).
+/// 3. Drop edges whose endpoints are not in the entity list.
+fn apply_edge_filters(
+    edges: Vec<ExtractedEdge>,
+    entities: &[ExtractedEntity],
+) -> Vec<ExtractedEdge> {
+    let entity_names: HashSet<String> =
+        entities.iter().map(|e| e.name.trim().to_string()).collect();
+
+    edges
+        .into_iter()
+        .filter_map(|mut edge| {
+            // Normalize relation_type to SCREAMING_SNAKE_CASE.
+            let normalized = normalize_relation_type(&edge.relation_type);
+            if normalized != edge.relation_type {
+                eprintln!(
+                    "liminis-graph: relation_type normalized {:?} → {:?}",
+                    edge.relation_type, normalized
+                );
+                edge.relation_type = normalized;
+            }
+
+            let src = edge.source_name.trim().to_string();
+            let dst = edge.target_name.trim().to_string();
+            edge.source_name = src.clone();
+            edge.target_name = dst.clone();
+
+            // Drop self-referential edges.
+            if src == dst {
+                eprintln!(
+                    "liminis-graph: dropping self-referential edge: {:?} --[{}]--> {:?}",
+                    src, edge.relation_type, dst
+                );
+                return None;
+            }
+
+            // Drop edges whose endpoints are not in the entity list.
+            if !entity_names.contains(&src) {
+                eprintln!(
+                    "liminis-graph: dropping edge — source {:?} not in entity list",
+                    src
+                );
+                return None;
+            }
+            if !entity_names.contains(&dst) {
+                eprintln!(
+                    "liminis-graph: dropping edge — target {:?} not in entity list",
+                    dst
+                );
+                return None;
+            }
+
+            Some(edge)
+        })
+        .collect()
+}
+
+/// Normalize a relation type string to SCREAMING_SNAKE_CASE.
+/// uppercase → replace non-alphanumeric with `_` → collapse consecutive `_` → trim `_`.
+fn normalize_relation_type(s: &str) -> String {
+    let upper = s.to_uppercase();
+    let replaced: String = upper
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    // Collapse consecutive underscores and trim leading/trailing.
+    let mut out = String::with_capacity(replaced.len());
+    let mut prev_underscore = false;
+    for c in replaced.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                out.push(c);
+            }
+            prev_underscore = true;
+        } else {
+            out.push(c);
+            prev_underscore = false;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+// ── Tool response parsers ─────────────────────────────────────────────────────
+
+/// Parse the entity tool response.
+fn parse_entity_response(mut resp: Value) -> EntityOutcome {
+    if resp["stop_reason"].as_str() == Some("max_tokens") {
+        return EntityOutcome::BudgetExhausted;
+    }
+
+    let tool_block = resp["content"].as_array_mut().and_then(|arr| {
+        let idx = arr.iter().position(|b| {
+            b["type"].as_str() == Some("tool_use") && b["name"].as_str() == Some("extract_entities")
+        })?;
+        Some(arr.remove(idx))
+    });
+
+    let Some(mut block) = tool_block else {
+        return EntityOutcome::ParseError(Error::Ipc(
+            "entity extraction response missing tool_use block".to_string(),
+        ));
+    };
+
+    let input = block["input"].take();
+    if input.is_null() {
+        return EntityOutcome::ParseError(Error::Ipc(
+            "entity extraction tool_use block has null input".to_string(),
+        ));
+    }
+
+    match serde_json::from_value::<EntityCallResult>(input) {
+        Ok(r) => EntityOutcome::Success(r.entities),
+        Err(e) => EntityOutcome::ParseError(Error::Json(e)),
+    }
+}
+
+/// Parse the edge tool response.
+fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
+    if resp["stop_reason"].as_str() == Some("max_tokens") {
+        return EdgeOutcome::BudgetExhausted;
+    }
+
+    let tool_block = resp["content"].as_array_mut().and_then(|arr| {
+        let idx = arr.iter().position(|b| {
+            b["type"].as_str() == Some("tool_use") && b["name"].as_str() == Some("extract_edges")
+        })?;
+        Some(arr.remove(idx))
+    });
+
+    let Some(mut block) = tool_block else {
+        return EdgeOutcome::ParseError(Error::Ipc(
+            "edge extraction response missing tool_use block".to_string(),
+        ));
+    };
+
+    let input = block["input"].take();
+    if input.is_null() {
+        return EdgeOutcome::ParseError(Error::Ipc(
+            "edge extraction tool_use block has null input".to_string(),
+        ));
+    }
+
+    match serde_json::from_value::<EdgeCallResult>(input) {
+        Ok(r) => EdgeOutcome::Success(r.edges),
+        Err(e) => EdgeOutcome::ParseError(Error::Json(e)),
+    }
+}
+
+// ── ToolOutcome ───────────────────────────────────────────────────────────────
+// Kept for unit tests that test parse_tool_response directly.
+
+#[cfg(test)]
 enum ToolOutcome {
     Success(ExtractionResult),
     BudgetExhausted,
     ParseError(Error),
 }
 
+#[cfg(test)]
 fn parse_tool_response(mut resp: Value) -> ToolOutcome {
     if resp["stop_reason"].as_str() == Some("max_tokens") {
         return ToolOutcome::BudgetExhausted;
@@ -412,10 +724,8 @@ pub struct MockExtractor;
 impl Extractor for MockExtractor {
     fn extract<'a>(
         &'a self,
-        _episode_body: &'a str,
-        _group_id: &'a str,
+        _opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
-        use crate::types::{ExtractedEdge, ExtractedEntity};
         Box::pin(async {
             Ok(ExtractionResult {
                 entities: vec![
@@ -434,6 +744,9 @@ impl Extractor for MockExtractor {
                     source_name: "Alice".to_string(),
                     target_name: "Acme Corp".to_string(),
                     fact: "Alice works at Acme Corp".to_string(),
+                    relation_type: "WORKS_AT".to_string(),
+                    valid_at: None,
+                    invalid_at: None,
                 }],
             })
         })
@@ -444,6 +757,46 @@ impl Extractor for MockExtractor {
         entities: &'a [(&'a str, &'a str)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         // MockExtractor returns empty string for each entity — no reclassification.
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+}
+
+// ── ScriptedExtractor ─────────────────────────────────────────────────────────
+
+/// Test extractor that returns pre-scripted `ExtractionResult` values in sequence.
+/// Panics when the script is exhausted. Used in integration tests.
+#[doc(hidden)]
+pub struct ScriptedExtractor {
+    results: std::sync::Mutex<std::collections::VecDeque<ExtractionResult>>,
+}
+
+impl ScriptedExtractor {
+    pub fn new(results: Vec<ExtractionResult>) -> Self {
+        Self {
+            results: std::sync::Mutex::new(results.into()),
+        }
+    }
+}
+
+impl Extractor for ScriptedExtractor {
+    fn extract<'a>(
+        &'a self,
+        _opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        let result = self
+            .results
+            .lock()
+            .expect("ScriptedExtractor lock poisoned")
+            .pop_front()
+            .expect("ScriptedExtractor script exhausted");
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
@@ -465,6 +818,9 @@ fn extract_json_block(s: &str) -> &str {
         }
     }
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
+        return &s[start..=end];
+    }
+    if let (Some(start), Some(end)) = (s.find('['), s.rfind(']')) {
         return &s[start..=end];
     }
     s.trim()
@@ -649,5 +1005,101 @@ mod tests {
             parse_tool_response(resp),
             ToolOutcome::ParseError(_)
         ));
+    }
+
+    #[test]
+    fn normalize_relation_type_screaming_snake() {
+        assert_eq!(normalize_relation_type("married to"), "MARRIED_TO");
+        assert_eq!(normalize_relation_type("WORKS_AT"), "WORKS_AT");
+        assert_eq!(normalize_relation_type("wrote"), "WROTE");
+        assert_eq!(normalize_relation_type("is followed by"), "IS_FOLLOWED_BY");
+        assert_eq!(normalize_relation_type("Won"), "WON");
+        assert_eq!(normalize_relation_type("produced by"), "PRODUCED_BY");
+    }
+
+    #[test]
+    fn apply_edge_filters_drops_self_ref() {
+        let entities = vec![
+            ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "".to_string(),
+            },
+            ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "".to_string(),
+            },
+        ];
+        let edges = vec![
+            ExtractedEdge {
+                source_name: "Alice".to_string(),
+                target_name: "Alice".to_string(),
+                fact: "Alice is Alice".to_string(),
+                relation_type: "IS".to_string(),
+                valid_at: None,
+                invalid_at: None,
+            },
+            ExtractedEdge {
+                source_name: "Alice".to_string(),
+                target_name: "Bob".to_string(),
+                fact: "Alice knows Bob".to_string(),
+                relation_type: "KNOWS".to_string(),
+                valid_at: None,
+                invalid_at: None,
+            },
+        ];
+        let filtered = apply_edge_filters(edges, &entities);
+        assert_eq!(filtered.len(), 1, "self-referential edge should be dropped");
+        assert_eq!(filtered[0].target_name, "Bob");
+    }
+
+    #[test]
+    fn apply_edge_filters_drops_missing_endpoint() {
+        let entities = vec![ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "".to_string(),
+        }];
+        let edges = vec![ExtractedEdge {
+            source_name: "Alice".to_string(),
+            target_name: "UnknownEntity".to_string(),
+            fact: "Alice relates to unknown".to_string(),
+            relation_type: "RELATES_TO".to_string(),
+            valid_at: None,
+            invalid_at: None,
+        }];
+        let filtered = apply_edge_filters(edges, &entities);
+        assert!(
+            filtered.is_empty(),
+            "edge with unknown endpoint should be dropped"
+        );
+    }
+
+    #[test]
+    fn apply_edge_filters_normalizes_relation_type() {
+        let entities = vec![
+            ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "".to_string(),
+            },
+            ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "".to_string(),
+            },
+        ];
+        let edges = vec![ExtractedEdge {
+            source_name: "Alice".to_string(),
+            target_name: "Bob".to_string(),
+            fact: "Alice is married to Bob".to_string(),
+            relation_type: "married to".to_string(),
+            valid_at: None,
+            invalid_at: None,
+        }];
+        let filtered = apply_edge_filters(edges, &entities);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].relation_type, "MARRIED_TO");
     }
 }
