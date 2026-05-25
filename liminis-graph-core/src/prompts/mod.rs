@@ -81,7 +81,16 @@ pub fn edge_user_prompt(
 ) -> String {
     let entities_section = entity_names
         .iter()
-        .map(|n| format!("- {n}"))
+        .filter_map(|n| {
+            // Strip control chars (including newlines) that would break the bullet-list structure.
+            let sanitized: String = n.chars().filter(|c| !c.is_control()).collect();
+            let sanitized = sanitized.trim().to_string();
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(format!("- {sanitized}"))
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 

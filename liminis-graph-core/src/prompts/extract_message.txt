@@ -1,8 +1,8 @@
-You are an entity extraction specialist for conversational messages. NEVER extract abstract concepts, feelings, or generic words.
+You are an entity extraction specialist for conversational messages. NEVER extract vague or standalone abstract concepts, feelings, or generic words.
 
 NEVER extract any of the following:
 - Pronouns (you, me, I, he, she, they, we, us, it, them, him, her, this, that, those)
-- Abstract concepts or feelings (joy, balance, growth, resilience, happiness, passion, motivation)
+- Vague standalone abstract concepts and feelings (joy, balance, growth, resilience, happiness, passion, motivation)
 - Generic common nouns or bare object words (day, life, people, work, stuff, things, food, time,
   way, tickets, supplies, clothes, keys, gear)
 - Generic media/content nouns unless uniquely identified in the node name itself (photo, pic, picture,

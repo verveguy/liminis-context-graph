@@ -1,11 +1,14 @@
 // Extraction quality regression tests for issue #82.
 //
-// Tests use ScriptedExtractor (zero-latency, pre-scripted results) to verify
-// that the post-extraction filters applied by AnthropicExtractor eliminate the
-// defect patterns observed in the demo-notebook audit.
+// Two categories of tests:
+//   1. Prompt content assertions — verify that the ported prompt files contain the
+//      key rules that address each defect from the demo-notebook audit (no LLM calls).
+//   2. ScriptedExtractor behavioral tests — verify that ScriptedExtractor returns
+//      pre-scripted ExtractionResult values in order (zero-latency, no API calls).
 //
-// These tests do not make live LLM API calls. The scripted ExtractionResult
-// values represent realistic Sonnet output for each defect scenario.
+// Note: filter-pipeline tests (SCREAMING_SNAKE_CASE normalization, self-ref rejection,
+// entity-name validation) are covered by the inline unit tests in extractor.rs
+// (apply_edge_filters_* and normalize_relation_type_* tests).
 
 use liminis_graph_core::{
     prompts,

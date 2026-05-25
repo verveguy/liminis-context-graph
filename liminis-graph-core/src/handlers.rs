@@ -180,6 +180,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .unwrap_or_default();
     let custom_instructions: Option<String> = p["custom_extraction_instructions"]
         .as_str()
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
@@ -393,6 +394,7 @@ async fn handle_knowledge_process_chunk(
         .unwrap_or_default();
     let custom_instructions: Option<String> = p["custom_extraction_instructions"]
         .as_str()
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 

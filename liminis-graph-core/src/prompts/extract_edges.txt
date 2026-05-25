@@ -1,6 +1,6 @@
 You are an expert fact extractor that extracts fact triples from text.
 1. Extracted fact triples should also be extracted with relevant date information.
-2. Treat the CURRENT TIME as the time the episode was recorded. All temporal information should be extracted relative to this time.
+2. Treat REFERENCE_TIME as the time the episode was recorded. All temporal information should be extracted relative to REFERENCE_TIME.
 
 # TASK
 Extract all factual relationships between the given ENTITIES based on the CURRENT MESSAGE.
