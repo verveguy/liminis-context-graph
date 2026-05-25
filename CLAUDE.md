@@ -1,5 +1,52 @@
 # liminis-graph — Claude guidance
 
+## Specs use Spec Kit (NON-NEGOTIABLE)
+
+All feature specs in this project use Spec Kit format: `## User Scenarios & Testing` with prioritized stories, `## Requirements` with FR-NNN identifiers, `## Success Criteria` with SC-NNN identifiers, `## Edge Cases`, and `## Assumptions`.
+
+**For Fabrik-driven features**: File a GitHub issue (with a free-form description or a Spec Kit–formatted body), label it `fabrik:yolo`, and put it in the Specify column of the project board. Fabrik's Specify stage automatically produces the canonical spec in Spec Kit format and commits it to `specs/<issue_number>-<slug>/spec.md` on the issue's feature branch. The spec ships with the implementation in the same PR and lands on `main` when the PR merges. No manual pre-commit step is needed — do not run the `/speckit-specify` slash command and do not create the spec directory by hand.
+
+- The directory prefix is the **GitHub issue number** (e.g., `specs/29-tier-2-wal-admin/`), not a sequential NNN counter. This guarantees uniqueness across parallel issues.
+- Any pre-existing `specs/<NNN>-*` directories (`001-rust-knowledge-graph`, etc.) predate this convention and stay as-is.
+- For an **in-flight issue** (PR open, not yet merged), the spec is visible on the PR's feature branch via GitHub's web UI file browser. It appears on `main` only after the PR merges.
+
+**For small bug fixes**: The full Spec Kit workflow is overkill — a focused issue with reproduction steps, expected/actual behavior, and acceptance criteria is fine. The Spec Kit threshold is roughly: if the work is large enough to be a "feature" or to have user-facing acceptance scenarios, file it as a Fabrik issue and let the Specify stage handle the spec. If it's a one-line fix or a clearly-scoped regression, just file the issue directly.
+
+## Where work happens (NON-NEGOTIABLE)
+
+Two rules govern how changes land in this repo:
+
+1. **Major work is driven by Fabrik.** Anything that meets the Spec Kit threshold above is filed as a Spec Kit issue and worked by Fabrik through its stages (Specify → Research → Plan → Implement → Review → Validate). Do not implement major features by hand in a side conversation; let the agent do it from the spec so the artifacts (spec, plan, tasks, PR) stay aligned.
+2. **Smaller work is done in a git worktree and pushed as a PR — never edited directly in `main`.** The `main` checkout must always remain valid: clean working tree, all tests passing, ready for Fabrik to fork worktrees from. Even a one-line doc tweak or a focused regression fix goes through a feature branch in a separate worktree.
+
+**Why:** Fabrik runs against `main` and forks per-issue worktrees from it. Uncommitted edits in `main` corrupt that workflow — Fabrik's worktrees won't see in-flight changes, conflict detection breaks, and the meaning of "what's in main" stops being well-defined. The same worktree-and-PR discipline Fabrik applies to itself must apply to direct collaboration too.
+
+**How to work in a worktree:**
+
+```bash
+# from the main checkout (~/dev/liminis-project/liminis-graph)
+git worktree add ../liminis-graph-worktrees/<short-slug> -b feat/<short-slug> main
+cd ../liminis-graph-worktrees/<short-slug>
+# ... edit, test, commit ...
+cargo fmt --all
+cargo test
+cargo clippy --all-targets -- -D warnings
+git push -u origin feat/<short-slug>
+gh pr create --fill
+# after merge, return to main checkout to clean up:
+cd -
+git worktree remove ../liminis-graph-worktrees/<short-slug>
+git branch -D feat/<short-slug>
+```
+
+Worktrees live as siblings to the main checkout under `../liminis-graph-worktrees/<short-slug>/`, not inside the repo. Always run `cargo fmt --all && cargo test && cargo clippy --all-targets -- -D warnings` from inside the worktree before pushing — see the Rust pre-commit checks section below for the detailed gate behavior.
+
+The Spec Kit threshold and the worktree threshold are the same: features go through Spec Kit + Fabrik; everything else still gets a worktree + PR.
+
+## Pre-spec ideas (`ideas/`)
+
+The `ideas/` directory holds pre-spec sketches and design notes that have not crossed the Spec Kit threshold (e.g. `cutover-plan.md`, `oss-launch-architecture.md`). **Do not implement directly from files there** — they are exploratory by definition and may be wrong, incomplete, or contradicted by later thinking. When an idea matures, file a Fabrik issue (with a Spec Kit–formatted body for features, or a focused bug body for fixes) and the resulting spec lives in `specs/<issue-number>-<short-name>/spec.md` per the convention above.
+
 ## Rust pre-commit checks (MUST run before every commit)
 
 CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run them locally first to save a fabrik retry cycle. Use the debug profile locally for faster feedback (CI uses `--release` only where the integration-test linker requires it).
