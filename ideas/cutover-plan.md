@@ -63,6 +63,8 @@ The actual switch.
 
 **Output:** No code change beyond defaults. The risk is operational, not technical.
 
+> **WAL backup blocker resolved (2026-05-25, issue #74).** The application WAL was never populated by the Rust binary (`WalWriter::log_mutation` had zero callers). This meant switching a workspace from Python to Rust silently dropped its WAL backup story — `knowledge_rebuild_from_wal` was non-functional on Rust-ingested data. Fixed: every Cypher mutation is now appended to the WAL after successful execution, restoring parity with the Python `LadybugDriver` pipeline. Stage 3 is no longer blocked by this issue.
+
 ## Stage 4 — Tear down
 
 After 2–4 weeks of stable Rust-default operation:
