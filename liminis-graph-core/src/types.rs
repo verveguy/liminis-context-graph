@@ -12,10 +12,13 @@ pub enum SourceType {
 impl SourceType {
     /// Maps a string label to a SourceType; defaults to Text for unknown values.
     pub fn from_str_lossy(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
-            "json" => Self::Json,
-            "message" => Self::Message,
-            _ => Self::Text,
+        let trimmed = s.trim();
+        if trimmed.eq_ignore_ascii_case("json") {
+            Self::Json
+        } else if trimmed.eq_ignore_ascii_case("message") {
+            Self::Message
+        } else {
+            Self::Text
         }
     }
 }
