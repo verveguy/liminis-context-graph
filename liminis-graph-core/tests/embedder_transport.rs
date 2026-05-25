@@ -30,7 +30,8 @@ async fn write_http_response(writer: &mut (impl tokio::io::AsyncWriteExt + Unpin
     writer.write_all(response.as_bytes()).await.ok();
 }
 
-async fn drain_http_request(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) {
+/// Reads headers and body from an HTTP/1.1 request. Returns the raw body bytes.
+async fn read_http_request_body(reader: &mut (impl tokio::io::AsyncBufRead + Unpin)) -> Vec<u8> {
     use tokio::io::AsyncBufReadExt;
 
     let mut content_length: usize = 0;
@@ -51,7 +52,24 @@ async fn drain_http_request(reader: &mut (impl tokio::io::AsyncBufRead + Unpin))
         use tokio::io::AsyncReadExt;
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).await.ok();
+        body
+    } else {
+        Vec::new()
     }
+}
+
+/// Asserts that the request body is a JSON object with an `"input"` field (OAI contract).
+fn assert_oai_request_body(body: &[u8]) {
+    let json: serde_json::Value =
+        serde_json::from_slice(body).expect("stub: request body should be valid JSON");
+    assert!(
+        json.get("input").is_some(),
+        "stub: expected OpenAI-compatible 'input' field in request body, got: {json}"
+    );
+    assert!(
+        json.get("text").is_none(),
+        "stub: found legacy 'text' field — client is using old contract"
+    );
 }
 
 /// Spawns a stub HTTP server on a random OS-assigned port. Returns the bound address.
@@ -68,12 +86,13 @@ async fn spawn_stub_http_server(dim: usize) -> (SocketAddr, JoinHandle<()>) {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
-            let body = body.clone();
+            let response_body = body.clone();
             tokio::spawn(async move {
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
-                drain_http_request(&mut reader).await;
-                write_http_response(&mut write_half, &body).await;
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                write_http_response(&mut write_half, &response_body).await;
             });
         }
     });
@@ -95,12 +114,13 @@ async fn spawn_stub_uds_server(path: &std::path::Path, dim: usize) -> JoinHandle
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
-            let body = body.clone();
+            let response_body = body.clone();
             tokio::spawn(async move {
                 let (read_half, mut write_half) = stream.into_split();
                 let mut reader = BufReader::new(read_half);
-                drain_http_request(&mut reader).await;
-                write_http_response(&mut write_half, &body).await;
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                write_http_response(&mut write_half, &response_body).await;
             });
         }
     })
