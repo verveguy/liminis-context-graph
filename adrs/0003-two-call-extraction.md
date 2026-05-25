@@ -33,4 +33,4 @@ Post-extraction filters applied after Call 2:
 
 **Negative:**
 - Two LLM calls per episode instead of one. Latency increases by one round-trip. For the target use case (background document ingestion), this is acceptable.
-- If the entity call returns zero entities, the edge call still fires but will produce no edges (all endpoints would fail the entity-name filter). This is correct behavior but wastes one call. A future optimization could short-circuit the edge call when the entity set is empty.
+- If the entity call returns zero entities, `do_extract()` short-circuits and returns an empty result without firing Call 2. No API cost is incurred for edge extraction when nothing was extracted.
