@@ -243,6 +243,7 @@ pub async fn add_episode(
     })?;
 
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     // Guard stays in async scope; spawn_blocking completes while it is held.
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
     // Cancellation is checked here — once the write guard is acquired the commit runs to
@@ -338,7 +339,7 @@ pub async fn add_episode(
             })?;
         }
 
-        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_cyphers(), &sink_c);
 
         Ok(())
     })

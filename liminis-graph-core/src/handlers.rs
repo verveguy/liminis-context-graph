@@ -525,11 +525,12 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         conn.remove_episode(&episode_uuid)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         Ok(())
     })
     .await??;
@@ -598,13 +599,14 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     // Write lock required: this handler may execute mutations, and the WAL flush must
     // be serialized with all other write paths to preserve replay order.
     let _guard = state.write_lock.write().await;
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<String>>, Error> {
         let conn = db.connect()?;
         let rows = conn.cypher_query(&query)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         Ok(rows)
     })
     .await??;
@@ -880,6 +882,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
@@ -887,7 +890,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         Ok(uuids)
     })
     .await??;
@@ -922,6 +925,7 @@ async fn handle_delete_chunk_episode(
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
@@ -929,7 +933,7 @@ async fn handle_delete_chunk_episode(
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         Ok(uuids)
     })
     .await??;
@@ -1426,12 +1430,13 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let apply_result = corrections::apply_corrections_file(&conn, &workspace_root, dry_run);
         if !dry_run {
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         }
         Ok::<_, Error>(apply_result)
     })
@@ -1516,11 +1521,12 @@ async fn handle_reprocess_entity_types(
 
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
     let _write_guard = state.write_lock.write().await;
     let reclassified = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let count = corrections::apply_entity_type_labels(&conn, &updates)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers());
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
         Ok(count)
     })
     .await??;
