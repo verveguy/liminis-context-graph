@@ -777,8 +777,10 @@ async fn handle_get_entity_neighbors(
         let mut nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
         // Collect all entity UUIDs: neighbor nodes + edge endpoints (for edge enrichment).
         let mut all_entity_uuids_owned = edge_endpoint_uuids(&edges);
+        let mut seen: std::collections::HashSet<String> =
+            all_entity_uuids_owned.iter().cloned().collect();
         for n in &nodes {
-            if !all_entity_uuids_owned.contains(&n.uuid) {
+            if seen.insert(n.uuid.clone()) {
                 all_entity_uuids_owned.push(n.uuid.clone());
             }
         }
