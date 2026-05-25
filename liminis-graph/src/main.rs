@@ -512,8 +512,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cancelled_chunks = Arc::clone(&state.cancelled_chunks);
     // R2: Drop AppState — drops Arc<Db>. If refcount reaches 0, the cxx::UniquePtr<ffi::Database>
     // destructor fires the LadybugDB WAL checkpoint. Connection tasks were awaited above.
-    // Note: spawn_blocking threads inside aborted tasks hold Arc<Db> until they finish naturally;
-    // the WAL checkpoint fires when those threads complete (best-effort per R5).
+    // spawn_blocking threads that hold Arc<Db> clones will release them when the tokio runtime
+    // drops at the end of main() — guaranteed before process exit (see ADR-0049).
     drop(state);
 
     let cancelled = cancelled_chunks.load(std::sync::atomic::Ordering::Relaxed) as u64;
@@ -530,5 +530,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Await drain task to flush the "stopped" event to stderr before exit.
     sink_drain_handle.await.ok();
 
-    std::process::exit(0);
+    Ok(())
 }
