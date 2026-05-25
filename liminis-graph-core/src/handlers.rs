@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -691,16 +692,25 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        conn.list_entities(
-            group_ids.as_deref().map(|_| gid_refs.as_slice()),
-            num_results,
-        )
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        let mut nodes = conn.list_entities(gid_slice, num_results)?;
+        let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
+        let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
+        let mut ep_info = conn
+            .get_episode_info_for_entities(&uuid_refs, gid_slice)
+            .unwrap_or_default();
+        for node in &mut nodes {
+            if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
+                node.episode_uuids = ep_uuids;
+                node.source_descriptions = src_descs;
+            }
+        }
+        Ok::<_, crate::error::Error>(nodes)
     })
     .await??;
     drop(_guard);
 
     let count = nodes.len();
-    // TODO(#32): source-info enrichment per node deferred
     Ok(json!({ "nodes": nodes, "count": count }))
 }
 
@@ -721,16 +731,22 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        conn.list_relationships(
-            group_ids.as_deref().map(|_| gid_refs.as_slice()),
-            num_results,
-        )
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        let mut facts = conn.list_relationships(gid_slice, num_results)?;
+        let entity_uuids_owned = edge_endpoint_uuids(&facts);
+        let entity_uuid_refs: Vec<&str> = entity_uuids_owned.iter().map(String::as_str).collect();
+        let ep_info = conn
+            .get_episode_info_for_entities(&entity_uuid_refs, gid_slice)
+            .unwrap_or_default();
+        for edge in &mut facts {
+            enrich_edge_from_entity_ep_info(edge, &ep_info);
+        }
+        Ok::<_, crate::error::Error>(facts)
     })
     .await??;
     drop(_guard);
 
     let count = facts.len();
-    // TODO(#32): source-info enrichment per edge deferred
     Ok(json!({ "facts": facts, "count": count }))
 }
 
@@ -755,12 +771,33 @@ async fn handle_get_entity_neighbors(
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        let (edges, neighbor_uuids) = conn.get_entity_neighbors(
-            &entity_uuid,
-            group_ids.as_deref().map(|_| gid_refs.as_slice()),
-            num_results,
-        )?;
-        let nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        let (mut edges, neighbor_uuids) =
+            conn.get_entity_neighbors(&entity_uuid, gid_slice, num_results)?;
+        let mut nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
+        // Collect all entity UUIDs: neighbor nodes + edge endpoints (for edge enrichment).
+        let mut all_entity_uuids_owned = edge_endpoint_uuids(&edges);
+        for n in &nodes {
+            if !all_entity_uuids_owned.contains(&n.uuid) {
+                all_entity_uuids_owned.push(n.uuid.clone());
+            }
+        }
+        let all_entity_uuid_refs: Vec<&str> = all_entity_uuids_owned
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let ep_info = conn
+            .get_episode_info_for_entities(&all_entity_uuid_refs, gid_slice)
+            .unwrap_or_default();
+        for node in &mut nodes {
+            if let Some((ep_uuids, src_descs)) = ep_info.get(&node.uuid) {
+                node.episode_uuids = ep_uuids.clone();
+                node.source_descriptions = src_descs.clone();
+            }
+        }
+        for edge in &mut edges {
+            enrich_edge_from_entity_ep_info(edge, &ep_info);
+        }
         Ok::<_, crate::error::Error>((edges, nodes))
     })
     .await??;
@@ -769,7 +806,6 @@ async fn handle_get_entity_neighbors(
     let center_uuid = p["entity_uuid"].as_str().unwrap_or("").to_string();
     let node_count = nodes.len();
     let edge_count = edges.len();
-    // TODO(#32): source-info enrichment per node/edge deferred
     Ok(json!({
         "center_uuid": center_uuid,
         "nodes": nodes,
@@ -779,7 +815,6 @@ async fn handle_get_entity_neighbors(
     }))
 }
 
-// TODO(#32): per-result source-info enrichment (_serialize_nodes_with_sources) is deferred
 async fn handle_get_entities_by_source(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -801,18 +836,26 @@ async fn handle_get_entities_by_source(
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        conn.get_entities_by_source(
-            &source,
-            group_ids.as_deref().map(|_| gid_refs.as_slice()),
-            num_results,
-        )
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        let mut nodes = conn.get_entities_by_source(&source, gid_slice, num_results)?;
+        let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
+        let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
+        let mut ep_info = conn
+            .get_episode_info_for_entities(&uuid_refs, gid_slice)
+            .unwrap_or_default();
+        for node in &mut nodes {
+            if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
+                node.episode_uuids = ep_uuids;
+                node.source_descriptions = src_descs;
+            }
+        }
+        Ok::<_, crate::error::Error>(nodes)
     })
     .await??;
     drop(_guard);
 
     let source_val = p["source"].as_str().unwrap_or("").to_string();
     let node_count = nodes.len();
-    // TODO(#32): source-info enrichment per node deferred
     Ok(json!({ "source": source_val, "nodes": nodes, "node_count": node_count }))
 }
 
@@ -1782,4 +1825,43 @@ fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
         Value::String(s) => Some(vec![s.clone()]),
         _ => None,
     }
+}
+
+/// Returns a deduplicated list of entity UUIDs from edge source and target endpoints.
+fn edge_endpoint_uuids(edges: &[crate::types::RelatesToEdge]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut uuids = Vec::new();
+    for edge in edges {
+        for uuid in [&edge.source_node_uuid, &edge.target_node_uuid] {
+            if seen.insert(uuid.clone()) {
+                uuids.push(uuid.clone());
+            }
+        }
+    }
+    uuids
+}
+
+/// Enriches an edge with episode info derived from its source and target entity UUIDs.
+///
+/// Uses either-endpoint semantics: any episode that mentions the source OR target entity
+/// is attributed to the edge. Episodes appearing via both endpoints are deduplicated.
+fn enrich_edge_from_entity_ep_info(
+    edge: &mut crate::types::RelatesToEdge,
+    ep_info: &HashMap<String, (Vec<String>, Vec<String>)>,
+) {
+    let mut seen_ep_uuids = std::collections::HashSet::new();
+    let mut ep_uuids = Vec::new();
+    let mut src_descs = Vec::new();
+    for endpoint_uuid in [&edge.source_node_uuid, &edge.target_node_uuid] {
+        if let Some((uuids, descs)) = ep_info.get(endpoint_uuid) {
+            for (ep_uuid, src_desc) in uuids.iter().zip(descs.iter()) {
+                if seen_ep_uuids.insert(ep_uuid.clone()) {
+                    ep_uuids.push(ep_uuid.clone());
+                    src_descs.push(src_desc.clone());
+                }
+            }
+        }
+    }
+    edge.episode_uuids = ep_uuids;
+    edge.source_descriptions = src_descs;
 }
