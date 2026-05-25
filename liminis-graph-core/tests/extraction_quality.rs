@@ -22,7 +22,7 @@ use liminis_graph_core::{
     embedder::MockEmbedder,
     episode,
     error::Error,
-    extractor::ExtractOptions,
+    extractor::{ExtractOptions, MockExtractor},
     ontology::{EntityTypeDef, Ontology, OntologyMode},
     prompts,
     telemetry::{NoopSink, TelemetrySink},
@@ -418,4 +418,50 @@ async fn edge_with_unresolvable_target_is_dropped() {
         "edge with unresolvable endpoint must be dropped; expected 0 edges, got {}",
         result.edges_extracted
     );
+}
+
+// ── SC-001/FR-001: relation_type field is populated on every edge ─────────────
+
+fn is_screaming_snake_case(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().next().unwrap().is_ascii_uppercase()
+        && s.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+// SC-001: After ingestion via MockExtractor, every edge in the DB has a non-null
+// relation_type field matching ^[A-Z][A-Z0-9_]*$ (SCREAMING_SNAKE_CASE).
+#[tokio::test]
+async fn edges_have_screaming_snake_case_relation_type() {
+    let (db, _dir) = make_db();
+    let state = make_state(db.clone(), Arc::new(MockExtractor), None);
+
+    episode::add_episode(
+        state,
+        "test-ep-rt",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let conn = db.connect().unwrap();
+    let edges = conn.list_relationships(None, 100).unwrap();
+
+    assert!(
+        !edges.is_empty(),
+        "expected at least one edge after ingestion"
+    );
+    for edge in &edges {
+        let rt = edge.relation_type.as_deref().unwrap_or("");
+        assert!(
+            is_screaming_snake_case(rt),
+            "edge relation_type '{rt}' must match SCREAMING_SNAKE_CASE (^[A-Z][A-Z0-9_]*$)"
+        );
+    }
 }

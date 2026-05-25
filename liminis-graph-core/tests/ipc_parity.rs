@@ -1358,3 +1358,54 @@ fn python_db_index_names_vector_edges() {
         result.err()
     );
 }
+
+// ── FR-007/SC-001: relation_type surfaces in knowledge_list_relationships ─────
+
+// After ingestion via MockExtractor (which returns WORKS_AT), every edge in the
+// knowledge_list_relationships response must include a non-null relation_type field.
+#[tokio::test]
+async fn list_relationships_includes_relation_type() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        200,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-rt-ipc",
+            "source_file": "rt_test.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 200);
+
+    let v = dispatch_val(
+        201,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 201);
+
+    let facts = v["result"]["facts"]
+        .as_array()
+        .expect("expected facts array");
+    assert!(
+        !facts.is_empty(),
+        "expected ≥1 relationship after ingest: {v}"
+    );
+
+    for fact in facts {
+        let rt = fact["relation_type"]
+            .as_str()
+            .expect("every fact must have a string relation_type field");
+        assert_eq!(
+            rt, "WORKS_AT",
+            "MockExtractor always returns WORKS_AT; got '{rt}'"
+        );
+    }
+}

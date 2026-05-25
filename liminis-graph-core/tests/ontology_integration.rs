@@ -253,3 +253,109 @@ fn load_ontology_empty_returns_none() {
     let result = load_ontology(Some(dir.path()));
     assert!(result.is_none(), "empty ontology file should return None");
 }
+
+// ── SC-003/FR-006: strict-mode relation_type filtering ───────────────────────
+
+use liminis_graph_core::ontology::RelationTypeDef;
+
+// SC-003(a): Strict-mode ontology with {AUTHORED} declared — edges with WORKS_AT are dropped.
+// MockExtractor returns Alice --WORKS_AT--> Acme Corp; the relation_type is not in vocabulary.
+#[tokio::test]
+async fn strict_mode_relation_type_drops_non_matching_edges() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![
+            EntityTypeDef {
+                name: "Person".to_string(),
+                description: None,
+            },
+            EntityTypeDef {
+                name: "Organization".to_string(),
+                description: None,
+            },
+        ],
+        relation_types: vec![RelationTypeDef {
+            name: "AUTHORED".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+        }],
+    };
+    let state = make_state(db, Some(ontology));
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-rt-strict",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.nodes_extracted, 2,
+        "both entities (Alice + Acme Corp) should pass through entity filtering"
+    );
+    assert_eq!(
+        result.edges_extracted, 0,
+        "strict mode: WORKS_AT edge must be dropped when ontology only declares AUTHORED; got {} edges",
+        result.edges_extracted
+    );
+}
+
+// SC-003(b): Open-mode ontology with {AUTHORED} declared — edges with WORKS_AT survive.
+// MockExtractor returns Alice --WORKS_AT--> Acme Corp; open mode keeps LLM-derived relation_type.
+#[tokio::test]
+async fn open_mode_relation_type_keeps_llm_derived_edges() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![
+            EntityTypeDef {
+                name: "Person".to_string(),
+                description: None,
+            },
+            EntityTypeDef {
+                name: "Organization".to_string(),
+                description: None,
+            },
+        ],
+        relation_types: vec![RelationTypeDef {
+            name: "AUTHORED".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+        }],
+    };
+    let state = make_state(db, Some(ontology));
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-rt-open",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.nodes_extracted, 2,
+        "open mode: expected 2 entities (Alice + Acme Corp)"
+    );
+    assert_eq!(
+        result.edges_extracted, 1,
+        "open mode: WORKS_AT edge must survive even when ontology declares only AUTHORED; got {} edges",
+        result.edges_extracted
+    );
+}

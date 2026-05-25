@@ -94,12 +94,22 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 
 /// Applies additive schema migrations to existing workspaces.
 ///
-/// Runs ALTER TABLE statements idempotently — errors are suppressed (logged at warn level)
-/// because the column may already exist or the DB engine may not support ALTER TABLE ADD.
-/// New workspaces get the column from the CREATE TABLE DDL above; this only upgrades old ones.
+/// Skips each migration when the target column already exists — probed by attempting a
+/// zero-row property access at the Binder stage. lbug raises a Binder exception when the
+/// property is unknown; a successful probe means the column is already present.
+/// This avoids a lbug bug where `ALTER TABLE ADD` on an existing column corrupts the hash index.
 pub fn migrate(conn: &Conn<'_>) {
+    // Probe: lbug fails at bind time if `relation_type` is not in the schema.
+    let column_exists = conn
+        .raw_query(
+            "MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.relation_type LIMIT 0",
+        )
+        .is_ok();
+    if column_exists {
+        return;
+    }
     if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
-        eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal — column may already exist)");
+        eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
     }
 }
 

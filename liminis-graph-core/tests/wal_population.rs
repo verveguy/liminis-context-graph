@@ -387,3 +387,92 @@ async fn test_wal_rebuild_reproduces_counts() {
         "rebuilt DB RELATES_TO edge count must match original (orig={edge_count_orig}, rebuilt={edge_count_rebuilt})"
     );
 }
+
+// ── SC-004/FR-008/FR-009: relation_type survives WAL round-trip ───────────────
+
+// SC-004: relation_type written to the WAL (via INSERT Cypher) and reproduced
+// faithfully after a full wipe + replay cycle.
+#[tokio::test]
+async fn relation_type_survives_wal_round_trip() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    // Ingest one episode; MockExtractor produces Alice --WORKS_AT--> Acme Corp.
+    let v = dispatch(
+        100,
+        "knowledge_add_episode",
+        json!({
+            "name": "rt-chunk",
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "test",
+            "source_description": "test/rt",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "rt_group"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v.get("result").is_some(), "add_episode failed: {v}");
+
+    // Verify the original DB has edges with WORKS_AT.
+    let orig_edges = {
+        let conn = db.connect().unwrap();
+        conn.list_relationships(None, 100).unwrap()
+    };
+    assert!(
+        !orig_edges.is_empty(),
+        "original DB must have at least one edge"
+    );
+    for e in &orig_edges {
+        assert_eq!(
+            e.relation_type.as_deref(),
+            Some("WORKS_AT"),
+            "original edge must have relation_type=WORKS_AT"
+        );
+    }
+
+    // WAL must be populated before attempting rebuild.
+    assert!(
+        has_wal_files(wal_dir.path()),
+        "WAL must be populated before round-trip test"
+    );
+
+    // Create a fresh empty DB and replay the WAL into it.
+    let rebuild_dir = TempDir::new().unwrap();
+    let rebuild_db =
+        Arc::new(Db::open(rebuild_dir.path().join("rt_rebuild.db").to_str().unwrap()).unwrap());
+    {
+        let conn = rebuild_db.connect().unwrap();
+        conn.init_schema(EMB_DIM).unwrap();
+    }
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let conn = rebuild_db.connect().unwrap();
+    let stats = replayer.replay(&conn).unwrap();
+    assert!(
+        stats.lines_replayed > 0,
+        "WAL replay must process at least one mutation line"
+    );
+    drop(conn);
+
+    // Edges in the rebuilt DB must have the same relation_type as the originals.
+    let rebuilt_edges = {
+        let conn = rebuild_db.connect().unwrap();
+        conn.list_relationships(None, 100).unwrap()
+    };
+    assert_eq!(
+        orig_edges.len(),
+        rebuilt_edges.len(),
+        "rebuilt DB must have same edge count as original"
+    );
+    for e in &rebuilt_edges {
+        assert_eq!(
+            e.relation_type.as_deref(),
+            Some("WORKS_AT"),
+            "replayed edge must have relation_type=WORKS_AT; got {:?}",
+            e.relation_type
+        );
+    }
+}
