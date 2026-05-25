@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1066,8 +1066,12 @@ async fn handle_rebuild_from_wal(
         let tx = progress_tx;
         // Clone sender for the post-spawn shutdown cancel notification (R9).
         let tx_notify = tx.clone();
-        let shutdown_flag = Arc::clone(&state.shutdown);
+        // Tracks whether the cancel_fn fired specifically because of shutdown (not client
+        // disconnect). Used to emit the R9 cancellation progress event only when shutdown
+        // actually interrupted the replay, not when replay completed and shutdown started later.
+        let shutdown_cancelled = Arc::new(AtomicBool::new(false));
         let shutdown_flag_cancel = Arc::clone(&state.shutdown);
+        let shutdown_cancelled_inner = Arc::clone(&shutdown_cancelled);
 
         // Write lock held in async scope; guard released after spawn_blocking completes.
         let _write_guard = if !dry_run {
@@ -1083,8 +1087,15 @@ async fn handle_rebuild_from_wal(
                 let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
                     let t = t.clone();
                     let flag = Arc::clone(&shutdown_flag_cancel);
-                    let f: crate::replay::CancelFn =
-                        Box::new(move || t.is_closed() || flag.load(Ordering::Relaxed));
+                    let cancelled = shutdown_cancelled_inner;
+                    let f: crate::replay::CancelFn = Box::new(move || {
+                        let client_gone = t.is_closed();
+                        let shutting_down = flag.load(Ordering::Relaxed);
+                        if shutting_down {
+                            cancelled.store(true, Ordering::Relaxed);
+                        }
+                        client_gone || shutting_down
+                    });
                     f
                 });
                 WalReplayer::new(&wal_dir_c).replay_opts(
@@ -1100,12 +1111,17 @@ async fn handle_rebuild_from_wal(
             .await??;
         drop(_write_guard);
 
-        // R9: if shutdown triggered the cancel, emit a final progress event before returning.
-        if shutdown_flag.load(Ordering::Relaxed) {
+        // R9: emit a final progress event when shutdown interrupted the replay mid-stream.
+        // Only fires when the cancel_fn actually returned true due to shutdown (not client
+        // disconnect, and not when replay completed before shutdown was checked).
+        if shutdown_cancelled.load(Ordering::Relaxed) {
             if let Some(ref notify_tx) = tx_notify {
                 let _ = notify_tx.send(json!({
+                    "type": "progress",
+                    "message": "Rebuild cancelled (service shutdown)",
                     "cancelled": true,
-                    "message": "Rebuild cancelled (service shutdown)"
+                    "mutations_replayed_so_far": stats.lines_replayed,
+                    "files_processed_so_far": stats.files_read,
                 }));
             }
         }
