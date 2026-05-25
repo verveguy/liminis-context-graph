@@ -199,7 +199,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok()
             .and_then(|s| s.parse().ok());
 
-    #[allow(unused_variables)]
     enum ResolvedTransport {
         Http(String),
         #[cfg(unix)]
@@ -312,7 +311,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let (transport_label, endpoint) = probe_embedder.transport_info();
-    let endpoint = endpoint.clone();
 
     let (embedding_dim, embedding_model_probed) = match probe_embedder.probe().await {
         Ok(result) => result,
