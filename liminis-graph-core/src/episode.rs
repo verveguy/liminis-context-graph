@@ -153,6 +153,8 @@ pub async fn add_episode(
                         name_embedding: name_embeddings[i].clone(),
                         summary: extracted.summary.clone(),
                         attributes: "{}".to_string(),
+                        episode_uuids: vec![],
+                        source_descriptions: vec![],
                     },
                 }
             }
@@ -173,6 +175,8 @@ pub async fn add_episode(
                     name_embedding: name_embeddings[i].clone(),
                     summary: extracted.summary.clone(),
                     attributes: "{}".to_string(),
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
                 },
             }
         };
@@ -261,6 +265,8 @@ pub async fn add_episode(
                 valid_at: Some(ref_time_owned.clone()),
                 invalid_at: None,
                 attributes: "{}".to_string(),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
             })?;
         }
 

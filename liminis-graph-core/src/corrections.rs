@@ -518,6 +518,8 @@ fn apply_same_as(
                     valid_at: old_edge.valid_at.clone(),
                     invalid_at: None,
                     attributes: old_edge.attributes.clone(),
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
                 };
                 conn.insert_relates_to_edge(&new_edge)?;
 

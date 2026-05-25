@@ -766,6 +766,8 @@ impl<'db> Conn<'db> {
                             name_embedding: stored_embedding,
                             summary: value_as_string(&row[6]),
                             attributes: value_as_string(&row[7]),
+                            episode_uuids: vec![],
+                            source_descriptions: vec![],
                         },
                     ));
                 }
@@ -901,6 +903,8 @@ impl<'db> Conn<'db> {
                 name_embedding: value_as_float_array(&row[5]),
                 summary: value_as_string(&row[6]),
                 attributes: value_as_string(&row[7]),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
             }))
         } else {
             Ok(None)
@@ -1081,6 +1085,8 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[8]),
                 fact_embedding: value_as_float_array(&row[9]),
                 created_at: value_as_timestamp_str(&row[10]),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
             });
         }
         Ok(rows)

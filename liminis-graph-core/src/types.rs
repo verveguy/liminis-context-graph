@@ -12,6 +12,10 @@ pub struct EntityRow {
     pub name_embedding: Vec<f32>,
     pub summary: String,
     pub attributes: String,
+    #[serde(default)]
+    pub episode_uuids: Vec<String>,
+    #[serde(default)]
+    pub source_descriptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -43,6 +47,10 @@ pub struct RelatesToEdge {
     pub valid_at: Option<String>,
     pub invalid_at: Option<String>,
     pub attributes: String,
+    #[serde(default)]
+    pub episode_uuids: Vec<String>,
+    #[serde(default)]
+    pub source_descriptions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
