@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     db::Db,
     dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter},
-    embedder::{Embedder, OaiEmbedder},
+    embedder::Embedder,
     env::lcg_env_var,
     extractor::Extractor,
     llm_router::LlmRouter,
@@ -73,8 +73,9 @@ impl AppState {
         db: Option<Arc<Db>>,
         degraded_reason: Option<String>,
         db_path: String,
+        embedder: Arc<dyn Embedder>,
+        embedding_model: String,
     ) -> Self {
-        let embedder: Arc<dyn Embedder> = Arc::new(OaiEmbedder::from_env());
         let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
         // deprecated: remove in Phase B (see #59)
         let dedup: Arc<dyn DedupAdapter> =

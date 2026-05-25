@@ -6,6 +6,7 @@ use std::time::Duration;
 use liminis_graph_core::{
     app_state::AppState,
     db::Db,
+    embedder::{Embedder, OaiEmbedder},
     env::lcg_env_var,
     handlers,
     ipc::IpcRequest,
@@ -149,11 +150,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // deprecated: remove in Phase B (see #59)
     let db_path = lcg_env_var("LCG_DB_PATH", "GRAPHITI_DB_PATH")
         .unwrap_or_else(|_| ".lcg/db/liminis.db".to_string());
-    // deprecated: remove in Phase B (see #59)
-    let embedding_dim: usize = lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(768);
+
+    // ── CLI arg parsing: --embedder-uds <path> | --embedder-http <url> ───────────
+    // Manual scan — only two mutually exclusive flags; clap would be overkill.
+    let mut cli_uds: Option<String> = None;
+    let mut cli_http: Option<String> = None;
+    {
+        let args: Vec<String> = std::env::args().collect();
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--embedder-uds" => {
+                    i += 1;
+                    cli_uds = Some(
+                        args.get(i)
+                            .cloned()
+                            .ok_or("--embedder-uds requires a socket path argument")?,
+                    );
+                }
+                "--embedder-http" => {
+                    i += 1;
+                    cli_http = Some(
+                        args.get(i)
+                            .cloned()
+                            .ok_or("--embedder-http requires a URL argument")?,
+                    );
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    if cli_uds.is_some() && cli_http.is_some() {
+        return Err(
+            "--embedder-uds and --embedder-http are mutually exclusive; specify only one".into(),
+        );
+    }
+
+    // ── Transport resolution (FR-003/FR-004/FR-007) ───────────────────────────────
+    // Priority: CLI flag > default UDS path (if socket exists) > LCG_EMBEDDING_URL env > error
+    const DEFAULT_UDS_PATH: &str = "/tmp/liminis-inference.sock";
+    let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
+        .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
+
+    // Dim override — used as fallback if probe fails (FR-008)
+    let embedding_dim_override: Option<usize> =
+        lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok());
+
+    #[allow(unused_variables)]
+    enum ResolvedTransport {
+        Http(String),
+        #[cfg(unix)]
+        Uds(String),
+    }
+
+    let resolved = if let Some(uds_path) = cli_uds {
+        // FR-010: validate socket exists at startup
+        #[cfg(unix)]
+        {
+            if !std::path::Path::new(&uds_path).exists() {
+                return Err(format!(
+                    "UDS socket not found at {uds_path}. \
+                     Ensure the liminis-inference sidecar is running."
+                )
+                .into());
+            }
+            ResolvedTransport::Uds(uds_path)
+        }
+        #[cfg(not(unix))]
+        {
+            return Err("--embedder-uds is only supported on Unix platforms".into());
+        }
+    } else if let Some(http_url) = cli_http {
+        // FR-011: validate URL is parseable
+        if !http_url.starts_with("http://") && !http_url.starts_with("https://") {
+            return Err(format!(
+                "Invalid --embedder-http URL: {http_url:?}. Expected http:// or https:// prefix."
+            )
+            .into());
+        }
+        ResolvedTransport::Http(http_url)
+    } else {
+        // No CLI flag — apply default resolution order
+        #[cfg(unix)]
+        if std::path::Path::new(DEFAULT_UDS_PATH).exists() {
+            ResolvedTransport::Uds(DEFAULT_UDS_PATH.to_string())
+        } else if let Ok(url) = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL") {
+            ResolvedTransport::Http(url)
+        } else {
+            return Err(format!(
+                "No embedder configured: default UDS socket {DEFAULT_UDS_PATH} not found and \
+                 LCG_EMBEDDING_URL is not set. Pass --embedder-uds or --embedder-http, or \
+                 start the liminis-inference sidecar."
+            )
+            .into());
+        }
+        #[cfg(not(unix))]
+        {
+            // Non-Unix: fall back to HTTP only
+            if let Ok(url) = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL") {
+                ResolvedTransport::Http(url)
+            } else {
+                ResolvedTransport::Http("http://127.0.0.1:8765/v1/embeddings".to_string())
+            }
+        }
+    };
 
     // After a successful migration, rewrite any .graphiti/-prefixed path to .lcg/.
     // This handles the case where deprecated GRAPHITI_* env vars pointed at .graphiti/...
@@ -194,6 +297,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
     let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = stderr_sink;
+
+    // ── Build probe embedder, then final embedder with discovered dim ─────────
+    // The probe runs before DB open so that a misconfigured embedder fails fast
+    // at startup rather than on the first embed request (FR-010/FR-011).
+    let probe_embedder = match &resolved {
+        ResolvedTransport::Http(url) => {
+            OaiEmbedder::new_http(url.clone(), embedder_model.clone(), 1)
+        }
+        #[cfg(unix)]
+        ResolvedTransport::Uds(path) => {
+            OaiEmbedder::new_uds(path.clone(), embedder_model.clone(), 1)
+        }
+    };
+
+    let (transport_label, endpoint) = probe_embedder.transport_info();
+    let endpoint = endpoint.clone();
+
+    let (embedding_dim, embedding_model_probed) = match probe_embedder.probe().await {
+        Ok(result) => result,
+        Err(e) => {
+            if let Some(dim) = embedding_dim_override {
+                eprintln!(
+                    "liminis-context-graph: embedder probe failed ({e}), \
+                     using LCG_EMBEDDING_DIM={dim} override"
+                );
+                (dim, embedder_model.clone())
+            } else {
+                return Err(
+                    format!("embedder probe failed and LCG_EMBEDDING_DIM is not set: {e}").into(),
+                );
+            }
+        }
+    };
+
+    eprintln!("embedder: transport={transport_label}, endpoint={endpoint}, dim={embedding_dim}");
+
+    // Build the final embedder with the correct probed dim
+    let embedder: Arc<dyn Embedder> = match &resolved {
+        ResolvedTransport::Http(url) => Arc::new(OaiEmbedder::new_http(
+            url.clone(),
+            embedding_model_probed.clone(),
+            embedding_dim,
+        )),
+        #[cfg(unix)]
+        ResolvedTransport::Uds(path) => Arc::new(OaiEmbedder::new_uds(
+            path.clone(),
+            embedding_model_probed.clone(),
+            embedding_dim,
+        )),
+    };
 
     // Attempt to open database and initialize schema. Classify errors:
     //   - Recoverable (lbug WAL corruption, permission denied, missing file) → degraded mode
@@ -237,6 +390,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         maybe_db,
         degraded_reason,
         db_path.clone(),
+        embedder,
+        embedding_model_probed,
     ));
 
     // ── Signal handler setup (R1: installed BEFORE the accept loop) ───────────
