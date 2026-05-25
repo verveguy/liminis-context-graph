@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 use liminis_graph_core::{
     app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
     episode, error::Error, extractor::MockExtractor, telemetry::NoopSink, types::ExtractionResult,
-    Extractor,
+    Extractor, Ontology,
 };
 use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
@@ -32,6 +32,7 @@ impl Extractor for SlowExtractor {
         &'a self,
         _episode_body: &'a str,
         _group_id: &'a str,
+        _ontology: Option<&'a Ontology>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
         Box::pin(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
