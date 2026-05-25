@@ -82,7 +82,7 @@ impl AppState {
         let wal_dir = lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
             .ok()
             .map(PathBuf::from);
-        let max_events_per_file: usize = lcg_env_var("LCG_WAL_MAX_EVENTS_PER_FILE", "LCG_WAL_MAX_EVENTS_PER_FILE")
+        let max_events_per_file: usize = std::env::var("LCG_WAL_MAX_EVENTS_PER_FILE")
             .ok()
             .and_then(|v| {
                 v.parse::<usize>().map_err(|_| {
@@ -92,7 +92,7 @@ impl AppState {
                 }).ok()
             })
             .unwrap_or(10_000);
-        let max_bytes_per_file: u64 = lcg_env_var("LCG_WAL_MAX_BYTES_PER_FILE", "LCG_WAL_MAX_BYTES_PER_FILE")
+        let max_bytes_per_file: u64 = std::env::var("LCG_WAL_MAX_BYTES_PER_FILE")
             .ok()
             .and_then(|v| {
                 v.parse::<u64>().map_err(|_| {

@@ -224,6 +224,14 @@ impl WalWriter {
     /// Returns `(files_rotated, files_total)` — `files_rotated` is 0 or 1.
     pub fn rotate(&mut self) -> (u32, u32) {
         let files_rotated = if self.current_file.take().is_some() {
+            self.last_rotation = Some(WalRotationInfo {
+                from_file_seq: self.file_seq - 1,
+                to_file_seq: self.file_seq,
+                closed_bytes: self.bytes_in_current_file,
+                closed_events: self.events_in_current_file,
+            });
+            self.bytes_in_current_file = 0;
+            self.events_in_current_file = 0;
             1
         } else {
             0
