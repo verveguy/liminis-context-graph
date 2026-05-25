@@ -15,6 +15,9 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
 time = { workspace = true }
 futures = { workspace = true }
 serde_yaml = { workspace = true }
