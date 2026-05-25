@@ -83,6 +83,7 @@ fn make_state_with_slow_extractor(db: Arc<Db>, token: CancellationToken) -> Arc<
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: token,
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -105,6 +106,7 @@ fn make_state_with_fast_extractor(db: Arc<Db>) -> Arc<AppState> {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 

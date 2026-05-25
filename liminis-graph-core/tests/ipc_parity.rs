@@ -69,6 +69,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -93,6 +94,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -309,6 +311,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -332,6 +335,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 

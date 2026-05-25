@@ -7,8 +7,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
-use tokio_util::sync::CancellationToken;
-
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
     app_state::AppState,
@@ -25,6 +23,7 @@ use liminis_graph_core::{
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -61,6 +60,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         indices_built: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -84,6 +84,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         indices_built: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 

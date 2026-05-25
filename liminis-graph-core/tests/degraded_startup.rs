@@ -56,6 +56,7 @@ fn make_degraded_state_with_capture(
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     })
 }
 
@@ -279,6 +280,7 @@ async fn test_recovery_unknown_strategy() {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     });
 
     let resp = dispatch_val(
@@ -321,6 +323,7 @@ async fn test_recovery_missing_strategy() {
         indices_built: Arc::new(AtomicBool::new(false)),
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;
