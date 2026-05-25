@@ -111,9 +111,6 @@ impl AppState {
         let wal_writer = wal_dir
             .as_deref()
             .and_then(|dir| WalWriter::new(dir, max_events_per_file, max_bytes_per_file).ok());
-        // deprecated: remove in Phase B (see #59)
-        let embedding_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
-            .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
         let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT")
             .ok()
             .map(PathBuf::from);
