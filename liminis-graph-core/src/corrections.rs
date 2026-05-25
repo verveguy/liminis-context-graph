@@ -518,6 +518,7 @@ fn apply_same_as(
                     valid_at: old_edge.valid_at.clone(),
                     invalid_at: None,
                     attributes: old_edge.attributes.clone(),
+                    relation_type: old_edge.relation_type.clone(),
                     episode_uuids: vec![],
                     source_descriptions: vec![],
                 };

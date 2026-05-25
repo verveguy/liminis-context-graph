@@ -147,6 +147,32 @@ pub async fn add_episode(
         }
     }
 
+    // Strict-mode relation_type filtering: drop edges whose relation_type is not in the vocabulary.
+    if let Some(onto) = ontology_ref {
+        if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
+            let vocab = onto.relation_type_names();
+            extraction.edges.retain(|e| {
+                match &e.relation_type {
+                    Some(rt) if vocab.contains(rt.as_str()) => true,
+                    Some(rt) => {
+                        eprintln!(
+                            "liminis-graph: ontology strict: dropping edge '{}' → '{}' (relation_type '{}' not in vocabulary)",
+                            e.source_name, e.target_name, rt
+                        );
+                        false
+                    }
+                    None => {
+                        eprintln!(
+                            "liminis-graph: ontology strict: dropping edge '{}' → '{}' (no relation_type)",
+                            e.source_name, e.target_name
+                        );
+                        false
+                    }
+                }
+            });
+        }
+    }
+
     // Post-extraction edge validation: drop self-referential and unresolvable edges.
     {
         let entity_name_set: std::collections::HashSet<String> = extraction
@@ -407,6 +433,7 @@ pub async fn add_episode(
                     .or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
                 attributes: "{}".to_string(),
+                relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             })?;
