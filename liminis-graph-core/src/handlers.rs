@@ -18,6 +18,7 @@ use crate::{
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     search,
     telemetry::{now_ms, TelemetryEvent},
+    types::SourceType,
     wal_exec,
 };
 
@@ -174,6 +175,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
 
+    let source_type = SourceType::from_str_lossy(&source);
     let result = episode::add_episode(
         state,
         &name,
@@ -182,6 +184,8 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         &source_desc,
         &ref_time,
         &group_id,
+        source_type,
+        None,
     )
     .await?;
 
@@ -397,6 +401,11 @@ async fn handle_knowledge_process_chunk(
 
     let start = Instant::now();
     let source_desc = format!("{}:{}", source_file, chunk_id);
+    let source_type = if source_file.to_lowercase().ends_with(".json") {
+        SourceType::Json
+    } else {
+        SourceType::Text
+    };
     let result = episode::add_episode(
         state,
         &chunk_id,
@@ -405,6 +414,8 @@ async fn handle_knowledge_process_chunk(
         &source_desc,
         &ref_time,
         &group_id,
+        source_type,
+        None,
     )
     .await?;
 

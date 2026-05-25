@@ -21,6 +21,7 @@ use liminis_graph_core::{
     ipc::IpcRequest,
     ontology::{load_ontology, EntityTypeDef, Ontology, OntologyMode},
     telemetry::{NoopSink, TelemetrySink},
+    types::SourceType,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -96,6 +97,8 @@ async fn no_ontology_all_entities_pass() {
         "test source",
         "2026-01-01T00:00:00Z",
         "grp",
+        SourceType::Text,
+        None,
     )
     .await
     .unwrap();
@@ -129,6 +132,8 @@ async fn strict_mode_entity_filtering_drops_out_of_vocab() {
         "test source",
         "2026-01-01T00:00:00Z",
         "grp",
+        SourceType::Text,
+        None,
     )
     .await
     .unwrap();
@@ -162,6 +167,8 @@ async fn open_mode_no_filtering() {
         "test source",
         "2026-01-01T00:00:00Z",
         "grp",
+        SourceType::Text,
+        None,
     )
     .await
     .unwrap();

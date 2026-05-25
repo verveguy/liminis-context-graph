@@ -14,8 +14,8 @@ use arc_swap::ArcSwapOption;
 use futures::future::BoxFuture;
 use liminis_graph_core::{
     app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
-    episode, error::Error, extractor::MockExtractor, telemetry::NoopSink, types::ExtractionResult,
-    Extractor, Ontology,
+    episode, error::Error, extractor::{ExtractOptions, MockExtractor}, telemetry::NoopSink,
+    types::{ExtractionResult, SourceType}, Extractor, Ontology,
 };
 use std::sync::atomic::AtomicBool;
 use tempfile::TempDir;
@@ -30,9 +30,7 @@ struct SlowExtractor;
 impl Extractor for SlowExtractor {
     fn extract<'a>(
         &'a self,
-        _episode_body: &'a str,
-        _group_id: &'a str,
-        _ontology: Option<&'a Ontology>,
+        _opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
         Box::pin(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -124,7 +122,7 @@ async fn cancel_during_phase_a_returns_cancelled() {
     // Spawn add_episode; it will block in SlowExtractor::extract for 60 s.
     let s = Arc::clone(&state);
     let handle = tokio::spawn(async move {
-        episode::add_episode(s, "ep", "body", "src", "desc", "2026-01-01 00:00:00", "grp").await
+        episode::add_episode(s, "ep", "body", "src", "desc", "2026-01-01 00:00:00", "grp", SourceType::Text, None).await
     });
 
     // Give the task a moment to enter the Phase A select!, then cancel.
@@ -166,6 +164,8 @@ async fn cancel_before_episode_returns_cancelled() {
         "desc",
         "2026-01-01 00:00:00",
         "grp",
+        SourceType::Text,
+        None,
     )
     .await;
 
@@ -195,6 +195,8 @@ async fn no_cancel_completes_normally() {
         "desc",
         "2026-01-01 00:00:00",
         "grp",
+        SourceType::Text,
+        None,
     )
     .await;
 
