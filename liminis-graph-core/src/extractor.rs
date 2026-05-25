@@ -9,6 +9,7 @@ use tokio::time::sleep;
 use crate::{
     env::lcg_env_var,
     error::Error,
+    ontology::Ontology,
     telemetry::{cost_for_usage, now_ms, TelemetryEvent, TelemetrySink},
     types::ExtractionResult,
 };
@@ -22,6 +23,7 @@ pub trait Extractor: Send + Sync {
         &'a self,
         episode_body: &'a str,
         group_id: &'a str,
+        ontology: Option<&'a Ontology>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
 
     /// Classifies entity types for a batch of (name, summary) pairs.
@@ -109,12 +111,42 @@ impl AnthropicExtractor {
         &self,
         episode_body: &str,
         _group_id: &str,
+        ontology: Option<&Ontology>,
     ) -> Result<ExtractionResult, Error> {
-        let system_text = "You are a knowledge graph extraction assistant. \
+        let mut system_text = "You are a knowledge graph extraction assistant. \
             Extract named entities and relationships from the given text. \
             Return ONLY valid JSON matching this schema exactly:\n\
             {\"entities\":[{\"name\":\"string\",\"entity_type\":\"string\",\"summary\":\"string\"}],\
-            \"edges\":[{\"source_name\":\"string\",\"target_name\":\"string\",\"fact\":\"string\"}]}";
+            \"edges\":[{\"source_name\":\"string\",\"target_name\":\"string\",\"fact\":\"string\"}]}"
+            .to_string();
+
+        if let Some(onto) = ontology {
+            if onto.has_entity_types() {
+                system_text.push_str("\n\n<ENTITY_TYPES>\nThe following entity types are defined for this workspace:\n");
+                for et in &onto.entity_types {
+                    if let Some(desc) = &et.description {
+                        system_text.push_str(&format!("- {}: {}\n", et.name, desc));
+                    } else {
+                        system_text.push_str(&format!("- {}\n", et.name));
+                    }
+                }
+                match onto.mode {
+                    crate::ontology::OntologyMode::Strict => {
+                        system_text.push_str(
+                            "Only extract entities whose type is exactly one of the listed types; \
+                             do not invent or use types not in this list.\n",
+                        );
+                    }
+                    crate::ontology::OntologyMode::Open => {
+                        system_text.push_str(
+                            "Prefer the listed entity types when they apply; \
+                             you may use other types for entities that clearly don't fit any listed type.\n",
+                        );
+                    }
+                }
+                system_text.push_str("</ENTITY_TYPES>");
+            }
+        }
 
         let system_value: Value = if self.is_sonnet() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
@@ -353,8 +385,9 @@ impl Extractor for AnthropicExtractor {
         &'a self,
         episode_body: &'a str,
         group_id: &'a str,
+        ontology: Option<&'a Ontology>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
-        Box::pin(self.do_extract(episode_body, group_id))
+        Box::pin(self.do_extract(episode_body, group_id, ontology))
     }
 
     fn classify_entities<'a>(
@@ -414,6 +447,7 @@ impl Extractor for MockExtractor {
         &'a self,
         _episode_body: &'a str,
         _group_id: &'a str,
+        _ontology: Option<&'a Ontology>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
         use crate::types::{ExtractedEdge, ExtractedEntity};
         Box::pin(async {

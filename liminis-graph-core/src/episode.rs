@@ -67,11 +67,12 @@ pub async fn add_episode(
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
+    let ontology_ref = state.ontology.as_deref();
     let (content_embedding, extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
         result = async {
             tokio::try_join!(
                 state.embedder.embed(body),
-                state.extractor.extract(body, group_id)
+                state.extractor.extract(body, group_id, ontology_ref)
             )
         } => result?,
         _ = state.cancel_token.cancelled() => {
