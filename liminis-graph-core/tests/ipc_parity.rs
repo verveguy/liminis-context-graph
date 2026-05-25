@@ -1228,6 +1228,80 @@ async fn test_source_info_enrichment_get_entities_by_source() {
     }
 }
 
+// ── source_type and custom_extraction_instructions IPC coverage (FR-001) ──────
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_source_type_message() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        80,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice: Hi Bob, how are you?",
+            "chunk_id": "msg-chunk-1",
+            "source_file": "chat.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+            "source_type": "message",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 80);
+    assert_eq!(
+        v["result"]["success"], true,
+        "source_type=message should succeed: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_source_type_json() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        81,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "{\"name\": \"Alice\", \"role\": \"engineer\"}",
+            "chunk_id": "json-chunk-1",
+            "source_file": "data.json",
+            "reference_time": "2024-06-01T12:00:00Z",
+            "source_type": "json",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 81);
+    assert_eq!(
+        v["result"]["success"], true,
+        "source_type=json should succeed: {v}"
+    );
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_custom_instructions() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        82,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp as a financial analyst.",
+            "chunk_id": "custom-instr-chunk-1",
+            "source_file": "doc.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+            "custom_extraction_instructions": "Focus on financial relationships only.",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 82);
+    assert_eq!(
+        v["result"]["success"], true,
+        "custom_extraction_instructions should thread through: {v}"
+    );
+}
+
 // ── Python-DB index name regression tests (FR-005) ───────────────────────────
 //
 // These tests open the Python-populated baseline_db fixture without any schema
