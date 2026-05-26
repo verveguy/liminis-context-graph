@@ -149,8 +149,12 @@ async fn parity_get_episodes_empty() {
     )
     .await;
     assert_ok_resp(&v, 2);
-    assert!(v["result"].is_array(), "expected array result: {v}");
-    assert_eq!(v["result"].as_array().unwrap().len(), 0);
+    assert!(v["result"].is_object(), "expected object envelope: {v}");
+    assert!(
+        v["result"]["episodes"].is_array(),
+        "expected episodes array: {v}"
+    );
+    assert_eq!(v["result"]["count"], 0);
 }
 
 #[tokio::test]
@@ -165,7 +169,9 @@ async fn parity_get_nodes_by_group_empty() {
     )
     .await;
     assert_ok_resp(&v, 3);
-    assert!(v["result"].is_array(), "expected array result: {v}");
+    assert!(v["result"].is_object(), "expected object envelope: {v}");
+    assert!(v["result"]["nodes"].is_array(), "expected nodes array: {v}");
+    assert_eq!(v["result"]["count"], 0);
 }
 
 #[tokio::test]
@@ -180,7 +186,9 @@ async fn parity_get_edges_by_group_empty() {
     )
     .await;
     assert_ok_resp(&v, 4);
-    assert!(v["result"].is_array(), "expected array result: {v}");
+    assert!(v["result"].is_object(), "expected object envelope: {v}");
+    assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
+    assert_eq!(v["result"]["count"], 0);
 }
 
 #[tokio::test]
@@ -195,7 +203,9 @@ async fn parity_get_edges_by_uuids_empty() {
     )
     .await;
     assert_ok_resp(&v, 5);
-    assert!(v["result"].is_array(), "expected array result: {v}");
+    assert!(v["result"].is_object(), "expected object envelope: {v}");
+    assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
+    assert_eq!(v["result"]["count"], 0);
 }
 
 #[tokio::test]
@@ -684,7 +694,7 @@ async fn parity_get_entities_by_source_no_match() {
     .await;
     assert_ok_resp(&v, 48);
     assert!(v["result"]["nodes"].is_array(), "expected nodes: {v}");
-    assert_eq!(v["result"]["node_count"], 0, "no match: {v}");
+    assert_eq!(v["result"]["count"], 0, "no match: {v}");
 }
 
 #[tokio::test]
