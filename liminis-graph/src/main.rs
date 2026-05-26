@@ -1,5 +1,7 @@
+mod migration;
 mod sink;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,33 +118,36 @@ async fn handle_streaming_request(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Phase A workspace dir auto-migration: rename .graphiti/ → .lcg/ on first run.
-    // Executed before path resolution so deprecated GRAPHITI_* paths that point at
-    // .graphiti/... can be rewritten after migration, preventing create_dir_all from
-    // silently recreating an empty .graphiti/ alongside the migrated .lcg/.
-    let migrated = if std::path::Path::new(".graphiti").exists()
-        && !std::path::Path::new(".lcg").exists()
-    {
-        match std::fs::rename(".graphiti", ".lcg") {
-            Ok(()) => {
-                eprintln!(
-                    "[liminis-context-graph] DEPRECATED: workspace directory \".graphiti\" has been \
-                     renamed to \".lcg\". Update your configuration to use LCG_* env vars. \
-                     The .graphiti fallback will be removed in Phase B (see issue #59)."
-                );
-                true
+    // Sink is created first so migration events are captured before any other work.
+    // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
+    let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
+    let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = stderr_sink;
+
+    // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
+    // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
+    // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
+    let (pre_migration_degraded, did_migrate) =
+        match migration::migrate_workspace(Path::new("."), &*telemetry_sink) {
+            Ok(migration::MigrationOutcome::Migrated) => (None, true),
+            Ok(migration::MigrationOutcome::AlreadyMigrated) => (None, true),
+            Ok(migration::MigrationOutcome::NothingToMigrate) => (None, false),
+            Err(migration::MigrationError::Schism { guidance }) => {
+                eprintln!("liminis-context-graph: FATAL workspace schism: {guidance}");
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Err(guidance.into());
             }
             Err(e) => {
-                eprintln!(
-                    "[liminis-context-graph] WARNING: could not auto-migrate .graphiti/ → .lcg/: {e}. \
-                     Continuing without migration."
-                );
-                false
+                eprintln!("liminis-context-graph: migration failed, entering degraded mode: {e}");
+                telemetry_sink.emit(TelemetryEvent::ServiceState {
+                    ts_ms: now_ms(),
+                    state: "degraded".to_string(),
+                    reason: Some("migration_failed".to_string()),
+                    detail: Some(serde_json::Value::String(e.to_string())),
+                });
+                (Some("migration_failed".to_string()), false)
             }
-        }
-    } else {
-        false
-    };
+        };
 
     // deprecated: remove in Phase B (see #59)
     let socket_path = lcg_env_var("LCG_SOCKET_PATH", "GRAPHITI_SOCKET_PATH")
@@ -261,15 +266,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // After a successful migration, rewrite any .graphiti/-prefixed path to .lcg/.
-    // This handles the case where deprecated GRAPHITI_* env vars pointed at .graphiti/...
-    // paths — without this, create_dir_all would recreate an empty .graphiti/ dir.
-    let socket_path = if migrated && socket_path.starts_with(".graphiti/") {
+    // After migration, rewrite deprecated GRAPHITI_* env-var paths to the new layout.
+    // Use specific mappings rather than a generic prefix-swap: the legacy db path maps to
+    // a different filename (.graphiti/db → .lcg/db/liminis.db), not just a new prefix.
+    let socket_path = if did_migrate && socket_path == ".graphiti/service.sock" {
+        ".lcg/service.sock".to_string()
+    } else if did_migrate && socket_path.starts_with(".graphiti/") {
         format!(".lcg/{}", &socket_path[".graphiti/".len()..])
     } else {
         socket_path
     };
-    let db_path = if migrated && db_path.starts_with(".graphiti/") {
+    let db_path = if did_migrate && db_path == ".graphiti/db" {
+        ".lcg/db/liminis.db".to_string()
+    } else if did_migrate && db_path.starts_with(".graphiti/") {
         format!(".lcg/{}", &db_path[".graphiti/".len()..])
     } else {
         db_path
@@ -296,10 +305,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     eprintln!("liminis-context-graph: listening on {socket_path}");
-
-    // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
-    let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
-    let telemetry_sink: Arc<dyn liminis_graph_core::TelemetrySink> = stderr_sink;
 
     // ── Build probe embedder, then final embedder with discovered dim ─────────
     // The probe runs before DB open so that a misconfigured embedder fails fast
@@ -397,6 +402,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+
+    // migration_failed takes precedence over db-open degraded reason.
+    let degraded_reason = pre_migration_degraded.or(degraded_reason);
 
     let state = Arc::new(AppState::from_env(
         Arc::clone(&telemetry_sink),
