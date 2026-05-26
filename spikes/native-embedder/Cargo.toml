@@ -1,0 +1,3 @@
+[workspace]
+members = ["common", "candle-bench", "ort-bench"]
+resolver = "2"
