@@ -57,7 +57,7 @@ pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std:
     };
 
     let json = serde_json::to_string_pretty(&sidecar)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
     let path = sidecar_path(workspace_root);
     let tmp_path = path.with_extension("json.tmp");
@@ -122,7 +122,9 @@ fn build_drift_summary(sidecar: &OntologySidecar, current: Option<&Ontology>) ->
 
     if mode_changed {
         let prev = sidecar.mode.as_deref().unwrap_or("none");
-        let cur = current.map(|o| o.mode.to_string()).unwrap_or_else(|| "none".to_string());
+        let cur = current
+            .map(|o| o.mode.to_string())
+            .unwrap_or_else(|| "none".to_string());
         parts.push(format!("mode changed: {} → {}", prev, cur));
     }
 
@@ -133,7 +135,10 @@ fn build_drift_summary(sidecar: &OntologySidecar, current: Option<&Ontology>) ->
         .into_iter()
         .collect();
     if !added_entities.is_empty() {
-        parts.push(format!("entity types added: [{}]", added_entities.join(", ")));
+        parts.push(format!(
+            "entity types added: [{}]",
+            added_entities.join(", ")
+        ));
     }
 
     let removed_entities: Vec<&str> = prev_entities

@@ -1408,7 +1408,8 @@ async fn handle_rebuild_from_wal(
                         if !dry_run {
                             if let Some(ref root) = bg_workspace_root {
                                 let ontology_ref = bg_ontology.as_deref();
-                                if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
+                                if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref)
+                                {
                                     eprintln!(
                                         "liminis-graph: ontology-sidecar: bg WAL replay write failed {:?}: {}",
                                         root, e
