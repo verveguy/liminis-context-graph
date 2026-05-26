@@ -79,7 +79,7 @@ impl AppState {
     ///
     /// - `LCG_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
     /// - `LCG_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
-    /// - `LCG_WAL_DIR`: optional WAL directory path.
+    /// - `LCG_WAL_DIR`: WAL directory path (default `.lcg/wal`).
     /// - `LCG_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
     pub fn from_env(
         sink: Arc<dyn TelemetrySink>,
@@ -98,9 +98,14 @@ impl AppState {
                 Arc::new(PassthroughDedupAdapter)
             };
         // deprecated: remove in Phase B (see #59)
-        let wal_dir = lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
-            .ok()
-            .map(PathBuf::from);
+        // Default to `.lcg/wal` (CWD-relative, matches the convention used by
+        // LCG_SOCKET_PATH and LCG_DB_PATH). Application WAL is essential for
+        // the `knowledge_rebuild_from_wal` recovery path; without a default,
+        // dropping the env var (per liminis#828) silently disabled WAL writes.
+        let wal_dir = Some(PathBuf::from(
+            lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
+                .unwrap_or_else(|_| ".lcg/wal".to_string()),
+        ));
         let max_events_per_file: usize = std::env::var("LCG_WAL_MAX_EVENTS_PER_FILE")
             .ok()
             .and_then(|v| {
