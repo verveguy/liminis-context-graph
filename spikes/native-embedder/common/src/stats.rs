@@ -14,6 +14,7 @@ pub struct BenchStats {
 
 impl BenchStats {
     pub fn compute(latencies_ms: &[f64], batch_total_ms: f64, batch_size: usize) -> Self {
+        assert!(!latencies_ms.is_empty(), "latencies_ms must not be empty");
         let mut sorted = latencies_ms.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let n = sorted.len();
