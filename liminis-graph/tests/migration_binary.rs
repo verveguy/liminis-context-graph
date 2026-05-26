@@ -10,14 +10,14 @@
 mod migration_binary_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::process::{Child, Command};
     use std::time::{Duration, Instant};
 
     use liminis_graph_core::db::Db;
     use tempfile::TempDir;
 
-    fn wait_for_socket(socket_path: &PathBuf, timeout: Duration) -> bool {
+    fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {

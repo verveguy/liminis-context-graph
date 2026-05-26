@@ -204,15 +204,15 @@ pub fn migrate_workspace(
             }
             #[cfg(unix)]
             {
-                if let Ok(meta) = entry.path().symlink_metadata() {
-                    if meta.file_type().is_socket() {
-                        sink.emit(TelemetryEvent::WorkspaceMigration {
-                            ts_ms: now_ms(),
-                            phase: "skip_socket".to_string(),
-                            detail: Some(json!({ "file": name_str.as_ref() })),
-                        });
-                        continue;
-                    }
+                // Use entry.file_type() — it reads from the cached d_type in the
+                // readdir result on Linux/macOS, avoiding an extra lstat() syscall.
+                if entry.file_type().map(|ft| ft.is_socket()).unwrap_or(false) {
+                    sink.emit(TelemetryEvent::WorkspaceMigration {
+                        ts_ms: now_ms(),
+                        phase: "skip_socket".to_string(),
+                        detail: Some(json!({ "file": name_str.as_ref() })),
+                    });
+                    continue;
                 }
             }
             if !unrecognized_dir.exists() {
@@ -431,24 +431,23 @@ fn fix_broken_lcg_layout(
     Ok(MigrationOutcome::Migrated)
 }
 
-/// Removes socket files from a directory without failing if they're not there.
+/// Removes transient files from a directory without failing if they're not there.
+///
+/// Removes any Unix socket file (transient by nature) and any entry named `service.sock`
+/// regardless of file type (handles the edge case where it's a regular file or symlink after
+/// an abnormal shutdown). Both are safe to delete — they're recreated on the next bind.
 fn remove_sockets_in_dir(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
+        let is_service_sock = entry.file_name() == "service.sock";
         #[cfg(unix)]
-        {
-            if let Ok(meta) = entry.path().symlink_metadata() {
-                if meta.file_type().is_socket() {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-            }
-        }
+        let is_socket = entry.file_type().map(|ft| ft.is_socket()).unwrap_or(false);
         #[cfg(not(unix))]
-        {
-            // On non-Unix, no socket files exist; nothing to remove.
-            let _ = entry;
+        let is_socket = false;
+        if is_service_sock || is_socket {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
