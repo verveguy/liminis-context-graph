@@ -83,7 +83,16 @@ pub fn migrate_workspace(
 
     match (legacy_exists, new_exists) {
         (false, false) => return Ok(MigrationOutcome::NothingToMigrate),
-        (false, true) => return Ok(MigrationOutcome::AlreadyMigrated),
+        (false, true) => {
+            // `.lcg/` exists and `.graphiti/` is gone. This is the normal "already migrated"
+            // case — but the old simple-rename migration (#64) could have left `.lcg/db` as a
+            // file instead of a directory. Detect and fix that broken layout in-place.
+            let lcg_db = new_dir.join("db");
+            if lcg_db.exists() && !lcg_db.is_dir() {
+                return fix_broken_lcg_layout(&new_dir, &partial_marker, sink);
+            }
+            return Ok(MigrationOutcome::AlreadyMigrated);
+        }
         (true, true) => {
             if !partial_marker.exists() {
                 let guidance = format!(
@@ -326,6 +335,101 @@ fn move_path(from: &Path, to: &Path, sink: &dyn TelemetrySink) -> Result<(), Mig
     Ok(())
 }
 
+/// Fix `.lcg/` that has the old layout left by the simple-rename migration (#64).
+///
+/// The old migration did `rename(".graphiti", ".lcg")`, leaving `.lcg/db` as a flat file
+/// and `.lcg/db.wal` as a sibling file — neither inside a `db/` subdirectory. The new
+/// binary defaults expect `.lcg/db/liminis.db`, so `create_dir_all(".lcg/db")` fails with
+/// EEXIST. This function restructures the layout in-place without touching `.graphiti/`.
+fn fix_broken_lcg_layout(
+    new_dir: &Path,
+    partial_marker: &Path,
+    sink: &dyn TelemetrySink,
+) -> Result<MigrationOutcome, MigrationError> {
+    sink.emit(TelemetryEvent::WorkspaceMigration {
+        ts_ms: now_ms(),
+        phase: "lcg_layout_fix_started".to_string(),
+        detail: Some(json!({ "dir": new_dir.display().to_string() })),
+    });
+
+    // Use a temp filename in the same directory to keep the rename on the same filesystem.
+    let tmp_db = new_dir.join("_db_migrate_tmp");
+    let lcg_db_file = new_dir.join("db");
+    let lcg_db_dir = new_dir.join("db");
+
+    // Step A: Move .lcg/db (file) → .lcg/_db_migrate_tmp.
+    std::fs::rename(&lcg_db_file, &tmp_db).map_err(|e| MigrationError::MoveFile {
+        path: lcg_db_file.clone(),
+        source: e,
+    })?;
+
+    // Step B: Create .lcg/db/ (directory).
+    std::fs::create_dir(&lcg_db_dir).map_err(|e| MigrationError::MoveFile {
+        path: lcg_db_dir.clone(),
+        source: e,
+    })?;
+
+    // Step C: Move .lcg/_db_migrate_tmp → .lcg/db/liminis.db.
+    std::fs::rename(&tmp_db, partial_marker).map_err(|e| MigrationError::MoveFile {
+        path: tmp_db.clone(),
+        source: e,
+    })?;
+    sink.emit(TelemetryEvent::WorkspaceMigration {
+        ts_ms: now_ms(),
+        phase: "step_moved".to_string(),
+        detail: Some(json!({
+            "from": lcg_db_file.display().to_string(),
+            "to": partial_marker.display().to_string(),
+        })),
+    });
+
+    // Step D: Move .lcg/db.wal → .lcg/db/liminis.db.wal (if present).
+    let lcg_db_wal = new_dir.join("db.wal");
+    let new_db_wal = lcg_db_dir.join("liminis.db.wal");
+    if lcg_db_wal.exists() && !new_db_wal.exists() {
+        move_path(&lcg_db_wal, &new_db_wal, sink)?;
+    }
+
+    // Step E: Validate migrated DB.
+    if partial_marker.exists() {
+        let db_path_str = partial_marker
+            .to_str()
+            .ok_or_else(|| MigrationError::DbValidation {
+                path: partial_marker.to_path_buf(),
+                reason: "path is not valid UTF-8".to_string(),
+            })?;
+        match Db::open(db_path_str) {
+            Ok(_db) => {
+                sink.emit(TelemetryEvent::WorkspaceMigration {
+                    ts_ms: now_ms(),
+                    phase: "db_validated".to_string(),
+                    detail: Some(json!({ "path": db_path_str })),
+                });
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                sink.emit(TelemetryEvent::WorkspaceMigration {
+                    ts_ms: now_ms(),
+                    phase: "db_validation_failed".to_string(),
+                    detail: Some(json!({ "path": db_path_str, "error": reason })),
+                });
+                return Err(MigrationError::DbValidation {
+                    path: partial_marker.to_path_buf(),
+                    reason,
+                });
+            }
+        }
+    }
+
+    sink.emit(TelemetryEvent::WorkspaceMigration {
+        ts_ms: now_ms(),
+        phase: "lcg_layout_fix_complete".to_string(),
+        detail: Some(json!({ "dir": new_dir.display().to_string() })),
+    });
+
+    Ok(MigrationOutcome::Migrated)
+}
+
 /// Removes socket files from a directory without failing if they're not there.
 fn remove_sockets_in_dir(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -389,6 +493,53 @@ mod tests {
         let result = migrate_workspace(tmp.path(), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::AlreadyMigrated)));
         assert!(phases(&sink).is_empty());
+    }
+
+    // ── Broken .lcg/ layout fix (post-simple-rename migration #64) ────────────
+
+    #[test]
+    fn fixes_broken_lcg_layout_when_db_is_flat_file() {
+        let tmp = TempDir::new().unwrap();
+        let new_dir = tmp.path().join(".lcg");
+        std::fs::create_dir(&new_dir).unwrap();
+
+        // Simulate the state left by the old simple-rename migration:
+        // .lcg/db is a flat file, not a directory.
+        let lcg_db_file = new_dir.join("db");
+        let db = Db::open(lcg_db_file.to_str().unwrap()).unwrap();
+        drop(db);
+        assert!(
+            lcg_db_file.is_file(),
+            "pre-condition: .lcg/db must be a file"
+        );
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &sink);
+        assert!(
+            matches!(result, Ok(MigrationOutcome::Migrated)),
+            "layout fix failed: {result:?}"
+        );
+
+        // .lcg/db must now be a directory containing liminis.db
+        assert!(
+            new_dir.join("db").is_dir(),
+            ".lcg/db must be a directory after fix"
+        );
+        assert!(
+            new_dir.join("db").join("liminis.db").is_file(),
+            ".lcg/db/liminis.db must exist after fix"
+        );
+
+        let p = phases(&sink);
+        assert!(
+            p.contains(&"lcg_layout_fix_started".to_string()),
+            "phases: {p:?}"
+        );
+        assert!(
+            p.contains(&"lcg_layout_fix_complete".to_string()),
+            "phases: {p:?}"
+        );
+        assert!(p.contains(&"db_validated".to_string()), "phases: {p:?}");
     }
 
     // ── SC-005: Schism detection ───────────────────────────────────────────────
