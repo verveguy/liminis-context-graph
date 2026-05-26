@@ -135,7 +135,7 @@ impl AppState {
         // contains ingested data. If it does, loading a new ontology counts as drift (FR-002).
         let has_prior_data = if workspace_root
             .as_deref()
-            .is_none_or(|r| ontology_sidecar::sidecar_path(r).exists())
+            .is_none_or(|r| ontology_sidecar::read_sidecar(r).is_some())
         {
             false
         } else {
