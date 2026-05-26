@@ -1113,13 +1113,19 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
                 state.wal_max_events_per_file,
                 state.wal_max_bytes_per_file,
             ) {
-                Ok(writer) => match state.wal_writer.lock() {
-                    Ok(mut guard) => *guard = Some(writer),
-                    Err(_) => eprintln!(
-                        "liminis-graph: WAL writer mutex poisoned after Recreate — \
-                         WAL writes disabled until restart"
-                    ),
-                },
+                Ok(writer) => {
+                    let mut guard = match state.wal_writer.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            eprintln!(
+                                "liminis-graph: WAL writer mutex was poisoned — \
+                                 recovering for Recreate re-init"
+                            );
+                            e.into_inner()
+                        }
+                    };
+                    *guard = Some(writer);
+                }
                 Err(e) => eprintln!(
                     "liminis-graph: WAL re-init failed after Recreate: {e} — \
                      WAL writes disabled until restart"
