@@ -8,12 +8,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     corrections,
     db::Db,
     episode,
     error::Error,
     ipc::{IpcRequest, IpcResponse},
+    ontology_sidecar,
     rebuild_job::{JobStatus, RebuildJob},
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     search,
@@ -231,18 +232,30 @@ type StatusFields = (
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let ontology_summary = {
+        let drift = state
+            .ontology_drift
+            .lock()
+            .map(|g| (g.drifted, g.drift_summary.clone()))
+            .unwrap_or((false, None));
+        let (drifted, drift_summary) = drift;
         match &state.ontology {
             Some(o) => json!({
                 "present": true,
+                "loaded": true,
                 "mode": o.mode.to_string(),
                 "entity_type_count": o.entity_types.len(),
                 "relation_type_count": o.relation_types.len(),
+                "drifted": drifted,
+                "drift_summary": drift_summary,
             }),
             None => json!({
                 "present": false,
+                "loaded": false,
                 "mode": null,
                 "entity_type_count": 0,
                 "relation_type_count": 0,
+                "drifted": false,
+                "drift_summary": null,
             }),
         }
     };
@@ -1228,6 +1241,21 @@ async fn handle_rebuild_from_wal(
             .await??;
         drop(_write_guard);
 
+        // After a successful non-dry-run WAL replay the graph is fully under the current ontology.
+        if !dry_run {
+            if let Some(ref root) = state.workspace_root {
+                let ontology_ref = state.ontology.as_deref();
+                if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
+                    eprintln!(
+                        "liminis-graph: ontology-sidecar: WAL replay write failed {:?}: {}",
+                        root, e
+                    );
+                } else if let Ok(mut guard) = state.ontology_drift.lock() {
+                    *guard = OntologyDriftState::default();
+                }
+            }
+        }
+
         // R9: emit a final progress event when shutdown interrupted the replay mid-stream.
         // Only fires when the cancel_fn actually returned true due to shutdown (not client
         // disconnect, and not when replay completed before shutdown was checked).
@@ -1322,6 +1350,9 @@ async fn handle_rebuild_from_wal(
     let job_id_task = job_id.clone();
     let job_id_handle_store = job_id.clone();
     let wal_dir_c = wal_dir.clone();
+    let bg_workspace_root = state.workspace_root.clone();
+    let bg_ontology = state.ontology.clone();
+    let bg_ontology_drift = Arc::clone(&state.ontology_drift);
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -1373,6 +1404,20 @@ async fn handle_rebuild_from_wal(
                             "indexes_created": stats.indexes_created,
                             "dry_run": dry_run,
                         }));
+                        // Update the sidecar so drift clears after a successful WAL rebuild.
+                        if !dry_run {
+                            if let Some(ref root) = bg_workspace_root {
+                                let ontology_ref = bg_ontology.as_deref();
+                                if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
+                                    eprintln!(
+                                        "liminis-graph: ontology-sidecar: bg WAL replay write failed {:?}: {}",
+                                        root, e
+                                    );
+                                } else if let Ok(mut guard) = bg_ontology_drift.lock() {
+                                    *guard = OntologyDriftState::default();
+                                }
+                            }
+                        }
                     }
                     Ok(Err(e)) => {
                         job.status = JobStatus::Failed;

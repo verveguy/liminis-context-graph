@@ -4,11 +4,12 @@ use std::sync::{Arc, OnceLock};
 use chrono::DateTime;
 
 use crate::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::escape_pub,
     error::Error,
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
+    ontology_sidecar,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
@@ -468,6 +469,21 @@ pub async fn add_episode(
     })
     .await??;
     drop(_write_guard);
+
+    // After a successful DB commit, persist the current ontology hash to `.lcg/ontology-hash.json`
+    // and clear the drift flag. Errors are non-fatal — a missed write means drift stays reported
+    // until the next successful ingest.
+    if let Some(ref root) = state.workspace_root {
+        let ontology_ref = state.ontology.as_deref();
+        if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
+            eprintln!(
+                "liminis-graph: ontology-sidecar: failed to update {:?}: {} — drift indicator may persist",
+                root, e
+            );
+        } else if let Ok(mut guard) = state.ontology_drift.lock() {
+            *guard = OntologyDriftState::default();
+        }
+    }
 
     Ok(AddEpisodeResult {
         episode_uuid,
