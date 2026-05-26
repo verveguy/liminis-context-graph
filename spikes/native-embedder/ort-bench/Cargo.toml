@@ -11,7 +11,7 @@ path = "src/main.rs"
 common = { path = "../common" }
 # ort 2.x: downloads libonnxruntime at build time by default.
 # Internet access required on first `cargo build`.
-ort = "2.0.0-rc.9"
+ort = "=2.0.0-rc.12"
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
