@@ -12,6 +12,6 @@
   "response": {
     "jsonrpc": "2.0",
     "id": 3,
-    "result": []
+    "result": {"nodes": [], "count": 0}
   }
 }

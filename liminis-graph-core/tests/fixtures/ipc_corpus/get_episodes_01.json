@@ -11,6 +11,6 @@
   "response": {
     "jsonrpc": "2.0",
     "id": 7,
-    "result": []
+    "result": {"episodes": [], "count": 0}
   }
 }
