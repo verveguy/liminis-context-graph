@@ -66,6 +66,12 @@ pub enum TelemetryEvent {
         closed_bytes: u64,
         closed_events: u64,
     },
+    WorkspaceMigration {
+        ts_ms: u64,
+        phase: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        detail: Option<serde_json::Value>,
+    },
 }
 
 pub fn now_ms() -> u64 {
