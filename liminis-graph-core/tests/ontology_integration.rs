@@ -19,7 +19,8 @@ use liminis_graph_core::{
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
-    ontology::{load_ontology, EntityTypeDef, Ontology, OntologyMode},
+    ontology::{content_hash, load_ontology, EntityTypeDef, Ontology, OntologyMode},
+    ontology_sidecar,
     telemetry::{NoopSink, TelemetrySink},
     types::SourceType,
 };
@@ -198,8 +199,10 @@ async fn knowledge_status_ontology_field_present_false() {
         "knowledge_status must always include 'ontology' field"
     );
     assert_eq!(result["ontology"]["present"], json!(false));
+    assert_eq!(result["ontology"]["loaded"], json!(false));
     assert_eq!(result["ontology"]["entity_type_count"], json!(0));
     assert_eq!(result["ontology"]["relation_type_count"], json!(0));
+    assert_eq!(result["ontology"]["drifted"], json!(false), "no drift when no ontology and workspace_root is None");
 }
 
 // SC-005: knowledge_status includes ontology field — present=true with correct counts.
@@ -227,9 +230,11 @@ async fn knowledge_status_ontology_field_populated() {
     let result = &resp_val["result"];
 
     assert_eq!(result["ontology"]["present"], json!(true));
+    assert_eq!(result["ontology"]["loaded"], json!(true));
     assert_eq!(result["ontology"]["mode"], json!("strict"));
     assert_eq!(result["ontology"]["entity_type_count"], json!(2));
     assert_eq!(result["ontology"]["relation_type_count"], json!(0));
+    assert_eq!(result["ontology"]["drifted"], json!(false), "no drift when workspace_root is None");
 }
 
 // ── load_ontology graceful degradation tests ──────────────────────────────────
@@ -359,4 +364,121 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
         "open mode: WORKS_AT edge must survive even when ontology declares only AUTHORED; got {} edges",
         result.edges_extracted
     );
+}
+
+// ── FR-008: drift detection regression tests ─────────────────────────────────
+
+fn make_ontology_with_entities(mode: OntologyMode, names: &[&str]) -> Ontology {
+    Ontology {
+        mode,
+        entity_types: names.iter().map(|n| EntityTypeDef {
+            name: n.to_string(),
+            description: None,
+        }).collect(),
+        relation_types: vec![],
+    }
+}
+
+#[test]
+fn drift_detected_after_entity_type_addition() {
+    let o1 = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
+    let o2 = make_ontology_with_entities(OntologyMode::Open, &["Person", "Equipment"]);
+    assert_ne!(
+        content_hash(Some(&o1)),
+        content_hash(Some(&o2)),
+        "adding an entity type must change the hash"
+    );
+}
+
+#[test]
+fn drift_detected_after_relation_type_rename() {
+    let o1 = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef { name: "Person".to_string(), description: None }],
+        relation_types: vec![RelationTypeDef { name: "AUTHORED".to_string(), description: None, source_type: None, target_type: None }],
+    };
+    let o2 = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef { name: "Person".to_string(), description: None }],
+        relation_types: vec![RelationTypeDef { name: "WROTE".to_string(), description: None, source_type: None, target_type: None }],
+    };
+    assert_ne!(
+        content_hash(Some(&o1)),
+        content_hash(Some(&o2)),
+        "renaming a relation type must change the hash"
+    );
+}
+
+#[test]
+fn cosmetic_edit_produces_same_hash() {
+    // Parse the same logical ontology twice via load_ontology to verify the hash
+    // is derived from parsed struct, not raw bytes.
+    let dir1 = TempDir::new().unwrap();
+    write_ontology_file(&dir1, "mode: open\nentity_types:\n  - name: Person\n");
+    let dir2 = TempDir::new().unwrap();
+    // Extra blank line is a cosmetic-only change
+    write_ontology_file(&dir2, "mode: open\n\nentity_types:\n  - name: Person\n\n");
+    let o1 = load_ontology(Some(dir1.path())).unwrap();
+    let o2 = load_ontology(Some(dir2.path())).unwrap();
+    assert_eq!(
+        content_hash(Some(&o1)),
+        content_hash(Some(&o2)),
+        "whitespace-only differences must produce the same hash"
+    );
+}
+
+#[test]
+fn no_drift_when_sidecar_matches_loaded_ontology() {
+    let dir = TempDir::new().unwrap();
+    let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
+    ontology_sidecar::write_sidecar(dir.path(), Some(&ontology)).unwrap();
+    let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology));
+    assert!(!drifted, "drift must be false when sidecar hash matches current ontology");
+    assert!(summary.is_none());
+}
+
+#[test]
+fn drift_clears_after_write_sidecar() {
+    let dir = TempDir::new().unwrap();
+    let o1 = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
+    let o2 = make_ontology_with_entities(OntologyMode::Open, &["Person", "Equipment"]);
+    // Write sidecar with o1
+    ontology_sidecar::write_sidecar(dir.path(), Some(&o1)).unwrap();
+    // Drift detected for o2
+    let (drifted_before, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2));
+    assert!(drifted_before, "drift must be true before sidecar update");
+    // Write sidecar with o2 to "clear" drift
+    ontology_sidecar::write_sidecar(dir.path(), Some(&o2)).unwrap();
+    let (drifted_after, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2));
+    assert!(!drifted_after, "drift must clear after sidecar is updated to current ontology");
+}
+
+#[test]
+fn no_ontology_to_no_ontology_no_drift() {
+    let dir = TempDir::new().unwrap();
+    // Write sidecar with no ontology (sentinel "none")
+    ontology_sidecar::write_sidecar(dir.path(), None).unwrap();
+    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), None);
+    assert!(!drifted, "no drift when both sidecar and current ontology are None");
+}
+
+#[test]
+fn no_sidecar_means_no_drift() {
+    let dir = TempDir::new().unwrap();
+    let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
+    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology));
+    assert!(!drifted, "no drift on first run (no sidecar exists yet)");
+}
+
+#[test]
+fn drift_summary_names_added_and_removed_types() {
+    let dir = TempDir::new().unwrap();
+    let old = make_ontology_with_entities(OntologyMode::Open, &["Person", "OldType"]);
+    ontology_sidecar::write_sidecar(dir.path(), Some(&old)).unwrap();
+    let new_ontology = make_ontology_with_entities(OntologyMode::Open, &["Person", "Equipment"]);
+    let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&new_ontology));
+    assert!(drifted);
+    let s = summary.unwrap();
+    assert!(s.contains("Equipment"), "drift summary should mention added type: {s}");
+    assert!(s.contains("OldType"), "drift summary should mention removed type: {s}");
 }
