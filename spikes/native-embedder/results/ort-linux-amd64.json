@@ -1,0 +1,25 @@
+{
+  "library": "ort",
+  "platform": "linux/x86_64",
+  "model_dir": "/spike/models/bge-base-onnx",
+  "cold_start_ms": 644.7640839999999,
+  "warmup_iters": 10,
+  "bench": {
+    "p50_ms": 17.360461,
+    "p95_ms": 25.090891,
+    "p99_ms": 26.361305,
+    "min_ms": 14.713389000000001,
+    "max_ms": 29.108748,
+    "mean_ms": 18.517460909999997,
+    "batch_throughput_per_sec": 39.657212304898366,
+    "n_iters": 100
+  },
+  "parity": {
+    "min_cosine": 0.92228085,
+    "max_cosine": 1.0000004,
+    "mean_cosine": 0.9984456,
+    "n_below_threshold": 1,
+    "threshold": 0.999,
+    "passed": false
+  }
+}
