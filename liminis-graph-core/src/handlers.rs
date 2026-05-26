@@ -1017,8 +1017,9 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     let _guard = state.write_lock.write().await;
 
     if !preserve_wal {
-        // Reset wal_writer to None before deleting the WAL directory so that subsequent writes
-        // lazily re-initialize the writer and don't target a deleted path.
+        // Flush and drop the WalWriter before deleting the WAL directory to avoid
+        // writing to a path that no longer exists. The writer is re-initialized below
+        // after the DB is swapped in (#100 regression fix).
         drop(
             state
                 .wal_writer
