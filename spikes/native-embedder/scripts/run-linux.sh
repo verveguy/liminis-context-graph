@@ -20,7 +20,7 @@ RUST_IMAGE="rust:1.85-slim"
 echo "=== Building and running candle-bench on linux/amd64 ==="
 docker run --rm \
   --platform linux/amd64 \
-  -v "$SPIKE_DIR":/spike:ro \
+  -v "$SPIKE_DIR":/spike \
   -v "$RESULTS_DIR":/results \
   -w /spike \
   "$RUST_IMAGE" \
@@ -41,7 +41,7 @@ echo ""
 echo "=== Building and running ort-bench on linux/amd64 ==="
 docker run --rm \
   --platform linux/amd64 \
-  -v "$SPIKE_DIR":/spike:ro \
+  -v "$SPIKE_DIR":/spike \
   -v "$RESULTS_DIR":/results \
   -w /spike \
   "$RUST_IMAGE" \
