@@ -727,6 +727,75 @@ mod tests {
         assert!(p.contains(&"complete".to_string()), "phases: {p:?}");
     }
 
+    // ── FR-010 / SC-003: Mid-migration failure leaves source intact ───────────
+
+    #[cfg(unix)]
+    #[test]
+    fn mid_migration_failure_leaves_source_intact_and_retry_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join(".graphiti");
+        let new_dir = tmp.path().join(".lcg");
+
+        // Simulate a partially-completed migration: .lcg/db/liminis.db (the partial marker)
+        // already exists (step 2 completed), but .graphiti/wal/ and ontology.yaml haven't
+        // been moved yet.
+        std::fs::create_dir(&legacy).unwrap();
+        let legacy_wal = legacy.join("wal");
+        std::fs::create_dir(&legacy_wal).unwrap();
+        std::fs::write(legacy_wal.join("001.jsonl"), b"{}").unwrap();
+        std::fs::write(legacy.join("ontology.yaml"), b"entities:").unwrap();
+
+        std::fs::create_dir_all(new_dir.join("db")).unwrap();
+        let marker = new_dir.join("db").join("liminis.db");
+        let db = Db::open(marker.to_str().unwrap()).unwrap();
+        drop(db);
+
+        // Make .lcg/ non-writable so rename of .graphiti/wal → .lcg/wal fails.
+        std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &sink);
+
+        // Restore permissions before assertions so TempDir can clean up.
+        std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            matches!(result, Err(MigrationError::MoveFile { .. })),
+            "expected MoveFile error, got: {result:?}"
+        );
+        // Source must be intact — nothing was deleted by the failed migration.
+        assert!(legacy.exists(), ".graphiti/ must still exist after failure");
+        assert!(
+            legacy_wal.exists(),
+            ".graphiti/wal/ must still exist after failure"
+        );
+        assert!(
+            legacy.join("ontology.yaml").exists(),
+            ".graphiti/ontology.yaml must still exist after failure"
+        );
+
+        // Retry after fixing the permissions — must complete the migration cleanly.
+        let sink2 = noop();
+        let result2 = migrate_workspace(tmp.path(), &sink2);
+        assert!(
+            matches!(result2, Ok(MigrationOutcome::Migrated)),
+            "retry after permission fix should succeed: {result2:?}"
+        );
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be gone after successful retry"
+        );
+        assert!(
+            new_dir.join("wal").is_dir(),
+            ".lcg/wal/ must exist after retry"
+        );
+        assert!(
+            new_dir.join("ontology.yaml").exists(),
+            ".lcg/ontology.yaml must exist after retry"
+        );
+    }
+
     // ── DB validation (FR-005) ────────────────────────────────────────────────
 
     #[test]
