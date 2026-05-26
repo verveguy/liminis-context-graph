@@ -176,13 +176,7 @@ async fn wal_repopulated_after_recreate() {
     );
 
     // SC-002: knowledge_status must report wal.exists=true and wal.byte_size>0.
-    let status_resp = dispatch(
-        3,
-        "knowledge_status",
-        json!({}),
-        Arc::clone(&state),
-    )
-    .await;
+    let status_resp = dispatch(3, "knowledge_status", json!({}), Arc::clone(&state)).await;
     assert!(
         status_resp.get("result").is_some(),
         "knowledge_status must succeed: {status_resp}"
