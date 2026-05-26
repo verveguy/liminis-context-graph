@@ -1,0 +1,19 @@
+[package]
+name = "ort-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "ort-bench"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common" }
+# ort 2.x: downloads libonnxruntime at build time by default.
+# Internet access required on first `cargo build`.
+ort = "2.0.0-rc.9"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
