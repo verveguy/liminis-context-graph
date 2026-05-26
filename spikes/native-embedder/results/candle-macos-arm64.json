@@ -1,7 +1,7 @@
 {
   "library": "candle",
   "platform": "macos/aarch64",
-  "model_dir": "/Users/bpja/.cache/huggingface/hub/models--BAAI--bge-base-en-v1.5/snapshots/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+  "model_dir": "models/bge-base",
   "cold_start_ms": 666.469875,
   "warmup_iters": 100,
   "bench": {
