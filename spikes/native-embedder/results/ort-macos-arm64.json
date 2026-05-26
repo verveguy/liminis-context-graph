@@ -1,7 +1,7 @@
 {
   "library": "ort",
   "platform": "macos/aarch64",
-  "model_dir": "/Users/bpja/dev/liminis-project/.fabrik/worktrees/verveguy-liminis-graph/issue-107/spikes/native-embedder/models/bge-base-onnx",
+  "model_dir": "models/bge-base-onnx",
   "cold_start_ms": 193.590625,
   "warmup_iters": 100,
   "bench": {
