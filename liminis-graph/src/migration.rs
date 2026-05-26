@@ -63,7 +63,8 @@ impl std::error::Error for MigrationError {
 ///
 /// State machine:
 /// - Neither exists → `NothingToMigrate`
-/// - Only `.lcg/` exists → `AlreadyMigrated`
+/// - Only `.lcg/` exists, correct layout → `AlreadyMigrated`
+/// - Only `.lcg/` exists, `.lcg/db` is a file (old simple-rename) → fix layout → `Migrated`
 /// - Only `.graphiti/` exists → clean migration
 /// - Both exist, `.lcg/db/liminis.db` present → partial-resume migration
 /// - Both exist, `.lcg/db/liminis.db` absent → `Schism` error (user must resolve)
@@ -353,19 +354,19 @@ fn fix_broken_lcg_layout(
     });
 
     // Use a temp filename in the same directory to keep the rename on the same filesystem.
+    // `lcg_db` is `.lcg/db` — a FILE before step A, a DIRECTORY after step B.
+    let lcg_db = new_dir.join("db");
     let tmp_db = new_dir.join("_db_migrate_tmp");
-    let lcg_db_file = new_dir.join("db");
-    let lcg_db_dir = new_dir.join("db");
 
     // Step A: Move .lcg/db (file) → .lcg/_db_migrate_tmp.
-    std::fs::rename(&lcg_db_file, &tmp_db).map_err(|e| MigrationError::MoveFile {
-        path: lcg_db_file.clone(),
+    std::fs::rename(&lcg_db, &tmp_db).map_err(|e| MigrationError::MoveFile {
+        path: lcg_db.clone(),
         source: e,
     })?;
 
-    // Step B: Create .lcg/db/ (directory).
-    std::fs::create_dir(&lcg_db_dir).map_err(|e| MigrationError::MoveFile {
-        path: lcg_db_dir.clone(),
+    // Step B: Create .lcg/db/ (directory) at the now-freed path.
+    std::fs::create_dir(&lcg_db).map_err(|e| MigrationError::MoveFile {
+        path: lcg_db.clone(),
         source: e,
     })?;
 
@@ -378,14 +379,14 @@ fn fix_broken_lcg_layout(
         ts_ms: now_ms(),
         phase: "step_moved".to_string(),
         detail: Some(json!({
-            "from": lcg_db_file.display().to_string(),
+            "from": lcg_db.display().to_string(),
             "to": partial_marker.display().to_string(),
         })),
     });
 
     // Step D: Move .lcg/db.wal → .lcg/db/liminis.db.wal (if present).
     let lcg_db_wal = new_dir.join("db.wal");
-    let new_db_wal = lcg_db_dir.join("liminis.db.wal");
+    let new_db_wal = lcg_db.join("liminis.db.wal");
     if lcg_db_wal.exists() && !new_db_wal.exists() {
         move_path(&lcg_db_wal, &new_db_wal, sink)?;
     }
