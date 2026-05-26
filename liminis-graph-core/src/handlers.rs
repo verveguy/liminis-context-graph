@@ -254,8 +254,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "mode": null,
                 "entity_type_count": 0,
                 "relation_type_count": 0,
-                "drifted": false,
-                "drift_summary": null,
+                "drifted": drifted,
+                "drift_summary": drift_summary,
             }),
         }
     };

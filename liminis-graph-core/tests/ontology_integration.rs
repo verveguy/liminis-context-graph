@@ -524,3 +524,51 @@ fn drift_summary_names_added_and_removed_types() {
         "drift summary should mention removed type: {s}"
     );
 }
+
+// Regression: knowledge_status must surface drift even when ontology is None (removed-ontology
+// scenario — User Story 1, acceptance scenario 3). The handler previously hardcoded
+// "drifted: false" in the None branch, ignoring the drift state from AppState.
+#[tokio::test]
+async fn knowledge_status_surfaces_drift_when_ontology_is_none() {
+    let (db, _dir) = make_db();
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(EMB_DIM)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState {
+            drifted: true,
+            drift_summary: Some("entity types removed: [Person]".to_string()),
+        })),
+    });
+
+    let resp = handlers::dispatch(req(1, "knowledge_status", json!({})), state, None).await;
+    let resp_val = serde_json::to_value(resp).unwrap();
+    let result = &resp_val["result"];
+
+    assert_eq!(result["ontology"]["loaded"], json!(false));
+    assert_eq!(
+        result["ontology"]["drifted"],
+        json!(true),
+        "drift must be surfaced even when no ontology is loaded"
+    );
+    assert_eq!(
+        result["ontology"]["drift_summary"],
+        json!("entity types removed: [Person]")
+    );
+}
