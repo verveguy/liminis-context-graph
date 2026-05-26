@@ -12,8 +12,15 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
-    app_state::{AppState, OntologyDriftState}, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
-    extractor::MockExtractor, handlers, ipc::IpcRequest, telemetry::NoopSink, EntityRow,
+    app_state::{AppState, OntologyDriftState},
+    db::Db,
+    dedup_adapter::PassthroughDedupAdapter,
+    embedder::MockEmbedder,
+    extractor::MockExtractor,
+    handlers,
+    ipc::IpcRequest,
+    telemetry::NoopSink,
+    EntityRow,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;

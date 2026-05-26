@@ -514,19 +514,30 @@ relation_types:
 
     // ── content_hash ─────────────────────────────────────────────────────────
 
-    fn make_ontology(mode: OntologyMode, entities: &[(&str, Option<&str>)], relations: &[(&str, Option<&str>, Option<&str>, Option<&str>)]) -> Ontology {
+    #[allow(clippy::type_complexity)]
+    fn make_ontology(
+        mode: OntologyMode,
+        entities: &[(&str, Option<&str>)],
+        relations: &[(&str, Option<&str>, Option<&str>, Option<&str>)],
+    ) -> Ontology {
         Ontology {
             mode,
-            entity_types: entities.iter().map(|(name, desc)| EntityTypeDef {
-                name: name.to_string(),
-                description: desc.map(|s| s.to_string()),
-            }).collect(),
-            relation_types: relations.iter().map(|(name, src, tgt, desc)| crate::ontology::RelationTypeDef {
-                name: name.to_string(),
-                source_type: src.map(|s| s.to_string()),
-                target_type: tgt.map(|s| s.to_string()),
-                description: desc.map(|s| s.to_string()),
-            }).collect(),
+            entity_types: entities
+                .iter()
+                .map(|(name, desc)| EntityTypeDef {
+                    name: name.to_string(),
+                    description: desc.map(|s| s.to_string()),
+                })
+                .collect(),
+            relation_types: relations
+                .iter()
+                .map(|(name, src, tgt, desc)| crate::ontology::RelationTypeDef {
+                    name: name.to_string(),
+                    source_type: src.map(|s| s.to_string()),
+                    target_type: tgt.map(|s| s.to_string()),
+                    description: desc.map(|s| s.to_string()),
+                })
+                .collect(),
         }
     }
 
@@ -546,14 +557,26 @@ relation_types:
     #[test]
     fn content_hash_entity_addition_changes_hash() {
         let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
-        let o2 = make_ontology(OntologyMode::Open, &[("Person", None), ("Equipment", None)], &[]);
+        let o2 = make_ontology(
+            OntologyMode::Open,
+            &[("Person", None), ("Equipment", None)],
+            &[],
+        );
         assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
     }
 
     #[test]
     fn content_hash_relation_rename_changes_hash() {
-        let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[("AUTHORED", None, None, None)]);
-        let o2 = make_ontology(OntologyMode::Open, &[("Person", None)], &[("WROTE", None, None, None)]);
+        let o1 = make_ontology(
+            OntologyMode::Open,
+            &[("Person", None)],
+            &[("AUTHORED", None, None, None)],
+        );
+        let o2 = make_ontology(
+            OntologyMode::Open,
+            &[("Person", None)],
+            &[("WROTE", None, None, None)],
+        );
         assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
     }
 
@@ -567,14 +590,26 @@ relation_types:
     #[test]
     fn content_hash_description_update_changes_hash() {
         let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
-        let o2 = make_ontology(OntologyMode::Open, &[("Person", Some("A human individual"))], &[]);
+        let o2 = make_ontology(
+            OntologyMode::Open,
+            &[("Person", Some("A human individual"))],
+            &[],
+        );
         assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
     }
 
     #[test]
     fn content_hash_order_independent() {
-        let o1 = make_ontology(OntologyMode::Open, &[("Person", None), ("Organization", None)], &[]);
-        let o2 = make_ontology(OntologyMode::Open, &[("Organization", None), ("Person", None)], &[]);
+        let o1 = make_ontology(
+            OntologyMode::Open,
+            &[("Person", None), ("Organization", None)],
+            &[],
+        );
+        let o2 = make_ontology(
+            OntologyMode::Open,
+            &[("Organization", None), ("Person", None)],
+            &[],
+        );
         assert_eq!(content_hash(Some(&o1)), content_hash(Some(&o2)));
     }
 

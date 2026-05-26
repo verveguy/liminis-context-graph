@@ -202,7 +202,11 @@ async fn knowledge_status_ontology_field_present_false() {
     assert_eq!(result["ontology"]["loaded"], json!(false));
     assert_eq!(result["ontology"]["entity_type_count"], json!(0));
     assert_eq!(result["ontology"]["relation_type_count"], json!(0));
-    assert_eq!(result["ontology"]["drifted"], json!(false), "no drift when no ontology and workspace_root is None");
+    assert_eq!(
+        result["ontology"]["drifted"],
+        json!(false),
+        "no drift when no ontology and workspace_root is None"
+    );
 }
 
 // SC-005: knowledge_status includes ontology field — present=true with correct counts.
@@ -234,7 +238,11 @@ async fn knowledge_status_ontology_field_populated() {
     assert_eq!(result["ontology"]["mode"], json!("strict"));
     assert_eq!(result["ontology"]["entity_type_count"], json!(2));
     assert_eq!(result["ontology"]["relation_type_count"], json!(0));
-    assert_eq!(result["ontology"]["drifted"], json!(false), "no drift when workspace_root is None");
+    assert_eq!(
+        result["ontology"]["drifted"],
+        json!(false),
+        "no drift when workspace_root is None"
+    );
 }
 
 // ── load_ontology graceful degradation tests ──────────────────────────────────
@@ -371,10 +379,13 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
 fn make_ontology_with_entities(mode: OntologyMode, names: &[&str]) -> Ontology {
     Ontology {
         mode,
-        entity_types: names.iter().map(|n| EntityTypeDef {
-            name: n.to_string(),
-            description: None,
-        }).collect(),
+        entity_types: names
+            .iter()
+            .map(|n| EntityTypeDef {
+                name: n.to_string(),
+                description: None,
+            })
+            .collect(),
         relation_types: vec![],
     }
 }
@@ -394,13 +405,29 @@ fn drift_detected_after_entity_type_addition() {
 fn drift_detected_after_relation_type_rename() {
     let o1 = Ontology {
         mode: OntologyMode::Open,
-        entity_types: vec![EntityTypeDef { name: "Person".to_string(), description: None }],
-        relation_types: vec![RelationTypeDef { name: "AUTHORED".to_string(), description: None, source_type: None, target_type: None }],
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "AUTHORED".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+        }],
     };
     let o2 = Ontology {
         mode: OntologyMode::Open,
-        entity_types: vec![EntityTypeDef { name: "Person".to_string(), description: None }],
-        relation_types: vec![RelationTypeDef { name: "WROTE".to_string(), description: None, source_type: None, target_type: None }],
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "WROTE".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+        }],
     };
     assert_ne!(
         content_hash(Some(&o1)),
@@ -433,7 +460,10 @@ fn no_drift_when_sidecar_matches_loaded_ontology() {
     let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
     ontology_sidecar::write_sidecar(dir.path(), Some(&ontology)).unwrap();
     let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology));
-    assert!(!drifted, "drift must be false when sidecar hash matches current ontology");
+    assert!(
+        !drifted,
+        "drift must be false when sidecar hash matches current ontology"
+    );
     assert!(summary.is_none());
 }
 
@@ -450,7 +480,10 @@ fn drift_clears_after_write_sidecar() {
     // Write sidecar with o2 to "clear" drift
     ontology_sidecar::write_sidecar(dir.path(), Some(&o2)).unwrap();
     let (drifted_after, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2));
-    assert!(!drifted_after, "drift must clear after sidecar is updated to current ontology");
+    assert!(
+        !drifted_after,
+        "drift must clear after sidecar is updated to current ontology"
+    );
 }
 
 #[test]
@@ -459,7 +492,10 @@ fn no_ontology_to_no_ontology_no_drift() {
     // Write sidecar with no ontology (sentinel "none")
     ontology_sidecar::write_sidecar(dir.path(), None).unwrap();
     let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), None);
-    assert!(!drifted, "no drift when both sidecar and current ontology are None");
+    assert!(
+        !drifted,
+        "no drift when both sidecar and current ontology are None"
+    );
 }
 
 #[test]
@@ -479,6 +515,12 @@ fn drift_summary_names_added_and_removed_types() {
     let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&new_ontology));
     assert!(drifted);
     let s = summary.unwrap();
-    assert!(s.contains("Equipment"), "drift summary should mention added type: {s}");
-    assert!(s.contains("OldType"), "drift summary should mention removed type: {s}");
+    assert!(
+        s.contains("Equipment"),
+        "drift summary should mention added type: {s}"
+    );
+    assert!(
+        s.contains("OldType"),
+        "drift summary should mention removed type: {s}"
+    );
 }
