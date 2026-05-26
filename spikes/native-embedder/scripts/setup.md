@@ -117,14 +117,22 @@ chmod +x scripts/run-linux.sh
 ## Measuring binary size delta
 
 The spike crate is not linked into `liminis-graph`. To estimate the binary
-growth if it were, compare binary sizes:
+growth if it were, compare the compiled binary sizes directly:
 
 ```bash
-# Baseline: what a small Rust binary looks like
-cargo build --release -p common 2>/dev/null || true
-# candle-bench binary includes the ML runtime overhead
+# Build both release binaries
+cargo build --release -p candle-bench
+cargo build --release -p ort-bench
+
+# Compare sizes
 ls -lh target/release/candle-bench target/release/ort-bench
 ```
+
+The `common` crate is a library with no binary target; it has no entry in
+`target/release/`. The bench binary sizes are the best available proxy for
+the ML library overhead that would accrue to `liminis-graph` if the embedder
+were integrated. Note that `libonnxruntime` (~60 MB) is downloaded separately
+and not included in the `ort-bench` binary size reported above.
 
 ## Interpreting results
 
