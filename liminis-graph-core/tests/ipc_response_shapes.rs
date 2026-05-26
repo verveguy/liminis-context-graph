@@ -248,6 +248,17 @@ async fn shape_get_entity_neighbors() {
         result["edges"].is_array(),
         "result must have edges array: {result}"
     );
+    // count must equal node_count and nodes.len() per ADR-0050 multi-collection convention.
+    assert_eq!(
+        result["count"].as_u64().unwrap(),
+        result["node_count"].as_u64().unwrap(),
+        "count must equal node_count: {result}"
+    );
+    assert_eq!(
+        result["count"].as_u64().unwrap(),
+        result["nodes"].as_array().unwrap().len() as u64,
+        "count must equal nodes.len(): {result}"
+    );
 }
 
 #[tokio::test]
