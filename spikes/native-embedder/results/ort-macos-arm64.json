@@ -1,0 +1,25 @@
+{
+  "library": "ort",
+  "platform": "macos/aarch64",
+  "model_dir": "/Users/bpja/dev/liminis-project/.fabrik/worktrees/verveguy-liminis-graph/issue-107/spikes/native-embedder/models/bge-base-onnx",
+  "cold_start_ms": 193.590625,
+  "warmup_iters": 100,
+  "bench": {
+    "p50_ms": 8.765749999999999,
+    "p95_ms": 26.217833,
+    "p99_ms": 28.14125,
+    "min_ms": 5.534833,
+    "max_ms": 29.215042,
+    "mean_ms": 10.74617622,
+    "batch_throughput_per_sec": 93.74537499868586,
+    "n_iters": 200
+  },
+  "parity": {
+    "min_cosine": 0.9222814,
+    "max_cosine": 1.0000004,
+    "mean_cosine": 0.9984457,
+    "n_below_threshold": 1,
+    "threshold": 0.999,
+    "passed": false
+  }
+}
