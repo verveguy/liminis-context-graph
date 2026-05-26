@@ -56,8 +56,7 @@ pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std:
         relation_types,
     };
 
-    let json = serde_json::to_string_pretty(&sidecar)
-        .map_err(std::io::Error::other)?;
+    let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
 
     let path = sidecar_path(workspace_root);
     let tmp_path = path.with_extension("json.tmp");
