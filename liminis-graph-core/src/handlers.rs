@@ -20,6 +20,7 @@ use crate::{
     search,
     telemetry::{now_ms, TelemetryEvent},
     types::SourceType,
+    wal::WalWriter,
     wal_exec,
 };
 
@@ -1100,6 +1101,32 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     state
         .indices_built
         .store(false, std::sync::atomic::Ordering::Release);
+
+    // Re-initialize the WalWriter so post-Recreate writes are captured (regression fix for #100).
+    // The writer was taken to None before WAL dir deletion above; without this, every subsequent
+    // wal_flush_chunk/wal_flush_ungrouped call silently skips because the guard is None.
+    if !preserve_wal {
+        if let Some(ref wal_dir) = state.wal_dir {
+            match WalWriter::new(
+                wal_dir,
+                state.wal_max_events_per_file,
+                state.wal_max_bytes_per_file,
+            ) {
+                Ok(writer) => match state.wal_writer.lock() {
+                    Ok(mut guard) => *guard = Some(writer),
+                    Err(_) => eprintln!(
+                        "liminis-graph: WAL writer mutex poisoned after Recreate — \
+                         WAL writes disabled until restart"
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "liminis-graph: WAL re-init failed after Recreate: {e} — \
+                     WAL writes disabled until restart"
+                ),
+            }
+        }
+    }
+
     drop(_guard);
 
     Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))
