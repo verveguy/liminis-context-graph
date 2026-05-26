@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::{MockEmbedder, OaiEmbedder},
@@ -70,6 +70,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 
@@ -95,6 +96,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 
@@ -322,6 +324,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 
@@ -346,6 +349,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 

@@ -15,10 +15,18 @@ use crate::{
     extractor::Extractor,
     llm_router::LlmRouter,
     ontology::{load_ontology, Ontology},
+    ontology_sidecar,
     rebuild_job::RebuildJob,
     telemetry::TelemetrySink,
     wal::WalWriter,
 };
+
+/// Ontology drift state computed at startup and cleared after each successful ingest.
+#[derive(Debug, Default, Clone)]
+pub struct OntologyDriftState {
+    pub drifted: bool,
+    pub drift_summary: Option<String>,
+}
 
 pub struct AppState {
     /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
@@ -59,6 +67,9 @@ pub struct AppState {
     /// `None` when no file is present, empty, or malformed — free-form extraction applies.
     /// Requires a service restart to pick up changes (FR-007; v1.5 will add hot-reload).
     pub ontology: Option<Arc<Ontology>>,
+    /// Drift state computed at startup by comparing the current ontology's hash against the
+    /// persisted `.lcg/ontology-hash.json` sidecar. Cleared after each successful ingest write.
+    pub ontology_drift: Arc<Mutex<OntologyDriftState>>,
 }
 
 impl AppState {
@@ -120,6 +131,18 @@ impl AppState {
                 "liminis-graph: ontology: none — free-form extraction (restart required to pick up changes)"
             );
         }
+        let (drifted, drift_summary) =
+            ontology_sidecar::compute_drift(workspace_root.as_deref(), ontology.as_deref());
+        if drifted {
+            eprintln!(
+                "liminis-graph: ontology: drift detected — {} — recommend Recreate + re-ingest",
+                drift_summary.as_deref().unwrap_or("unknown change")
+            );
+        }
+        let ontology_drift = Arc::new(Mutex::new(OntologyDriftState {
+            drifted,
+            drift_summary,
+        }));
         Self {
             db: ArcSwapOption::from(db),
             degraded_reason: Arc::new(Mutex::new(degraded_reason)),
@@ -139,6 +162,7 @@ impl AppState {
             cancel_token: CancellationToken::new(),
             cancelled_chunks: Arc::new(AtomicUsize::new(0)),
             ontology,
+            ontology_drift,
         }
     }
 }

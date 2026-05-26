@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 // ── Serde deserialization types (YAML schema) ─────────────────────────────────
 
@@ -307,6 +308,54 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
     })
 }
 
+// ── Content hash ─────────────────────────────────────────────────────────────
+
+/// Returns a stable semantic content hash of the given ontology.
+///
+/// - `None` returns the sentinel string `"none"`, representing "ingested with no ontology".
+/// - Hash is based on the parsed struct, not raw YAML bytes — cosmetic edits (whitespace,
+///   comments) produce the same hash.
+/// - Canonical form: `"mode:{mode}\nentity_types:{entries}\nrelation_types:{entries}"` where
+///   entries are sorted by name and formatted as `NAME\0DESCRIPTION` (entity) or
+///   `NAME\0SOURCE\0TARGET\0DESCRIPTION` (relation), joined with `\0\0`.
+pub fn content_hash(ontology: Option<&Ontology>) -> String {
+    let Some(o) = ontology else {
+        return "none".to_string();
+    };
+
+    let mut entity_entries: Vec<String> = o
+        .entity_types
+        .iter()
+        .map(|e| format!("{}\0{}", e.name, e.description.as_deref().unwrap_or("")))
+        .collect();
+    entity_entries.sort_unstable();
+
+    let mut relation_entries: Vec<String> = o
+        .relation_types
+        .iter()
+        .map(|r| {
+            format!(
+                "{}\0{}\0{}\0{}",
+                r.name,
+                r.source_type.as_deref().unwrap_or(""),
+                r.target_type.as_deref().unwrap_or(""),
+                r.description.as_deref().unwrap_or("")
+            )
+        })
+        .collect();
+    relation_entries.sort_unstable();
+
+    let canonical = format!(
+        "mode:{}\nentity_types:{}\nrelation_types:{}",
+        o.mode,
+        entity_entries.join("\0\0"),
+        relation_entries.join("\0\0"),
+    );
+
+    let digest = Sha256::digest(canonical.as_bytes());
+    format!("{:x}", digest)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -461,5 +510,79 @@ relation_types:
         .unwrap();
         let ontology = load_ontology(Some(dir.path())).expect("should load from .graphiti");
         assert_eq!(ontology.entity_types.len(), 1);
+    }
+
+    // ── content_hash ─────────────────────────────────────────────────────────
+
+    fn make_ontology(mode: OntologyMode, entities: &[(&str, Option<&str>)], relations: &[(&str, Option<&str>, Option<&str>, Option<&str>)]) -> Ontology {
+        Ontology {
+            mode,
+            entity_types: entities.iter().map(|(name, desc)| EntityTypeDef {
+                name: name.to_string(),
+                description: desc.map(|s| s.to_string()),
+            }).collect(),
+            relation_types: relations.iter().map(|(name, src, tgt, desc)| crate::ontology::RelationTypeDef {
+                name: name.to_string(),
+                source_type: src.map(|s| s.to_string()),
+                target_type: tgt.map(|s| s.to_string()),
+                description: desc.map(|s| s.to_string()),
+            }).collect(),
+        }
+    }
+
+    #[test]
+    fn content_hash_none_returns_sentinel() {
+        assert_eq!(content_hash(None), "none");
+    }
+
+    #[test]
+    fn content_hash_same_ontology_is_stable() {
+        let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
+        let h1 = content_hash(Some(&o));
+        let h2 = content_hash(Some(&o));
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn content_hash_entity_addition_changes_hash() {
+        let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
+        let o2 = make_ontology(OntologyMode::Open, &[("Person", None), ("Equipment", None)], &[]);
+        assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
+    }
+
+    #[test]
+    fn content_hash_relation_rename_changes_hash() {
+        let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[("AUTHORED", None, None, None)]);
+        let o2 = make_ontology(OntologyMode::Open, &[("Person", None)], &[("WROTE", None, None, None)]);
+        assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
+    }
+
+    #[test]
+    fn content_hash_mode_flip_changes_hash() {
+        let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
+        let o2 = make_ontology(OntologyMode::Strict, &[("Person", None)], &[]);
+        assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
+    }
+
+    #[test]
+    fn content_hash_description_update_changes_hash() {
+        let o1 = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
+        let o2 = make_ontology(OntologyMode::Open, &[("Person", Some("A human individual"))], &[]);
+        assert_ne!(content_hash(Some(&o1)), content_hash(Some(&o2)));
+    }
+
+    #[test]
+    fn content_hash_order_independent() {
+        let o1 = make_ontology(OntologyMode::Open, &[("Person", None), ("Organization", None)], &[]);
+        let o2 = make_ontology(OntologyMode::Open, &[("Organization", None), ("Person", None)], &[]);
+        assert_eq!(content_hash(Some(&o1)), content_hash(Some(&o2)));
+    }
+
+    #[test]
+    fn content_hash_none_differs_from_empty_would_be_same_sentinel() {
+        // None always returns "none" — distinct from any real ontology hash
+        let h = content_hash(None);
+        assert_eq!(h, "none");
+        assert_ne!(h.len(), 64); // real SHA-256 is 64 hex chars; "none" is 4
     }
 }

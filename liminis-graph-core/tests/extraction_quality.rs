@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
@@ -70,6 +70,7 @@ fn make_state(
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: ontology.map(Arc::new),
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 

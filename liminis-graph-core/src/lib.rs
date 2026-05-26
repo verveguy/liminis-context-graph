@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod ipc;
 pub mod llm_router;
 pub mod ontology;
+pub mod ontology_sidecar;
 pub mod prompts;
 pub mod rebuild_job;
 pub mod replay;
