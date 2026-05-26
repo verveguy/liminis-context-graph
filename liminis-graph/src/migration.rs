@@ -458,7 +458,24 @@ fn remove_sockets_in_dir(dir: &Path) {
 mod tests {
     use super::*;
     use liminis_graph_core::telemetry::CaptureSink;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serializes `Db::open` across tests in this module. lbug's first-ever
+    /// `INSTALL vector` (called inside `Db::open`'s schema init) creates a
+    /// per-user extension cache directory at `~/.lbdb/extension/<ver>/<arch>/`.
+    /// When multiple tests run in parallel and all hit this for the first
+    /// time in the same process, they race on the create — one wins and the
+    /// others see EEXIST-ish failures and lbug surfaces them as
+    /// "Failed to create directory ... Check if it exists and remove it."
+    /// Holding this mutex during `Db::open` in tests forces serialization
+    /// of that first-use install. Subsequent opens are fast and harmless.
+    static DB_OPEN_LOCK: Mutex<()> = Mutex::new(());
+
+    fn open_db_serialized(path: &str) -> Db {
+        let _guard = DB_OPEN_LOCK.lock().expect("DB_OPEN_LOCK poisoned");
+        Db::open(path).expect("Db::open failed")
+    }
 
     fn noop() -> CaptureSink {
         CaptureSink::new()
@@ -506,7 +523,7 @@ mod tests {
         // Simulate the state left by the old simple-rename migration:
         // .lcg/db is a flat file, not a directory.
         let lcg_db_file = new_dir.join("db");
-        let db = Db::open(lcg_db_file.to_str().unwrap()).unwrap();
+        let db = open_db_serialized(lcg_db_file.to_str().unwrap());
         drop(db);
         assert!(
             lcg_db_file.is_file(),
@@ -670,7 +687,7 @@ mod tests {
         std::fs::create_dir_all(new_dir.join("db")).unwrap();
         // Create a real DB at the marker path so validation succeeds
         let marker = new_dir.join("db").join("liminis.db");
-        let _db = Db::open(marker.to_str().unwrap()).unwrap();
+        let _db = open_db_serialized(marker.to_str().unwrap());
         drop(_db);
 
         // Legacy still has wal/ and ontology
@@ -748,7 +765,7 @@ mod tests {
 
         std::fs::create_dir_all(new_dir.join("db")).unwrap();
         let marker = new_dir.join("db").join("liminis.db");
-        let db = Db::open(marker.to_str().unwrap()).unwrap();
+        let db = open_db_serialized(marker.to_str().unwrap());
         drop(db);
 
         // Make .lcg/ non-writable so rename of .graphiti/wal → .lcg/wal fails.
@@ -810,7 +827,7 @@ mod tests {
         // assertion in the hash-index recovery path. The migration's validation step
         // only calls Db::open (not init_schema), so testing that is sufficient.
         let legacy_db_path = legacy.join("db");
-        let db = Db::open(legacy_db_path.to_str().unwrap()).unwrap();
+        let db = open_db_serialized(legacy_db_path.to_str().unwrap());
         drop(db);
 
         let sink = noop();
@@ -823,7 +840,10 @@ mod tests {
         let new_db = tmp.path().join(".lcg").join("db").join("liminis.db");
         assert!(new_db.exists(), "migrated DB file must exist");
         // Verify DB is still openable post-migration (without init_schema)
-        assert!(Db::open(new_db.to_str().unwrap()).is_ok());
+        {
+            let _guard = DB_OPEN_LOCK.lock().expect("DB_OPEN_LOCK poisoned");
+            assert!(Db::open(new_db.to_str().unwrap()).is_ok());
+        }
 
         let p = phases(&sink);
         assert!(p.contains(&"db_validated".to_string()), "phases: {p:?}");
