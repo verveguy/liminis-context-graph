@@ -59,6 +59,7 @@ pub struct ParityResult {
 
 impl ParityResult {
     pub fn compute(similarities: &[f32], threshold: f32) -> Self {
+        assert!(!similarities.is_empty(), "similarities must not be empty");
         let n = similarities.len();
         let min_cosine = similarities.iter().cloned().fold(f32::INFINITY, f32::min);
         let max_cosine = similarities.iter().cloned().fold(f32::NEG_INFINITY, f32::max);

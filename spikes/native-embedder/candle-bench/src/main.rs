@@ -99,13 +99,18 @@ fn main() -> Result<()> {
         let f = std::fs::File::open(parity_path)?;
         let refs: ReferenceEmbeddings = serde_json::from_reader(f)?;
 
+        if refs.embeddings.len() != PARITY_SENTENCES.len() {
+            anyhow::bail!(
+                "reference JSON has {} embeddings, expected {}",
+                refs.embeddings.len(),
+                PARITY_SENTENCES.len()
+            );
+        }
         let mut sims = Vec::with_capacity(PARITY_SENTENCES.len());
         for (i, sentence) in PARITY_SENTENCES.iter().enumerate() {
-            if let Some(ref_emb) = refs.embeddings.get(i) {
-                let emb = embedder.embed(sentence)?;
-                let sim = cosine_similarity(&emb, ref_emb);
-                sims.push(sim);
-            }
+            let emb = embedder.embed(sentence)?;
+            let sim = cosine_similarity(&emb, &refs.embeddings[i]);
+            sims.push(sim);
         }
         Some(ParityResult::compute(&sims, 0.999))
     } else {
