@@ -474,7 +474,8 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Err(e) => return Err(e),
     };
 
-    Ok(serde_json::to_value(entities)?)
+    let count = entities.len();
+    Ok(json!({"nodes": entities, "count": count}))
 }
 
 async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -519,7 +520,8 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         Err(e) => return Err(e),
     };
 
-    Ok(serde_json::to_value(edges)?)
+    let count = edges.len();
+    Ok(json!({"facts": edges, "count": count}))
 }
 
 // ── Other read handlers — hold shared read guard across spawn_blocking ────────
@@ -544,7 +546,8 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     .await??;
     drop(_guard);
 
-    Ok(serde_json::to_value(episodes)?)
+    let count = episodes.len();
+    Ok(json!({"episodes": episodes, "count": count}))
 }
 
 async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -582,7 +585,8 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
     .await??;
     drop(_guard);
 
-    Ok(serde_json::to_value(nodes)?)
+    let count = nodes.len();
+    Ok(json!({"nodes": nodes, "count": count}))
 }
 
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -598,7 +602,8 @@ async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
     .await??;
     drop(_guard);
 
-    Ok(serde_json::to_value(edges)?)
+    let count = edges.len();
+    Ok(json!({"edges": edges, "count": count}))
 }
 
 async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -621,7 +626,8 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
     .await??;
     drop(_guard);
 
-    Ok(serde_json::to_value(edges)?)
+    let count = edges.len();
+    Ok(json!({"edges": edges, "count": count}))
 }
 
 async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -851,6 +857,7 @@ async fn handle_get_entity_neighbors(
         "center_uuid": center_uuid,
         "nodes": nodes,
         "edges": edges,
+        "count": node_count,
         "node_count": node_count,
         "edge_count": edge_count,
     }))
@@ -896,8 +903,8 @@ async fn handle_get_entities_by_source(
     drop(_guard);
 
     let source_val = p["source"].as_str().unwrap_or("").to_string();
-    let node_count = nodes.len();
-    Ok(json!({ "source": source_val, "nodes": nodes, "node_count": node_count }))
+    let count = nodes.len();
+    Ok(json!({ "source": source_val, "nodes": nodes, "count": count }))
 }
 
 async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
