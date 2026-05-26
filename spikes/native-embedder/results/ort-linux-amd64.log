@@ -1,0 +1,32 @@
+Loading model from /spike/models/bge-base-onnx ...
+Cold start: 645 ms
+Warmup (10 iters) ...
+Benchmarking (100 iters) ...
+Batch throughput (3 trials × 200 sentences) ...
+Parity check vs /spike/reference_embeddings.json ...
+Results written to /results/ort-linux-amd64.json
+
+p50=17.4ms p95=25.1ms batch=40sent/s
+	Command being timed: "/tmp/target/release/ort-bench --model-dir /spike/models/bge-base-onnx --warmup 10 --iters 100 --parity-json /spike/reference_embeddings.json --output-json /results/ort-linux-amd64.json"
+	User time (seconds): 110.23
+	System time (seconds): 18.76
+	Percent of CPU this job got: 671%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:19.20
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 439612
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 1861
+	Minor (reclaiming a frame) page faults: 35135
+	Voluntary context switches: 2087262
+	Involuntary context switches: 43378
+	Swaps: 0
+	File system inputs: 304
+	File system outputs: 1
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

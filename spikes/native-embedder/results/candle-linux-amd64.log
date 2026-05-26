@@ -1,0 +1,29 @@
+Loading model from /spike/models/bge-base ...
+
+thread 'main' (4009) panicked at /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/gemm-f32-0.17.1/src/gemm.rs:3:5:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Command exited with non-zero status 101
+	Command being timed: "/tmp/target/release/candle-bench --model-dir /spike/models/bge-base --warmup 5 --iters 50 --parity-json /spike/reference_embeddings.json --output-json /results/candle-linux-amd64.json"
+	User time (seconds): 0.10
+	System time (seconds): 0.21
+	Percent of CPU this job got: 100%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:00.32
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 858136
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 460
+	Minor (reclaiming a frame) page faults: 37733
+	Voluntary context switches: 1593
+	Involuntary context switches: 1139
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 0
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 101
