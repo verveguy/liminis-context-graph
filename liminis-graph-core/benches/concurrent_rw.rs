@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use arc_swap::ArcSwapOption;
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::{Embedder, MockEmbedder},
@@ -56,6 +56,7 @@ fn build_state(db: Arc<Db>) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 

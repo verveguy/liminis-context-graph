@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
@@ -57,6 +57,7 @@ fn make_degraded_state_with_capture(
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 
@@ -281,6 +282,7 @@ async fn test_recovery_unknown_strategy() {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     });
 
     let resp = dispatch_val(
@@ -324,6 +326,7 @@ async fn test_recovery_missing_strategy() {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;

@@ -13,7 +13,7 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use futures::future::BoxFuture;
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
@@ -90,6 +90,7 @@ fn make_state_with_slow_extractor(db: Arc<Db>, token: CancellationToken) -> Arc<
         cancel_token: token,
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 
@@ -113,6 +114,7 @@ fn make_state_with_fast_extractor(db: Arc<Db>) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
 

@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
-    app_state::AppState, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
+    app_state::{AppState, OntologyDriftState}, db::Db, dedup_adapter::PassthroughDedupAdapter, embedder::MockEmbedder,
     extractor::MockExtractor, handlers, ipc::IpcRequest, telemetry::NoopSink, EntityRow,
 };
 use serde_json::{json, Value};
@@ -56,6 +56,7 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     });
     (state, dir)
 }

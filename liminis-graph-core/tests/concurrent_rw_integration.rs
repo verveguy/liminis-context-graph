@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use arc_swap::ArcSwapOption;
 use liminis_graph_core::{
-    app_state::AppState,
+    app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::{DedupAdapter, PassthroughDedupAdapter},
     embedder::MockEmbedder,
@@ -136,6 +136,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     });
 
     let s1 = Arc::clone(&state);
