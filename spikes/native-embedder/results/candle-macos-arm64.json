@@ -1,0 +1,25 @@
+{
+  "library": "candle",
+  "platform": "macos/aarch64",
+  "model_dir": "/Users/bpja/.cache/huggingface/hub/models--BAAI--bge-base-en-v1.5/snapshots/a5beb1e3e68b9ab74eb54cfd186867f64f240e1a",
+  "cold_start_ms": 666.469875,
+  "warmup_iters": 100,
+  "bench": {
+    "p50_ms": 76.07424999999999,
+    "p95_ms": 162.962,
+    "p99_ms": 173.22995799999998,
+    "min_ms": 35.342833999999996,
+    "max_ms": 366.6945,
+    "mean_ms": 86.15696602499999,
+    "batch_throughput_per_sec": 11.545826721242825,
+    "n_iters": 200
+  },
+  "parity": {
+    "min_cosine": 0.92228174,
+    "max_cosine": 1.0000004,
+    "mean_cosine": 0.99844575,
+    "n_below_threshold": 1,
+    "threshold": 0.999,
+    "passed": false
+  }
+}
