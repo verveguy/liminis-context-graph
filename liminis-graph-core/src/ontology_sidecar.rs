@@ -70,10 +70,15 @@ pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std:
 }
 
 /// Computes the drift state by comparing the current ontology's hash against the persisted sidecar.
+///
+/// `has_prior_data`: true when no sidecar exists but the DB already contains ingested nodes
+/// (pre-#98 workspace). In that case, loading an ontology is treated as drift (FR-002).
+///
 /// Returns `(drifted, drift_summary)`.
 pub fn compute_drift(
     workspace_root: Option<&Path>,
     ontology: Option<&Ontology>,
+    has_prior_data: bool,
 ) -> (bool, Option<String>) {
     let root = match workspace_root {
         Some(r) => r,
@@ -82,8 +87,23 @@ pub fn compute_drift(
 
     let sidecar = match read_sidecar(root) {
         Some(s) => s,
-        // No sidecar: first run or pre-upgrade workspace — no drift (FR-007)
-        None => return (false, None),
+        None => {
+            // Pre-#98 workspace: ingested before sidecar writes were added. If the DB has data
+            // and an ontology is now loaded, that's drift (FR-002, User Story 3 Scenario 2).
+            if has_prior_data {
+                if let Some(o) = ontology {
+                    return (
+                        true,
+                        Some(format!(
+                            "ontology added: {} entity types, {} relation types",
+                            o.entity_types.len(),
+                            o.relation_types.len()
+                        )),
+                    );
+                }
+            }
+            return (false, None);
+        }
     };
 
     let current_hash = content_hash(ontology);
@@ -96,6 +116,25 @@ pub fn compute_drift(
 }
 
 fn build_drift_summary(sidecar: &OntologySidecar, current: Option<&Ontology>) -> String {
+    // Pure addition: sidecar recorded "no ontology" but one is now loaded.
+    if sidecar.hash == "none" {
+        if let Some(o) = current {
+            return format!(
+                "ontology added: {} entity types, {} relation types",
+                o.entity_types.len(),
+                o.relation_types.len()
+            );
+        }
+    }
+    // Pure removal: sidecar recorded a real ontology but none is loaded now.
+    if sidecar.hash != "none" && current.is_none() {
+        return format!(
+            "ontology removed (was {} entity types, {} relation types)",
+            sidecar.entity_types.len(),
+            sidecar.relation_types.len()
+        );
+    }
+
     let prev_entities: std::collections::HashSet<&str> =
         sidecar.entity_types.iter().map(|s| s.as_str()).collect();
     let prev_relations: std::collections::HashSet<&str> =

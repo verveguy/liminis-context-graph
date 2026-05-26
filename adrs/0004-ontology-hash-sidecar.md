@@ -32,11 +32,13 @@ The sidecar lives at `<workspace>/.lcg/ontology-hash.json`, co-located with the 
 
 ## Decision 4: Sentinel hash `"none"` for no-ontology state
 
-`content_hash(None)` returns the sentinel string `"none"` (not a SHA-256 hash). This allows the sidecar to distinguish two states:
-- Sidecar absent: workspace has never been ingested. No drift reported (FR-007).
-- Sidecar present with hash `"none"`: graph was ingested with no ontology. Drift is reported if an ontology is now loaded.
+`content_hash(None)` returns the sentinel string `"none"` (not a SHA-256 hash). This allows the sidecar to distinguish three states:
 
-This avoids a special-case comparison branch at drift-detection time.
+- **Sidecar absent, DB empty**: workspace has never been ingested. No drift reported (FR-007).
+- **Sidecar present with hash `"none"`**: graph was ingested with no ontology. Drift is reported if an ontology is now loaded (FR-002).
+- **Sidecar absent, DB has Episodic nodes**: workspace was ingested before #98 (no sidecar was ever written). Treated as "ingested with no ontology" — drift is reported if an ontology is now loaded. `has_prior_data: bool` is determined in `app_state::from_env` by calling `count_nodes("Episodic")` when no sidecar file exists. If the DB is unavailable at startup, `has_prior_data` defaults to `false` (conservative: may miss drift rather than false-positive it). This case is transient — after the first ingest post-upgrade, the sidecar is written and the DB check is never run again.
+
+This avoids a special-case comparison branch at drift-detection time for the common path. The pre-upgrade DB-presence check is isolated to the sidecar-absent branch in `compute_drift`.
 
 ## Consequences
 

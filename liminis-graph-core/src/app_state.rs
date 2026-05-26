@@ -131,8 +131,26 @@ impl AppState {
                 "liminis-graph: ontology: none — free-form extraction (restart required to pick up changes)"
             );
         }
-        let (drifted, drift_summary) =
-            ontology_sidecar::compute_drift(workspace_root.as_deref(), ontology.as_deref());
+        // For pre-#98 workspaces that have no sidecar file, check whether the DB already
+        // contains ingested data. If it does, loading a new ontology counts as drift (FR-002).
+        let has_prior_data = if workspace_root
+            .as_deref()
+            .map(|r| ontology_sidecar::sidecar_path(r).exists())
+            .unwrap_or(true)
+        {
+            false
+        } else {
+            db.as_ref()
+                .and_then(|d| d.connect().ok())
+                .and_then(|c| c.count_nodes("Episodic").ok())
+                .unwrap_or(0)
+                > 0
+        };
+        let (drifted, drift_summary) = ontology_sidecar::compute_drift(
+            workspace_root.as_deref(),
+            ontology.as_deref(),
+            has_prior_data,
+        );
         if drifted {
             eprintln!(
                 "liminis-graph: ontology: drift detected — {} — recommend Recreate + re-ingest",

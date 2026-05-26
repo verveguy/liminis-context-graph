@@ -459,7 +459,8 @@ fn no_drift_when_sidecar_matches_loaded_ontology() {
     let dir = TempDir::new().unwrap();
     let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
     ontology_sidecar::write_sidecar(dir.path(), Some(&ontology)).unwrap();
-    let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology));
+    let (drifted, summary) =
+        ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology), false);
     assert!(
         !drifted,
         "drift must be false when sidecar hash matches current ontology"
@@ -475,11 +476,11 @@ fn drift_clears_after_write_sidecar() {
     // Write sidecar with o1
     ontology_sidecar::write_sidecar(dir.path(), Some(&o1)).unwrap();
     // Drift detected for o2
-    let (drifted_before, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2));
+    let (drifted_before, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2), false);
     assert!(drifted_before, "drift must be true before sidecar update");
     // Write sidecar with o2 to "clear" drift
     ontology_sidecar::write_sidecar(dir.path(), Some(&o2)).unwrap();
-    let (drifted_after, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2));
+    let (drifted_after, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&o2), false);
     assert!(
         !drifted_after,
         "drift must clear after sidecar is updated to current ontology"
@@ -491,7 +492,7 @@ fn no_ontology_to_no_ontology_no_drift() {
     let dir = TempDir::new().unwrap();
     // Write sidecar with no ontology (sentinel "none")
     ontology_sidecar::write_sidecar(dir.path(), None).unwrap();
-    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), None);
+    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), None, false);
     assert!(
         !drifted,
         "no drift when both sidecar and current ontology are None"
@@ -499,11 +500,14 @@ fn no_ontology_to_no_ontology_no_drift() {
 }
 
 #[test]
-fn no_sidecar_means_no_drift() {
+fn no_sidecar_no_prior_data_means_no_drift() {
     let dir = TempDir::new().unwrap();
     let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person"]);
-    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology));
-    assert!(!drifted, "no drift on first run (no sidecar exists yet)");
+    let (drifted, _) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology), false);
+    assert!(
+        !drifted,
+        "no drift on first run (no sidecar, no prior DB data)"
+    );
 }
 
 #[test]
@@ -512,7 +516,8 @@ fn drift_summary_names_added_and_removed_types() {
     let old = make_ontology_with_entities(OntologyMode::Open, &["Person", "OldType"]);
     ontology_sidecar::write_sidecar(dir.path(), Some(&old)).unwrap();
     let new_ontology = make_ontology_with_entities(OntologyMode::Open, &["Person", "Equipment"]);
-    let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), Some(&new_ontology));
+    let (drifted, summary) =
+        ontology_sidecar::compute_drift(Some(dir.path()), Some(&new_ontology), false);
     assert!(drifted);
     let s = summary.unwrap();
     assert!(
@@ -522,6 +527,61 @@ fn drift_summary_names_added_and_removed_types() {
     assert!(
         s.contains("OldType"),
         "drift summary should mention removed type: {s}"
+    );
+}
+
+// FR-002/User Story 1: sidecar present with hash "none" + ontology now loaded → drift (addition).
+#[test]
+fn sidecar_none_hash_plus_loaded_ontology_reports_drift() {
+    let dir = TempDir::new().unwrap();
+    ontology_sidecar::write_sidecar(dir.path(), None).unwrap();
+    let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person", "Organization"]);
+    let (drifted, summary) =
+        ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology), false);
+    assert!(
+        drifted,
+        "drift must be true: sidecar=none, current=has ontology"
+    );
+    let s = summary.unwrap();
+    assert!(
+        s.contains("ontology added"),
+        "summary must mention 'ontology added': {s}"
+    );
+}
+
+// FR-002/User Story 2: sidecar present with real hash + no ontology now → drift (removal).
+#[test]
+fn sidecar_real_hash_plus_no_ontology_reports_drift() {
+    let dir = TempDir::new().unwrap();
+    let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person", "Organization"]);
+    ontology_sidecar::write_sidecar(dir.path(), Some(&ontology)).unwrap();
+    let (drifted, summary) = ontology_sidecar::compute_drift(Some(dir.path()), None, false);
+    assert!(
+        drifted,
+        "drift must be true: sidecar=has ontology, current=none"
+    );
+    let s = summary.unwrap();
+    assert!(
+        s.contains("ontology removed"),
+        "summary must mention 'ontology removed': {s}"
+    );
+}
+
+// FR-002/User Story 3: no sidecar + DB has prior data + ontology loaded → drift (pre-upgrade workspace).
+#[test]
+fn no_sidecar_with_prior_data_and_ontology_reports_drift() {
+    let dir = TempDir::new().unwrap();
+    let ontology = make_ontology_with_entities(OntologyMode::Open, &["Person", "Organization"]);
+    let (drifted, summary) =
+        ontology_sidecar::compute_drift(Some(dir.path()), Some(&ontology), true);
+    assert!(
+        drifted,
+        "drift must be true for pre-upgrade workspace with ontology now loaded"
+    );
+    let s = summary.unwrap();
+    assert!(
+        s.contains("ontology added"),
+        "summary must mention 'ontology added': {s}"
     );
 }
 
