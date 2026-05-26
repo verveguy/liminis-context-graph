@@ -48,6 +48,8 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         sink,
         db_path: "shapes_test.db".to_string(),
         wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
         wal_writer: Arc::new(Mutex::new(None)),
         active_writes: Arc::new(AtomicUsize::new(0)),
