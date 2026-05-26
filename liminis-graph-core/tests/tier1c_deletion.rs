@@ -394,14 +394,17 @@ async fn clear_all_followed_by_process_chunk() {
 }
 
 #[tokio::test]
-async fn clear_all_drops_wal_writer() {
+async fn clear_all_reinits_wal_writer() {
+    // Regression test for #100: after clear_all, the WalWriter must be
+    // eagerly re-initialized (not left as None) when wal_dir is configured.
+    // The previous "lazy re-init" approach was broken: wal_flush_chunk and
+    // wal_flush_ungrouped silently skipped on None, so WAL writes were lost.
     let (db, dir) = make_db(4);
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
     let wal_dir = dir.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
     let state = make_state_with_wal(db, wal_dir, &db_path);
 
-    // Confirm the WAL writer is Some before clear_all
     assert!(
         state.wal_writer.lock().unwrap().is_some(),
         "wal_writer should be Some before clear_all"
@@ -416,9 +419,10 @@ async fn clear_all_drops_wal_writer() {
     .await;
     assert_ok(&v, 1);
 
-    // After clear_all, wal_writer must be None so the next write triggers lazy re-init
+    // After clear_all with wal_dir configured, the writer must be re-initialized
+    // so that post-Recreate writes are captured in the WAL (FR-001, #100 fix).
     assert!(
-        state.wal_writer.lock().unwrap().is_none(),
-        "wal_writer must be None after clear_all"
+        state.wal_writer.lock().unwrap().is_some(),
+        "wal_writer must be re-initialized (Some) after clear_all when wal_dir is configured"
     );
 }
