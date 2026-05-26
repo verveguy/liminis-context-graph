@@ -103,12 +103,12 @@ mod migration_binary_tests {
         std::fs::write(wal_dir.join("001.jsonl"), b"{\"type\":\"test\"}\n").unwrap();
 
         // Ontology and hash sidecar
-        std::fs::write(legacy.join("ontology.yaml"), b"entities:\n  - name: Person\n").unwrap();
         std::fs::write(
-            legacy.join("ontology-hash.json"),
-            b"{\"hash\":\"abc123\"}",
+            legacy.join("ontology.yaml"),
+            b"entities:\n  - name: Person\n",
         )
         .unwrap();
+        std::fs::write(legacy.join("ontology-hash.json"), b"{\"hash\":\"abc123\"}").unwrap();
 
         // ── Spawn binary ─────────────────────────────────────────────────────
         // Socket path is absolute so we can wait for it. DB path uses binary default
@@ -139,7 +139,10 @@ mod migration_binary_tests {
             !legacy.exists(),
             ".graphiti/ must be removed after migration"
         );
-        assert!(new_dir.join("db").is_dir(), ".lcg/db/ must be a directory, not a file");
+        assert!(
+            new_dir.join("db").is_dir(),
+            ".lcg/db/ must be a directory, not a file"
+        );
         assert!(
             new_dir.join("db").join("liminis.db").is_file(),
             ".lcg/db/liminis.db must exist"

@@ -1,8 +1,8 @@
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+use std::path::{Path, PathBuf};
 
 use liminis_graph_core::{
     db::Db,
@@ -437,14 +437,20 @@ mod tests {
 
         let new_dir = tmp.path().join(".lcg");
         assert!(new_dir.join("db").is_dir(), ".lcg/db/ must be a directory");
-        assert!(!new_dir.join("db").join("liminis.db").exists(), "no db file in legacy");
+        assert!(
+            !new_dir.join("db").join("liminis.db").exists(),
+            "no db file in legacy"
+        );
         assert!(new_dir.join("db").join("liminis.db.wal").exists());
         assert!(new_dir.join("wal").is_dir());
         assert!(new_dir.join("wal").join("001.jsonl").exists());
         assert!(new_dir.join("ontology.yaml").exists());
         assert!(new_dir.join("ontology-hash.json").exists());
 
-        assert!(!legacy.exists(), ".graphiti/ must be removed after migration");
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after migration"
+        );
 
         let p = phases(&sink);
         assert!(p.contains(&"started".to_string()));
@@ -464,8 +470,15 @@ mod tests {
         let result = migrate_workspace(tmp.path(), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::Migrated)));
 
-        let unrecognized = tmp.path().join(".lcg").join("_unrecognized").join("mystery.txt");
-        assert!(unrecognized.exists(), "_unrecognized/mystery.txt must exist");
+        let unrecognized = tmp
+            .path()
+            .join(".lcg")
+            .join("_unrecognized")
+            .join("mystery.txt");
+        assert!(
+            unrecognized.exists(),
+            "_unrecognized/mystery.txt must exist"
+        );
         assert!(phases(&sink).contains(&"unrecognized_file".to_string()));
     }
 
