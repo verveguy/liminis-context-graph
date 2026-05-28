@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "ort-bench", about = "BGE-base-en-v1.5 embedding spike — ort (ONNX Runtime) backend")]
+#[command(
+    name = "ort-bench",
+    about = "BGE-base-en-v1.5 embedding spike — ort (ONNX Runtime) backend"
+)]
 struct Args {
     /// Directory containing model.onnx and tokenizer.json
     #[arg(long)]
@@ -32,6 +35,10 @@ struct Args {
     /// Write structured JSON results here (stdout if omitted)
     #[arg(long)]
     output_json: Option<PathBuf>,
+
+    /// Execution provider: cpu (default) or coreml (macOS only)
+    #[arg(long, default_value = "cpu")]
+    execution_provider: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -44,6 +51,7 @@ struct ReferenceEmbeddings {
 struct Output {
     library: &'static str,
     platform: String,
+    execution_provider: String,
     model_dir: String,
     cold_start_ms: f64,
     warmup_iters: usize,
@@ -55,8 +63,19 @@ fn main() -> Result<()> {
     let process_start = Instant::now();
     let args = Args::parse();
 
-    eprintln!("Loading model from {} ...", args.model_dir.display());
-    let mut embedder = embedder::BgeEmbedder::load(&args.model_dir)?;
+    eprintln!(
+        "Loading model from {} (execution provider: {}) ...",
+        args.model_dir.display(),
+        args.execution_provider
+    );
+    let mut embedder = match args.execution_provider.as_str() {
+        "cpu" => embedder::BgeEmbedder::load(&args.model_dir)?,
+        #[cfg(target_os = "macos")]
+        "coreml" => embedder::BgeEmbedder::load_with_coreml(&args.model_dir)?,
+        #[cfg(not(target_os = "macos"))]
+        "coreml" => anyhow::bail!("CoreML EP is only available on macOS"),
+        other => anyhow::bail!("unknown execution provider: {}", other),
+    };
 
     // First embed call marks end of cold start
     let _ = embedder.embed("warmup")?;
@@ -81,7 +100,10 @@ fn main() -> Result<()> {
     }
 
     // Batch throughput: embed all 200 bench sentences, 3 trials, take best
-    eprintln!("Batch throughput (3 trials × {} sentences) ...", bench_sents.len());
+    eprintln!(
+        "Batch throughput (3 trials × {} sentences) ...",
+        bench_sents.len()
+    );
     let mut batch_total_ms = f64::MAX;
     for _ in 0..3 {
         let t0 = Instant::now();
@@ -120,6 +142,7 @@ fn main() -> Result<()> {
     let output = Output {
         library: "ort",
         platform: platform_string(),
+        execution_provider: args.execution_provider.clone(),
         model_dir: args.model_dir.display().to_string(),
         cold_start_ms,
         warmup_iters: args.warmup,
@@ -135,8 +158,10 @@ fn main() -> Result<()> {
         println!("{}", json);
     }
 
-    eprintln!("\np50={:.1}ms p95={:.1}ms batch={:.0}sent/s",
-        output.bench.p50_ms, output.bench.p95_ms, output.bench.batch_throughput_per_sec);
+    eprintln!(
+        "\np50={:.1}ms p95={:.1}ms batch={:.0}sent/s",
+        output.bench.p50_ms, output.bench.p95_ms, output.bench.batch_throughput_per_sec
+    );
 
     Ok(())
 }

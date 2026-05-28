@@ -62,7 +62,10 @@ impl ParityResult {
         assert!(!similarities.is_empty(), "similarities must not be empty");
         let n = similarities.len();
         let min_cosine = similarities.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_cosine = similarities.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let max_cosine = similarities
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
         let mean_cosine = similarities.iter().sum::<f32>() / n as f32;
         let n_below_threshold = similarities.iter().filter(|&&s| s < threshold).count();
         ParityResult {

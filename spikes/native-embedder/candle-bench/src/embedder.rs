@@ -34,7 +34,11 @@ impl BgeEmbedder {
             .map_err(|e| anyhow::anyhow!("{e}"))
             .with_context(|| format!("loading {}", tokenizer_path.display()))?;
 
-        Ok(BgeEmbedder { model, tokenizer, device })
+        Ok(BgeEmbedder {
+            model,
+            tokenizer,
+            device,
+        })
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
