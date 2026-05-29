@@ -30,12 +30,12 @@ jobs:
 
       - name: dedup bench 1k
         run: |
-          cargo bench --bench search -- 1k --measurement-time ${{ inputs.measurement_time || '30' }} \
+          cargo bench --bench search -- 1k --measurement-time "${{ inputs.measurement_time || '30' }}" \
             2>&1 | tee bench-1k.txt
 
       - name: dedup bench 10k
         run: |
-          cargo bench --bench search -- 10k --measurement-time ${{ inputs.measurement_time || '30' }} \
+          cargo bench --bench search -- 10k --measurement-time "${{ inputs.measurement_time || '30' }}" \
             2>&1 | tee bench-10k.txt
 
       - name: dedup bench 50k
