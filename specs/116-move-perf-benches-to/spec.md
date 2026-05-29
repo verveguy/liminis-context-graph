@@ -7,7 +7,7 @@
 
 ## Background
 
-The current `bench-dedup` job has a useful PR-time gate — `dedup_overlap_check` at line 82 — which is a *correctness* assertion that R-007 (95% decision overlap) still holds. That stays on PRs. Everything else in the bench surface is *measurement*, not *gating*:
+The current `bench-dedup` job has a useful PR-time gate — `dedup_overlap_check` at line 82 — which is a *correctness* assertion that R-003 (95% decision overlap) still holds. That stays on PRs. Everything else in the bench surface is *measurement*, not *gating*:
 
 - `bench compile (stub)` (lines 53-66) just runs `cargo bench --no-run` to ensure benches compile. This is a build-the-bench-binaries check, not a measurement. It costs a full lbug C++ build per PR.
 - `dedup bench 1k / 10k / 50k` (lines 85-95) only run on main pushes today, NOT on PRs. So PRs already don't measure perf — but they still pay the full bench-binary compile via `bench compile (stub)`.
@@ -73,7 +73,7 @@ The project optionally runs the perf bench nightly via `schedule:` cron so a per
   - Option B: fold the overlap check into the `test` job, eliminating the separate `bench-dedup` job entirely. Saves a runner. Preferred if it doesn't substantially lengthen the `test` job's wall-clock.
 - **FR-004.** The new `bench.yml` workflow MUST be discoverable via `gh workflow list` and runnable via `gh workflow run bench.yml`. Inputs (if any) MUST be documented inline in the workflow file's `on.workflow_dispatch.inputs` block.
 - **FR-005.** The new `bench.yml` workflow MUST upload its bench output as a workflow artefact (markdown or text). At minimum, the criterion-style output of the runs MUST be retrievable from the Actions UI for 30 days (GHA default retention).
-- **FR-006.** `.github/workflows/ci.yml` MUST continue to enforce all current correctness gates: `cargo test --release`, `dedup_overlap_check` (R-007), `cargo clippy -- -D warnings`, `cargo fmt --check`, and the "no ML runtime deps" cargo-tree check. No gates are lost.
+- **FR-006.** `.github/workflows/ci.yml` MUST continue to enforce all current correctness gates: `cargo test --release`, `dedup_overlap_check` (R-003), `cargo clippy -- -D warnings`, `cargo fmt --check`, and the "no ML runtime deps" cargo-tree check. No gates are lost.
 - **FR-007.** Documentation: a short note in `CLAUDE.md` or a new `docs/BENCHMARKING.md` MUST explain how to trigger the perf workflow and where to read results.
 - **FR-008.** The reduction in per-PR runner consumption MUST be measurable. After deployment, total runner-minutes per PR (sum of all jobs that previously ran) MUST drop by at least 50%. Today: ~3h cumulative (3× ~1h). Post-fix target: ≤ ~1.5h cumulative.
 
@@ -87,7 +87,7 @@ The project optionally runs the perf bench nightly via `schedule:` cron so a per
 
 ## Assumptions
 
-- **A1.** The user's intent is to remove perf measurement from automatic runs, not to remove correctness gates. The `dedup_overlap_check` is correctness (R-007 spec requirement) and stays automatic; everything else moves to on-demand.
+- **A1.** The user's intent is to remove perf measurement from automatic runs, not to remove correctness gates. The `dedup_overlap_check` is correctness (R-003 spec requirement) and stays automatic; everything else moves to on-demand.
 - **A2.** `gh workflow run` is an acceptable trigger mechanism. No fancy chatops or Slack integration needed.
 - **A3.** GHA `workflow_dispatch` triggers are documented and stable. Engineers reading the workflow file can find the trigger.
 - **A4.** Workflow artefact retention (30 days default) is sufficient for human review. Long-term perf history is out of scope.
@@ -114,6 +114,6 @@ The project optionally runs the perf bench nightly via `schedule:` cron so a per
 
 - **`.github/workflows/ci.yml` lines 53-66** — current `bench compile (stub)` job (`bench-stub`). Pure build, no measurement, no gating value on PRs.
 - **`.github/workflows/ci.yml` lines 68-95** — current `bench-dedup` job. Mixes correctness (`dedup_overlap_check`, line 82) with measurement (`dedup bench 1k/10k/50k`, lines 85-95, already gated to main pushes only).
-- **specs/23-bench-dedup-30-perf/spec.md** — original bench infrastructure spec (R-007 95% decision-overlap requirement).
+- **specs/23-bench-dedup-30-perf/spec.md** — original bench infrastructure spec (R-003 95% decision-overlap requirement).
 - **Sibling issue**: cache lbug build across CI runs — composes with this one. PR runtime improves dramatically when both land.
 - **Direct motivation**: PRs #113 and #114, both paused by Fabrik because three concurrent ~1h jobs per PR exceed the CI-wait window.

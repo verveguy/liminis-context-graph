@@ -101,9 +101,9 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
-      # R-007 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
+      # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
       # Runs here (not bench-dedup) so it shares the lbug build artifacts already in ./target/.
-      - name: dedup decision-overlap check (R-007)
+      - name: dedup decision-overlap check (R-003)
         run: cargo bench --bench search -- dedup_overlap_check
 
       - name: check no ML runtime deps
