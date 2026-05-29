@@ -39,6 +39,7 @@ jobs:
           path: |
             target/release/build/lbug-*
             target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
 
       # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
       # /home/runner/work/liminis-graph/liminis-graph/ — stable on GHA ubuntu-latest
@@ -80,6 +81,7 @@ jobs:
           path: |
             target/release/build/lbug-*
             target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
 
       # `cargo test` must stay --release: linking the 6 integration-test
       # binaries against lbug + third-party static archives in debug mode
@@ -150,6 +152,7 @@ jobs:
           path: |
             target/release/build/lbug-*
             target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
 
       - name: cargo bench --no-run
         run: cargo bench --no-run
@@ -180,6 +183,7 @@ jobs:
           path: |
             target/release/build/lbug-*
             target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
 
       # R-007 95% overlap is a correctness gate — runs on every PR.
       - name: dedup decision-overlap check (R-007)
