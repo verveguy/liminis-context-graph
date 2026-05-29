@@ -4,10 +4,55 @@ on:
   push:
   pull_request:
 
+env:
+  # Bump this date to manually bust the lbug C++ build cache (e.g., if a cache entry is corrupted).
+  # Incrementing this invalidates ALL existing lbug cache entries across all branches.
+  LBUG_CACHE_BUST: "2026-05-29"
+
 jobs:
+  build-lbug:
+    name: build lbug cache
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.lbug-cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        # Hash the entire lbug stanza from Cargo.lock (12 lines after the name line).
+        # This changes on version bump, checksum change, or dependency list change.
+        # Unrelated Cargo.lock changes (serde, tokio, etc.) do NOT affect this hash.
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore/cache lbug build artifacts
+        id: lbug-cache
+        uses: actions/cache@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+
+      # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
+      # /home/runner/work/liminis-graph/liminis-graph/ — stable on GHA ubuntu-latest
+      # but not portable to self-hosted runners with non-standard workspace paths.
+      - name: Build lbug from source (skipped on cache hit)
+        if: steps.lbug-cache.outputs.cache-hit != 'true'
+        env:
+          LBUG_BUILD_FROM_SOURCE: "1"
+        run: cargo build --release -p liminis-graph-core
+
   test:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: build-lbug
     env:
       # The prebuilt liblbug.a doesn't ship companion third-party archives;
       # build from source so all deps (fastpfor, brotli, lz4, zstd, yyjson…) are bundled.
@@ -19,13 +64,42 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lbug build artifacts from cache
+        id: lbug-cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
 
       # `cargo test` must stay --release: linking the 6 integration-test
       # binaries against lbug + third-party static archives in debug mode
       # OOMs the 7GB Ubuntu runner during `ld` (bus error / signal 7).
-      # Release dead-code-eliminates enough to fit. Clippy below runs in
-      # debug since it doesn't link binaries.
+      # Release dead-code-eliminates enough to fit.
+      - name: cargo build --release (capture output for cache regression check)
+        run: cargo build --release 2>&1 | tee /tmp/build.log
+
+      # FR-008: assert that lbug's C++ cmake build did NOT run on a cache-hit.
+      # If "Compiling lbug" appears in the build log on a cache-hit, the cache
+      # is silently broken and CI would creep back to ~1h wall-clock.
+      - name: Assert lbug not recompiled on cache-hit run (FR-008)
+        if: steps.lbug-cache-restore.outputs.cache-hit == 'true'
+        run: |
+          if grep -q "Compiling lbug " /tmp/build.log; then
+            echo "ERROR: lbug C++ recompiled despite cache-hit — cache is not working"
+            exit 1
+          fi
+          echo "OK: lbug cache hit confirmed, no recompilation"
+
       - name: cargo test
         run: cargo test --release
 
@@ -45,7 +119,7 @@ jobs:
           echo "OK: no ML runtime deps found"
 
       - name: cargo clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --release -- -D warnings
 
       - name: cargo fmt
         run: cargo fmt --check
@@ -53,6 +127,7 @@ jobs:
   bench-stub:
     name: bench compile (stub)
     runs-on: ubuntu-latest
+    needs: build-lbug
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
     steps:
@@ -60,7 +135,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
 
       - name: cargo bench --no-run
         run: cargo bench --no-run
@@ -68,6 +157,7 @@ jobs:
   bench-dedup:
     name: bench-dedup
     runs-on: ubuntu-latest
+    needs: build-lbug
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
     steps:
@@ -75,7 +165,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
 
       # R-007 95% overlap is a correctness gate — runs on every PR.
       - name: dedup decision-overlap check (R-007)
