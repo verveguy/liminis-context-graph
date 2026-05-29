@@ -203,15 +203,25 @@ impl WalReplayer {
                 });
 
                 if !is_known {
+                    let end = wal_line
+                        .cypher
+                        .char_indices()
+                        .nth(80)
+                        .map_or(wal_line.cypher.len(), |(i, _)| i);
                     eprintln!(
                         "[WAL WARN] skipping unrecognised mutation: {}",
-                        &wal_line.cypher.chars().take(80).collect::<String>()
+                        &wal_line.cypher[..end]
                     );
                     stats.unrecognised_lines += 1;
                     continue;
                 }
 
-                let is_match_prefixed = upper.split_whitespace().next().unwrap_or("") == "MATCH";
+                let trimmed = upper.trim_start();
+                let is_match_prefixed = trimmed.starts_with("MATCH")
+                    && trimmed
+                        .get(5..)
+                        .and_then(|s| s.chars().next())
+                        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
 
                 if opts.dry_run {
                     stats.lines_replayed += 1;
