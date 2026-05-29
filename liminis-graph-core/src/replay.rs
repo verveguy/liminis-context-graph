@@ -211,8 +211,7 @@ impl WalReplayer {
                     continue;
                 }
 
-                let is_match_prefixed =
-                    upper.split_whitespace().next().unwrap_or("") == "MATCH";
+                let is_match_prefixed = upper.split_whitespace().next().unwrap_or("") == "MATCH";
 
                 if opts.dry_run {
                     stats.lines_replayed += 1;
