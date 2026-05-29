@@ -63,12 +63,13 @@ fn main() -> Result<()> {
     let process_start = Instant::now();
     let args = Args::parse();
 
+    let ep = args.execution_provider.to_lowercase();
     eprintln!(
         "Loading model from {} (execution provider: {}) ...",
         args.model_dir.display(),
-        args.execution_provider
+        ep
     );
-    let mut embedder = match args.execution_provider.as_str() {
+    let mut embedder = match ep.as_str() {
         "cpu" => embedder::BgeEmbedder::load(&args.model_dir)?,
         #[cfg(target_os = "macos")]
         "coreml" => embedder::BgeEmbedder::load_with_coreml(&args.model_dir)?,
@@ -142,7 +143,7 @@ fn main() -> Result<()> {
     let output = Output {
         library: "ort",
         platform: platform_string(),
-        execution_provider: args.execution_provider.clone(),
+        execution_provider: ep.clone(),
         model_dir: args.model_dir.display().to_string(),
         cold_start_ms,
         warmup_iters: args.warmup,
