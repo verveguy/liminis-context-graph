@@ -71,10 +71,10 @@ gh workflow run bench.yml
 ```
 
 Results appear in the Actions tab under the "Perf Benchmarks" workflow. Each run uploads two artifacts (30-day retention):
-- **`bench-results-<sha>`** — plain-text criterion output for `1k`, `10k`, and `50k` dedup runs; readable directly in the GitHub UI.
-- **`criterion-html-<sha>`** — full criterion HTML reports; download locally for flamegraphs and comparison plots.
+- **`bench-results-<sha>`** — plain-text criterion output for `1k`, `10k`, and `50k` dedup runs; download the zip from the Actions UI to inspect.
+- **`criterion-html-<sha>`** — criterion HTML reports with interactive plots (box plots, violin plots); download locally for detailed comparison.
 
-The `dedup_overlap_check` correctness gate (R-007) still runs automatically on every PR as part of the `test` job — only the *measurement* steps moved to the on-demand workflow. To enable nightly automatic bench runs, uncomment the `schedule:` block in `.github/workflows/bench.yml`.
+The `dedup_overlap_check` correctness gate (R-003) still runs automatically on every PR as part of the `test` job — only the *measurement* steps moved to the on-demand workflow. To enable nightly automatic bench runs, uncomment the `schedule:` block in `.github/workflows/bench.yml`.
 
 ## When adding or modifying a struct field
 
