@@ -419,3 +419,133 @@ fn test_replay_opts_progress_abort() {
 
     assert_eq!(stats.files_read, 1, "replay aborted after first file");
 }
+
+/// FR-006: four_bucket_regression — each of the four stat buckets can be independently triggered.
+/// Writes a 4-line WAL: 1 valid mutation, 1 unrecognised shape, 1 unparseable JSON, 1 failed
+/// execution (duplicate primary key). Asserts each counter is 1, sum is 3, and the failure
+/// sample captures the Cypher snippet and error from the failing line.
+#[test]
+fn four_bucket_regression() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert a node so the fourth WAL line (a CREATE with same UUID) violates the PK.
+    conn.run_cypher("CREATE (:Entity {uuid: 'conflict-uuid-123'})").unwrap();
+
+    // Line 1: valid mutation — succeeds → lines_replayed
+    let line1 = r#"{"seq":0,"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'new-entity-ok'}) ON CREATE SET n.name = 'ok', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-05-22 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#;
+    // Line 2: read-only shape — no mutation keyword → unrecognised_lines
+    let line2 = r#"{"seq":1,"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MATCH (n) RETURN n","params":{}}"#;
+    // Line 3: malformed JSON — parse failure → unparseable_lines
+    let line3 = r#"not valid json {"#;
+    // Line 4: duplicate primary key — raw_query returns Err → failed_lines
+    let line4 = r#"{"seq":3,"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {uuid: 'conflict-uuid-123'})","params":{}}"#;
+
+    fs::write(
+        wal_dir.path().join("20260522_000000_aaa111_0000.jsonl"),
+        format!("{line1}\n{line2}\n{line3}\n{line4}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort even with failures");
+
+    assert_eq!(stats.lines_replayed, 1, "one successful mutation");
+    assert_eq!(stats.unrecognised_lines, 1, "MATCH...RETURN is unrecognised");
+    assert_eq!(stats.unparseable_lines, 1, "malformed JSON line");
+    assert_eq!(stats.failed_lines, 1, "duplicate PK causes execution failure");
+    assert_eq!(stats.lines_skipped(), 3, "sum of three failure buckets");
+    assert_eq!(stats.failed_samples.len(), 1, "one failure sample captured");
+    assert!(
+        !stats.failed_samples[0].cypher.is_empty(),
+        "sample must have a cypher snippet"
+    );
+    assert!(
+        stats.failed_samples[0].cypher.len() <= 200,
+        "cypher snippet must be truncated to 200 chars"
+    );
+    assert!(
+        !stats.failed_samples[0].error.is_empty(),
+        "sample must have a non-empty error message"
+    );
+}
+
+/// FR-006: sample_cap_respected — failure_sample_cap limits the number of collected samples.
+#[test]
+fn sample_cap_respected() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert so all 5 CREATE lines will fail with duplicate PK.
+    conn.run_cypher("CREATE (:Entity {uuid: 'dup-cap-uuid'})").unwrap();
+
+    let content: String = (0..5u64)
+        .map(|seq| {
+            format!(
+                r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'dup-cap-uuid'}})","params":{{}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    fs::write(
+        wal_dir.path().join("20260522_000000_bbb222_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(3),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort");
+
+    assert_eq!(stats.failed_lines, 5, "all five lines failed");
+    assert_eq!(
+        stats.failed_samples.len(),
+        3,
+        "only first 3 samples collected (cap=3)"
+    );
+}
+
+/// FR-006: empty_wal_all_zeros — all new counters are zero and failed_samples is empty.
+#[test]
+fn empty_wal_all_zeros() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(&conn, ReplayOptions::default())
+        .expect("replay empty dir");
+
+    assert_eq!(stats.lines_replayed, 0);
+    assert_eq!(stats.unrecognised_lines, 0);
+    assert_eq!(stats.failed_lines, 0);
+    assert_eq!(stats.unparseable_lines, 0);
+    assert_eq!(stats.lines_skipped(), 0);
+    assert!(stats.failed_samples.is_empty(), "no failures → empty sample vec");
+}
