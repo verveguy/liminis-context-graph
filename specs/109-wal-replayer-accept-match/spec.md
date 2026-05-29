@@ -84,7 +84,7 @@ The MATCH-aware detection MUST NOT treat read-only `MATCH … RETURN` queries as
 
 ### Edge Cases
 
-- **Cypher with comments containing keywords**: `// SET this later` followed by a pure MATCH-RETURN should NOT be classified as a mutation. Strip Cypher line comments (`//…` and `/* … */`) before keyword scanning.
+- **Cypher with comments containing keywords**: `// SET this later` followed by a pure MATCH-RETURN should NOT be classified as a mutation. **Known limitation**: the current implementation does NOT strip Cypher line (`//`) or block (`/* … */`) comments — a mutation keyword appearing only inside a comment will produce a false-positive classification. This is an accepted trade-off: neither graphiti nor liminis-graph emits commented Cypher in WAL lines, so the gap is benign in practice. See `strip_quoted_literals` in `wal.rs` for the documented constraint.
 - **`MATCH … MERGE …` patterns** (insert-if-missing-against-an-existing-anchor): MUST be classified as mutation (the MERGE writes if not present).
 - **Embedding writes with `$embedding` placeholder of unexpected dim**: If a WAL was written under a different embedding dimension than the current model produces, `raw_query` will fail at execution. This is correctly handled today (counted as a failed line). No change needed; WAL-from-different-embedder is a known limitation.
 - **`MATCH (n) RETURN count(n)`** and similar aggregation reads: classified as non-mutation, skipped (no execution overhead).
