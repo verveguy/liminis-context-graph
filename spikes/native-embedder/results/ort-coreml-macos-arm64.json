@@ -1,0 +1,26 @@
+{
+  "library": "ort",
+  "platform": "macos/aarch64",
+  "execution_provider": "coreml",
+  "model_dir": "models/bge-base-onnx",
+  "cold_start_ms": 1785.6067090000001,
+  "warmup_iters": 100,
+  "bench": {
+    "p50_ms": 33.125375,
+    "p95_ms": 59.873917,
+    "p99_ms": 64.303,
+    "min_ms": 21.013042,
+    "max_ms": 67.07100000000001,
+    "mean_ms": 35.530208334999976,
+    "batch_throughput_per_sec": 28.717149129429753,
+    "n_iters": 200
+  },
+  "parity": {
+    "min_cosine": 0.9222723,
+    "max_cosine": 1.000001,
+    "mean_cosine": 0.99844545,
+    "n_below_threshold": 1,
+    "threshold": 0.999,
+    "passed": false
+  }
+}
