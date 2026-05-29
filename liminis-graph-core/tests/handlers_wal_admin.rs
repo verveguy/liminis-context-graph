@@ -409,3 +409,152 @@ async fn test_rebuild_status_completed_after_background_job() {
         }
     }
 }
+
+// ── new stat-field assertions (FR-002, Task 9) ───────────────────────────────
+
+fn assert_has_stat_fields(v: &Value, label: &str) {
+    for field in &[
+        "unrecognised_lines",
+        "failed_lines",
+        "unparseable_lines",
+        "lines_skipped",
+        "failed_samples",
+    ] {
+        assert!(
+            v["result"].get(field).is_some(),
+            "{label}: result missing '{field}': {v}"
+        );
+    }
+    assert!(
+        v["result"]["failed_samples"].is_array(),
+        "{label}: failed_samples must be an array: {v}"
+    );
+}
+
+/// dry_run response includes all four granular stat fields plus failed_samples.
+#[tokio::test]
+async fn test_rebuild_from_wal_dry_run_has_stat_fields() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_stat_dryrun.jsonl"),
+        entity_wal_line(0, "stat-dry-a") + "\n" + &entity_wal_line(1, "stat-dry-b") + "\n",
+    )
+    .unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+    let v = dispatch(
+        30,
+        "knowledge_rebuild_from_wal",
+        json!({"dry_run": true}),
+        state,
+    )
+    .await;
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_has_stat_fields(&v, "dry_run");
+    assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+    assert_eq!(v["result"]["lines_skipped"], 0, "{v}");
+    assert_eq!(v["result"]["failed_samples"], json!([]), "{v}");
+}
+
+/// streaming path response includes all four granular stat fields plus failed_samples.
+#[tokio::test]
+async fn test_rebuild_from_wal_streaming_has_stat_fields() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_stat_stream.jsonl"),
+        entity_wal_line(0, "stat-stream-a") + "\n" + &entity_wal_line(1, "stat-stream-b") + "\n",
+    )
+    .unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: serde_json::Value::Number(31.into()),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    // Drain any progress events
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_has_stat_fields(&v, "streaming");
+    assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+    assert_eq!(v["result"]["lines_skipped"], 0, "{v}");
+    assert_eq!(v["result"]["failed_samples"], json!([]), "{v}");
+}
+
+/// background job result stored in rebuild_status also includes all granular stat fields.
+#[tokio::test]
+async fn test_rebuild_status_result_has_stat_fields() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_stat_bg.jsonl"),
+        entity_wal_line(0, "stat-bg-a") + "\n",
+    )
+    .unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // Start the background rebuild
+    let v = dispatch(
+        32,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["success"], true, "{v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    // Poll until completed (up to 5 seconds), then check the stored result JSON
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            33,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => {
+                // The per-replay stats are stored in the nested result.result object
+                let inner = &status_v["result"]["result"];
+                for field in &[
+                    "unrecognised_lines",
+                    "failed_lines",
+                    "unparseable_lines",
+                    "lines_skipped",
+                    "failed_samples",
+                ] {
+                    assert!(
+                        inner.get(field).is_some(),
+                        "bg-job-result: result.result missing '{field}': {status_v}"
+                    );
+                }
+                assert!(
+                    inner["failed_samples"].is_array(),
+                    "failed_samples must be array: {status_v}"
+                );
+                assert_eq!(inner["failed_samples"], json!([]), "{status_v}");
+                return;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 5s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    }
+}
