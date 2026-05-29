@@ -283,7 +283,11 @@ fn test_replay_skips_pure_match_return() {
         .replay(&conn)
         .expect("replay");
 
-    assert_eq!(stats.lines_skipped(), 1, "pure MATCH-RETURN must be skipped");
+    assert_eq!(
+        stats.lines_skipped(),
+        1,
+        "pure MATCH-RETURN must be skipped"
+    );
     assert_eq!(stats.lines_replayed, 0, "no mutations were replayed");
 }
 
