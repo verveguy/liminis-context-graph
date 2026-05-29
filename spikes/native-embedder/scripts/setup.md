@@ -138,7 +138,8 @@ COREML_VERBOSE=1 /usr/bin/time -l ./target/release/ort-bench \
 ```
 
 Pass 1 may take 30–120 s on first launch while CoreML compiles the model.
-Record the `cold_start_ms` value — it reflects CoreML compilation time.
+Record the `cold_start_ms` value — it measures time from process start to first
+embedding, which on first launch includes CoreML model load and compilation time.
 The `COREML_VERBOSE=1` environment variable may emit per-op dispatch info to
 stderr; capture it in the log file. If no dispatch info appears, observe ANE
 activity separately via `sudo powermetrics --samplers gpu_power`.
@@ -194,6 +195,7 @@ Each benchmark writes a JSON file with this schema:
 {
   "library": "candle|ort",
   "platform": "macos/aarch64",
+  "execution_provider": "cpu|coreml",  // ort-bench only
   "cold_start_ms": 1234,
   "bench": {
     "p50_ms": 15.2,

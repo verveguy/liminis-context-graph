@@ -374,7 +374,7 @@ Same harness, corpus, and protocol as the original spike:
 | Batch throughput (sent/s) | 93.7 | **28.7** | — |
 | RSS (steady state) | ~397 MB | **~1 675 MB** | ≤500 MB (SC-004) |
 | Cold start, cached run | 194 ms | **1 786 ms** | ≤2 000 ms (SC-005) |
-| Cold start, first launch | — | **~2 050 ms** | ≤2 000 ms |
+| Cold start, first launch | — | **~2 050 ms** | — (informational; SC-005 applies to cached run only) |
 | Cosine parity (min) | 0.9223 | 0.9223 | — |
 | n\_below\_0.999 | 1/50 | 1/50 | 0 (SC-001) |
 
@@ -384,8 +384,9 @@ RSS values via `/usr/bin/time -l` peak memory footprint:
 
 #### Compute unit identification (FR-005)
 
-`COREML_VERBOSE=1` produced no per-op dispatch log — ort rc.12 does not forward this
-environment variable to CoreML's internal logging. The three repeated warnings
+`COREML_VERBOSE=1` produced no per-op dispatch log in this run — no per-op dispatch
+output appeared in the captured logs (behavior may depend on ORT build or macOS version).
+The three repeated warnings
 `Context leak detected, CoreAnalytics returned false` during model load indicate that
 CoreML's analytics context failed to initialize, suggesting the CoreML EP encountered
 partial compatibility issues with this ONNX model's opset.
