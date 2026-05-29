@@ -111,7 +111,8 @@ fn test_replay_skips_unknown_op_without_abort() {
         .expect("replay must not abort");
 
     assert_eq!(
-        stats.lines_skipped(), 1,
+        stats.lines_skipped(),
+        1,
         "unknown op must be counted as skipped"
     );
     assert_eq!(stats.lines_replayed, 0);
@@ -434,7 +435,8 @@ fn four_bucket_regression() {
     conn.init_schema(4).unwrap();
 
     // Pre-insert a node so the fourth WAL line (a CREATE with same UUID) violates the PK.
-    conn.run_cypher("CREATE (:Entity {uuid: 'conflict-uuid-123'})").unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid: 'conflict-uuid-123'})")
+        .unwrap();
 
     // Line 1: valid mutation — succeeds → lines_replayed
     let line1 = r#"{"seq":0,"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'new-entity-ok'}) ON CREATE SET n.name = 'ok', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-05-22 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#;
@@ -462,9 +464,15 @@ fn four_bucket_regression() {
         .expect("replay must not abort even with failures");
 
     assert_eq!(stats.lines_replayed, 1, "one successful mutation");
-    assert_eq!(stats.unrecognised_lines, 1, "MATCH...RETURN is unrecognised");
+    assert_eq!(
+        stats.unrecognised_lines, 1,
+        "MATCH...RETURN is unrecognised"
+    );
     assert_eq!(stats.unparseable_lines, 1, "malformed JSON line");
-    assert_eq!(stats.failed_lines, 1, "duplicate PK causes execution failure");
+    assert_eq!(
+        stats.failed_lines, 1,
+        "duplicate PK causes execution failure"
+    );
     assert_eq!(stats.lines_skipped(), 3, "sum of three failure buckets");
     assert_eq!(stats.failed_samples.len(), 1, "one failure sample captured");
     assert!(
@@ -492,7 +500,8 @@ fn sample_cap_respected() {
     conn.init_schema(4).unwrap();
 
     // Pre-insert so all 5 CREATE lines will fail with duplicate PK.
-    conn.run_cypher("CREATE (:Entity {uuid: 'dup-cap-uuid'})").unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid: 'dup-cap-uuid'})")
+        .unwrap();
 
     let content: String = (0..5u64)
         .map(|seq| {
@@ -547,5 +556,8 @@ fn empty_wal_all_zeros() {
     assert_eq!(stats.failed_lines, 0);
     assert_eq!(stats.unparseable_lines, 0);
     assert_eq!(stats.lines_skipped(), 0);
-    assert!(stats.failed_samples.is_empty(), "no failures → empty sample vec");
+    assert!(
+        stats.failed_samples.is_empty(),
+        "no failures → empty sample vec"
+    );
 }
