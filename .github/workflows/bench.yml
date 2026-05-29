@@ -1,0 +1,63 @@
+name: Perf Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      measurement_time:
+        description: 'Criterion measurement time in seconds (per bench)'
+        required: false
+        default: '30'
+
+  # Uncomment the block below to enable nightly perf tracking (P3 optional feature).
+  # schedule:
+  #   - cron: '0 2 * * *'  # 02:00 UTC every night
+
+jobs:
+  bench:
+    name: bench (ubuntu-latest)
+    runs-on: ubuntu-latest
+    env:
+      LBUG_BUILD_FROM_SOURCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: compile bench binaries
+        run: cargo bench --no-run
+
+      - name: dedup bench 1k
+        run: |
+          cargo bench --bench search -- 1k --measurement-time ${{ inputs.measurement_time || '30' }} \
+            2>&1 | tee bench-1k.txt
+
+      - name: dedup bench 10k
+        run: |
+          cargo bench --bench search -- 10k --measurement-time ${{ inputs.measurement_time || '30' }} \
+            2>&1 | tee bench-10k.txt
+
+      - name: dedup bench 50k
+        run: |
+          cargo bench --bench search -- dedup_50k \
+            2>&1 | tee bench-50k.txt
+
+      - name: upload bench results (text)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results-${{ github.sha }}
+          path: |
+            bench-1k.txt
+            bench-10k.txt
+            bench-50k.txt
+          retention-days: 30
+
+      - name: upload criterion HTML reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criterion-html-${{ github.sha }}
+          path: target/criterion/
+          retention-days: 30
