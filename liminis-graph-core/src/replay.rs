@@ -31,6 +31,8 @@ pub struct ReplayStats {
     pub files_read: u64,
     /// Always 0 — callers invoke `knowledge_build_indices` separately after rebuild.
     pub indexes_created: u64,
+    /// Mutations whose Cypher began with MATCH (e.g. MATCH … SET for embedding enrichment).
+    pub match_prefixed_replayed: u64,
 }
 
 impl ReplayStats {
@@ -107,6 +109,7 @@ impl WalReplayer {
             failed_samples: Vec::new(),
             files_read: 0,
             indexes_created: 0,
+            match_prefixed_replayed: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -208,12 +211,23 @@ impl WalReplayer {
                     continue;
                 }
 
+                let is_match_prefixed =
+                    upper.split_whitespace().next().unwrap_or("") == "MATCH";
+
                 if opts.dry_run {
                     stats.lines_replayed += 1;
+                    if is_match_prefixed {
+                        stats.match_prefixed_replayed += 1;
+                    }
                 } else {
                     let cypher = interpolate_params(&wal_line.cypher, &wal_line.params);
                     match conn.raw_query(&cypher) {
-                        Ok(_) => stats.lines_replayed += 1,
+                        Ok(_) => {
+                            stats.lines_replayed += 1;
+                            if is_match_prefixed {
+                                stats.match_prefixed_replayed += 1;
+                            }
+                        }
                         Err(e) => {
                             eprintln!(
                                 "[WAL WARN] replay execution error at line {} in {:?}: {}",
