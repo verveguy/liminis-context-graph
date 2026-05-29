@@ -48,12 +48,27 @@ See [scripts/setup.md](scripts/setup.md) for model download and ONNX export step
 ### 4. Run ort-bench (macOS / Linux)
 
 ```bash
+# CPU execution provider (default, cross-platform)
 /usr/bin/time -l ./target/release/ort-bench \
   --model-dir models/bge-base-onnx \
   --warmup 100 --iters 200 \
   --parity-json reference_embeddings.json \
   --output-json results/ort-macos-arm64.json
+
+# CoreML execution provider (macOS only — see scripts/setup.md Step 8 for two-pass protocol)
+COREML_VERBOSE=1 /usr/bin/time -l ./target/release/ort-bench \
+  --model-dir models/bge-base-onnx \
+  --warmup 100 --iters 200 \
+  --execution-provider coreml \
+  --parity-json reference_embeddings.json \
+  --output-json results/ort-coreml-macos-arm64.json
 ```
+
+`--execution-provider` accepts `cpu` (default) or `coreml`. The `coreml` value
+routes inference through ort's CoreML execution provider on macOS Apple Silicon.
+On non-macOS platforms, `coreml` will exit with a clear error. Run the two-pass
+cold-start protocol from `scripts/setup.md` Step 8 before benchmarking CoreML EP
+to avoid recording CoreML's first-launch compilation time as benchmark overhead.
 
 ### 5. Run on Linux x86_64 (via Docker)
 

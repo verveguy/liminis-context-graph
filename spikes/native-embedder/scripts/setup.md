@@ -114,6 +114,58 @@ chmod +x scripts/run-linux.sh
 ./scripts/run-linux.sh
 ```
 
+## Step 8: Run ort-bench with CoreML execution provider (macOS only)
+
+The `--execution-provider coreml` flag routes inference through ort's CoreML EP.
+This requires a **two-pass protocol** because CoreML compiles the ONNX subgraph
+on first launch (30–120 s for a 110M-parameter model); the SC-005 cold-start
+threshold (≤2 s) applies to the *cached* run only.
+
+### Clear the CoreML cache (for a clean first-launch time)
+
+```bash
+rm -rf ~/Library/Caches/com.microsoft.onnxruntime*
+```
+
+### Pass 1: prime the CoreML cache and record compilation time
+
+```bash
+COREML_VERBOSE=1 /usr/bin/time -l ./target/release/ort-bench \
+  --model-dir models/bge-base-onnx \
+  --warmup 5 --iters 5 \
+  --execution-provider coreml \
+  2>&1 | tee results/ort-coreml-primer.log
+```
+
+Pass 1 may take 30–120 s on first launch while CoreML compiles the model.
+Record the `cold_start_ms` value — it reflects CoreML compilation time.
+The `COREML_VERBOSE=1` environment variable may emit per-op dispatch info to
+stderr; capture it in the log file. If no dispatch info appears, observe ANE
+activity separately via `sudo powermetrics --samplers gpu_power`.
+
+### Pass 2: run the actual benchmark (warm CoreML cache)
+
+```bash
+COREML_VERBOSE=1 /usr/bin/time -l ./target/release/ort-bench \
+  --model-dir models/bge-base-onnx \
+  --warmup 100 --iters 200 \
+  --execution-provider coreml \
+  --parity-json reference_embeddings.json \
+  --output-json results/ort-coreml-macos-arm64.json \
+  2>&1 | tee results/ort-coreml-macos-arm64.log
+```
+
+Pass 2 `cold_start_ms` reflects the cached CoreML load time (≤2 s expected
+if the CoreML cache is warm from Pass 1).
+
+**Outputs**:
+- `results/ort-coreml-primer.log` — Pass 1 log (includes compilation time)
+- `results/ort-coreml-macos-arm64.json` — Pass 2 benchmark JSON
+- `results/ort-coreml-macos-arm64.log` — Pass 2 full log
+
+**Note**: `coreml` is macOS-only. Running `--execution-provider coreml` on
+Linux will exit with: `Error: CoreML EP is only available on macOS`.
+
 ## Measuring binary size delta
 
 The spike crate is not linked into `liminis-graph`. To estimate the binary

@@ -294,6 +294,11 @@ addressed via Metal/CUDA acceleration, the Linux memory footprint is a separate 
 native embedder for the OSS bundle. The ONNX export step should be automated or a
 pre-exported model should be shipped.
 
+**Updated after Issue #111 (ort+CoreML EP measurement)**: The CoreML execution provider
+did not close the gap. See the CoreML EP Addendum below for measurements. The dual-path
+architecture (Swift CoreML sidecar for macOS Liminis-app; ort+CPU for the cross-platform
+OSS bundle) remains the correct recommendation.
+
 ---
 
 ## Notes on ADR-0044 Principle V
@@ -326,6 +331,93 @@ Verdict is **GO-with-caveats** for `ort`:
    - Decide whether to ship pre-exported ONNX model or require export at setup time.
 3. Update `liminis-graph/ideas/oss-launch-architecture.md` to record this spike's
    findings: candle is a dead end (latency), ort is the path forward for Option B.
+
+---
+
+---
+
+## CoreML EP Addendum (Issue #111)
+
+**Date**: 2026-05-28
+**Branch**: `fabrik/issue-111`
+**Question**: Can ort with the CoreML execution provider match or beat the Swift CoreML sidecar's 20 ms p95 on macOS Apple Silicon? If yes, consolidate on a single ort-based embedder path for both Mac and Linux.
+
+### Methodology
+
+Same harness, corpus, and protocol as the original spike:
+
+- **Model**: BAAI/bge-base-en-v1.5 (ONNX, opset 18, exported via `torch.onnx.export` inline format)
+- **Corpus**: 200-sentence latency benchmark + 50-sentence parity reference
+- **Protocol**: 100 warmup + 200 timed iterations; two-pass cold-start (Pass 1 primes CoreML cache, Pass 2 is the benchmark)
+- **Platform**: macOS arm64 (Apple Silicon)
+- **ort version**: 2.0.0-rc.12 with `features = ["coreml"]`
+- **Results committed**: `spikes/native-embedder/results/ort-coreml-macos-arm64.json`
+
+### Results: ort+CoreML EP on macOS Apple Silicon
+
+#### Single-input latency
+
+| Metric | ort+CPU (#107) | ort+CoreML EP | Swift sidecar |
+|--------|---------------|---------------|---------------|
+| p50 ms | 8.8 | **33.1** | ~19.5 |
+| p95 ms | 26.2 | **59.9** | **20.0** (baseline) |
+| p99 ms | 28.1 | **64.3** | ~20.3 |
+| min ms | 5.5 | 21.0 | — |
+| max ms | 29.2 | 67.1 | — |
+| mean ms | 10.7 | 35.5 | — |
+| p99/p50 ratio | 3.2× | **1.94×** | ~1.04× |
+
+#### Other measurements
+
+| Metric | ort+CPU (#107) | ort+CoreML EP | Threshold |
+|--------|---------------|---------------|-----------|
+| Batch throughput (sent/s) | 93.7 | **28.7** | — |
+| RSS (steady state) | ~397 MB | **~1 675 MB** | ≤500 MB (SC-004) |
+| Cold start, cached run | 194 ms | **1 786 ms** | ≤2 000 ms (SC-005) |
+| Cold start, first launch | — | **~2 050 ms** | ≤2 000 ms |
+| Cosine parity (min) | 0.9223 | 0.9223 | — |
+| n\_below\_0.999 | 1/50 | 1/50 | 0 (SC-001) |
+
+RSS values via `/usr/bin/time -l` peak memory footprint:
+- ort+CoreML EP: 2,044,528,656 bytes (~1 950 MB peak) during benchmark; 1,756,119,040 bytes maximum RSS
+- ort+CPU (same inline ONNX model): 635,110,456 bytes (~606 MB)
+
+#### Compute unit identification (FR-005)
+
+`COREML_VERBOSE=1` produced no per-op dispatch log — ort rc.12 does not forward this
+environment variable to CoreML's internal logging. The three repeated warnings
+`Context leak detected, CoreAnalytics returned false` during model load indicate that
+CoreML's analytics context failed to initialize, suggesting the CoreML EP encountered
+partial compatibility issues with this ONNX model's opset.
+
+From the performance signature — latency 3.8× *worse* than ort+CPU, throughput 3.3×
+*worse*, and RSS 4.2× *higher* — the most likely explanation is heavy CPU fallback:
+most BERT ops in the opset-18 model are not supported by the CoreML EP in ort rc.12,
+so they execute on CPU via the partition-fallback path. The CoreML dispatch overhead
+(data copies, op partitioning) adds latency on top of the CPU cost, and CoreML's
+intermediate buffers inflate RSS dramatically. Effective compute unit: CPU (fallback).
+
+### Verdict
+
+**ort+CoreML EP on macOS: NO-GO — keep split (>20 ms p95)**
+
+All three of the SC-002 variant conditions fail:
+
+1. **p95 latency**: 59.9 ms >> 20 ms threshold (3.0× over; also 2.3× worse than ort+CPU)
+2. **p99/p50 tail ratio**: 1.94× > 1.5× threshold
+3. **RSS (SC-004)**: ~1 675 MB >> 500 MB threshold (3.4× over)
+
+The CoreML EP does not accelerate BERT inference for this ONNX model; it degrades both
+latency and memory compared to the CPU execution provider. This rules out ort+CoreML EP
+as a replacement for the Swift CoreML sidecar.
+
+**Architecture decision**: The dual-path recommendation from Issue #107 stands unchanged:
+- **macOS Liminis-app**: Swift CoreML sidecar (20 ms p95, ANE/GPU/CPU via CoreML runtime)
+- **Cross-platform OSS bundle**: ort with CPU execution provider (26 ms p95, 397 MB RSS)
+
+If a future ort release improves CoreML EP compatibility with transformer ONNX models
+(particularly for opset 17–18 BERT graphs), re-measurement would be warranted. Until
+then, the consolidation question is closed: **keep split**.
 
 ---
 
@@ -406,3 +498,45 @@ Result JSON files committed at `spikes/native-embedder/results/`:
 candle on Linux x86_64 via Docker (QEMU) panics at startup due to FMA instruction
 emulation gap. See Section 4 for details. candle Linux measurements require a native
 x86_64 host.
+
+### ort-coreml-macos-arm64.json (Issue #111)
+
+Two-pass protocol: Pass 1 primed the CoreML cache (cold_start=2 050 ms, first-launch
+compilation); Pass 2 below is the benchmark result (100 warmup + 200 timed iterations).
+
+```json
+{
+  "library": "ort",
+  "platform": "macos/aarch64",
+  "execution_provider": "coreml",
+  "model_dir": "models/bge-base-onnx",
+  "cold_start_ms": 1785.6067090000001,
+  "warmup_iters": 100,
+  "bench": {
+    "p50_ms": 33.125375,
+    "p95_ms": 59.873917,
+    "p99_ms": 64.303,
+    "min_ms": 21.013042,
+    "max_ms": 67.07100000000001,
+    "mean_ms": 35.530208334999976,
+    "batch_throughput_per_sec": 28.717149129429753,
+    "n_iters": 200
+  },
+  "parity": {
+    "min_cosine": 0.9222723,
+    "max_cosine": 1.000001,
+    "mean_cosine": 0.99844545,
+    "n_below_threshold": 1,
+    "threshold": 0.999,
+    "passed": false
+  }
+}
+```
+
+**Memory (RSS)**:
+- ort+CoreML EP macOS arm64: 1,756,119,040 bytes max RSS (~1 675 MB) via `/usr/bin/time -l`
+- Peak memory footprint: 2,044,528,656 bytes (~1 950 MB) during benchmark run
+
+**COREML_VERBOSE output**: No per-op dispatch information emitted. Three
+`Context leak detected, CoreAnalytics returned false` warnings appeared during
+model load, indicating partial CoreML compatibility issues.
