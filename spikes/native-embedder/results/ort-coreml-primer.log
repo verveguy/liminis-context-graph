@@ -1,0 +1,47 @@
+Loading model from models/bge-base-onnx (execution provider: coreml) ...
+Context leak detected, CoreAnalytics returned false
+Context leak detected, CoreAnalytics returned false
+Context leak detected, CoreAnalytics returned false
+Cold start: 2050 ms
+Warmup (5 iters) ...
+Benchmarking (5 iters) ...
+Batch throughput (3 trials × 200 sentences) ...
+{
+  "library": "ort",
+  "platform": "macos/aarch64",
+  "execution_provider": "coreml",
+  "model_dir": "models/bge-base-onnx",
+  "cold_start_ms": 2049.935917,
+  "warmup_iters": 5,
+  "bench": {
+    "p50_ms": 28.178333,
+    "p95_ms": 29.043083,
+    "p99_ms": 29.043083,
+    "min_ms": 20.716625,
+    "max_ms": 29.043083,
+    "mean_ms": 26.7393666,
+    "batch_throughput_per_sec": 29.23545627553616,
+    "n_iters": 5
+  },
+  "parity": null
+}
+
+p50=28.2ms p95=29.0ms batch=29sent/s
+       23.47 real        45.71 user        13.09 sys
+          2112421888  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              158169  page reclaims
+                  83  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 202  voluntary context switches
+             1263903  involuntary context switches
+        575725965887  instructions retired
+        198577712509  cycles elapsed
+          2400962840  peak memory footprint

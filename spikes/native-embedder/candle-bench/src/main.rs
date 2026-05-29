@@ -11,7 +11,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "candle-bench", about = "BGE-base-en-v1.5 embedding spike — candle backend")]
+#[command(
+    name = "candle-bench",
+    about = "BGE-base-en-v1.5 embedding spike — candle backend"
+)]
 struct Args {
     /// Directory containing model.safetensors, config.json, tokenizer.json
     #[arg(long)]
@@ -81,7 +84,10 @@ fn main() -> Result<()> {
     }
 
     // Batch throughput: embed all 200 bench sentences sequentially, 3 trials
-    eprintln!("Batch throughput (3 trials × {} sentences) ...", bench_sents.len());
+    eprintln!(
+        "Batch throughput (3 trials × {} sentences) ...",
+        bench_sents.len()
+    );
     let mut batch_total_ms = f64::MAX;
     for _ in 0..3 {
         let t0 = Instant::now();
@@ -135,8 +141,10 @@ fn main() -> Result<()> {
         println!("{}", json);
     }
 
-    eprintln!("\np50={:.1}ms p95={:.1}ms batch={:.0}sent/s",
-        output.bench.p50_ms, output.bench.p95_ms, output.bench.batch_throughput_per_sec);
+    eprintln!(
+        "\np50={:.1}ms p95={:.1}ms batch={:.0}sent/s",
+        output.bench.p50_ms, output.bench.p95_ms, output.bench.batch_throughput_per_sec
+    );
 
     Ok(())
 }

@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use ort::execution_providers::CoreMLExecutionProvider;
 use ort::{session::Session, value::TensorRef};
 use tokenizers::Tokenizer;
 
@@ -14,6 +16,24 @@ impl BgeEmbedder {
         let onnx_path = model_dir.join("model.onnx");
         let session = Session::builder()
             .context("creating ort Session builder")?
+            .commit_from_file(&onnx_path)
+            .with_context(|| format!("loading ONNX model from {}", onnx_path.display()))?;
+
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .with_context(|| format!("loading {}", tokenizer_path.display()))?;
+
+        Ok(BgeEmbedder { session, tokenizer })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn load_with_coreml(model_dir: &std::path::Path) -> Result<Self> {
+        let onnx_path = model_dir.join("model.onnx");
+        let session = Session::builder()
+            .context("creating ort Session builder")?
+            .with_execution_providers([CoreMLExecutionProvider::default().build()])
+            .map_err(|e| anyhow::anyhow!("registering CoreML execution provider: {e}"))?
             .commit_from_file(&onnx_path)
             .with_context(|| format!("loading ONNX model from {}", onnx_path.display()))?;
 
