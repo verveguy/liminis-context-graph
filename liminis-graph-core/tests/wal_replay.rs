@@ -162,8 +162,8 @@ fn test_replay_golden_fixture_counts() {
         .replay(&conn)
         .expect("replay fixture");
 
-    // Line 4 (MATCH ... SET) contains SET keyword so is correctly replayed.
-    assert_eq!(stats.lines_replayed, 5, "5 mutation lines replayed");
+    // Lines 4, 6, 7 are MATCH-prefixed mutations; all 8 lines are replayed.
+    assert_eq!(stats.lines_replayed, 8, "8 mutation lines replayed");
     assert_eq!(stats.lines_skipped(), 0, "no lines skipped");
 
     let entity_count = conn.count_nodes("Entity").unwrap();
@@ -198,6 +198,124 @@ fn test_open_or_rebuild_from_wal() {
     assert_eq!(
         episodic_count, 2,
         "expected 2 Episodic nodes after WAL rebuild"
+    );
+}
+
+/// MATCH-SET mutations in the fixture update field values; verify they landed (FR-006).
+#[test]
+fn test_replay_golden_fixture_field_updates() {
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let wal_dir_temp = TempDir::new().unwrap();
+    fs::copy(
+        fixture_path("python_produced.jsonl"),
+        wal_dir_temp
+            .path()
+            .join("20260519_000000_aaa111_0000.jsonl"),
+    )
+    .unwrap();
+
+    let _stats = WalReplayer::new(wal_dir_temp.path())
+        .replay(&conn)
+        .expect("replay fixture");
+
+    // Seq 4: MATCH Entity entity-0 SET attributes — verify the attribute value was written.
+    let entity = conn
+        .get_entity_by_uuid("entity-0")
+        .expect("query ok")
+        .expect("entity-0 exists");
+    assert_eq!(
+        entity.attributes, "{\"updated\":true}",
+        "entity-0 attributes should reflect MATCH-SET from seq 4"
+    );
+
+    // Seq 6: MATCH Episodic episodic-0 SET content_embedding — verify the embedding changed.
+    // The original value (seq 2) was [0.5,0.5,0.5,0.5]; the update sets [0.9,0.8,0.7,0.6].
+    let emb_rows = conn
+        .cypher_query("MATCH (n:Episodic {uuid: 'episodic-0'}) RETURN n.content_embedding")
+        .expect("cypher ok");
+    assert!(!emb_rows.is_empty(), "episodic-0 must exist");
+    let emb_str = &emb_rows[0][0];
+    // The updated embedding [0.9,0.8,0.7,0.6] contains "0.9"; the original [0.5,0.5,0.5,0.5] does not.
+    assert!(
+        emb_str.contains("0.9"),
+        "content_embedding should reflect update to [0.9,0.8,0.7,0.6], got: {emb_str:?}"
+    );
+
+    // Seq 7: MATCH RelatesToNode_ edge-0 SET fact_embedding — verify the embedding changed.
+    // The original value (seq 5 CREATE) was [0.1,0.2,0.3,0.4]; the update sets [0.5,0.4,0.3,0.2].
+    let fe_rows = conn
+        .cypher_query("MATCH (rn:RelatesToNode_ {uuid: 'edge-0'}) RETURN rn.fact_embedding")
+        .expect("cypher ok");
+    assert!(!fe_rows.is_empty(), "RelatesToNode_ edge-0 must exist");
+    let fe_str = &fe_rows[0][0];
+    // The updated embedding starts with 0.5; the original started with 0.1 (no "0.5" in original).
+    assert!(
+        fe_str.contains("0.5"),
+        "fact_embedding should reflect update to [0.5,0.4,0.3,0.2], got: {fe_str:?}"
+    );
+}
+
+/// Pure MATCH … RETURN queries (no mutation clause) are classified as non-mutations and skipped (SC-006).
+#[test]
+fn test_replay_skips_pure_match_return() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'x'}) RETURN n.uuid","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay");
+
+    assert_eq!(stats.lines_skipped(), 1, "pure MATCH-RETURN must be skipped");
+    assert_eq!(stats.lines_replayed, 0, "no mutations were replayed");
+}
+
+/// match_prefixed_replayed counter increments for MATCH-prefixed mutations only (FR-007).
+#[test]
+fn test_replay_match_prefixed_counter() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Two lines: one MERGE (not match-prefixed), one MATCH … SET (match-prefixed).
+    let merge_line = make_entity_line(0, "counter-entity");
+    let match_line = r#"{"seq":1,"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'counter-entity'}) SET n.summary = 'updated'","params":{}}"#;
+    let content = format!("{merge_line}\n{match_line}\n");
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay");
+
+    assert_eq!(stats.lines_replayed, 2, "both mutations must be replayed");
+    assert_eq!(
+        stats.match_prefixed_replayed, 1,
+        "only the MATCH-prefixed line counts as match_prefixed_replayed"
     );
 }
 
