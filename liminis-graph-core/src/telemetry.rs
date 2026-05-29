@@ -40,9 +40,11 @@ pub enum TelemetryEvent {
     },
     WalReplayComplete {
         ts_ms: u64,
-        episodes_replayed: u64,
+        mutations_replayed: u64,
+        unrecognised_lines: u64,
+        failed_lines: u64,
+        unparseable_lines: u64,
         duration_ms: u64,
-        throughput_eps: f64,
     },
     ServiceState {
         ts_ms: u64,

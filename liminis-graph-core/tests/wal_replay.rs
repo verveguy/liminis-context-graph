@@ -83,7 +83,7 @@ fn test_replay_tolerates_truncated_final_line() {
         .replay(&conn)
         .expect("replay must succeed");
 
-    assert_eq!(stats.lines_skipped, 1, "truncated line must be skipped");
+    assert_eq!(stats.lines_skipped(), 1, "truncated line must be skipped");
     assert_eq!(stats.lines_replayed, 1, "first valid line must be replayed");
 }
 
@@ -111,7 +111,7 @@ fn test_replay_skips_unknown_op_without_abort() {
         .expect("replay must not abort");
 
     assert_eq!(
-        stats.lines_skipped, 1,
+        stats.lines_skipped(), 1,
         "unknown op must be counted as skipped"
     );
     assert_eq!(stats.lines_replayed, 0);
@@ -133,7 +133,7 @@ fn test_replay_empty_dir_succeeds() {
         .expect("replay empty dir");
 
     assert_eq!(stats.lines_replayed, 0);
-    assert_eq!(stats.lines_skipped, 0);
+    assert_eq!(stats.lines_skipped(), 0);
     assert_eq!(stats.files_read, 0);
 }
 
@@ -163,7 +163,7 @@ fn test_replay_golden_fixture_counts() {
 
     // Line 4 (MATCH ... SET) contains SET keyword so is correctly replayed.
     assert_eq!(stats.lines_replayed, 5, "5 mutation lines replayed");
-    assert_eq!(stats.lines_skipped, 0, "no lines skipped");
+    assert_eq!(stats.lines_skipped(), 0, "no lines skipped");
 
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();

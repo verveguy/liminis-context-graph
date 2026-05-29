@@ -2,17 +2,43 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use crate::db::Conn;
 use crate::error::Error;
 use crate::wal::{strip_quoted_literals, WalLine};
 
+/// A single captured failure from a `raw_query` execution error during replay.
+#[derive(Serialize)]
+pub struct FailureSample {
+    /// First 200 chars of the interpolated Cypher that was executed.
+    pub cypher: String,
+    /// The lbug error message returned by `raw_query`.
+    pub error: String,
+}
+
 /// Statistics returned from a WAL replay run.
 pub struct ReplayStats {
     pub lines_replayed: u64,
-    pub lines_skipped: u64,
+    /// Lines whose Cypher shape the replayer didn't recognise as a mutation.
+    pub unrecognised_lines: u64,
+    /// Lines that were attempted but failed at `raw_query` execution.
+    pub failed_lines: u64,
+    /// Lines that failed JSON parsing or had an I/O read error (both are data corruption).
+    pub unparseable_lines: u64,
+    /// Sampled failure details for `failed_lines` (first N, capped by `ReplayOptions::failure_sample_cap`).
+    pub failed_samples: Vec<FailureSample>,
     pub files_read: u64,
     /// Always 0 — callers invoke `knowledge_build_indices` separately after rebuild.
     pub indexes_created: u64,
+}
+
+impl ReplayStats {
+    /// Sum of `unrecognised_lines + failed_lines + unparseable_lines`.
+    /// Retained for back-compat: equals the old `lines_skipped` field.
+    pub fn lines_skipped(&self) -> u64 {
+        self.unrecognised_lines + self.failed_lines + self.unparseable_lines
+    }
 }
 
 /// Callback invoked during replay to emit progress; returning `false` aborts cleanly.
@@ -31,6 +57,9 @@ pub struct ReplayOptions {
     pub progress_fn: Option<ProgressFn>,
     /// Called once per mutation to detect client disconnection faster than the 1000-mutation cadence.
     pub cancel_fn: Option<CancelFn>,
+    /// Maximum number of `raw_query` failure samples to collect in `ReplayStats::failed_samples`.
+    /// When `None`, reads `LCG_REPLAY_FAILURE_SAMPLES` env var, defaulting to 10.
+    pub failure_sample_cap: Option<usize>,
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -64,9 +93,18 @@ impl WalReplayer {
     /// - `opts.progress_fn` is called once per file and once per 1000 mutations within a file;
     ///   returning `false` aborts the replay cleanly.
     pub fn replay_opts(&self, conn: &Conn<'_>, opts: ReplayOptions) -> Result<ReplayStats, Error> {
+        let sample_cap = opts.failure_sample_cap.unwrap_or_else(|| {
+            std::env::var("LCG_REPLAY_FAILURE_SAMPLES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10)
+        });
         let mut stats = ReplayStats {
             lines_replayed: 0,
-            lines_skipped: 0,
+            unrecognised_lines: 0,
+            failed_lines: 0,
+            unparseable_lines: 0,
+            failed_samples: Vec::new(),
             files_read: 0,
             indexes_created: 0,
         };
@@ -123,7 +161,7 @@ impl WalReplayer {
                             i + 1,
                             file_path
                         );
-                        stats.lines_skipped += 1;
+                        stats.unparseable_lines += 1;
                         continue;
                     }
                 };
@@ -140,7 +178,7 @@ impl WalReplayer {
                             i + 1,
                             file_path
                         );
-                        stats.lines_skipped += 1;
+                        stats.unparseable_lines += 1;
                         continue;
                     }
                 };
@@ -166,7 +204,7 @@ impl WalReplayer {
                         "[WAL WARN] skipping unrecognised mutation: {}",
                         &wal_line.cypher[..wal_line.cypher.len().min(80)]
                     );
-                    stats.lines_skipped += 1;
+                    stats.unrecognised_lines += 1;
                     continue;
                 }
 
@@ -183,7 +221,13 @@ impl WalReplayer {
                                 file_path,
                                 e
                             );
-                            stats.lines_skipped += 1;
+                            stats.failed_lines += 1;
+                            if stats.failed_samples.len() < sample_cap {
+                                stats.failed_samples.push(FailureSample {
+                                    cypher: cypher[..cypher.len().min(200)].to_string(),
+                                    error: e.to_string(),
+                                });
+                            }
                         }
                     }
                 }

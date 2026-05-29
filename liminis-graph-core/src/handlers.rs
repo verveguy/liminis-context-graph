@@ -1244,6 +1244,7 @@ async fn handle_rebuild_from_wal(
             None
         };
 
+        let replay_started_at = std::time::Instant::now();
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
@@ -1269,11 +1270,21 @@ async fn handle_rebuild_from_wal(
                         dry_run,
                         cancel_fn,
                         progress_fn: build_progress_fn(tx),
+                        failure_sample_cap: None,
                     },
                 )
             })
             .await??;
         drop(_write_guard);
+
+        state.sink.emit(TelemetryEvent::WalReplayComplete {
+            ts_ms: now_ms(),
+            mutations_replayed: stats.lines_replayed,
+            unrecognised_lines: stats.unrecognised_lines,
+            failed_lines: stats.failed_lines,
+            unparseable_lines: stats.unparseable_lines,
+            duration_ms: replay_started_at.elapsed().as_millis() as u64,
+        });
 
         // After a successful non-dry-run WAL replay the graph is fully under the current ontology.
         if !dry_run {
@@ -1301,6 +1312,10 @@ async fn handle_rebuild_from_wal(
                     "cancelled": true,
                     "mutations_replayed_so_far": stats.lines_replayed,
                     "files_processed_so_far": stats.files_read,
+                    "unrecognised_lines": stats.unrecognised_lines,
+                    "failed_lines": stats.failed_lines,
+                    "unparseable_lines": stats.unparseable_lines,
+                    "lines_skipped": stats.lines_skipped(),
                 }));
             }
         }
@@ -1310,6 +1325,11 @@ async fn handle_rebuild_from_wal(
             "mutations_replayed": stats.lines_replayed,
             "wal_files_processed": stats.files_read,
             "indexes_created": stats.indexes_created,
+            "unrecognised_lines": stats.unrecognised_lines,
+            "failed_lines": stats.failed_lines,
+            "unparseable_lines": stats.unparseable_lines,
+            "lines_skipped": stats.lines_skipped(),
+            "failed_samples": stats.failed_samples,
         });
         if dry_run {
             result["dry_run"] = json!(true);
@@ -1331,6 +1351,7 @@ async fn handle_rebuild_from_wal(
     if dry_run {
         let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
+        let replay_started_at = std::time::Instant::now();
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
@@ -1341,16 +1362,30 @@ async fn handle_rebuild_from_wal(
                         dry_run: true,
                         progress_fn: None,
                         cancel_fn: None,
+                        failure_sample_cap: None,
                     },
                 )
             })
             .await??;
+        state.sink.emit(TelemetryEvent::WalReplayComplete {
+            ts_ms: now_ms(),
+            mutations_replayed: stats.lines_replayed,
+            unrecognised_lines: stats.unrecognised_lines,
+            failed_lines: stats.failed_lines,
+            unparseable_lines: stats.unparseable_lines,
+            duration_ms: replay_started_at.elapsed().as_millis() as u64,
+        });
         return Ok(json!({
             "success": true,
             "mutations_replayed": stats.lines_replayed,
             "wal_files_processed": stats.files_read,
             "indexes_created": stats.indexes_created,
             "dry_run": true,
+            "unrecognised_lines": stats.unrecognised_lines,
+            "failed_lines": stats.failed_lines,
+            "unparseable_lines": stats.unparseable_lines,
+            "lines_skipped": stats.lines_skipped(),
+            "failed_samples": stats.failed_samples,
         }));
     }
 
@@ -1387,6 +1422,7 @@ async fn handle_rebuild_from_wal(
     let bg_workspace_root = state.workspace_root.clone();
     let bg_ontology = state.ontology.clone();
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
+    let bg_sink = Arc::clone(&state.sink);
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -1398,6 +1434,7 @@ async fn handle_rebuild_from_wal(
 
         let jobs_ref = Arc::clone(&rebuild_jobs);
         let jid = job_id_task.clone();
+        let replay_started_at = std::time::Instant::now();
 
         let result =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
@@ -1418,6 +1455,7 @@ async fn handle_rebuild_from_wal(
                         dry_run,
                         progress_fn: Some(progress_fn),
                         cancel_fn: None,
+                        failure_sample_cap: None,
                     },
                 )
             })
@@ -1432,11 +1470,24 @@ async fn handle_rebuild_from_wal(
                         job.status = JobStatus::Completed;
                         job.mutations_replayed = stats.lines_replayed;
                         job.wal_files_processed = stats.files_read;
+                        bg_sink.emit(TelemetryEvent::WalReplayComplete {
+                            ts_ms: now_ms(),
+                            mutations_replayed: stats.lines_replayed,
+                            unrecognised_lines: stats.unrecognised_lines,
+                            failed_lines: stats.failed_lines,
+                            unparseable_lines: stats.unparseable_lines,
+                            duration_ms: replay_started_at.elapsed().as_millis() as u64,
+                        });
                         job.result = Some(json!({
                             "mutations_replayed": stats.lines_replayed,
                             "wal_files_processed": stats.files_read,
                             "indexes_created": stats.indexes_created,
                             "dry_run": dry_run,
+                            "unrecognised_lines": stats.unrecognised_lines,
+                            "failed_lines": stats.failed_lines,
+                            "unparseable_lines": stats.unparseable_lines,
+                            "lines_skipped": stats.lines_skipped(),
+                            "failed_samples": stats.failed_samples,
                         }));
                         // Update the sidecar so drift clears after a successful WAL rebuild.
                         if !dry_run {
@@ -1683,7 +1734,13 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
         "rebuild_from_workspace_wal" => {
             let wal_dir = wal_dir.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
-            recover_rebuild_from_workspace_wal(&db_path, &wal_dir, embedding_dim).await
+            recover_rebuild_from_workspace_wal(
+                &db_path,
+                &wal_dir,
+                embedding_dim,
+                Arc::clone(&state.sink),
+            )
+            .await
         }
         "restore_from_backup" => recover_restore_from_backup(&db_path, embedding_dim).await,
         other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
@@ -1780,6 +1837,7 @@ async fn recover_rebuild_from_workspace_wal(
     db_path: &str,
     wal_dir: &std::path::Path,
     embedding_dim: usize,
+    sink: std::sync::Arc<dyn crate::telemetry::TelemetrySink>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     let wal_dir = wal_dir.to_path_buf();
@@ -1804,7 +1862,16 @@ async fn recover_rebuild_from_workspace_wal(
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
-            crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
+            let replay_started_at = std::time::Instant::now();
+            let stats = crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
+            sink.emit(TelemetryEvent::WalReplayComplete {
+                ts_ms: now_ms(),
+                mutations_replayed: stats.lines_replayed,
+                unrecognised_lines: stats.unrecognised_lines,
+                failed_lines: stats.failed_lines,
+                unparseable_lines: stats.unparseable_lines,
+                duration_ms: replay_started_at.elapsed().as_millis() as u64,
+            });
         }
         Ok(RecoverOutcome {
             db: Some(db),
