@@ -480,7 +480,7 @@ fn four_bucket_regression() {
         "sample must have a cypher snippet"
     );
     assert!(
-        stats.failed_samples[0].cypher.len() <= 200,
+        stats.failed_samples[0].cypher.chars().count() <= 200,
         "cypher snippet must be truncated to 200 chars"
     );
     assert!(

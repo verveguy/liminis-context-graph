@@ -224,7 +224,7 @@ impl WalReplayer {
                             stats.failed_lines += 1;
                             if stats.failed_samples.len() < sample_cap {
                                 stats.failed_samples.push(FailureSample {
-                                    cypher: cypher[..cypher.len().min(200)].to_string(),
+                                    cypher: cypher.chars().take(200).collect(),
                                     error: e.to_string(),
                                 });
                             }
