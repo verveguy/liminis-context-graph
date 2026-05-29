@@ -202,7 +202,7 @@ impl WalReplayer {
                 if !is_known {
                     eprintln!(
                         "[WAL WARN] skipping unrecognised mutation: {}",
-                        &wal_line.cypher[..wal_line.cypher.len().min(80)]
+                        &wal_line.cypher.chars().take(80).collect::<String>()
                     );
                     stats.unrecognised_lines += 1;
                     continue;
