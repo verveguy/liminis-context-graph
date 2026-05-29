@@ -53,10 +53,12 @@ CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merg
 
 1. `cargo fmt --all` — auto-format. Never commit without running this. Rust treats whitespace as binary pass/fail; even a single misaligned brace fails `cargo fmt --check` in CI.
 2. `cargo test` — compiles lib + tests and runs them. (CI runs `cargo test --release` because the 6 integration tests require release-mode linking. Locally, debug is fine for iteration; if your change touches release-only behavior, also run `cargo test --release` before committing.) Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
-3. `cargo clippy -- -D warnings` — CI runs this exact form. Locally, `cargo clippy --all-targets -- -D warnings` is **stricter** (covers tests, benches, and examples in one pass) and is recommended for catching issues that CI's lib-only clippy would still hit via the test build. CI's `-D warnings` means any warning blocks merge. Common traps:
+3. `cargo clippy --release -- -D warnings` — CI runs this exact form (release profile, to reuse cached lbug artifacts). Locally, `cargo clippy --all-targets -- -D warnings` is **stricter** (covers tests, benches, and examples in one pass) and is recommended for catching issues that CI's clippy would still hit via the test build. CI's `-D warnings` means any warning blocks merge. Common traps:
    - `dead_code` on test-only helpers → add `#[allow(dead_code)]`
    - `items_after_test_module` → put any non-test helpers BEFORE `#[cfg(test)] mod tests { }`, never after
    - New clippy lints introduced by a toolchain bump
+
+**lbug C++ build cache**: CI caches the compiled lbug build artifacts (liblbug.a and 17 third-party archives, ~316 MB) across runs so PRs don't rebuild lbug from C++ source. The cache key includes `runner.os`, the resolved `rustc` version, and a hash of the `lbug` stanza in `Cargo.lock` — unrelated dep bumps don't invalidate it. On cache hit, CI completes in ~10–15 min; on miss (first PR after an lbug version bump or toolchain upgrade) it takes ~1h and populates the cache for subsequent PRs. To manually bust a corrupted cache, bump the `LBUG_CACHE_BUST` date string in `.github/workflows/ci.yml`'s top-level `env:` block — this invalidates all existing lbug cache entries across branches.
 
 If any step fails, fix and re-run from step 1 (fmt may have shifted line numbers).
 
