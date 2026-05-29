@@ -63,7 +63,7 @@ fn test_walline_deserializes_python_fixture() {
     let content =
         std::fs::read_to_string(fixture_path("python_produced.jsonl")).expect("read fixture");
 
-    let expected_seqs = [0u64, 1, 2, 3, 4];
+    let expected_seqs = [0u64, 1, 2, 3, 4, 5, 6, 7];
     let mut idx = 0;
     for raw in content.lines() {
         let raw = raw.trim();

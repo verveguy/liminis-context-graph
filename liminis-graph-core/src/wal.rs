@@ -295,6 +295,11 @@ fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
 /// Handles `\'` escape sequences inside literals.  Used by `log_mutation` to prevent DML
 /// keywords that happen to appear inside stored string values from being misclassified as
 /// mutation queries.
+///
+/// Limitation: Cypher line comments (`//`) and block comments (`/* … */`) are not stripped.
+/// A keyword appearing only inside a comment will pass through and trigger a false-positive
+/// mutation classification. In practice, neither graphiti nor liminis-graph emits commented
+/// Cypher in WAL lines, so this gap is benign.
 pub(crate) fn strip_quoted_literals(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
