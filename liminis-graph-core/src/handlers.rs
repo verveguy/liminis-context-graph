@@ -1311,6 +1311,7 @@ async fn handle_rebuild_from_wal(
                     "message": "Rebuild cancelled (service shutdown)",
                     "cancelled": true,
                     "mutations_replayed_so_far": stats.lines_replayed,
+                    "match_prefixed_replayed_so_far": stats.match_prefixed_replayed,
                     "files_processed_so_far": stats.files_read,
                     "unrecognised_lines": stats.unrecognised_lines,
                     "failed_lines": stats.failed_lines,
@@ -1324,6 +1325,7 @@ async fn handle_rebuild_from_wal(
         let mut result = json!({
             "success": true,
             "mutations_replayed": stats.lines_replayed,
+            "match_prefixed_replayed": stats.match_prefixed_replayed,
             "wal_files_processed": stats.files_read,
             "indexes_created": stats.indexes_created,
             "unrecognised_lines": stats.unrecognised_lines,
@@ -1379,6 +1381,7 @@ async fn handle_rebuild_from_wal(
         return Ok(json!({
             "success": true,
             "mutations_replayed": stats.lines_replayed,
+            "match_prefixed_replayed": stats.match_prefixed_replayed,
             "wal_files_processed": stats.files_read,
             "indexes_created": stats.indexes_created,
             "dry_run": true,
@@ -1481,6 +1484,7 @@ async fn handle_rebuild_from_wal(
                         });
                         job.result = Some(json!({
                             "mutations_replayed": stats.lines_replayed,
+                            "match_prefixed_replayed": stats.match_prefixed_replayed,
                             "wal_files_processed": stats.files_read,
                             "indexes_created": stats.indexes_created,
                             "dry_run": dry_run,
