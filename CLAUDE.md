@@ -62,6 +62,20 @@ CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merg
 
 If any step fails, fix and re-run from step 1 (fmt may have shifted line numbers).
 
+## Running performance benchmarks
+
+Performance benchmarks are **not** run on every PR — they run on explicit invocation only. Use:
+
+```bash
+gh workflow run bench.yml
+```
+
+Results appear in the Actions tab under the "Perf Benchmarks" workflow. Each run uploads two artifacts (30-day retention):
+- **`bench-results-<sha>`** — plain-text criterion output for `1k`, `10k`, and `50k` dedup runs; readable directly in the GitHub UI.
+- **`criterion-html-<sha>`** — full criterion HTML reports; download locally for flamegraphs and comparison plots.
+
+The `dedup_overlap_check` correctness gate (R-007) still runs automatically on every PR as part of the `test` job — only the *measurement* steps moved to the on-demand workflow. To enable nightly automatic bench runs, uncomment the `schedule:` block in `.github/workflows/bench.yml`.
+
 ## When adding or modifying a struct field
 
 Grep ALL constructor call sites, including test files:
