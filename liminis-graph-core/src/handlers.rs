@@ -1316,6 +1316,7 @@ async fn handle_rebuild_from_wal(
                     "failed_lines": stats.failed_lines,
                     "unparseable_lines": stats.unparseable_lines,
                     "lines_skipped": stats.lines_skipped(),
+                    "failed_samples": stats.failed_samples,
                 }));
             }
         }
