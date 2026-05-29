@@ -101,6 +101,11 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
+      # R-007 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
+      # Runs here (not bench-dedup) so it shares the lbug build artifacts already in ./target/.
+      - name: dedup decision-overlap check (R-007)
+        run: cargo bench --bench search -- dedup_overlap_check
+
       - name: check no ML runtime deps
         run: |
           # Match crate names only — "tch" must not also match "scratch", etc.
@@ -121,75 +126,3 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --check
-
-  bench-stub:
-    name: bench compile (stub)
-    runs-on: ubuntu-latest
-    needs: build-lbug
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Get rustc version for cache key
-        id: rustc-ver
-        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
-
-      - name: Get lbug version hash for cache key
-        id: lbug-hash
-        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore lbug build artifacts from cache
-        uses: actions/cache/restore@v4
-        with:
-          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
-          path: |
-            target/release/build/lbug-*
-            target/release/.fingerprint/lbug-*
-            target/release/deps/liblbug-*
-
-      - name: cargo bench --no-run
-        run: cargo bench --no-run
-
-  bench-dedup:
-    name: bench-dedup
-    runs-on: ubuntu-latest
-    needs: build-lbug
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Get rustc version for cache key
-        id: rustc-ver
-        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
-
-      - name: Get lbug version hash for cache key
-        id: lbug-hash
-        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore lbug build artifacts from cache
-        uses: actions/cache/restore@v4
-        with:
-          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
-          path: |
-            target/release/build/lbug-*
-            target/release/.fingerprint/lbug-*
-            target/release/deps/liblbug-*
-
-      # R-007 95% overlap is a correctness gate — runs on every PR.
-      - name: dedup decision-overlap check (R-007)
-        run: cargo bench --bench search -- dedup_overlap_check
-
-      # Perf benches are observation, not gates — only on main push, to keep PR latency low.
-      - name: dedup bench 1k
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: cargo bench --bench search -- 1k --measurement-time 30
-
-      - name: dedup bench 10k
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: cargo bench --bench search -- 10k --measurement-time 30
-
-      - name: dedup bench 50k
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: cargo bench --bench search -- dedup_50k
