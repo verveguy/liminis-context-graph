@@ -1,0 +1,34 @@
+name: Swift sidecar CI
+
+# macOS runners are ~10× the cost of Ubuntu runners on GHA, so we path-filter
+# this workflow to only fire on changes under native/local-inference/. The
+# main Ubuntu CI (ci.yml) is unaffected by the Swift sidecar.
+
+on:
+  push:
+    paths:
+      - 'native/local-inference/**'
+      - '.github/workflows/swift.yml'
+  pull_request:
+    paths:
+      - 'native/local-inference/**'
+      - '.github/workflows/swift.yml'
+
+jobs:
+  swift-test:
+    name: swift test (macos-latest)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: native/local-inference
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      # Tests use stub .mlpackage fixtures committed under
+      # Tests/LocalInferenceTests/Fixtures/, so the real BGE-base model
+      # is not required and no network calls happen at test time.
+      - name: swift test
+        run: swift test

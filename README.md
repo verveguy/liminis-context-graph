@@ -165,9 +165,14 @@ Read-only methods that do not call the embedder (`health_check`, `knowledge_stat
 
 ### macOS: Swift CoreML sidecar (default)
 
-On macOS, the Liminis app bundles a Swift CoreML sidecar that serves `/v1/embeddings` over
-UDS at `/tmp/liminis-inference.sock`. When using the bundled app, the sidecar is managed
-automatically and `liminis-context-graph` connects to it by default.
+This repository ships a Swift CoreML sidecar at [`native/local-inference/`](native/local-inference/)
+that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
+(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock`. macOS 26+ and Xcode
+command-line tools are required. See [`native/local-inference/README.md`](native/local-inference/README.md)
+for build and run instructions.
+
+`liminis-context-graph` discovers the sidecar's default UDS socket automatically — start the
+sidecar first, then start the binary.
 
 ### HTTP transport (CI / Linux / custom embedders)
 

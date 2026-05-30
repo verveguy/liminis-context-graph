@@ -1,0 +1,23 @@
+.build/
+*.o
+*.d
+
+# Generated model artifacts (large; regenerate via convert-embedding-model.py)
+*.mlpackage
+*.mlmodelc
+
+# Tokenizer files (downloaded at setup time; not source code)
+tokenizer.json
+tokenizer_config.json
+tokenizer_reference.json
+vocab.txt
+special_tokens_map.json
+config.json
+
+# Benchmark output (new runs write to benchmark/results/)
+benchmark/results/*.json
+benchmark/results/*.md
+
+# Allow test fixtures committed under Tests/ (stub .mlpackage and tokenizer cache)
+!Tests/LocalInferenceTests/Fixtures/
+!Tests/LocalInferenceTests/Fixtures/**
