@@ -59,22 +59,16 @@ versions of their generator scripts:
 
 Each sentinel contains the SHA-256 hash of its tracked script. `check-fixture-freshness.sh`
 compares the current script hash against the committed sentinel — if they differ, it exits
-non-zero with a targeted error message. This check runs as a CI job (`fixture-freshness-check`
-in `.github/workflows/test.yml`) on every PR.
+non-zero with a targeted error message. Run it locally or wire it into the
+`swift.yml` workflow as a pre-test step if you want CI enforcement.
 
 ## Refreshing fixtures
 
 After editing any generator script, run:
 
 ```bash
-# From liminis-app/native/local-inference/
+# From native/local-inference/
 bash refresh-test-fixtures.sh
-```
-
-Or via pnpm from `liminis-app/`:
-
-```bash
-pnpm refresh:test-fixtures
 ```
 
 The script regenerates all fixtures and rewrites all four sentinels. It requires:
@@ -87,11 +81,8 @@ After running, review the diff and commit the updated fixtures alongside the scr
 ## Checking freshness locally
 
 ```bash
-# From liminis-app/native/local-inference/
+# From native/local-inference/
 bash check-fixture-freshness.sh
-
-# Or via pnpm from liminis-app/
-pnpm check:fixture-freshness
 ```
 
 ## Bug retrospective (FR-009)

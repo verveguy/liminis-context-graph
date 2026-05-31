@@ -4,7 +4,9 @@
 # Steps 1–2 run the stub generator scripts in Tests/…/Fixtures/ (documented
 # stubs — see Fixtures/README.md for the rationale).  Step 3 runs the
 # production prepare-tokenizer.py.  convert-embedding-model.py is not run
-# (its sentinel is updated only, not its output — see ADR-062).
+# here (its sentinel is updated only, not its output) because regenerating
+# the real ~85 MB CoreML weights on every fixture refresh is wasted work
+# when the integration tests load stubs.
 #
 # Run this command after changing any of the generator scripts:
 #   prepare-tokenizer.py, convert-embedding-model.py,

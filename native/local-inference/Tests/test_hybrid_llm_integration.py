@@ -16,9 +16,9 @@ Runs against the *real* Swift binary. Skips automatically when:
   - Apple Intelligence is not available (non-macOS-26 CI environments)
 
 Run with:
-    uv run --script tests/test_hybrid_llm_integration.py
+    uv run --script native/local-inference/Tests/test_hybrid_llm_integration.py
 or (if deps already installed):
-    pytest tests/test_hybrid_llm_integration.py -v
+    pytest native/local-inference/Tests/test_hybrid_llm_integration.py -v
 """
 
 import asyncio
@@ -43,13 +43,9 @@ import pytest_asyncio
 # ---------------------------------------------------------------------------
 
 PACKAGE_DIR = Path(__file__).parent.parent
-BINARY = (
-    PACKAGE_DIR
-    / ".build"
-    / "arm64-apple-macosx"
-    / "release"
-    / "LocalInference"
-)
+# Use the architecture-neutral release path so this works on both Apple Silicon
+# and Intel Macs. SwiftPM writes binaries to .build/release/ regardless of host arch.
+BINARY = PACKAGE_DIR / ".build" / "release" / "LocalInference"
 SOCKET_PATH = "/tmp/liminis-inference-test.sock"
 
 # ---------------------------------------------------------------------------

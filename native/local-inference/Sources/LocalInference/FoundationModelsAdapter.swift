@@ -35,7 +35,7 @@ private actor InferenceActor {
 
     func stream(request: ChatCompletionRequest) -> AsyncThrowingStream<String, any Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 do {
                     let (instructions, userTurn) = self.buildPrompt(from: request.messages)
                     let wantsJSON = request.responseFormat?.type == "json_object"
@@ -63,6 +63,7 @@ private actor InferenceActor {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -122,7 +123,7 @@ struct FoundationModelsAdapter: InferenceAdapter {
         // Note: streaming must start on the actor but yields chunks back to the caller.
         // We wrap in a new stream that awaits the actor's stream.
         return AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 let innerStream = await InferenceActor.shared.stream(request: request)
                 do {
                     for try await chunk in innerStream {
@@ -133,6 +134,7 @@ struct FoundationModelsAdapter: InferenceAdapter {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 }

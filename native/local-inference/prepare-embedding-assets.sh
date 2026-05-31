@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# One-shot wrapper that produces the two artifacts `pnpm package` needs:
+# One-shot setup wrapper. Produces the two artifacts the Swift sidecar needs:
 #   1. native/local-inference/bge-base-en-v1.5.mlpackage  (via convert-embedding-model.py)
 #   2. resources/models/tokenizer/models/BAAI/bge-base-en-v1.5/  (via prepare-tokenizer.py)
 #
 # Re-running is safe — both helpers overwrite their outputs.
+#
+# After this script succeeds, build the sidecar with:
+#   swift build -c release
+# and run it with:
+#   .build/release/LocalInference
 
 set -euo pipefail
 
@@ -23,4 +28,5 @@ echo "==> Staging tokenizer files for offline swift-transformers loading"
 uv run prepare-tokenizer.py
 
 echo
-echo "Done. Both artifacts are ready for 'pnpm package'."
+echo "Done. Build the sidecar with: swift build -c release"
+echo "Then run it with:           .build/release/LocalInference"

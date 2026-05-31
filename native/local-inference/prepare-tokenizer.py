@@ -2,7 +2,7 @@
 """
 Stage HuggingFace tokenizer files for offline swift-transformers loading.
 
-Output: <project_root>/liminis-app/resources/models/tokenizer/models/BAAI/bge-base-en-v1.5/
+Output: <repo_root>/resources/models/tokenizer/models/BAAI/bge-base-en-v1.5/
 
 == Offline loader contract (swift-transformers HubApi, pinned at v0.1.24) ==
 The loader walks the TOP-LEVEL visible files in:
@@ -76,8 +76,8 @@ _STUB_ETAG = "prepare-tokenizer-stub-etag"
 def default_output(model: str) -> Path:
     # Mirrors HubApi(downloadBase:) expectations: <root>/models/<org>/<model>/
     here = Path(__file__).resolve().parent  # native/local-inference
-    project_root = here.parent.parent       # liminis-app
-    return project_root / "resources" / "models" / "tokenizer" / "models" / model
+    repo_root = here.parent.parent          # liminis-graph repo root
+    return repo_root / "resources" / "models" / "tokenizer" / "models" / model
 
 
 def write_metadata_marker(marker_path: Path, commit_hash: str) -> None:
@@ -99,7 +99,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         default=None,
-        help="Destination directory (defaults to liminis-app/resources/models/tokenizer/models/<model>/)",
+        help="Destination directory (defaults to <repo_root>/resources/models/tokenizer/models/<model>/)",
     )
     parser.add_argument(
         "--revision",

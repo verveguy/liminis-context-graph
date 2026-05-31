@@ -28,9 +28,13 @@ func extractJSON(from text: String) -> String {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    // Find outermost { … } span
+    // Find outermost { … } span. If the closing brace appears before the opening
+    // one (e.g. model output containing prose between dangling braces), there is no
+    // valid JSON span to extract — return the cleaned text and let downstream parsing
+    // surface a clear error rather than crashing on an inverted range.
     guard let firstBrace = cleaned.firstIndex(of: "{"),
-          let lastBrace  = cleaned.lastIndex(of: "}") else {
+          let lastBrace  = cleaned.lastIndex(of: "}"),
+          firstBrace <= lastBrace else {
         return cleaned
     }
     return String(cleaned[firstBrace...lastBrace])
