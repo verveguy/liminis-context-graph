@@ -35,7 +35,7 @@ After the bump, all existing `liminis-graph-core` integration tests pass, all `l
 **Acceptance Scenarios**:
 
 1. **Given** the bump is applied, **When** the full CI suite runs, **Then** all tests pass on `ubuntu-latest` and (locally, since macOS CI is currently disabled) on the maintainer's Apple Silicon machine.
-2. **Given** the bumped binary, **When** the user starts it with a 0.16.1-created workspace `.lcg/db/liminis.db`, **Then** it reads the database without an on-disk format incompatibility error. (If 0.17.0 introduces an on-disk format change, this scenario becomes a migration concern — see edge cases.)
+2. **Given** the bumped binary, **When** the user starts it with a 0.16.1-created workspace `.lcg/db/liminis.db`, **Then** either it reads the database without error, or (if 0.17.0 changed the on-disk format) the bump still lands with the CHANGELOG noting the format change and the PR description including a one-line workspace-recreation note.
 
 ---
 
@@ -48,7 +48,7 @@ A future engineer reading `CHANGELOG.md` or the PR body can see what changed in 
 **Acceptance Scenarios**:
 
 1. **Given** the bump PR's description, **When** read, **Then** it lists (a) the source consulted (commit log between tags v0.16.1..v0.17.0 in `LadybugDB/ladybug-rust`), (b) a bulleted summary of changes relevant to us (API surface we use, behavior changes, error surface, performance hints), (c) explicit "no change" notes for the surfaces we care about that did NOT change.
-2. **Given** `CHANGELOG.md`, **When** read after merge, **Then** a one-line `### Changed` entry under `[Unreleased]` records the bump and links to the PR.
+2. **Given** `CHANGELOG.md`, **When** read after merge, **Then** a one-line `### Changed` entry under `[Unreleased]` records the bump and links to the PR (and calls out any on-disk format change if applicable).
 
 ---
 
@@ -65,7 +65,7 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 
 ### Edge Cases
 
-- **0.17.0 has a different on-disk DB file format.** Treat as a non-trivial breakage per FR-004(b). The bump itself doesn't land; a separate issue handles migration. lbug pre-1.0 has historically done this in past minor bumps (workspaces had to be recreated).
+- **0.17.0 has a different on-disk DB file format.** The bump still lands. Research notes the format change; the CHANGELOG entry calls it out explicitly; the PR description includes a one-line note that the maintainer must recreate the workspace. No migration code, no separate issue — sole user is the maintainer.
 - **0.17.0 changes the error text for "missing vector index"** (or similar). Our auto-heal logic in `liminis-graph-core/src/handlers.rs` greps on this text. If it changes, we update the grep in the same PR (small, focused; in scope per FR-004(a)).
 - **0.17.0's `QueryResult::Drop` semantics regress** (we had to fix this in graphiti fork PR `c8ad76d`). If we see a segfault during the test run on the bump branch, that's a hard regression; file upstream issue, do NOT bump, keep `=0.16.1`.
 - **0.17.0 changes the vector-extension cache layout** under `~/.lbdb/extension/`. Migration tests serialize `Db::open` to avoid races against this cache (per `#104`). New layout means a fresh cache directory on first run; no test failure expected, but worth a sanity check in Research.
@@ -81,17 +81,17 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - **FR-003.** Research stage MUST consult the LadybugDB/ladybug-rust repository (commit log between `v0.16.1` and `v0.17.0`, or whatever the upstream tagging convention is) and produce a written summary covering at minimum:
   - **Public API surface changes** affecting any method/type we use (`Db`, `Connection`, `QueryResult`, `PreparedStatement`, `Value`, `LogicalType`, the vector-extension calls, the FTS calls, error types)
   - **Error type/text changes** — we have integration tests that grep on lbug error text for the "vector index missing" / "FTS missing" cases that drive our auto-heal logic
-  - **On-disk format changes** — if 0.17.0 changes the DB file format, that's a workspace migration concern; either gate the bump on adding migration logic or note the breakage in CHANGELOG and require workspace recreation
+  - **On-disk format changes** — note whether the DB file format changed. If it did, the bump still lands: the CHANGELOG entry calls it out, and the PR description includes a one-line note that the maintainer must recreate the workspace. No migration code required.
   - **Behavior changes** to: WAL semantics, write serialization, mmap sizing on macOS, vector extension cache layout (`~/.lbdb/extension/`), query-result iterator semantics, transactional semantics
   - **Build / linker changes** — if 0.17.0 changes the third-party static-archive bundling expectations, the `LBUG_BUILD_FROM_SOURCE=1` story may need re-verification
 - **FR-004.** If FR-003 surfaces any incompatibility with our integration, the Plan stage MUST EITHER:
-  - (a) Include the adaptations needed in this PR — small, focused changes only.
-  - (b) Pause and file a follow-up if the breakage is non-trivial (e.g., on-disk format change requiring migration logic). In that case the bump itself does NOT land in this PR.
+  - (a) Include the adaptations needed in this PR — small, focused changes only (e.g., updated error-text grep, on-disk format noted in CHANGELOG with a workspace-recreation note in the PR description).
+  - (b) Abandon the bump and keep `=0.16.1` only for hard runtime regressions that cannot be worked around (e.g., a `QueryResult::Drop` segfault). File an upstream issue. On-disk format changes alone do NOT trigger this path.
 - **FR-005.** All existing pre-commit gates MUST pass: `cargo fmt --all --check && cargo test --release && cargo clippy --all-targets -- -D warnings`. `cargo test --release` is the CI-mode invocation (debug-mode linking OOMs on Ubuntu).
 - **FR-006.** Special verification: the migration tests in `liminis-graph/tests/migration_binary.rs` (which serialize `Db::open` to avoid the lbug vector-extension cache race per `#104`'s fix) MUST still pass. If lbug 0.17.0 changed the extension cache layout under `~/.lbdb/extension/<ver>/`, the cache version path changes and tests pick up a fresh cache on first run; that's expected and not a failure.
-- **FR-007.** `CHANGELOG.md` under `[Unreleased]` MUST gain a `### Changed` line: `- bump lbug pin from 0.16.1 to 0.17.0 (see PR #NNN for delta summary)`.
+- **FR-007.** `CHANGELOG.md` under `[Unreleased]` MUST gain a `### Changed` line: `- bump lbug pin from 0.16.1 to 0.17.0 (see PR #NNN for delta summary)`. If Research found an on-disk format change, the line MUST call that out explicitly.
 - **FR-008.** This PR MUST NOT touch any other dependency. Even if Cargo regenerates the lockfile and other transitive deps are slightly out of step, do NOT bundle unrelated bumps. Single-purpose PR.
-- **FR-009.** The PR description MUST include the Research-stage summary verbatim (or link to a comment on the issue that contains it), so reviewers don't have to re-derive what changed.
+- **FR-009.** The PR description MUST include the Research-stage summary verbatim (or link to a comment on the issue that contains it), so reviewers don't have to re-derive what changed. If the on-disk format changed, a one-line workspace-recreation note MUST appear in the PR description.
 - **FR-010.** No changes to `.cargo/config.toml`, `.github/workflows/ci.yml`, `LBUG_BUILD_FROM_SOURCE` settings, or the lbug-cache key derivation. The cache-invalidation behavior of `#115` is already correctly parameterized on the lbug-sys version.
 
 ## Success Criteria *(mandatory)*
@@ -101,7 +101,7 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - **SC-001.** `lbug = "=0.17.0"` is pinned in workspace `Cargo.toml`; `Cargo.lock` reflects the matching version and checksum.
 - **SC-002.** All CI gates pass on the bump PR (`cargo fmt --check`, `cargo test --release`, `cargo clippy --all-targets -- -D warnings`).
 - **SC-003.** The PR description contains a Research-derived summary of what changed in lbug 0.17.0 that touches our integration.
-- **SC-004.** `CHANGELOG.md` `[Unreleased]` has a one-line `### Changed` entry recording the bump.
+- **SC-004.** `CHANGELOG.md` `[Unreleased]` has a one-line `### Changed` entry recording the bump (and any on-disk format change, if applicable).
 - **SC-005.** No unrelated dependency bumps in the same PR.
 - **SC-006.** Migration tests (per `#104`'s serialized `Db::open` fix) still pass.
 - **SC-007.** First post-bump PR on main (any unrelated PR) hits the freshly-populated lbug cache and runs in ~7 min, confirming the cache invalidation worked as designed.
@@ -112,7 +112,7 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - **A2.** Most of our lbug call sites are stable across 0.16.1 → 0.17.0. Pre-1.0 minor bumps tend to add features rather than break existing ones; the breakages we worry about are the focused exceptions, not the default.
 - **A3.** The lbug-cache key in `#115` correctly invalidates on lbug-sys version change. Verified by the SC-003 design of `#115`: "A PR bumping lbug-sys misses the cache cleanly, completes in roughly today's baseline, and populates the cache."
 - **A4.** The maintainer is okay paying the one-time ~1h CI cost on this bump PR in exchange for fresh upstream features and bug fixes.
-- **A5.** The on-disk DB format does NOT change. This is the most consequential assumption; Research stage explicitly verifies it. If it changes, the bump is gated on a separate migration issue.
+- **A5.** The on-disk DB format may or may not change; Research stage explicitly checks. If it changed, the bump still lands — the CHANGELOG entry notes it and the maintainer recreates the workspace. The sole user is the maintainer, so workspace recreation is an acceptable resolution.
 
 ## Out of Scope
 
@@ -121,6 +121,7 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - Performance benchmarking the delta. If 0.17.0 changes hot-path performance materially, that's a separate observation worth a follow-up, but we don't gate the bump on bench parity.
 - Adopting new lbug 0.17.0 features (vector indices, query planner hints, etc.). Bumping the floor, not the ceiling.
 - Updating CLAUDE.md to mention the new version (CLAUDE.md doesn't pin a version today; if Research finds a behavior change worth documenting for future engineers, add it; otherwise leave alone).
+- Writing migration code for on-disk format changes. Sole user is the maintainer; workspace recreation is sufficient.
 
 ## Source References
 
