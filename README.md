@@ -1,5 +1,7 @@
 # Liminis Context Graph
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A purpose-built Rust knowledge-graph service over [LadybugDB](https://github.com/lbugdb/lbug). Distinct product from the upstream Python graphiti-core library — different language, different DB engine, different concurrency model, different API surface, different LLM routing.
 
 ## Goals
@@ -190,3 +192,11 @@ specification and transport decision record.
 ## Architecture decisions
 
 See [`docs/adr/`](docs/adr/) for recorded architecture decisions. The project constitution lives at [`.specify/memory/constitution.md`](.specify/memory/constitution.md).
+
+## Contributing
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to file issues, submit pull requests, and the required pre-commit checks. No CLA or DCO sign-off is required — contributions are accepted under the project's MIT license by inbound=outbound convention.
+
+## Security
+
+To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/verveguy/liminis-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.

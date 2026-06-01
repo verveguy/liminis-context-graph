@@ -4,6 +4,8 @@ about: Something is broken
 labels: bug
 ---
 
+> **External contributors**: see [CONTRIBUTING.md](CONTRIBUTING.md) for filing guidelines.
+
 ## Describe the bug
 
 <!-- A clear and concise description of what the bug is. -->
