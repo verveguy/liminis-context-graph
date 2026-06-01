@@ -1,3 +1,5 @@
+> **External contributors**: see [CONTRIBUTING.md](CONTRIBUTING.md) — the Constitution gates below are maintainer-internal and may be skipped.
+
 ## Summary
 
 <!-- What does this PR do? 1–3 bullet points. -->
