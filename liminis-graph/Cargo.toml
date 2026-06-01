@@ -1,9 +1,10 @@
 [package]
 name = "liminis-context-graph"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "LadybugDB knowledge-graph IPC binary"
 license = "MIT"
+repository.workspace = true
 
 [dependencies]
 liminis-graph-core = { path = "../liminis-graph-core" }
