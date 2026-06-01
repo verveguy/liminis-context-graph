@@ -19,6 +19,28 @@ A purpose-built Rust knowledge-graph service over [LadybugDB](https://github.com
 
 ## Quickstart
 
+### Install prebuilt binary
+
+The fastest way to get `liminis-context-graph` — no Rust toolchain required:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-graph/releases/latest/download/liminis-context-graph-installer.sh | sh
+```
+
+Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
+
+> **macOS Gatekeeper note**: If macOS blocks the downloaded binary, clear the quarantine attribute before running:
+> ```sh
+> xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph
+> ```
+> Code signing will be added in a future release.
+
+> **Embedder required at runtime**: The binary connects to an out-of-process embedding service on startup. See the Configuration section for `LCG_EMBEDDING_URL`.
+
+### Build from source
+
+Requires [Rust/Cargo](https://rustup.rs/) and `cmake` (for the lbug C++ build, ~20–30 min cold):
+
 ```bash
 # Build both crates
 cargo build --release
@@ -32,6 +54,16 @@ cargo run --example basic_ingest -p liminis-graph-core
 # Run the binary stub
 cargo run -p liminis-context-graph
 ```
+
+### Release runbook (maintainers)
+
+To cut a release:
+
+1. Update `CHANGELOG.md`: rename `## [Unreleased]` to `## [x.y.z]` (e.g. `## [0.1.0]`).
+2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. The release workflow builds all three platforms and publishes the GitHub Release automatically (~30–45 min).
+
+If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue, then re-tag and re-push.
 
 ## Workspace layout
 

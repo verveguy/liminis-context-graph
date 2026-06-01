@@ -11,6 +11,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- Prebuilt binaries for `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu` now published as GitHub Release assets via `cargo-dist`. One-line install: `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-graph/releases/latest/download/liminis-context-graph-installer.sh | sh`.
+
 ### Changed
 
 ### Fixed
