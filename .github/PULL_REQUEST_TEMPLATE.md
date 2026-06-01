@@ -1,4 +1,4 @@
-> **External contributors**: see [CONTRIBUTING.md](CONTRIBUTING.md) — the Constitution gates below are maintainer-internal and may be skipped.
+> **External contributors**: see [CONTRIBUTING.md](../CONTRIBUTING.md) — the Constitution gates below are maintainer-internal and may be skipped.
 
 ## Summary
 
