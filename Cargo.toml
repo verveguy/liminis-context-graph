@@ -46,7 +46,7 @@ ninja-build = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
-lbug = "=0.16.1"
+lbug = "=0.17.0"
 thiserror = "2"
 tempfile = "3"
 regex = "1"
