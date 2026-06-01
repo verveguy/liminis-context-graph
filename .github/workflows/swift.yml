@@ -1,0 +1,45 @@
+name: Swift sidecar CI
+
+# Currently DISABLED.
+#
+# The `native/local-inference/` Swift package targets macOS 26 (Foundation
+# Models on-device LLM) and `swift-tools-version: 6.2`. GitHub's
+# `macos-latest` runner image is still on macOS 15 + Swift 6.1 as of
+# 2026-05-30, so `swift test` fails with:
+#
+#     error: package 'local-inference' is using Swift tools version 6.2.0
+#            but the installed version is 6.1.0
+#
+# Re-enable by deleting the `if: false` line below once GHA's `macos-latest`
+# image catches up to macOS 26 + Xcode with Swift 6.2 — at which point the
+# `swift test` job will run normally on PRs that touch the sidecar.
+#
+# In the meantime, contributors should run `swift test` locally inside
+# `native/local-inference/` on a macOS 26 dev machine before pushing.
+
+on:
+  push:
+    paths:
+      - 'native/local-inference/**'
+      - '.github/workflows/swift.yml'
+  pull_request:
+    paths:
+      - 'native/local-inference/**'
+      - '.github/workflows/swift.yml'
+
+jobs:
+  swift-test:
+    name: swift test (macos-latest)
+    if: false  # see header — waiting on GHA macOS 26 runner image
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: native/local-inference
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: swift test
+        run: swift test
