@@ -131,10 +131,10 @@ jobs:
         run: "echo \"LBUG_BUILD_FROM_SOURCE=1\" >> \"$GITHUB_ENV\""
       - name: "Get rustc version for lbug cache key"
         id: "rustc-ver"
-        run: "echo \"version=$(rustc --version | sha256sum | cut -c1-8)\" >> \"$GITHUB_OUTPUT\""
+        run: "echo \"version=$(rustc --version | shasum -a 256 | cut -c1-8)\" >> \"$GITHUB_OUTPUT\""
       - name: "Get lbug version hash for lbug cache key"
         id: "lbug-hash"
-        run: "echo \"hash=$(grep -A12 '^name = \"lbug\"$' Cargo.lock | sha256sum | cut -c1-12)\" >> \"$GITHUB_OUTPUT\""
+        run: "echo \"hash=$(grep -A12 '^name = \"lbug\"$' Cargo.lock | shasum -a 256 | cut -c1-12)\" >> \"$GITHUB_OUTPUT\""
       - name: "Restore lbug build artifacts from cache"
         uses: "actions/cache/restore@v4"
         with:
