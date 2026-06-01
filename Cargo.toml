@@ -2,6 +2,10 @@
 members = ["liminis-graph-core", "liminis-graph"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+repository = "https://github.com/verveguy/liminis-graph"
+
 # Strip debuginfo from dev/test builds. Linking the six integration-test
 # binaries against the full lbug static archive (+ third-party deps) with
 # default `debug = "full"` blows the 7GB Ubuntu CI runner's RAM during
@@ -10,6 +14,35 @@ resolver = "2"
 # override with `RUSTFLAGS="-C debuginfo=2"`.
 [profile.dev]
 debug = "line-tables-only"
+
+[profile.dist]
+inherits = "release"
+strip = "debuginfo"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.32.0"
+ci = ["github"]
+installers = ["shell"]
+targets = [
+  "aarch64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+  "aarch64-unknown-linux-gnu",
+]
+include = ["LICENSE", "README.md", "CHANGELOG.md"]
+github-build-setup = "build-setup.yml"
+# allow-dirty suppresses "release.yml out of date" errors from dist plan/generate.
+# The cache/restore step in build-setup.yml was patched to use a YAML literal block
+# scalar (|) for the multi-line path — cargo-dist's YAML emitter writes continuation
+# lines at column 0, which is invalid YAML. This fix is correct; allow-dirty = ci
+# preserves it across future dist generate runs.
+allow-dirty = ["ci"]
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+
+[workspace.metadata.dist.dependencies.apt]
+cmake = "*"
+ninja-build = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
