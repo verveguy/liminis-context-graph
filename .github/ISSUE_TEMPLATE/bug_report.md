@@ -4,7 +4,7 @@ about: Something is broken
 labels: bug
 ---
 
-> **External contributors**: see [CONTRIBUTING.md](CONTRIBUTING.md) for filing guidelines.
+> **External contributors**: see [CONTRIBUTING.md](../../CONTRIBUTING.md) for filing guidelines.
 
 ## Describe the bug
 

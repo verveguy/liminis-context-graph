@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-120`
 **Created**: 2026-05-30
-**Status**: Draft
+**Status**: Specified
 **Input**: 2026-05-30 — repository is being prepared for public OSS launch. Surveyed current state: README exists (~9 KB, OSS-aware but internal-leaning quickstart), CLAUDE.md exists, `.github/ISSUE_TEMPLATE/` and `PULL_REQUEST_TEMPLATE.md` exist, ADRs in `docs/adr/`, repo is already public at `github.com/verveguy/liminis-graph`, no secrets in tracked files. Cargo.toml declares `license = "MIT"` on both workspace crates but no LICENSE file exists at the repo root. Missing the canonical OSS scaffolding files: LICENSE, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CHANGELOG. This issue covers all that scaffolding plus light README polish in one PR. Larger code-prep items (MCP-over-stdio transport, pluggable LLM extractor, embedder strategy) are tracked separately and intentionally out of scope here.
 
 ## Background
@@ -122,7 +122,7 @@ Before OSS launch is announced, the LadybugDB (`lbug`) dependency's license is c
 
 ## Requirements *(mandatory)*
 
-- **FR-001.** A `LICENSE` file MUST be added at the repo root containing the unmodified OSI canonical MIT License text. The copyright line MUST read `Copyright (c) 2026 verveguy` (or the maintainer's preferred legal-name form — Research stage confirms via the existing pattern in Cargo.toml `authors` field if present; otherwise use the GitHub org name).
+- **FR-001.** A `LICENSE` file MUST be added at the repo root containing the unmodified OSI canonical MIT License text. The copyright line MUST read `Copyright (c) 2026 Brett Adam` (legal name confirmed via `git log`; single copyright holder, no other contributors).
 - **FR-002.** A `CONTRIBUTING.md` file MUST be added at the repo root covering:
   - Where to file issues (GitHub Issues; link to the existing `.github/ISSUE_TEMPLATE/` choices).
   - The fork-branch-PR flow for external contributors (one short worked example).

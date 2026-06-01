@@ -4,7 +4,7 @@ about: Propose new functionality
 labels: enhancement
 ---
 
-> **External contributors**: see [CONTRIBUTING.md](CONTRIBUTING.md) — the Constitution alignment section is maintainer-internal and may be skipped.
+> **External contributors**: see [CONTRIBUTING.md](../../CONTRIBUTING.md) — the Constitution alignment section is maintainer-internal and may be skipped.
 
 ## Problem
 
