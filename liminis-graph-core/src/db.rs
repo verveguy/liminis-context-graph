@@ -852,7 +852,7 @@ impl<'db> Conn<'db> {
     /// Hybrid HNSW + BM25 dedup: retrieves CANDIDATE_K candidates per path, fuses with RRF,
     /// cosine-rechecks the full fused set against `threshold`, and returns the best match.
     ///
-    /// Note: the `ef` search parameter is not configurable in lbug 0.16.1; the lbug default is used.
+    /// Note: the `ef` search parameter is not configurable in lbug 0.17.0; the lbug default is used.
     pub fn hybrid_dedup_similar_entity(
         &self,
         name_embedding: &[f32],
@@ -1235,7 +1235,7 @@ impl<'db> Conn<'db> {
 
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
     /// on the RelatesToNode_ shadow node. Also attempts to set `invalid_at` on the
-    /// RELATES_TO relationship property (lbug 0.16.1 may not support SET on rels;
+    /// RELATES_TO relationship property (lbug 0.17.0 may not support SET on rels;
     /// if it fails the error is logged but not propagated).
     pub fn invalidate_edge(&self, edge_uuid: &str, invalid_at: &str) -> Result<(), Error> {
         let uuid_esc = escape(edge_uuid);

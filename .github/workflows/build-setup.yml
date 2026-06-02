@@ -1,5 +1,6 @@
-- name: Set LBUG_BUILD_FROM_SOURCE
-  run: echo "LBUG_BUILD_FROM_SOURCE=1" >> "$GITHUB_ENV"
+# Note: LBUG_BUILD_FROM_SOURCE was removed with the lbug 0.17.0 bump.
+# The 0.17.0+ prebuilt is a self-contained fat bundle; source builds cause
+# 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
 
 - name: Get rustc version for lbug cache key
   id: rustc-ver

@@ -15,4 +15,6 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Changed
 
+- Bump lbug pin from 0.16.1 to 0.17.0 (see PR for delta summary; new `SystemConfig` defaults: `throw_on_wal_replay_failure=true`, `enable_checksums=true`; also removes `LBUG_BUILD_FROM_SOURCE` — 0.17.0 prebuilt is a self-contained fat bundle).
+
 ### Fixed
