@@ -127,8 +127,8 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: "Set LBUG_BUILD_FROM_SOURCE"
-        run: "echo \"LBUG_BUILD_FROM_SOURCE=1\" >> \"$GITHUB_ENV\""
+      # LBUG_BUILD_FROM_SOURCE removed: lbug 0.17.0+ prebuilt is a self-contained fat bundle.
+      # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
       - name: "Get rustc version for lbug cache key"
         id: "rustc-ver"
         run: "echo \"version=$(rustc --version | shasum -a 256 | cut -c1-8)\" >> \"$GITHUB_OUTPUT\""
