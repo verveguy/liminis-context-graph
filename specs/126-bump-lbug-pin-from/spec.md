@@ -92,7 +92,7 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - **FR-007.** `CHANGELOG.md` under `[Unreleased]` MUST gain a `### Changed` line: `- bump lbug pin from 0.16.1 to 0.17.0 (see PR #NNN for delta summary)`. If Research found an on-disk format change, the line MUST call that out explicitly.
 - **FR-008.** This PR MUST NOT touch any other dependency. Even if Cargo regenerates the lockfile and other transitive deps are slightly out of step, do NOT bundle unrelated bumps. Single-purpose PR.
 - **FR-009.** The PR description MUST include the Research-stage summary verbatim (or link to a comment on the issue that contains it), so reviewers don't have to re-derive what changed. If the on-disk format changed, a one-line workspace-recreation note MUST appear in the PR description.
-- **FR-010.** No changes to `.cargo/config.toml`, `.github/workflows/ci.yml`, `LBUG_BUILD_FROM_SOURCE` settings, or the lbug-cache key derivation. The cache-invalidation behavior of `#115` is already correctly parameterized on the lbug-sys version.
+- **FR-010.** Remove `LBUG_BUILD_FROM_SOURCE` settings from `.cargo/config.toml` and CI workflows. As of lbug 0.17.0, the prebuilt is a self-contained fat bundle (all third-party archives merged into `liblbug.a` via `BundleStaticLibrary.cmake`); building from source causes 7399 duplicate-symbol linker errors because `link_bundled_deps=true` links both the fat archive and the individual archives. The lbug-cache key derivation and all other CI settings remain unchanged.
 
 ## Success Criteria *(mandatory)*
 
@@ -132,4 +132,4 @@ The maintainer is not surprised when the bump PR's first CI run takes ~1h instea
 - **lbug source repo**: <https://github.com/LadybugDB/ladybug-rust> — no GitHub Releases or CHANGELOG.md found via `gh api` as of issue filing; Research must derive the delta from the commit log between tags.
 - **`#124` (in flight)** — prebuilt-binary release via cargo-dist. Bumping lbug before that lands is fine: the first release artifact will simply embed 0.17.0 lbug. If the bump comes after, the next release picks it up automatically.
 - **`Cargo.toml` lines 4-9** — captures the rationale for `[profile.dev] debug = "line-tables-only"` (Ubuntu CI OOM during linking). Unaffected by this bump.
-- **`.cargo/config.toml`** — `LBUG_BUILD_FROM_SOURCE=1` and `RUST_TEST_THREADS=4` (the latter to avoid macOS mmap exhaustion from lbug's 8TB-per-`Db::open`). Both should remain unchanged; verify in Research that the rationale still applies to 0.17.0.
+- **`.cargo/config.toml`** — `RUST_TEST_THREADS=4` (to avoid macOS mmap exhaustion from lbug's 8TB-per-`Db::open`) remains unchanged. `LBUG_BUILD_FROM_SOURCE=1` was removed: the 0.17.0 prebuilt is a self-contained fat bundle that ships all third-party archives, making the source-build workaround both unnecessary and actively harmful. See LadybugDB/ladybug-rust#18.
