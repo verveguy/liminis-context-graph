@@ -44,20 +44,16 @@ jobs:
       # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
       # /home/runner/work/liminis-graph/liminis-graph/ — stable on GHA ubuntu-latest
       # but not portable to self-hosted runners with non-standard workspace paths.
-      - name: Build lbug from source (skipped on cache hit)
+      # Note: lbug 0.17.0+ prebuilt is a self-contained fat bundle; LBUG_BUILD_FROM_SOURCE
+      # is no longer needed. This step just populates the cache so the test job gets a hit.
+      - name: Populate lbug prebuilt cache (skipped on cache hit)
         if: steps.lbug-cache.outputs.cache-hit != 'true'
-        env:
-          LBUG_BUILD_FROM_SOURCE: "1"
         run: cargo build --release -p liminis-graph-core
 
   test:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
     needs: build-lbug
-    env:
-      # The prebuilt liblbug.a doesn't ship companion third-party archives;
-      # build from source so all deps (fastpfor, brotli, lz4, zstd, yyjson…) are bundled.
-      LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -130,8 +126,6 @@ jobs:
     name: bench compile (stub)
     runs-on: ubuntu-latest
     needs: build-lbug
-    env:
-      LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -161,8 +155,6 @@ jobs:
     name: bench-dedup
     runs-on: ubuntu-latest
     needs: build-lbug
-    env:
-      LBUG_BUILD_FROM_SOURCE: "1"
     steps:
       - uses: actions/checkout@v4
 
