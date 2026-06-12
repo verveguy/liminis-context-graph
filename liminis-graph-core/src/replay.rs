@@ -8,17 +8,19 @@ use crate::db::Conn;
 use crate::error::Error;
 use crate::wal::{strip_quoted_literals, WalLine};
 
-/// lbug error-message substrings that identify legacy graphiti/FalkorDB-era schema constructs
-/// (Community node label, HAS relationship type, episodes property) not present in the current
-/// lbug schema. Mutations matching these patterns are counted in `ReplayStats::legacy_skipped_lines`
-/// rather than `failed_lines` so they don't inflate the fidelity-warning ratio.
+/// lbug error-message substrings (lowercase) that identify legacy graphiti/FalkorDB-era schema
+/// constructs (Community node label, HAS relationship type, episodes property) not present in the
+/// current lbug schema. Mutations matching these patterns are counted in
+/// `ReplayStats::legacy_skipped_lines` rather than `failed_lines` so they don't inflate the
+/// fidelity-warning ratio. Patterns are compared case-insensitively against the lowercased error
+/// string to guard against minor casing variations across lbug versions.
 ///
 /// NOTE: These patterns are matched against lbug 0.17.x error text. If lbug changes its error
 /// message format in a future version these patterns may silently stop matching. See ADR-0007.
 const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[
-    "Table Community does not exist",
-    "Table HAS does not exist",
-    "Cannot find property episodes for",
+    "table community does not exist",
+    "table has does not exist",
+    "cannot find property episodes for",
 ];
 
 /// A single captured failure from a `raw_query` execution error during replay.
@@ -50,6 +52,9 @@ pub struct ReplayStats {
     /// (Community node label, HAS relationship type, episodes property) that no longer exist
     /// in the current lbug schema. Counted separately from `failed_lines` so they don't
     /// inflate the fidelity failure ratio.
+    ///
+    /// Note: this counter is **excluded** from [`lines_skipped()`] — callers that want a
+    /// total "mutations not applied" count must add `legacy_skipped_lines + lines_skipped()`.
     pub legacy_skipped_lines: u64,
     /// Populated when `failed_lines / (lines_replayed + failed_lines) > threshold` after
     /// replay completes. Threshold defaults to 10% and is overridable via
@@ -263,9 +268,10 @@ impl WalReplayer {
                         }
                         Err(e) => {
                             let err_str = e.to_string();
+                            let err_lower = err_str.to_lowercase();
                             let is_legacy = LEGACY_SCHEMA_ERROR_PATTERNS
                                 .iter()
-                                .any(|pat| err_str.contains(pat));
+                                .any(|pat| err_lower.contains(pat));
                             if is_legacy {
                                 eprintln!(
                                     "[WAL SKIP] legacy-schema mutation at line {} in {:?}: {}",
@@ -386,7 +392,7 @@ fn json_to_cypher_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
-            format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+            format!("'{}'", crate::db::escape_pub(s))
         }
         serde_json::Value::Array(arr) => {
             let items: Vec<_> = arr.iter().map(json_to_cypher_literal).collect();
