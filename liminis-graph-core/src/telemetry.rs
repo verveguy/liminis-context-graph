@@ -44,6 +44,7 @@ pub enum TelemetryEvent {
         unrecognised_lines: u64,
         failed_lines: u64,
         unparseable_lines: u64,
+        legacy_skipped_lines: u64,
         duration_ms: u64,
     },
     ServiceState {

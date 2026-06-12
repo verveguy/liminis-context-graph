@@ -1283,6 +1283,7 @@ async fn handle_rebuild_from_wal(
             unrecognised_lines: stats.unrecognised_lines,
             failed_lines: stats.failed_lines,
             unparseable_lines: stats.unparseable_lines,
+            legacy_skipped_lines: stats.legacy_skipped_lines,
             duration_ms: replay_started_at.elapsed().as_millis() as u64,
         });
 
@@ -1331,8 +1332,10 @@ async fn handle_rebuild_from_wal(
             "unrecognised_lines": stats.unrecognised_lines,
             "failed_lines": stats.failed_lines,
             "unparseable_lines": stats.unparseable_lines,
+            "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "fidelity_warning": stats.fidelity_warning,
         });
         if dry_run {
             result["dry_run"] = json!(true);
@@ -1376,6 +1379,7 @@ async fn handle_rebuild_from_wal(
             unrecognised_lines: stats.unrecognised_lines,
             failed_lines: stats.failed_lines,
             unparseable_lines: stats.unparseable_lines,
+            legacy_skipped_lines: stats.legacy_skipped_lines,
             duration_ms: replay_started_at.elapsed().as_millis() as u64,
         });
         return Ok(json!({
@@ -1388,8 +1392,10 @@ async fn handle_rebuild_from_wal(
             "unrecognised_lines": stats.unrecognised_lines,
             "failed_lines": stats.failed_lines,
             "unparseable_lines": stats.unparseable_lines,
+            "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "fidelity_warning": stats.fidelity_warning,
         }));
     }
 
@@ -1480,6 +1486,7 @@ async fn handle_rebuild_from_wal(
                             unrecognised_lines: stats.unrecognised_lines,
                             failed_lines: stats.failed_lines,
                             unparseable_lines: stats.unparseable_lines,
+                            legacy_skipped_lines: stats.legacy_skipped_lines,
                             duration_ms: replay_started_at.elapsed().as_millis() as u64,
                         });
                         job.result = Some(json!({
@@ -1491,8 +1498,10 @@ async fn handle_rebuild_from_wal(
                             "unrecognised_lines": stats.unrecognised_lines,
                             "failed_lines": stats.failed_lines,
                             "unparseable_lines": stats.unparseable_lines,
+                            "legacy_skipped_lines": stats.legacy_skipped_lines,
                             "lines_skipped": stats.lines_skipped(),
                             "failed_samples": stats.failed_samples,
+                            "fidelity_warning": stats.fidelity_warning,
                         }));
                         // Update the sidecar so drift clears after a successful WAL rebuild.
                         if !dry_run {
@@ -1868,6 +1877,9 @@ async fn recover_rebuild_from_workspace_wal(
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
             let replay_started_at = std::time::Instant::now();
+            // TODO(follow-up): recover_rebuild_from_workspace_wal does not yet surface
+            // fidelity_warning in RecoverOutcome — a high failure rate here is still silent.
+            // See #128 for context; address in a follow-up issue.
             let stats = crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
             sink.emit(TelemetryEvent::WalReplayComplete {
                 ts_ms: now_ms(),
@@ -1875,6 +1887,7 @@ async fn recover_rebuild_from_workspace_wal(
                 unrecognised_lines: stats.unrecognised_lines,
                 failed_lines: stats.failed_lines,
                 unparseable_lines: stats.unparseable_lines,
+                legacy_skipped_lines: stats.legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
         }
