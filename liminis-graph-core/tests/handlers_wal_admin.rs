@@ -420,6 +420,7 @@ fn assert_has_stat_fields(v: &Value, label: &str) {
         "legacy_skipped_lines",
         "lines_skipped",
         "failed_samples",
+        "fidelity_warning",
     ] {
         assert!(
             v["result"].get(field).is_some(),
@@ -537,6 +538,7 @@ async fn test_rebuild_status_result_has_stat_fields() {
                     "legacy_skipped_lines",
                     "lines_skipped",
                     "failed_samples",
+                    "fidelity_warning",
                 ] {
                     assert!(
                         inner.get(field).is_some(),
