@@ -162,13 +162,13 @@ fn test_replay_golden_fixture_counts() {
         .replay(&conn)
         .expect("replay fixture");
 
-    // Lines 4, 6, 7 are MATCH-prefixed mutations; all 8 lines are replayed.
-    assert_eq!(stats.lines_replayed, 8, "8 mutation lines replayed");
+    // Lines 4, 6, 7 are MATCH-prefixed mutations; all 9 lines are replayed (seq 8 has apostrophes).
+    assert_eq!(stats.lines_replayed, 9, "9 mutation lines replayed");
     assert_eq!(stats.lines_skipped(), 0, "no lines skipped");
 
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();
-    assert_eq!(entity_count, 2, "expected 2 Entity nodes");
+    assert_eq!(entity_count, 3, "expected 3 Entity nodes (including apostrophe-bearing entity-2)");
     assert_eq!(episodic_count, 2, "expected 2 Episodic nodes");
 }
 
@@ -194,7 +194,7 @@ fn test_open_or_rebuild_from_wal() {
     let conn = db.connect().expect("connect");
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();
-    assert_eq!(entity_count, 2, "expected 2 Entity nodes after WAL rebuild");
+    assert_eq!(entity_count, 3, "expected 3 Entity nodes after WAL rebuild");
     assert_eq!(
         episodic_count, 2,
         "expected 2 Episodic nodes after WAL rebuild"
@@ -659,6 +659,131 @@ fn sample_cap_respected() {
     );
 }
 
+/// SC-003: apostrophe in string param must replay without parse error and store correctly.
+/// This is the root-cause regression test for issue #128 (84.5% data loss from '' vs \' escaping).
+#[test]
+fn test_apostrophe_in_params_replays_correctly() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // WAL line with apostrophes in name and summary params — previously caused parse errors.
+    let line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.group_id = $group_id, n.labels = $labels, n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, n.summary = $summary, n.attributes = $attributes","params":{"uuid":"apostrophe-entity","name":"Bob's team","group_id":"g","labels":["t"],"created_at":"2026-05-19 00:00:00","name_embedding":[1.0,0.0,0.0,0.0],"summary":"it's Alice's plan","attributes":"{}"}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_apo111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(stats.lines_replayed, 1, "apostrophe-bearing mutation must replay successfully");
+    assert_eq!(stats.failed_lines, 0, "no failures expected");
+
+    // Verify the node was created with the exact apostrophe-bearing name preserved.
+    let entity = conn
+        .get_entity_by_uuid("apostrophe-entity")
+        .expect("query ok")
+        .expect("apostrophe-entity must exist in DB");
+    assert_eq!(
+        entity.name, "Bob's team",
+        "name must be stored with apostrophe intact, not doubled or stripped"
+    );
+}
+
+/// SC-004: fidelity_warning fires when failed_lines / total > 10%.
+#[test]
+fn test_fidelity_warning_fires_above_threshold() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert a node so all subsequent CREATE lines (same UUID) fail with a duplicate PK.
+    conn.run_cypher("CREATE (:Entity {uuid: 'fidelity-dup'})").unwrap();
+
+    // 11 failing lines (duplicate PK) + 1 successful MERGE = 11/12 = 91.7% > 10% threshold.
+    let failing_line = |seq: u64| -> String {
+        format!(r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'fidelity-dup'}})","params":{{}}}}"#)
+    };
+    let good_line = make_entity_line(11, "fidelity-ok");
+    let content: String = (0..11u64)
+        .map(failing_line)
+        .chain(std::iter::once(good_line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_fidelity_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(&conn, ReplayOptions { failure_sample_cap: Some(0), ..Default::default() })
+        .expect("replay must not abort");
+
+    assert_eq!(stats.lines_replayed, 1);
+    assert_eq!(stats.failed_lines, 11);
+    assert!(
+        stats.fidelity_warning.is_some(),
+        "fidelity_warning must be set when >10% of mutations fail"
+    );
+    let warning = stats.fidelity_warning.as_deref().unwrap();
+    assert!(
+        warning.contains("91.") || warning.contains("91,"),
+        "warning must contain the observed ratio (~91.7%), got: {warning}"
+    );
+    assert!(
+        warning.contains("10.0%") || warning.contains("10,0%"),
+        "warning must state the threshold (10.0%), got: {warning}"
+    );
+}
+
+/// SC-005: legacy-schema mutations (Community node) increment legacy_skipped_lines, not failed_lines.
+#[test]
+fn test_legacy_skip_community_node() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Line 1: Community node CREATE — references a table that doesn't exist in current schema.
+    let community_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Community {uuid: 'comm-1', name: 'Test Community'})","params":{}}"#;
+    // Line 2: valid Entity MERGE — should succeed normally.
+    let entity_line = make_entity_line(1, "legacy-skip-entity");
+    let content = format!("{community_line}\n{entity_line}\n");
+    fs::write(
+        wal_dir.path().join("20260519_000000_legacy_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(stats.lines_replayed, 1, "valid Entity must be replayed");
+    assert_eq!(stats.failed_lines, 0, "Community must not count as a failure");
+    assert_eq!(
+        stats.legacy_skipped_lines, 1,
+        "Community CREATE must be counted as legacy_skipped_lines"
+    );
+    assert_eq!(
+        stats.lines_skipped(), 0,
+        "lines_skipped() does not include legacy_skipped_lines"
+    );
+}
+
 /// FR-006: empty_wal_all_zeros — all new counters are zero and failed_samples is empty.
 #[test]
 fn empty_wal_all_zeros() {
@@ -677,7 +802,9 @@ fn empty_wal_all_zeros() {
     assert_eq!(stats.unrecognised_lines, 0);
     assert_eq!(stats.failed_lines, 0);
     assert_eq!(stats.unparseable_lines, 0);
+    assert_eq!(stats.legacy_skipped_lines, 0);
     assert_eq!(stats.lines_skipped(), 0);
+    assert!(stats.fidelity_warning.is_none(), "no warning when total is 0");
     assert!(
         stats.failed_samples.is_empty(),
         "no failures → empty sample vec"
