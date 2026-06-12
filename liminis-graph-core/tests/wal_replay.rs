@@ -803,6 +803,59 @@ fn test_legacy_skip_community_node() {
     );
 }
 
+/// FR-006 / SC-004: ISO-8601 timestamps in bare $param positions must succeed as TIMESTAMP values.
+///
+/// Regression guard: if timestamp detection is removed from json_to_cypher_literal,
+/// lbug will reject STRING→TIMESTAMP and this test fails immediately in CI.
+#[test]
+fn test_timestamp_in_params_replays_correctly() {
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Fixture contains:
+    //   Line 0: Episodic MERGE with bare $created_at / $valid_at params (RFC-3339 strings)
+    //   Line 1: RelatesToNode_ MERGE with bare $created_at / $valid_at / $invalid_at params
+    // Templates use bare $param (no timestamp() wrapper) — the fix must supply the wrapper.
+    let wal_dir = TempDir::new().unwrap();
+    let fixture = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wal/timestamps_in_params.jsonl"),
+    )
+    .unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260612_100000_ts_test_0000.jsonl"),
+        &fixture,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines, 0,
+        "timestamp params must not produce STRING→TIMESTAMP binder errors; got {} failures",
+        stats.failed_lines
+    );
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both fixture lines must be replayed"
+    );
+
+    // Verify the RelatesToNode_ edge is findable by uuid — confirms the CREATE landed and
+    // that subsequent MATCHes won't cascade into "Cannot find property" errors.
+    let rows = conn
+        .cypher_query("MATCH (r:RelatesToNode_ {uuid: 'ts-edge-1'}) RETURN r.uuid")
+        .expect("cypher query must succeed");
+    assert!(
+        !rows.is_empty(),
+        "RelatesToNode_ ts-edge-1 must exist after replay"
+    );
+}
+
 /// FR-006: empty_wal_all_zeros — all new counters are zero and failed_samples is empty.
 #[test]
 fn empty_wal_all_zeros() {
