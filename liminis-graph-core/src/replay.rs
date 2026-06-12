@@ -392,7 +392,14 @@ fn json_to_cypher_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
         serde_json::Value::String(s) => {
-            format!("'{}'", crate::db::escape_pub(s))
+            // Detect RFC-3339 datetime strings and emit the typed timestamp() constructor
+            // that lbug requires. Without this, STRING→TIMESTAMP implicit casts fail and
+            // every subsequent MATCH on the node/edge yields "Cannot find property" cascades.
+            if chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(s).is_ok() {
+                format!("timestamp('{}')", crate::db::escape_pub(s))
+            } else {
+                format!("'{}'", crate::db::escape_pub(s))
+            }
         }
         serde_json::Value::Array(arr) => {
             let items: Vec<_> = arr.iter().map(json_to_cypher_literal).collect();
@@ -473,5 +480,46 @@ mod interpolate_tests {
             result.contains("'secret'"),
             "$b must still expand to 'secret'"
         );
+    }
+
+    #[test]
+    fn test_timestamp_with_offset_emits_typed_literal() {
+        let val = serde_json::Value::String("2026-03-25T16:58:57.761788+00:00".to_string());
+        assert_eq!(
+            json_to_cypher_literal(&val),
+            "timestamp('2026-03-25T16:58:57.761788+00:00')"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_utc_z_emits_typed_literal() {
+        let val = serde_json::Value::String("2026-03-25T16:58:57Z".to_string());
+        assert_eq!(
+            json_to_cypher_literal(&val),
+            "timestamp('2026-03-25T16:58:57Z')"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_nonzero_offset_emits_typed_literal() {
+        let val = serde_json::Value::String("2026-03-25T16:58:57+05:30".to_string());
+        assert_eq!(
+            json_to_cypher_literal(&val),
+            "timestamp('2026-03-25T16:58:57+05:30')"
+        );
+    }
+
+    #[test]
+    fn test_space_separated_datetime_no_tz_emits_bare_string() {
+        // "2026-05-19 00:00:00" is the format used in existing fixtures where the template
+        // already wraps with timestamp(...). parse_from_rfc3339 rejects it (no T, no tz).
+        let val = serde_json::Value::String("2026-05-19 00:00:00".to_string());
+        assert_eq!(json_to_cypher_literal(&val), "'2026-05-19 00:00:00'");
+    }
+
+    #[test]
+    fn test_ordinary_string_emits_bare_string() {
+        let val = serde_json::Value::String("not a timestamp".to_string());
+        assert_eq!(json_to_cypher_literal(&val), "'not a timestamp'");
     }
 }
