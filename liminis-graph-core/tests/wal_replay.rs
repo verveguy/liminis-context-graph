@@ -168,7 +168,10 @@ fn test_replay_golden_fixture_counts() {
 
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();
-    assert_eq!(entity_count, 3, "expected 3 Entity nodes (including apostrophe-bearing entity-2)");
+    assert_eq!(
+        entity_count, 3,
+        "expected 3 Entity nodes (including apostrophe-bearing entity-2)"
+    );
     assert_eq!(episodic_count, 2, "expected 2 Episodic nodes");
 }
 
@@ -682,7 +685,10 @@ fn test_apostrophe_in_params_replays_correctly() {
         .replay(&conn)
         .expect("replay must succeed");
 
-    assert_eq!(stats.lines_replayed, 1, "apostrophe-bearing mutation must replay successfully");
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "apostrophe-bearing mutation must replay successfully"
+    );
     assert_eq!(stats.failed_lines, 0, "no failures expected");
 
     // Verify the node was created with the exact apostrophe-bearing name preserved.
@@ -707,11 +713,14 @@ fn test_fidelity_warning_fires_above_threshold() {
     conn.init_schema(4).unwrap();
 
     // Pre-insert a node so all subsequent CREATE lines (same UUID) fail with a duplicate PK.
-    conn.run_cypher("CREATE (:Entity {uuid: 'fidelity-dup'})").unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid: 'fidelity-dup'})")
+        .unwrap();
 
     // 11 failing lines (duplicate PK) + 1 successful MERGE = 11/12 = 91.7% > 10% threshold.
     let failing_line = |seq: u64| -> String {
-        format!(r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'fidelity-dup'}})","params":{{}}}}"#)
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'fidelity-dup'}})","params":{{}}}}"#
+        )
     };
     let good_line = make_entity_line(11, "fidelity-ok");
     let content: String = (0..11u64)
@@ -727,7 +736,13 @@ fn test_fidelity_warning_fires_above_threshold() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay_opts(&conn, ReplayOptions { failure_sample_cap: Some(0), ..Default::default() })
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(0),
+                ..Default::default()
+            },
+        )
         .expect("replay must not abort");
 
     assert_eq!(stats.lines_replayed, 1);
@@ -773,13 +788,17 @@ fn test_legacy_skip_community_node() {
         .expect("replay must succeed");
 
     assert_eq!(stats.lines_replayed, 1, "valid Entity must be replayed");
-    assert_eq!(stats.failed_lines, 0, "Community must not count as a failure");
+    assert_eq!(
+        stats.failed_lines, 0,
+        "Community must not count as a failure"
+    );
     assert_eq!(
         stats.legacy_skipped_lines, 1,
         "Community CREATE must be counted as legacy_skipped_lines"
     );
     assert_eq!(
-        stats.lines_skipped(), 0,
+        stats.lines_skipped(),
+        0,
         "lines_skipped() does not include legacy_skipped_lines"
     );
 }
@@ -804,7 +823,10 @@ fn empty_wal_all_zeros() {
     assert_eq!(stats.unparseable_lines, 0);
     assert_eq!(stats.legacy_skipped_lines, 0);
     assert_eq!(stats.lines_skipped(), 0);
-    assert!(stats.fidelity_warning.is_none(), "no warning when total is 0");
+    assert!(
+        stats.fidelity_warning.is_none(),
+        "no warning when total is 0"
+    );
     assert!(
         stats.failed_samples.is_empty(),
         "no failures → empty sample vec"

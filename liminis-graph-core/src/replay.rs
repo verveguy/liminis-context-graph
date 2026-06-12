@@ -385,7 +385,9 @@ fn json_to_cypher_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+        serde_json::Value::String(s) => {
+            format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
+        }
         serde_json::Value::Array(arr) => {
             let items: Vec<_> = arr.iter().map(json_to_cypher_literal).collect();
             format!("[{}]", items.join(", "))
