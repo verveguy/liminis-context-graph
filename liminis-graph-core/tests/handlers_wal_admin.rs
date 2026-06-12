@@ -417,6 +417,7 @@ fn assert_has_stat_fields(v: &Value, label: &str) {
         "unrecognised_lines",
         "failed_lines",
         "unparseable_lines",
+        "legacy_skipped_lines",
         "lines_skipped",
         "failed_samples",
     ] {
@@ -533,6 +534,7 @@ async fn test_rebuild_status_result_has_stat_fields() {
                     "unrecognised_lines",
                     "failed_lines",
                     "unparseable_lines",
+                    "legacy_skipped_lines",
                     "lines_skipped",
                     "failed_samples",
                 ] {
@@ -557,4 +559,56 @@ async fn test_rebuild_status_result_has_stat_fields() {
             other => panic!("unexpected status: {other}: {status_v}"),
         }
     }
+}
+
+/// IPC response includes a non-null fidelity_warning when failed_lines / total > 10% (FR-004, SC-004).
+#[tokio::test]
+async fn test_rebuild_from_wal_fidelity_warning_surfaced() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    // 11 lines referencing a non-existent table → each fails and increments failed_lines.
+    // 1 valid Entity MERGE → lines_replayed. Ratio = 11/12 = 91.7% > 10%.
+    let fail_line = |seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:NonExistentFidelityTable {{uuid: 'f-{seq}'}})","params":{{}}}}"#
+        )
+    };
+    let ok_line = entity_wal_line(11, "fidelity-warn-entity");
+    let content: String = (0..11u64)
+        .map(fail_line)
+        .chain(std::iter::once(ok_line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_fidelity_warn.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: serde_json::Value::Number(34.into()),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {} // drain progress events
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["mutations_replayed"], 1, "{v}");
+    assert_eq!(v["result"]["failed_lines"], 11, "{v}");
+    assert!(
+        !v["result"]["fidelity_warning"].is_null(),
+        "fidelity_warning must be a non-null string when >10% of mutations fail: {v}"
+    );
+    let warning = v["result"]["fidelity_warning"].as_str().unwrap_or("");
+    assert!(
+        !warning.is_empty(),
+        "fidelity_warning must be non-empty: {v}"
+    );
 }
