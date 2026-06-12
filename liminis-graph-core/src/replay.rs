@@ -395,7 +395,14 @@ fn json_to_cypher_literal(val: &serde_json::Value) -> String {
             // Detect RFC-3339 datetime strings and emit the typed timestamp() constructor
             // that lbug requires. Without this, STRING→TIMESTAMP implicit casts fail and
             // every subsequent MATCH on the node/edge yields "Cannot find property" cascades.
-            if chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(s).is_ok() {
+            // Pre-filter: a valid RFC-3339 datetime is at least 20 chars, starts with a digit
+            // (year), and has 'T' at index 10. This skips the chrono parser for the majority
+            // of params (UUIDs, names, content) without changing correctness.
+            if s.len() >= 20
+                && s.as_bytes()[0].is_ascii_digit()
+                && (s.as_bytes()[10] == b'T' || s.as_bytes()[10] == b't')
+                && chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(s).is_ok()
+            {
                 format!("timestamp('{}')", crate::db::escape_pub(s))
             } else {
                 format!("'{}'", crate::db::escape_pub(s))
