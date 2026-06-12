@@ -8,6 +8,19 @@ use crate::db::Conn;
 use crate::error::Error;
 use crate::wal::{strip_quoted_literals, WalLine};
 
+/// lbug error-message substrings that identify legacy graphiti/FalkorDB-era schema constructs
+/// (Community node label, HAS relationship type, episodes property) not present in the current
+/// lbug schema. Mutations matching these patterns are counted in `ReplayStats::legacy_skipped_lines`
+/// rather than `failed_lines` so they don't inflate the fidelity-warning ratio.
+///
+/// NOTE: These patterns are matched against lbug 0.17.x error text. If lbug changes its error
+/// message format in a future version these patterns may silently stop matching. See ADR-0007.
+const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[
+    "Table Community does not exist",
+    "Table HAS does not exist",
+    "Cannot find property episodes for",
+];
+
 /// A single captured failure from a `raw_query` execution error during replay.
 #[derive(Serialize)]
 pub struct FailureSample {
@@ -33,6 +46,15 @@ pub struct ReplayStats {
     pub indexes_created: u64,
     /// Mutations whose Cypher began with MATCH (e.g. MATCH … SET for embedding enrichment).
     pub match_prefixed_replayed: u64,
+    /// WAL mutations skipped because they reference legacy-schema constructs
+    /// (Community node label, HAS relationship type, episodes property) that no longer exist
+    /// in the current lbug schema. Counted separately from `failed_lines` so they don't
+    /// inflate the fidelity failure ratio.
+    pub legacy_skipped_lines: u64,
+    /// Populated when `failed_lines / (lines_replayed + failed_lines) > threshold` after
+    /// replay completes. Threshold defaults to 10% and is overridable via
+    /// `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
+    pub fidelity_warning: Option<String>,
 }
 
 impl ReplayStats {
@@ -110,6 +132,8 @@ impl WalReplayer {
             files_read: 0,
             indexes_created: 0,
             match_prefixed_replayed: 0,
+            legacy_skipped_lines: 0,
+            fidelity_warning: None,
         };
 
         if !self.wal_dir.exists() {
@@ -238,18 +262,32 @@ impl WalReplayer {
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[WAL WARN] replay execution error at line {} in {:?}: {}",
-                                i + 1,
-                                file_path,
-                                e
-                            );
-                            stats.failed_lines += 1;
-                            if stats.failed_samples.len() < sample_cap {
-                                stats.failed_samples.push(FailureSample {
-                                    cypher: cypher.chars().take(200).collect(),
-                                    error: e.to_string(),
-                                });
+                            let err_str = e.to_string();
+                            let is_legacy = LEGACY_SCHEMA_ERROR_PATTERNS
+                                .iter()
+                                .any(|pat| err_str.contains(pat));
+                            if is_legacy {
+                                eprintln!(
+                                    "[WAL SKIP] legacy-schema mutation at line {} in {:?}: {}",
+                                    i + 1,
+                                    file_path,
+                                    err_str
+                                );
+                                stats.legacy_skipped_lines += 1;
+                            } else {
+                                eprintln!(
+                                    "[WAL WARN] replay execution error at line {} in {:?}: {}",
+                                    i + 1,
+                                    file_path,
+                                    err_str
+                                );
+                                stats.failed_lines += 1;
+                                if stats.failed_samples.len() < sample_cap {
+                                    stats.failed_samples.push(FailureSample {
+                                        cypher: cypher.chars().take(200).collect(),
+                                        error: err_str,
+                                    });
+                                }
                             }
                         }
                     }
@@ -281,6 +319,23 @@ impl WalReplayer {
                         }
                     }
                 }
+            }
+        }
+
+        let threshold: f64 = std::env::var("LCG_REPLAY_FIDELITY_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.10)
+            .clamp(0.0, 1.0);
+        let total = stats.lines_replayed + stats.failed_lines;
+        if total > 0 {
+            let ratio = stats.failed_lines as f64 / total as f64;
+            if ratio > threshold {
+                stats.fidelity_warning = Some(format!(
+                    "{:.1}% of mutations failed (threshold: {:.1}%); rebuilt graph may be incomplete",
+                    ratio * 100.0,
+                    threshold * 100.0,
+                ));
             }
         }
 
@@ -330,7 +385,7 @@ fn json_to_cypher_literal(val: &serde_json::Value) -> String {
         serde_json::Value::Null => "null".to_string(),
         serde_json::Value::Bool(b) => b.to_string(),
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
         serde_json::Value::Array(arr) => {
             let items: Vec<_> = arr.iter().map(json_to_cypher_literal).collect();
             format!("[{}]", items.join(", "))
@@ -385,7 +440,7 @@ mod interpolate_tests {
     #[test]
     fn test_json_to_cypher_literal_string() {
         let val = serde_json::Value::String("it's here".to_string());
-        assert_eq!(json_to_cypher_literal(&val), "'it''s here'");
+        assert_eq!(json_to_cypher_literal(&val), "'it\\'s here'");
     }
 
     #[test]
