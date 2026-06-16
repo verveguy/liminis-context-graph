@@ -103,21 +103,19 @@ pub fn migrate(conn: &Conn<'_>) {
     // Each column is probed independently — no early return — so that a DB which already has
     // relation_type (from the first migration) still gets episodes probed and added if absent.
     // lbug fails at bind time if the column is not in the schema; success means it's present.
-    if !conn
+    if conn
         .raw_query(
             "MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.relation_type LIMIT 0",
         )
-        .is_ok()
+        .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
             eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
         }
     }
-    if !conn
-        .raw_query(
-            "MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.episodes LIMIT 0",
-        )
-        .is_ok()
+    if conn
+        .raw_query("MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.episodes LIMIT 0")
+        .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD episodes STRING[]") {
             eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD episodes STRING[]: {e} (non-fatal)");
