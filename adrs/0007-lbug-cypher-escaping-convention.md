@@ -67,6 +67,10 @@ Evidence for backslash escaping (not SQL doubling):
 The `LEGACY_SCHEMA_ERROR_PATTERNS` constant in `replay.rs` matches lbug 0.17.x error text
 for missing legacy tables/properties. If lbug changes its error message format in a future
 version, these patterns will silently stop matching. When upgrading lbug, verify that the
-error text for `CREATE (:Community …)`, `CREATE (:HAS …)`, and a property access on a
-non-existent `episodes` field still contains the expected substrings. See `replay.rs` for
-the current patterns.
+error text for `CREATE (:Community …)` and `CREATE (:HAS …)` still contains the expected
+substrings. See `replay.rs` for the current patterns.
+
+Note: the `"cannot find property episodes for"` pattern was removed in #133. The `episodes`
+property is now a real `STRING[]` column on `RelatesToNode_` (matching graphiti's kuzu_driver.py
+schema), so episodes mutations succeed and must not be silently skipped. Any future `episodes`
+error would indicate a real schema regression and should surface as a loud `failed_lines` entry.
