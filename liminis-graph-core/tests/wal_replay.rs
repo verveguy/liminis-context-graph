@@ -856,6 +856,167 @@ fn test_timestamp_in_params_replays_correctly() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #133 regression tests: episodes schema parity + FalkorDB-dialect translation
+// ---------------------------------------------------------------------------
+
+/// FR-008a / FR-008d: FalkorDB-era WAL with `episodes STRING[]` + `VECF32($param)` replays
+/// correctly. Verifies:
+///   - mutations are counted in `mutations_replayed` (not `legacy_skipped_lines`)
+///   - `failed_lines == 0`
+///   - `RelatesToNode_` node is created (relationship layer is not discarded)
+#[test]
+fn test_falkordb_episodes_merge_replays_successfully() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let fixture = std::fs::read_to_string(fixture_path("falkordb_era_episodes.jsonl")).unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260401_100000_episodes_0000.jsonl"),
+        &fixture,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines, 0,
+        "episodes + VECF32 mutations must not fail; got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.legacy_skipped_lines, 0,
+        "episodes mutations must not be silently skipped"
+    );
+    assert_eq!(stats.lines_replayed, 2, "both fixture lines must be replayed");
+
+    // Relationship layer must exist — the RelatesToNode_ node was created.
+    let count = conn.count_nodes("RelatesToNode_").expect("count query");
+    assert!(count > 0, "RelatesToNode_ must be non-empty after replay");
+
+    // Verify the specific node is queryable by uuid.
+    let rows = conn
+        .cypher_query(
+            "MATCH (r:RelatesToNode_ {uuid: 'rel-episodes-001'}) RETURN r.uuid",
+        )
+        .expect("cypher query must succeed");
+    assert!(
+        !rows.is_empty(),
+        "RelatesToNode_ rel-episodes-001 must exist after replay"
+    );
+}
+
+/// FR-008b: VECF32([…]) inline array form strips correctly and the containing mutation succeeds.
+#[test]
+fn test_vecf32_inline_array_strips_correctly() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Uppercase VECF32 with an inline array literal — must be stripped before raw_query.
+    let line = r#"{"seq":0,"ts":"2026-04-01T10:00:00.000000+00:00","db":"","cypher":"MERGE (ep:Episodic {uuid: $uuid}) ON CREATE SET ep.name = $name, ep.group_id = $group_id, ep.created_at = $created_at, ep.source = $src, ep.source_description = $sd, ep.content = $content, ep.content_embedding = VECF32([0.1, 0.2, 0.3, 0.4]), ep.valid_at = $valid_at, ep.entity_edges = $entity_edges","params":{"uuid":"ep-inline-vecf32","name":"Inline Vecf32","group_id":"g","created_at":"2026-03-25T10:00:00.000000+00:00","src":"test","sd":"test source","content":"inline test","valid_at":"2026-03-25T10:00:00.000000+00:00","entity_edges":[]}}"#;
+    std::fs::write(
+        wal_dir.path().join("20260401_000000_vecf32_inline_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines, 0,
+        "VECF32 inline must not fail; got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+    );
+    assert_eq!(stats.lines_replayed, 1);
+}
+
+/// FR-008b: vecf32($param) lowercase param-ref form strips correctly.
+#[test]
+fn test_vecf32_param_ref_strips_correctly() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Lowercase vecf32 with a param reference — must strip to $name_embedding.
+    let line = r#"{"seq":0,"ts":"2026-04-01T10:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.group_id = $group_id, n.labels = $labels, n.created_at = $created_at, n.name_embedding = vecf32($name_embedding), n.summary = $summary, n.attributes = $attrs","params":{"uuid":"e-param-vecf32","name":"Param Vecf32","group_id":"g","labels":["person"],"created_at":"2026-03-25T10:00:00.000000+00:00","name_embedding":[0.1,0.2,0.3,0.4],"summary":"test","attrs":"{}"}}"#;
+    std::fs::write(
+        wal_dir.path().join("20260401_000000_vecf32_param_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines, 0,
+        "vecf32 param-ref must not fail; got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+    );
+    assert_eq!(stats.lines_replayed, 1);
+}
+
+/// FR-008c: bulk `SET n = $props` is expanded to individual property assignments.
+/// Uses a FalkorDB-style WAL line where all properties come from a single map param.
+#[test]
+fn test_bulk_set_expands_to_individual_assignments() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // FalkorDB-style bulk SET: all properties come from a single $props map.
+    // After expand_bulk_property_set this becomes individual SET n.k = $props_k assignments.
+    let line = r#"{"seq":0,"ts":"2026-04-01T10:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n = $props","params":{"uuid":"bulk-uuid","props":{"name":"Alice","group_id":"g1"}}}"#;
+    std::fs::write(
+        wal_dir.path().join("20260401_000000_bulk_set_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines, 0,
+        "bulk SET must not fail; got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+    );
+    assert_eq!(stats.lines_replayed, 1);
+
+    // Entity must exist with the properties from $props.
+    let rows = conn
+        .cypher_query("MATCH (n:Entity {uuid: 'bulk-uuid'}) RETURN n.name")
+        .expect("cypher query must succeed");
+    assert!(
+        !rows.is_empty(),
+        "Entity bulk-uuid must exist after bulk-SET expansion"
+    );
+}
+
 /// FR-006: empty_wal_all_zeros — all new counters are zero and failed_samples is empty.
 #[test]
 fn empty_wal_all_zeros() {
