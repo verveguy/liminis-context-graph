@@ -414,7 +414,7 @@ fn test_replay_opts_dry_run() {
     assert_eq!(count_before, count_after, "dry_run must not modify the DB");
 }
 
-/// progress_fn fires at least once per file.
+/// progress_fn fires at least once per file and carries correct files_total + counters (SC-001).
 #[test]
 fn test_replay_opts_progress_callback() {
     let wal_dir = TempDir::new().unwrap();
@@ -436,7 +436,15 @@ fn test_replay_opts_progress_callback() {
     let conn = db.connect().unwrap();
     conn.init_schema(4).unwrap();
 
-    let calls: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    #[derive(Clone)]
+    struct Snapshot {
+        files_processed: u64,
+        files_total: u64,
+        failed_lines_so_far: u64,
+        legacy_skipped_lines_so_far: u64,
+    }
+
+    let calls: Arc<Mutex<Vec<Snapshot>>> = Arc::new(Mutex::new(Vec::new()));
     let calls_clone = Arc::clone(&calls);
 
     let replayer = WalReplayer::new(wal_dir.path());
@@ -445,10 +453,12 @@ fn test_replay_opts_progress_callback() {
             &conn,
             ReplayOptions {
                 progress_fn: Some(Box::new(move |p: &ReplayProgress| {
-                    calls_clone
-                        .lock()
-                        .unwrap()
-                        .push((p.files_processed, p.mutations_replayed));
+                    calls_clone.lock().unwrap().push(Snapshot {
+                        files_processed: p.files_processed,
+                        files_total: p.files_total,
+                        failed_lines_so_far: p.failed_lines_so_far,
+                        legacy_skipped_lines_so_far: p.legacy_skipped_lines_so_far,
+                    });
                     true
                 })),
                 ..Default::default()
@@ -457,10 +467,127 @@ fn test_replay_opts_progress_callback() {
         .expect("replay_opts progress");
 
     let calls_guard = calls.lock().unwrap();
+
+    // Must fire at least once per file (2 files → ≥2 per-file events)
     assert!(
         calls_guard.len() >= 2,
         "progress_fn must fire at least once per file (got {} calls)",
         calls_guard.len()
+    );
+
+    // Every event carries the correct denominator (SC-001)
+    for snap in calls_guard.iter() {
+        assert_eq!(
+            snap.files_total, 2,
+            "files_total must equal the number of WAL files in the directory"
+        );
+    }
+
+    // files_processed advances from 1 to N across per-file events (monotonic subset)
+    let per_file_events: Vec<_> = calls_guard
+        .iter()
+        .filter(|s| s.files_processed != calls_guard[0].files_processed || s.files_processed == 1)
+        .collect();
+    assert_eq!(
+        calls_guard.first().unwrap().files_processed,
+        1,
+        "first progress event must have files_processed == 1"
+    );
+    assert_eq!(
+        calls_guard
+            .iter()
+            .map(|s| s.files_processed)
+            .max()
+            .unwrap_or(0),
+        2,
+        "last files_processed must equal files_total"
+    );
+
+    // Clean WAL — no failures
+    for snap in calls_guard.iter() {
+        assert_eq!(
+            snap.failed_lines_so_far, 0,
+            "clean WAL must have failed_lines_so_far == 0"
+        );
+        assert_eq!(
+            snap.legacy_skipped_lines_so_far, 0,
+            "clean WAL must have legacy_skipped_lines_so_far == 0"
+        );
+    }
+
+    // Suppress unused warning from the per_file_events binding used only for its side effect
+    let _ = per_file_events;
+}
+
+/// Mid-replay cancel: last progress event has files_processed < files_total (SC-001 scenario 4).
+#[test]
+fn test_replay_opts_progress_cancel_mid_run() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    for i in 0u64..3 {
+        fs::write(
+            wal_dir
+                .path()
+                .join(format!("20260522_{:06}_aaa_{:04}.jsonl", i, i)),
+            make_entity_line(i, &format!("cancel-{i}")) + "\n",
+        )
+        .unwrap();
+    }
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    #[derive(Clone)]
+    struct Snapshot {
+        files_processed: u64,
+        files_total: u64,
+    }
+
+    let calls: Arc<Mutex<Vec<Snapshot>>> = Arc::new(Mutex::new(Vec::new()));
+    let calls_clone = Arc::clone(&calls);
+
+    // Cancel after the first file (return false from progress_fn)
+    let cancelled = Arc::new(Mutex::new(false));
+    let cancelled_clone = Arc::clone(&cancelled);
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let _stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                progress_fn: Some(Box::new(move |p: &ReplayProgress| {
+                    calls_clone.lock().unwrap().push(Snapshot {
+                        files_processed: p.files_processed,
+                        files_total: p.files_total,
+                    });
+                    let mut done = cancelled_clone.lock().unwrap();
+                    if p.files_processed >= 1 && !*done {
+                        *done = true;
+                        return false; // abort after first file
+                    }
+                    true
+                })),
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts cancel");
+
+    let calls_guard = calls.lock().unwrap();
+    assert!(
+        !calls_guard.is_empty(),
+        "at least one progress event expected before cancel"
+    );
+    let last = calls_guard.last().unwrap();
+    assert_eq!(
+        last.files_total, 3,
+        "files_total must reflect total WAL files even when cancelled"
+    );
+    assert!(
+        last.files_processed < last.files_total,
+        "cancelled replay must have files_processed < files_total"
     );
 }
 

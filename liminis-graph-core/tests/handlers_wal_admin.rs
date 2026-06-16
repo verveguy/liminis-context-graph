@@ -614,3 +614,68 @@ async fn test_rebuild_from_wal_fidelity_warning_surfaced() {
         "fidelity_warning must be non-empty: {v}"
     );
 }
+
+/// Streaming IPC progress events include files_total, failed_lines_so_far, and
+/// legacy_skipped_lines_so_far as numeric fields (FR-003, SC-002).
+#[tokio::test]
+async fn test_rebuild_from_wal_streaming_progress_has_new_fields() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_progress_fields.jsonl"),
+        entity_wal_line(0, "progress-field-a")
+            + "\n"
+            + &entity_wal_line(1, "progress-field-b")
+            + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("20260522_000001_progress_fields2.jsonl"),
+        entity_wal_line(2, "progress-field-c") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: serde_json::Value::Number(40.into()),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let _resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+
+    // Collect all progress events
+    let mut events: Vec<Value> = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+
+    assert!(
+        !events.is_empty(),
+        "at least one progress event must be emitted for 2 WAL files"
+    );
+
+    for ev in &events {
+        assert!(
+            ev["files_total"].is_number(),
+            "progress event must include numeric 'files_total': {ev}"
+        );
+        assert_eq!(
+            ev["files_total"].as_u64().unwrap_or(0),
+            2,
+            "files_total must equal the number of WAL files: {ev}"
+        );
+        assert!(
+            ev["failed_lines_so_far"].is_number(),
+            "progress event must include numeric 'failed_lines_so_far': {ev}"
+        );
+        assert!(
+            ev["legacy_skipped_lines_so_far"].is_number(),
+            "progress event must include numeric 'legacy_skipped_lines_so_far': {ev}"
+        );
+    }
+}
