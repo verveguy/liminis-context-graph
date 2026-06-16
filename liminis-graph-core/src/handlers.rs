@@ -1245,7 +1245,14 @@ async fn handle_rebuild_from_wal(
         };
 
         let replay_started_at = std::time::Instant::now();
-        let wal_files_total = count_wal_files(&wal_dir_c);
+        let mut wal_files_total: u64 = 0;
+        if let Ok(mut entries) = tokio::fs::read_dir(&wal_dir_c).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                    wal_files_total += 1;
+                }
+            }
+        }
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
@@ -2010,17 +2017,6 @@ fn has_jsonl_files(dir: &std::path::Path) -> bool {
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
         })
         .unwrap_or(false)
-}
-
-fn count_wal_files(dir: &std::path::Path) -> u64 {
-    std::fs::read_dir(dir)
-        .ok()
-        .map(|rd| {
-            rd.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
-                .count() as u64
-        })
-        .unwrap_or(0)
 }
 
 fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
