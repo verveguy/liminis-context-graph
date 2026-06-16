@@ -1279,6 +1279,7 @@ async fn handle_rebuild_from_wal(
                         cancel_fn,
                         progress_fn: build_progress_fn(tx),
                         failure_sample_cap: None,
+                        batch_size: None,
                     },
                 )
             })
@@ -1380,6 +1381,7 @@ async fn handle_rebuild_from_wal(
                         progress_fn: None,
                         cancel_fn: None,
                         failure_sample_cap: None,
+                        batch_size: None,
                     },
                 )
             })
@@ -1478,6 +1480,7 @@ async fn handle_rebuild_from_wal(
                         progress_fn: Some(progress_fn),
                         cancel_fn: None,
                         failure_sample_cap: None,
+                        batch_size: None,
                     },
                 )
             })
