@@ -1,4 +1,4 @@
-use liminis_graph_core::{Db, ReplayOptions, ReplayProgress, WalReplayer};
+use liminis_graph_core::{Db, EntityRow, ReplayOptions, ReplayProgress, WalReplayer};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -1250,5 +1250,352 @@ fn empty_wal_all_zeros() {
     assert!(
         stats.failed_samples.is_empty(),
         "no failures → empty sample vec"
+    );
+}
+
+// ── Batch UNWIND tests (issue #139) ───────────────────────────────────────────
+
+/// Entity MERGE WAL line with uuid/name/name_embedding as params; created_at is inline.
+fn entity_merge_wal_line(seq: u64, uuid: &str, name: &str, emb: [f32; 4]) -> String {
+    let template = "MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.group_id = 'g', n.labels = ['tag'], n.created_at = timestamp('2026-05-19 00:00:00'), n.name_embedding = $name_embedding, n.summary = 's', n.attributes = '{}'";
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"{template}","params":{{"uuid":"{uuid}","name":"{name}","name_embedding":[{},{},{},{}]}}}}"#,
+        emb[0], emb[1], emb[2], emb[3]
+    )
+}
+
+/// Entity CREATE WAL line (fails on duplicate uuid, unlike MERGE).
+fn entity_create_wal_line(seq: u64, uuid: &str, name: &str, emb: [f32; 4]) -> String {
+    let template = "CREATE (n:Entity {uuid: $uuid, name: $name, group_id: 'g', labels: ['tag'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: $name_embedding, summary: 's', attributes: '{}'})";
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"{template}","params":{{"uuid":"{uuid}","name":"{name}","name_embedding":[{},{},{},{}]}}}}"#,
+        emb[0], emb[1], emb[2], emb[3]
+    )
+}
+
+/// Episodic MERGE WAL line with uuid/name as params.
+fn episodic_merge_wal_line(seq: u64, uuid: &str, name: &str) -> String {
+    let template = "MERGE (ep:Episodic {uuid: $uuid}) ON CREATE SET ep.name = $name, ep.group_id = 'g', ep.created_at = timestamp('2026-03-25T16:58:57Z'), ep.source = 'src', ep.source_description = 'sd', ep.content = 'c', ep.content_embedding = [0.1, 0.0, 0.0, 0.0], ep.valid_at = timestamp('2026-03-25T16:58:57Z'), ep.entity_edges = []";
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"{template}","params":{{"uuid":"{uuid}","name":"{name}"}}}}"#
+    )
+}
+
+/// Batch of 10 same-template Entity MERGEs with batch_size=4 forces multiple UNWIND flushes.
+/// Asserts all 10 entities exist in the DB after replay (FR-002, SC-002).
+#[test]
+fn batch_same_template_groups_into_unwind() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    for i in 0..10u64 {
+        lines.push_str(&entity_merge_wal_line(
+            i,
+            &format!("batch-e-{i}"),
+            &format!("E{i}"),
+            emb,
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(4),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.lines_replayed, 10,
+        "all 10 mutations must be replayed"
+    );
+    assert_eq!(stats.failed_lines, 0, "no failures");
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 10, "all 10 Entity nodes must exist in DB");
+}
+
+/// One bad row in a batch causes UNWIND failure; fallback per-row keeps valid rows.
+/// Asserts mutations_replayed == 4, failed_lines == 1 (SC-003, FR-008).
+#[test]
+fn batch_fallback_isolates_bad_row() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert the conflicting entity so that CREATE (not MERGE) fails on it.
+    conn.insert_entity(&EntityRow {
+        uuid: "fb-pre".to_string(),
+        name: "Pre".to_string(),
+        group_id: "g".to_string(),
+        labels: vec!["tag".to_string()],
+        created_at: "2026-05-19 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: "s".to_string(),
+        attributes: "{}".to_string(),
+        episode_uuids: vec![],
+        source_descriptions: vec![],
+    })
+    .unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    // 5 lines: mutation #3 (seq=2) uses the pre-existing uuid → fails on CREATE.
+    let uuids = ["fb-1", "fb-2", "fb-pre", "fb-4", "fb-5"];
+    let mut lines = String::new();
+    for (i, &uuid) in uuids.iter().enumerate() {
+        lines.push_str(&entity_create_wal_line(
+            i as u64,
+            uuid,
+            &format!("FB{i}"),
+            emb,
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(5),
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on batch failure");
+
+    assert_eq!(
+        stats.lines_replayed, 4,
+        "4 valid mutations must succeed after fallback"
+    );
+    assert_eq!(stats.failed_lines, 1, "exactly 1 mutation must fail");
+    assert_eq!(
+        stats.failed_samples.len(),
+        1,
+        "exactly 1 failure sample must be captured"
+    );
+
+    // Verify the 4 valid entities exist.
+    for uuid in &["fb-1", "fb-2", "fb-4", "fb-5"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(!rows.is_empty(), "entity {uuid} must exist after fallback");
+    }
+}
+
+/// batch_size=1 is identical to the pre-batching per-row path (SC-004, FR-004).
+#[test]
+fn batch_size_one_matches_per_row() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let emb = [0.5f32, 0.5, 0.0, 0.0];
+    let mut lines = String::new();
+    for i in 0..5u64 {
+        lines.push_str(&entity_merge_wal_line(
+            i,
+            &format!("bs1-e-{i}"),
+            &format!("BS1-{i}"),
+            emb,
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("replay with batch_size=1 must succeed");
+
+    assert_eq!(
+        stats.lines_replayed, 5,
+        "all 5 must replay with batch_size=1"
+    );
+    assert_eq!(stats.failed_lines, 0);
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 5);
+}
+
+/// Mixed templates produce separate batches; all 6 mutations succeed (FR-001, FR-011).
+#[test]
+fn batch_template_boundary_flushes_correctly() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let emb = [0.1f32, 0.9, 0.0, 0.0];
+    let mut lines = String::new();
+    for i in 0..3u64 {
+        lines.push_str(&entity_merge_wal_line(
+            i,
+            &format!("tb-en-{i}"),
+            &format!("TBEn{i}"),
+            emb,
+        ));
+        lines.push('\n');
+    }
+    for i in 0..3u64 {
+        lines.push_str(&episodic_merge_wal_line(
+            3 + i,
+            &format!("tb-ep-{i}"),
+            &format!("TBEp{i}"),
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    assert_eq!(stats.lines_replayed, 6, "all 6 must be replayed");
+    assert_eq!(stats.failed_lines, 0);
+    assert_eq!(conn.count_nodes("Entity").unwrap(), 3);
+    assert_eq!(conn.count_nodes("Episodic").unwrap(), 3);
+}
+
+/// WAL file boundary flushes the partial batch before the next file starts (FR-011).
+#[test]
+fn batch_file_boundary_flushes_between_files() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let emb = [0.3f32, 0.7, 0.0, 0.0];
+    // Two files, each with 4 same-template Entity MERGEs. batch_size=10 means no size-flush
+    // within a file; the file-boundary flush must drain the 4-item batch before file 2 starts.
+    for file_idx in 0..2u64 {
+        let ts = format!("2026051900{file_idx}000");
+        let mut lines = String::new();
+        for i in 0..4u64 {
+            let uuid = format!("fb-f{file_idx}-e{i}");
+            let name = format!("FBF{file_idx}E{i}");
+            lines.push_str(&entity_merge_wal_line(file_idx * 4 + i, &uuid, &name, emb));
+            lines.push('\n');
+        }
+        fs::write(
+            wal_dir
+                .path()
+                .join(format!("20260519_{ts}_aaa111_0000.jsonl")),
+            &lines,
+        )
+        .unwrap();
+    }
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.lines_replayed, 8,
+        "all 8 mutations from both files must replay"
+    );
+    assert_eq!(stats.failed_lines, 0);
+    assert_eq!(conn.count_nodes("Entity").unwrap(), 8);
+}
+
+/// Invalid batch sizes (0 and 257) must cause an error before any WAL is read (FR-005).
+#[test]
+fn batch_invalid_size_returns_error() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let result_zero = WalReplayer::new(wal_dir.path()).replay_opts(
+        &conn,
+        ReplayOptions {
+            batch_size: Some(0),
+            ..Default::default()
+        },
+    );
+    let err_zero = match result_zero {
+        Err(e) => e,
+        Ok(_) => panic!("batch_size=0 must return Err"),
+    };
+    assert!(
+        err_zero.to_string().contains("configuration error"),
+        "error must be a Config error: {err_zero}"
+    );
+
+    let result_big = WalReplayer::new(wal_dir.path()).replay_opts(
+        &conn,
+        ReplayOptions {
+            batch_size: Some(257),
+            ..Default::default()
+        },
+    );
+    let err_big = match result_big {
+        Err(e) => e,
+        Ok(_) => panic!("batch_size=257 must return Err"),
+    };
+    assert!(
+        err_big.to_string().contains("configuration error"),
+        "error must be a Config error: {err_big}"
     );
 }
