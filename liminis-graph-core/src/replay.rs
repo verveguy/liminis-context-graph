@@ -415,7 +415,13 @@ fn rewrite_params_for_unwind(template: &str, keys: &[&str]) -> String {
     while let Some(dollar_pos) = remaining.find('$') {
         result.push_str(&remaining[..dollar_pos]);
         let after_dollar = &remaining[dollar_pos + 1..];
-        if let Some(k) = sorted_keys.iter().find(|&&k| after_dollar.starts_with(k)) {
+        if let Some(k) = sorted_keys.iter().find(|&&k| {
+            after_dollar.starts_with(k)
+                && after_dollar[k.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+        }) {
             result.push_str("row.");
             result.push_str(k);
             remaining = &remaining[dollar_pos + 1 + k.len()..];
@@ -428,6 +434,15 @@ fn rewrite_params_for_unwind(template: &str, keys: &[&str]) -> String {
     result
 }
 
+/// Serializes a JSON object map directly to a Cypher map literal without wrapping in Value::Object.
+fn map_to_cypher_literal(obj: &serde_json::Map<String, serde_json::Value>) -> String {
+    let pairs: Vec<String> = obj
+        .iter()
+        .map(|(k, v)| format!("{k}: {}", json_to_cypher_literal(v)))
+        .collect();
+    format!("{{{}}}", pairs.join(", "))
+}
+
 /// Builds an inline-literal UNWIND Cypher query from a rewritten template and a list of row maps.
 ///
 /// lbug (Kuzu) has no parameterized query API (ADR-001), so the row list is inlined as a Cypher
@@ -436,10 +451,7 @@ fn build_unwind_query(
     rewritten_template: &str,
     rows: &[serde_json::Map<String, serde_json::Value>],
 ) -> String {
-    let row_literals: Vec<String> = rows
-        .iter()
-        .map(|row| json_to_cypher_literal(&serde_json::Value::Object(row.clone())))
-        .collect();
+    let row_literals: Vec<String> = rows.iter().map(map_to_cypher_literal).collect();
     format!(
         "UNWIND [{}] AS row\n{}",
         row_literals.join(", "),
@@ -496,7 +508,8 @@ fn flush_batch(
 
     if batch.len() == 1 {
         // Single-entry path: use interpolate_params to produce the final Cypher.
-        let params = serde_json::Value::Object(batch.rows[0].clone());
+        let row = std::mem::take(&mut batch.rows[0]);
+        let params = serde_json::Value::Object(row);
         let cypher = interpolate_params(&batch.template, &params);
         execute_single(
             &cypher,
@@ -790,6 +803,19 @@ mod interpolate_tests {
         let template = "MERGE (n:Entity {uuid: 'no-params'}) ON CREATE SET n.x = 1";
         let result = rewrite_params_for_unwind(template, &["uuid"]);
         assert_eq!(result, template);
+    }
+
+    #[test]
+    fn test_rewrite_boundary_check_prevents_partial_match() {
+        // Keys: only "name". Template has $name_embedding.
+        // Without boundary check, "name" would greedily match $name from $name_embedding.
+        // With boundary check, "_" after "name" stops the match, so $name_embedding is untouched.
+        let template = "SET n.name_embedding = $name_embedding";
+        let result = rewrite_params_for_unwind(template, &["name"]);
+        assert_eq!(
+            result, template,
+            "$name_embedding must not be rewritten when only 'name' is in keys"
+        );
     }
 
     #[test]
