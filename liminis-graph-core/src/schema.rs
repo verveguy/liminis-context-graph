@@ -49,6 +49,7 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          fact STRING, \
          fact_embedding FLOAT[{dim}], \
          episodes STRING[], \
+         expired_at TIMESTAMP, \
          valid_at TIMESTAMP, \
          invalid_at TIMESTAMP, \
          attributes STRING, \
@@ -119,6 +120,14 @@ pub fn migrate(conn: &Conn<'_>) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD episodes STRING[]") {
             eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD episodes STRING[]: {e} (non-fatal)");
+        }
+    }
+    if conn
+        .raw_query("MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.expired_at LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP: {e} (non-fatal)");
         }
     }
 }

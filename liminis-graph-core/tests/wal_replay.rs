@@ -919,6 +919,67 @@ fn test_falkordb_episodes_merge_replays_successfully() {
     );
 }
 
+/// SC-001 regression: `RelatesToNode_` WAL lines carrying `SET r.expired_at = $expired_at`
+/// replayed successfully after `expired_at TIMESTAMP` was added to the schema.
+///
+/// Before the fix, lbug raised `Binder exception: Cannot find property expired_at for r`
+/// which failed the MERGE and cascaded into ~74k `Cannot find property uuid` errors.
+///
+/// Verifies:
+///   - `failed_lines == 0`
+///   - `legacy_skipped_lines == 0` (not silently skipped)
+///   - `lines_replayed == 1`
+///   - `expired_at` is stored non-null on the created node (timestamp round-trip)
+#[test]
+fn test_falkordb_expired_at_merge_replays_successfully() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let fixture = std::fs::read_to_string(fixture_path("falkordb_era_expired_at.jsonl")).unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260401_100000_expired_at_0000.jsonl"),
+        &fixture,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines,
+        0,
+        "expired_at mutation must not fail; got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.legacy_skipped_lines, 0,
+        "expired_at mutation must not be silently skipped"
+    );
+    assert_eq!(stats.lines_replayed, 1, "fixture line must be replayed");
+
+    // Verify expired_at was stored — the column must be non-null for this fixture.
+    let rows = conn
+        .cypher_query(
+            "MATCH (r:RelatesToNode_ {uuid: 'rel-expired-at-001'}) \
+             WHERE r.expired_at IS NOT NULL RETURN r.uuid",
+        )
+        .expect("cypher query must succeed");
+    assert!(
+        !rows.is_empty(),
+        "RelatesToNode_ rel-expired-at-001 must exist with non-null expired_at after replay"
+    );
+}
+
 /// FR-008b: VECF32([…]) inline array form strips correctly and the containing mutation succeeds.
 #[test]
 fn test_vecf32_inline_array_strips_correctly() {
