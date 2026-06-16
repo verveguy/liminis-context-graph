@@ -9,18 +9,20 @@ use crate::error::Error;
 use crate::wal::{strip_quoted_literals, WalLine};
 
 /// lbug error-message substrings (lowercase) that identify legacy graphiti/FalkorDB-era schema
-/// constructs (Community node label, HAS relationship type, episodes property) not present in the
-/// current lbug schema. Mutations matching these patterns are counted in
-/// `ReplayStats::legacy_skipped_lines` rather than `failed_lines` so they don't inflate the
-/// fidelity-warning ratio. Patterns are compared case-insensitively against the lowercased error
-/// string to guard against minor casing variations across lbug versions.
+/// constructs (Community node label, HAS relationship type) not present in the current lbug
+/// schema. Mutations matching these patterns are counted in `ReplayStats::legacy_skipped_lines`
+/// rather than `failed_lines` so they don't inflate the fidelity-warning ratio. Patterns are
+/// compared case-insensitively against the lowercased error string to guard against minor casing
+/// variations across lbug versions.
+///
+/// NOTE: `episodes` was intentionally removed from this list in #133: `RelatesToNode_` now has an
+/// `episodes STRING[]` column, so episodes mutations succeed and must NOT be silently skipped.
 ///
 /// NOTE: These patterns are matched against lbug 0.17.x error text. If lbug changes its error
 /// message format in a future version these patterns may silently stop matching. See ADR-0007.
 const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[
     "table community does not exist",
     "table has does not exist",
-    "cannot find property episodes for",
 ];
 
 /// A single captured failure from a `raw_query` execution error during replay.
@@ -49,9 +51,10 @@ pub struct ReplayStats {
     /// Mutations whose Cypher began with MATCH (e.g. MATCH … SET for embedding enrichment).
     pub match_prefixed_replayed: u64,
     /// WAL mutations skipped because they reference legacy-schema constructs
-    /// (Community node label, HAS relationship type, episodes property) that no longer exist
-    /// in the current lbug schema. Counted separately from `failed_lines` so they don't
-    /// inflate the fidelity failure ratio.
+    /// (Community node label, HAS relationship type) that are not present in the current lbug
+    /// schema. Counted separately from `failed_lines` so they don't inflate the fidelity failure
+    /// ratio. Note: episodes mutations are NOT counted here — `episodes STRING[]` is a real
+    /// schema column since #133 and those mutations succeed normally.
     ///
     /// Note: this counter is **excluded** from [`lines_skipped()`] — callers that want a
     /// total "mutations not applied" count must add `legacy_skipped_lines + lines_skipped()`.
