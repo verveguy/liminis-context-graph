@@ -261,7 +261,7 @@ impl WalReplayer {
                     }
                 } else {
                     let cypher = strip_vecf32(&wal_line.cypher);
-                    let (cypher, params) = expand_bulk_property_set(&cypher, &wal_line.params);
+                    let (cypher, params) = expand_bulk_property_set(&cypher, wal_line.params);
                     let cypher = interpolate_params(&cypher, &params);
                     match conn.raw_query(&cypher) {
                         Ok(_) => {
