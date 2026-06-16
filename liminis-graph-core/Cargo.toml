@@ -23,13 +23,13 @@ futures = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tokio-util = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 lbug = { workspace = true }
-regex = { workspace = true }
 
 [[bench]]
 name = "concurrent_rw"
