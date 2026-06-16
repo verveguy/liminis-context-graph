@@ -31,11 +31,14 @@ pub(crate) fn strip_vecf32(cypher: &str) -> String {
     let mut rest = cypher;
 
     loop {
-        // Case-insensitive search: find the next `vecf32(` in `rest`.
-        // `to_ascii_lowercase()` only lowercases ASCII bytes and leaves non-ASCII bytes
-        // unchanged, so byte positions align between `lower` and `rest`.
-        let lower = rest.to_ascii_lowercase();
-        let Some(rel_pos) = lower.find(needle) else {
+        // Case-insensitive search without allocating: slide a window of `needle.len()` bytes
+        // across `rest` and compare case-insensitively. All bytes in the needle are ASCII so
+        // the comparison is sound even when `rest` contains multibyte UTF-8 sequences.
+        let Some(rel_pos) = rest
+            .as_bytes()
+            .windows(needle.len())
+            .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+        else {
             result.push_str(rest);
             break;
         };
@@ -85,9 +88,10 @@ pub(crate) fn strip_vecf32(cypher: &str) -> String {
 ///
 /// Individual assignments (`SET n.field = $x`) are detected by the dot in the LHS and left
 /// unchanged. Returns the (possibly rewritten) Cypher string and the (possibly extended) params.
+/// Takes `params` by value to avoid cloning in the common path (no bulk SET present).
 pub(crate) fn expand_bulk_property_set(
     cypher: &str,
-    params: &serde_json::Value,
+    mut params: serde_json::Value,
 ) -> (String, serde_json::Value) {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
@@ -99,34 +103,41 @@ pub(crate) fn expand_bulk_property_set(
             .expect("valid regex")
     });
 
-    let serde_json::Value::Object(param_map) = params else {
-        return (cypher.to_string(), params.clone());
-    };
-
-    // Collect matches where the referenced param is a JSON object.
-    let matches: Vec<_> = re
-        .captures_iter(cypher)
-        .filter_map(|cap| {
-            let full = cap.get(0)?;
-            let var_name = cap.get(1)?.as_str().to_string();
-            let param_name = cap.get(2)?.as_str().to_string();
-            let param_val = param_map.get(&param_name)?;
-            if let serde_json::Value::Object(obj) = param_val {
-                Some((full.start(), full.end(), var_name, param_name, obj.clone()))
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if matches.is_empty() {
-        return (cypher.to_string(), params.clone());
+    // Early exit when params is not a JSON object — no clone needed.
+    if !matches!(&params, serde_json::Value::Object(_)) {
+        return (cypher.to_string(), params);
     }
 
-    let mut new_params = serde_json::Value::Object(param_map.clone());
-    let param_obj = new_params.as_object_mut().unwrap();
+    // Collect matches where the referenced param is a non-empty JSON object.
+    // The block scope ensures the shared borrow of `params` ends before we mutate it below.
+    let matches: Vec<_> = {
+        let param_map = params.as_object().unwrap();
+        re.captures_iter(cypher)
+            .filter_map(|cap| {
+                let full = cap.get(0)?;
+                let var_name = cap.get(1)?.as_str().to_string();
+                let param_name = cap.get(2)?.as_str().to_string();
+                let param_val = param_map.get(&param_name)?;
+                if let serde_json::Value::Object(obj) = param_val {
+                    // Skip empty objects — they would produce invalid `SET ` Cypher.
+                    if !obj.is_empty() {
+                        Some((full.start(), full.end(), var_name, param_name, obj.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    if matches.is_empty() {
+        return (cypher.to_string(), params);
+    }
 
     // Build per-match replacements and extend the params map with flattened keys.
+    let param_obj = params.as_object_mut().unwrap();
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
     for (start, end, var_name, param_name, obj) in &matches {
         let mut assignments: Vec<String> = Vec::new();
@@ -147,7 +158,7 @@ pub(crate) fn expand_bulk_property_set(
         result.replace_range(start..end, &replacement);
     }
 
-    (result, new_params)
+    (result, params)
 }
 
 #[cfg(test)]
@@ -198,7 +209,7 @@ mod tests {
     fn expand_bulk_set_expands_object_param() {
         let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n = $props";
         let params = json!({"uuid": "abc", "props": {"name": "Alice", "group_id": "g1"}});
-        let (new_cypher, new_params) = expand_bulk_property_set(cypher, &params);
+        let (new_cypher, new_params) = expand_bulk_property_set(cypher, params);
         assert!(
             new_cypher.contains("n.name = $props_name"),
             "expected individual assignment; got: {new_cypher}"
@@ -215,7 +226,7 @@ mod tests {
     fn expand_bulk_set_leaves_individual_assignments_unchanged() {
         let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n.name = $name";
         let params = json!({"uuid": "abc", "name": "Alice"});
-        let (new_cypher, _) = expand_bulk_property_set(cypher, &params);
+        let (new_cypher, _) = expand_bulk_property_set(cypher, params);
         assert_eq!(new_cypher, cypher);
     }
 
@@ -223,7 +234,7 @@ mod tests {
     fn expand_bulk_set_mixed_bulk_and_individual() {
         let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n = $props, n.extra = $extra";
         let params = json!({"uuid": "abc", "props": {"name": "Alice"}, "extra": "val"});
-        let (new_cypher, new_params) = expand_bulk_property_set(cypher, &params);
+        let (new_cypher, new_params) = expand_bulk_property_set(cypher, params);
         assert!(
             new_cypher.contains("n.name = $props_name"),
             "bulk expansion missing; got: {new_cypher}"
@@ -243,7 +254,7 @@ mod tests {
             "uuid": "top-level-uuid",
             "props": {"uuid": "obj-uuid", "name": "Bob"}
         });
-        let (new_cypher, new_params) = expand_bulk_property_set(cypher, &params);
+        let (new_cypher, new_params) = expand_bulk_property_set(cypher, params);
         assert!(
             new_cypher.contains("n.uuid = $props_uuid"),
             "flattened key should be prefixed; got: {new_cypher}"
@@ -260,7 +271,19 @@ mod tests {
     fn expand_bulk_set_non_object_param_unchanged() {
         let cypher = "SET n = $props";
         let params = json!({"props": "not-an-object"});
-        let (new_cypher, _) = expand_bulk_property_set(cypher, &params);
+        let (new_cypher, _) = expand_bulk_property_set(cypher, params);
         assert_eq!(new_cypher, cypher);
+    }
+
+    #[test]
+    fn expand_bulk_set_empty_object_skipped() {
+        // An empty $props object must not produce invalid `SET ` Cypher.
+        let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n = $props";
+        let params = json!({"uuid": "abc", "props": {}});
+        let (new_cypher, _) = expand_bulk_property_set(cypher, params);
+        assert_eq!(
+            new_cypher, cypher,
+            "empty object must leave Cypher unchanged"
+        );
     }
 }
