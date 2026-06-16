@@ -104,20 +104,20 @@ pub(crate) fn expand_bulk_property_set(
     };
 
     // Collect matches where the referenced param is a JSON object.
-    let matches: Vec<(usize, usize, String, String, serde_json::Map<String, serde_json::Value>)> =
-        re.captures_iter(cypher)
-            .filter_map(|cap| {
-                let full = cap.get(0)?;
-                let var_name = cap.get(1)?.as_str().to_string();
-                let param_name = cap.get(2)?.as_str().to_string();
-                let param_val = param_map.get(&param_name)?;
-                if let serde_json::Value::Object(obj) = param_val {
-                    Some((full.start(), full.end(), var_name, param_name, obj.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+    let matches: Vec<_> = re
+        .captures_iter(cypher)
+        .filter_map(|cap| {
+            let full = cap.get(0)?;
+            let var_name = cap.get(1)?.as_str().to_string();
+            let param_name = cap.get(2)?.as_str().to_string();
+            let param_val = param_map.get(&param_name)?;
+            if let serde_json::Value::Object(obj) = param_val {
+                Some((full.start(), full.end(), var_name, param_name, obj.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     if matches.is_empty() {
         return (cypher.to_string(), params.clone());
@@ -167,10 +167,7 @@ mod tests {
 
     #[test]
     fn strip_vecf32_lowercase_param_ref() {
-        assert_eq!(
-            strip_vecf32("SET n.emb = vecf32($emb)"),
-            "SET n.emb = $emb"
-        );
+        assert_eq!(strip_vecf32("SET n.emb = vecf32($emb)"), "SET n.emb = $emb");
     }
 
     #[test]
