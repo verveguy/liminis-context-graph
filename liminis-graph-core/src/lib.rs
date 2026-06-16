@@ -9,6 +9,7 @@ pub mod error;
 pub mod extractor;
 pub mod handlers;
 pub mod ipc;
+pub(crate) mod legacy_wal;
 pub mod llm_router;
 pub mod ontology;
 pub mod ontology_sidecar;

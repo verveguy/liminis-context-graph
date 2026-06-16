@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::db::Conn;
 use crate::error::Error;
+use crate::legacy_wal::{expand_bulk_property_set, strip_vecf32};
 use crate::wal::{strip_quoted_literals, WalLine};
 
 /// lbug error-message substrings (lowercase) that identify legacy graphiti/FalkorDB-era schema
@@ -261,7 +262,10 @@ impl WalReplayer {
                         stats.match_prefixed_replayed += 1;
                     }
                 } else {
-                    let cypher = interpolate_params(&wal_line.cypher, &wal_line.params);
+                    let cypher = strip_vecf32(&wal_line.cypher);
+                    let (cypher, params) =
+                        expand_bulk_property_set(&cypher, &wal_line.params);
+                    let cypher = interpolate_params(&cypher, &params);
                     match conn.raw_query(&cypher) {
                         Ok(_) => {
                             stats.lines_replayed += 1;
