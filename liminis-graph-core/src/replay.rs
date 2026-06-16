@@ -96,7 +96,10 @@ pub struct ReplayOptions {
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
 pub struct ReplayProgress {
     pub files_processed: u64,
+    pub files_total: u64,
     pub mutations_replayed: u64,
+    pub failed_lines_so_far: u64,
+    pub legacy_skipped_lines_so_far: u64,
     pub message: String,
 }
 
@@ -155,6 +158,7 @@ impl WalReplayer {
 
         // Lexicographic order — ISO-8601 timestamp prefix ensures chronological order (R-07).
         files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        let files_total = files.len() as u64;
 
         'files: for file_path in &files {
             stats.files_read += 1;
@@ -163,7 +167,10 @@ impl WalReplayer {
             if let Some(ref f) = opts.progress_fn {
                 let p = ReplayProgress {
                     files_processed: stats.files_read,
+                    files_total,
                     mutations_replayed: stats.lines_replayed,
+                    failed_lines_so_far: stats.failed_lines,
+                    legacy_skipped_lines_so_far: stats.legacy_skipped_lines,
                     message: format!("processing file {}", file_path.display()),
                 };
                 if !f(&p) {
@@ -317,7 +324,10 @@ impl WalReplayer {
                     if let Some(ref f) = opts.progress_fn {
                         let p = ReplayProgress {
                             files_processed: stats.files_read,
+                            files_total,
                             mutations_replayed: stats.lines_replayed,
+                            failed_lines_so_far: stats.failed_lines,
+                            legacy_skipped_lines_so_far: stats.legacy_skipped_lines,
                             message: format!(
                                 "replayed {} mutations in file {}",
                                 mutations_in_file,

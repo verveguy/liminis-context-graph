@@ -1245,6 +1245,7 @@ async fn handle_rebuild_from_wal(
         };
 
         let replay_started_at = std::time::Instant::now();
+        let wal_files_total = count_wal_files(&wal_dir_c);
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
@@ -1314,6 +1315,9 @@ async fn handle_rebuild_from_wal(
                     "mutations_replayed_so_far": stats.lines_replayed,
                     "match_prefixed_replayed_so_far": stats.match_prefixed_replayed,
                     "files_processed_so_far": stats.files_read,
+                    "files_total": wal_files_total,
+                    "failed_lines_so_far": stats.failed_lines,
+                    "legacy_skipped_lines_so_far": stats.legacy_skipped_lines,
                     "unrecognised_lines": stats.unrecognised_lines,
                     "failed_lines": stats.failed_lines,
                     "unparseable_lines": stats.unparseable_lines,
@@ -1454,6 +1458,7 @@ async fn handle_rebuild_from_wal(
                         if let Some(job) = guard.get_mut(&jid) {
                             job.mutations_replayed = p.mutations_replayed;
                             job.wal_files_processed = p.files_processed;
+                            job.wal_files_total = p.files_total;
                         }
                     }
                     true
@@ -1567,6 +1572,7 @@ async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result
         "status": job.status.as_str(),
         "mutations_replayed": job.mutations_replayed,
         "wal_files_processed": job.wal_files_processed,
+        "wal_files_total": job.wal_files_total,
         "start_time": job.start_time.to_rfc3339(),
         "elapsed_seconds": job.elapsed_seconds(),
         "error": job.error,
@@ -2006,6 +2012,17 @@ fn has_jsonl_files(dir: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn count_wal_files(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
 fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
     tx.map(|tx| {
         let f: ProgressFn = Box::new(move |p| {
@@ -2014,6 +2031,9 @@ fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
                 "message": p.message,
                 "mutations_replayed_so_far": p.mutations_replayed,
                 "files_processed_so_far": p.files_processed,
+                "files_total": p.files_total,
+                "failed_lines_so_far": p.failed_lines_so_far,
+                "legacy_skipped_lines_so_far": p.legacy_skipped_lines_so_far,
             });
             tx.send(val).is_ok()
         });
