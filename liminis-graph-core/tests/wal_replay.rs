@@ -886,16 +886,24 @@ fn test_falkordb_episodes_merge_replays_successfully() {
         .expect("replay must succeed");
 
     assert_eq!(
-        stats.failed_lines, 0,
+        stats.failed_lines,
+        0,
         "episodes + VECF32 mutations must not fail; got {} failures with samples: {:?}",
         stats.failed_lines,
-        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         stats.legacy_skipped_lines, 0,
         "episodes mutations must not be silently skipped"
     );
-    assert_eq!(stats.lines_replayed, 2, "both fixture lines must be replayed");
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both fixture lines must be replayed"
+    );
 
     // Relationship layer must exist — the RelatesToNode_ node was created.
     let count = conn.count_nodes("RelatesToNode_").expect("count query");
@@ -903,9 +911,7 @@ fn test_falkordb_episodes_merge_replays_successfully() {
 
     // Verify the specific node is queryable by uuid.
     let rows = conn
-        .cypher_query(
-            "MATCH (r:RelatesToNode_ {uuid: 'rel-episodes-001'}) RETURN r.uuid",
-        )
+        .cypher_query("MATCH (r:RelatesToNode_ {uuid: 'rel-episodes-001'}) RETURN r.uuid")
         .expect("cypher query must succeed");
     assert!(
         !rows.is_empty(),
@@ -926,7 +932,9 @@ fn test_vecf32_inline_array_strips_correctly() {
     // Uppercase VECF32 with an inline array literal — must be stripped before raw_query.
     let line = r#"{"seq":0,"ts":"2026-04-01T10:00:00.000000+00:00","db":"","cypher":"MERGE (ep:Episodic {uuid: $uuid}) ON CREATE SET ep.name = $name, ep.group_id = $group_id, ep.created_at = $created_at, ep.source = $src, ep.source_description = $sd, ep.content = $content, ep.content_embedding = VECF32([0.1, 0.2, 0.3, 0.4]), ep.valid_at = $valid_at, ep.entity_edges = $entity_edges","params":{"uuid":"ep-inline-vecf32","name":"Inline Vecf32","group_id":"g","created_at":"2026-03-25T10:00:00.000000+00:00","src":"test","sd":"test source","content":"inline test","valid_at":"2026-03-25T10:00:00.000000+00:00","entity_edges":[]}}"#;
     std::fs::write(
-        wal_dir.path().join("20260401_000000_vecf32_inline_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("20260401_000000_vecf32_inline_0000.jsonl"),
         format!("{line}\n"),
     )
     .unwrap();
@@ -936,10 +944,15 @@ fn test_vecf32_inline_array_strips_correctly() {
         .expect("replay must succeed");
 
     assert_eq!(
-        stats.failed_lines, 0,
+        stats.failed_lines,
+        0,
         "VECF32 inline must not fail; got {} failures with samples: {:?}",
         stats.failed_lines,
-        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
     );
     assert_eq!(stats.lines_replayed, 1);
 }
@@ -957,7 +970,9 @@ fn test_vecf32_param_ref_strips_correctly() {
     // Lowercase vecf32 with a param reference — must strip to $name_embedding.
     let line = r#"{"seq":0,"ts":"2026-04-01T10:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, n.group_id = $group_id, n.labels = $labels, n.created_at = $created_at, n.name_embedding = vecf32($name_embedding), n.summary = $summary, n.attributes = $attrs","params":{"uuid":"e-param-vecf32","name":"Param Vecf32","group_id":"g","labels":["person"],"created_at":"2026-03-25T10:00:00.000000+00:00","name_embedding":[0.1,0.2,0.3,0.4],"summary":"test","attrs":"{}"}}"#;
     std::fs::write(
-        wal_dir.path().join("20260401_000000_vecf32_param_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("20260401_000000_vecf32_param_0000.jsonl"),
         format!("{line}\n"),
     )
     .unwrap();
@@ -967,10 +982,15 @@ fn test_vecf32_param_ref_strips_correctly() {
         .expect("replay must succeed");
 
     assert_eq!(
-        stats.failed_lines, 0,
+        stats.failed_lines,
+        0,
         "vecf32 param-ref must not fail; got {} failures with samples: {:?}",
         stats.failed_lines,
-        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
     );
     assert_eq!(stats.lines_replayed, 1);
 }
@@ -1000,10 +1020,15 @@ fn test_bulk_set_expands_to_individual_assignments() {
         .expect("replay must succeed");
 
     assert_eq!(
-        stats.failed_lines, 0,
+        stats.failed_lines,
+        0,
         "bulk SET must not fail; got {} failures with samples: {:?}",
         stats.failed_lines,
-        stats.failed_samples.iter().map(|s| &s.error).collect::<Vec<_>>()
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
     );
     assert_eq!(stats.lines_replayed, 1);
 

@@ -21,10 +21,8 @@ use crate::wal::{strip_quoted_literals, WalLine};
 ///
 /// NOTE: These patterns are matched against lbug 0.17.x error text. If lbug changes its error
 /// message format in a future version these patterns may silently stop matching. See ADR-0007.
-const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[
-    "table community does not exist",
-    "table has does not exist",
-];
+const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] =
+    &["table community does not exist", "table has does not exist"];
 
 /// A single captured failure from a `raw_query` execution error during replay.
 #[derive(Serialize)]
@@ -263,8 +261,7 @@ impl WalReplayer {
                     }
                 } else {
                     let cypher = strip_vecf32(&wal_line.cypher);
-                    let (cypher, params) =
-                        expand_bulk_property_set(&cypher, &wal_line.params);
+                    let (cypher, params) = expand_bulk_property_set(&cypher, &wal_line.params);
                     let cypher = interpolate_params(&cypher, &params);
                     match conn.raw_query(&cypher) {
                         Ok(_) => {
