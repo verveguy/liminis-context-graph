@@ -483,11 +483,7 @@ fn test_replay_opts_progress_callback() {
         );
     }
 
-    // files_processed advances from 1 to N across per-file events (monotonic subset)
-    let per_file_events: Vec<_> = calls_guard
-        .iter()
-        .filter(|s| s.files_processed != calls_guard[0].files_processed || s.files_processed == 1)
-        .collect();
+    // files_processed advances from 1 to N
     assert_eq!(
         calls_guard.first().unwrap().files_processed,
         1,
@@ -514,9 +510,6 @@ fn test_replay_opts_progress_callback() {
             "clean WAL must have legacy_skipped_lines_so_far == 0"
         );
     }
-
-    // Suppress unused warning from the per_file_events binding used only for its side effect
-    let _ = per_file_events;
 }
 
 /// Mid-replay cancel: last progress event has files_processed < files_total (SC-001 scenario 4).
