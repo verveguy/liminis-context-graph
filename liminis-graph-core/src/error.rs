@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("operation cancelled")]
     Cancelled,
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
