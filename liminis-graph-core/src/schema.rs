@@ -48,6 +48,7 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          created_at TIMESTAMP, \
          fact STRING, \
          fact_embedding FLOAT[{dim}], \
+         episodes STRING[], \
          valid_at TIMESTAMP, \
          invalid_at TIMESTAMP, \
          attributes STRING, \
@@ -99,17 +100,28 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 /// property is unknown; a successful probe means the column is already present.
 /// This avoids a lbug bug where `ALTER TABLE ADD` on an existing column corrupts the hash index.
 pub fn migrate(conn: &Conn<'_>) {
-    // Probe: lbug fails at bind time if `relation_type` is not in the schema.
-    let column_exists = conn
+    // Each column is probed independently — no early return — so that a DB which already has
+    // relation_type (from the first migration) still gets episodes probed and added if absent.
+    // lbug fails at bind time if the column is not in the schema; success means it's present.
+    if !conn
         .raw_query(
             "MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.relation_type LIMIT 0",
         )
-        .is_ok();
-    if column_exists {
-        return;
+        .is_ok()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
+        }
     }
-    if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
-        eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
+    if !conn
+        .raw_query(
+            "MATCH (n:RelatesToNode_) WHERE n.uuid = '_probe_' RETURN n.episodes LIMIT 0",
+        )
+        .is_ok()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD episodes STRING[]") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD episodes STRING[]: {e} (non-fatal)");
+        }
     }
 }
 
