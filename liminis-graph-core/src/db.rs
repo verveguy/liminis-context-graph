@@ -1491,8 +1491,6 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Escapes FTS query strings for embedding in Cypher CALL statements.
-
 pub(crate) fn format_str_list(v: &[&str]) -> String {
     if v.is_empty() {
         return "[]".to_string();
