@@ -364,15 +364,13 @@ impl<'db> Conn<'db> {
         group_id: &str,
         last_n: usize,
     ) -> Result<Vec<EpisodicRow>, Error> {
-        let sql = format!(
-            "MATCH (ep:Episodic) WHERE ep.group_id = '{}' \
+        let result = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges \
-             ORDER BY ep.created_at DESC LIMIT {}",
-            escape(group_id),
-            last_n,
-        );
-        let result = self.inner.query(&sql)?;
+             ORDER BY ep.created_at DESC LIMIT $limit",
+            serde_json::json!({ "gid": group_id, "limit": last_n as i64 }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EpisodicRow {
@@ -408,22 +406,26 @@ impl<'db> Conn<'db> {
         source_file: &str,
         group_ids: Option<&[&str]>,
     ) -> Result<Vec<String>, Error> {
-        let escaped_src = escape(source_file);
         let group_clause = match group_ids {
-            Some(ids) if !ids.is_empty() => {
-                format!(" AND ep.group_id IN {}", format_str_list(ids))
-            }
-            _ => String::new(),
+            Some(ids) if !ids.is_empty() => " AND ep.group_id IN $gids",
+            _ => "",
         };
         let prefix = format!("{}:", source_file);
-        let escaped_prefix = escape(&prefix);
         let match_sql = format!(
-            "MATCH (ep:Episodic) WHERE (ep.source_description = '{}' \
-             OR ep.source_description STARTS WITH '{}'){} RETURN ep.uuid",
-            escaped_src, escaped_prefix, group_clause,
+            "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
+             OR ep.source_description STARTS WITH $prefix){group_clause} RETURN ep.uuid"
         );
-        let result = self.inner.query(&match_sql)?;
-        let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
+        let mut params = serde_json::json!({ "src": source_file, "prefix": prefix });
+        if let Some(ids) = group_ids {
+            if !ids.is_empty() {
+                params["gids"] = serde_json::json!(ids);
+            }
+        }
+        let uuids: Vec<String> = self
+            .query_params(&match_sql, params)?
+            .into_iter()
+            .map(|row| value_as_string(&row[0]))
+            .collect();
         if !uuids.is_empty() {
             self.exec_params(
                 "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
@@ -447,18 +449,22 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
     ) -> Result<Vec<String>, Error> {
         let group_clause = match group_ids {
-            Some(ids) if !ids.is_empty() => {
-                format!(" AND ep.group_id IN {}", format_str_list(ids))
-            }
-            _ => String::new(),
+            Some(ids) if !ids.is_empty() => " AND ep.group_id IN $gids",
+            _ => "",
         };
-        let match_sql = format!(
-            "MATCH (ep:Episodic) WHERE ep.name = '{}'{} RETURN ep.uuid",
-            escape(chunk_id),
-            group_clause,
-        );
-        let result = self.inner.query(&match_sql)?;
-        let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
+        let match_sql =
+            format!("MATCH (ep:Episodic) WHERE ep.name = $name{group_clause} RETURN ep.uuid");
+        let mut params = serde_json::json!({ "name": chunk_id });
+        if let Some(ids) = group_ids {
+            if !ids.is_empty() {
+                params["gids"] = serde_json::json!(ids);
+            }
+        }
+        let uuids: Vec<String> = self
+            .query_params(&match_sql, params)?
+            .into_iter()
+            .map(|row| value_as_string(&row[0]))
+            .collect();
         if !uuids.is_empty() {
             self.exec_params(
                 "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
@@ -783,25 +789,23 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
-        let src_esc = escape(source);
-        let sql = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                let gid_list = format_str_list(gids);
-                format!(
-                    "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
-                     WHERE ep.source_description CONTAINS '{src_esc}' AND e.group_id IN {gid_list} \
-                     RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                     e.summary, e.attributes LIMIT {limit}"
-                )
-            }
-            _ => format!(
+        let (cypher, params): (&str, serde_json::Value) = match group_ids {
+            Some(gids) if !gids.is_empty() => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
-                 WHERE ep.source_description CONTAINS '{src_esc}' \
+                 WHERE ep.source_description CONTAINS $src AND e.group_id IN $gids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes LIMIT {limit}"
+                 e.summary, e.attributes LIMIT $limit",
+                serde_json::json!({ "src": source, "gids": gids, "limit": limit as i64 }),
+            ),
+            _ => (
+                "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
+                 WHERE ep.source_description CONTAINS $src \
+                 RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                 e.summary, e.attributes LIMIT $limit",
+                serde_json::json!({ "src": source, "limit": limit as i64 }),
             ),
         };
-        let result = self.inner.query(&sql)?;
+        let result = self.query_params(cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -840,13 +844,12 @@ impl<'db> Conn<'db> {
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.group_id = '{}' \
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.name_embedding, e.summary, e.attributes",
-            escape(group_id),
-        );
-        let result = self.inner.query(&sql)?;
+            serde_json::json!({ "gid": group_id }),
+        )?;
         let mut best: Option<(f32, EntityRow)> = None;
 
         for row in result {
@@ -884,12 +887,11 @@ impl<'db> Conn<'db> {
 
     /// Returns the number of Entity nodes in the given group. Returns 0 when the group is empty.
     pub fn entity_count_in_group(&self, group_id: &str) -> Result<usize, Error> {
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.group_id = '{}' RETURN count(e)",
-            escape(group_id),
-        );
-        let mut result = self.inner.query(&sql)?;
-        if let Some(row) = result.next() {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid RETURN count(e)",
+            serde_json::json!({ "gid": group_id }),
+        )?;
+        if let Some(row) = rows.into_iter().next() {
             Ok(value_as_usize(&row[0]))
         } else {
             Ok(0)
@@ -905,11 +907,10 @@ impl<'db> Conn<'db> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
-        let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        let uuid_list = format_str_list(&uuid_refs);
-        let sql =
-            format!("MATCH (e:Entity) WHERE e.uuid IN {uuid_list} RETURN e.uuid, e.name_embedding");
-        let result = self.inner.query(&sql)?;
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.name_embedding",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
         let mut pairs = Vec::new();
         for row in result {
             let emb = value_as_float_array(&row[1]);
@@ -966,15 +967,13 @@ impl<'db> Conn<'db> {
         name: &str,
         group_id: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.name = '{}' AND e.group_id = '{}' \
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.summary, e.attributes LIMIT 1",
-            escape(name),
-            escape(group_id),
-        );
-        let mut result = self.inner.query(&sql)?;
-        if let Some(row) = result.next() {
+            serde_json::json!({ "name": name, "gid": group_id }),
+        )?;
+        if let Some(row) = rows.into_iter().next() {
             Ok(Some(EntityRow {
                 uuid: value_as_string(&row[0]),
                 name: value_as_string(&row[1]),
@@ -992,14 +991,13 @@ impl<'db> Conn<'db> {
 
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
-        let sql = format!(
-            "MATCH (e:Entity {{uuid: '{}'}}) \
+        let rows = self.query_params(
+            "MATCH (e:Entity {uuid: $uuid}) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.name_embedding, e.summary, e.attributes",
-            escape(uuid),
-        );
-        let mut result = self.inner.query(&sql)?;
-        if let Some(row) = result.next() {
+            serde_json::json!({ "uuid": uuid }),
+        )?;
+        if let Some(row) = rows.into_iter().next() {
             Ok(Some(EntityRow {
                 uuid: value_as_string(&row[0]),
                 name: value_as_string(&row[1]),
@@ -1022,14 +1020,12 @@ impl<'db> Conn<'db> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
-        let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        let uuid_list = format_str_list(&uuid_refs);
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.uuid IN {uuid_list} \
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes"
-        );
-        let result = self.inner.query(&sql)?;
+             e.summary, e.attributes",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -1059,19 +1055,22 @@ impl<'db> Conn<'db> {
         if entity_uuids.is_empty() {
             return Ok(HashMap::new());
         }
-        let uuid_list = format_str_list(entity_uuids);
         let gid_clause = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                format!(" AND ep.group_id IN {}", format_str_list(gids))
-            }
-            _ => String::new(),
+            Some(gids) if !gids.is_empty() => " AND ep.group_id IN $gids",
+            _ => "",
         };
         let sql = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
-             WHERE n.uuid IN {uuid_list}{gid_clause} \
+             WHERE n.uuid IN $uuids{gid_clause} \
              RETURN DISTINCT n.uuid, ep.uuid, ep.source_description"
         );
-        let result = self.inner.query(&sql)?;
+        let mut params = serde_json::json!({ "uuids": entity_uuids });
+        if let Some(gids) = group_ids {
+            if !gids.is_empty() {
+                params["gids"] = serde_json::json!(gids);
+            }
+        }
+        let result = self.query_params(&sql, params)?;
         let mut map: EpisodeInfoMap = HashMap::new();
         for row in result {
             let entity_uuid = value_as_string(&row[0]);
@@ -1089,17 +1088,15 @@ impl<'db> Conn<'db> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
-        let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        let uuid_list = format_str_list(&uuid_refs);
         // Resolve src/dst via the two-hop links (Entity→RelatesToNode_→Entity).
-        let sql = format!(
-            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN {uuid_list} \
+        let result = self.query_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids \
              OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
              OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
-             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
-        );
-        let result = self.inner.query(&sql)?;
+             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(RelatesToEdge {
@@ -1196,26 +1193,29 @@ impl<'db> Conn<'db> {
         &self,
         entity_uuid: &str,
     ) -> Result<Vec<RelatesToEdge>, Error> {
-        let uuid_esc = escape(entity_uuid);
         // Outgoing edges (entity is source)
-        let out_sql = format!(
-            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+        let mut edges = self.collect_full_relates_to_edges(
+            "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type"
-        );
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+            serde_json::json!({ "uuid": entity_uuid }),
+        )?;
         // Incoming edges (entity is target)
-        let in_sql = format!(
-            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+        edges.extend(self.collect_full_relates_to_edges(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type"
-        );
-        let mut edges = self.collect_full_relates_to_edges(&out_sql)?;
-        edges.extend(self.collect_full_relates_to_edges(&in_sql)?);
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+            serde_json::json!({ "uuid": entity_uuid }),
+        )?);
         Ok(edges)
     }
 
-    fn collect_full_relates_to_edges(&self, sql: &str) -> Result<Vec<RelatesToEdge>, Error> {
-        let result = self.inner.query(sql)?;
+    fn collect_full_relates_to_edges(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let result = self.query_params(cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(RelatesToEdge {
@@ -1247,15 +1247,12 @@ impl<'db> Conn<'db> {
         target_uuid: &str,
         name: &str,
     ) -> Result<bool, Error> {
-        let sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}})-[:RELATES_TO]->(rn:RelatesToNode_ {{name: '{}'}})-[:RELATES_TO]->(dst:Entity {{uuid: '{}'}}) \
+        let rows = self.query_params(
+            "MATCH (src:Entity {uuid: $src})-[:RELATES_TO]->(rn:RelatesToNode_ {name: $name})-[:RELATES_TO]->(dst:Entity {uuid: $dst}) \
              RETURN count(rn)",
-            escape(source_uuid),
-            escape(name),
-            escape(target_uuid),
-        );
-        let mut result = self.inner.query(&sql)?;
-        if let Some(row) = result.next() {
+            serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid }),
+        )?;
+        if let Some(row) = rows.into_iter().next() {
             Ok(value_as_usize(&row[0]) > 0)
         } else {
             Ok(false)
@@ -1304,19 +1301,17 @@ impl<'db> Conn<'db> {
     /// RELATES_TO relationship property (lbug 0.17.0 may not support SET on rels;
     /// if it fails the error is logged but not propagated).
     pub fn invalidate_edge(&self, edge_uuid: &str, invalid_at: &str) -> Result<(), Error> {
-        let uuid_esc = escape(edge_uuid);
-        let ts_esc = escape(invalid_at);
-        let node_sql = format!(
-            "MATCH (rn:RelatesToNode_ {{uuid: '{uuid_esc}'}}) \
-             SET rn.invalid_at = timestamp('{ts_esc}')"
-        );
-        self.raw_query(&node_sql)?;
+        // invalid_at is an RFC-3339 string; json_to_value binds it as a typed Timestamp, which
+        // lbug requires for a `SET col = $x` assignment into a TIMESTAMP column.
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.invalid_at = $ts",
+            serde_json::json!({ "uuid": edge_uuid, "ts": invalid_at }),
+        )?;
         // Attempt SET on the RELATES_TO rel — non-fatal if unsupported.
-        let rel_sql = format!(
-            "MATCH (src:Entity)-[r:RELATES_TO {{uuid: '{uuid_esc}'}}]->(dst:Entity) \
-             SET r.invalid_at = timestamp('{ts_esc}')"
-        );
-        if let Err(e) = self.raw_query(&rel_sql) {
+        if let Err(e) = self.exec_params(
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) SET r.invalid_at = $ts",
+            serde_json::json!({ "uuid": edge_uuid, "ts": invalid_at }),
+        ) {
             eprintln!(
                 "liminis-graph: SET invalid_at on RELATES_TO rel unsupported or failed (non-fatal): {e}"
             );
@@ -1334,15 +1329,12 @@ impl<'db> Conn<'db> {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.group_id = '{}' AND size(e.labels) = 1 AND 'Entity' IN e.labels \
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) = 1 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.uuid SKIP {} LIMIT {}",
-            escape(group_id),
-            offset,
-            limit,
-        );
-        let result = self.inner.query(&sql)?;
+             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+            serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -1361,16 +1353,12 @@ impl<'db> Conn<'db> {
 
     /// Returns entities whose name starts with `name_prefix`.
     /// Pass `""` to return all entities.
-    ///
-    /// NOTE: `name_prefix` is single-quote–escaped but not parameterised; use only
-    /// trusted input until lbug exposes a parameterised-query API.
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.name STARTS WITH '{}' \
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.name STARTS WITH $prefix \
              RETURN e.uuid, e.name, e.group_id, e.summary, e.attributes",
-            escape(name_prefix),
-        );
-        let result = self.inner.query(&sql)?;
+            serde_json::json!({ "prefix": name_prefix }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -1484,20 +1472,6 @@ fn logical_type_of(v: &serde_json::Value) -> LogicalType {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-fn escape(s: &str) -> String {
-    // Cypher single-quoted string literals use backslash escaping, not SQL-style doubling.
-    // Backslashes must be escaped first so the newly introduced backslashes are not re-escaped.
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
-pub(crate) fn format_str_list(v: &[&str]) -> String {
-    if v.is_empty() {
-        return "[]".to_string();
-    }
-    let parts: Vec<String> = v.iter().map(|s| format!("'{}'", escape(s))).collect();
-    format!("[{}]", parts.join(", "))
-}
 
 fn value_as_string(v: &lbug::Value) -> String {
     match v {
