@@ -56,6 +56,30 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          relation_type STRING\
          )"
     ))?;
+    // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
+    // see #145). They carry no read/write paths, but must EXIST so legacy WAL statements that
+    // reference them — notably the bulk edge-delete `MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]
+    // ->(m) WHERE e.uuid IN $uuids DELETE e` — bind and execute (a missing table makes the whole
+    // multi-type pattern fail to prepare, silently skipping the MENTIONS/RELATES_TO deletes too).
+    // Column sets match graphiti's kuzu_driver.py.
+    conn.raw_query(&format!(
+        "CREATE NODE TABLE IF NOT EXISTS Community (\
+         uuid STRING PRIMARY KEY, \
+         name STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP, \
+         name_embedding FLOAT[{dim}], \
+         summary STRING\
+         )"
+    ))?;
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS Saga (\
+         uuid STRING PRIMARY KEY, \
+         name STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
+         )",
+    )?;
     Ok(())
 }
 
@@ -85,10 +109,44 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
          attributes STRING\
          )",
     )?;
+    // graphiti's Kuzu schema declares `uuid STRING PRIMARY KEY` on MENTIONS, but the Rust
+    // native write path (`insert_mentions_edge`) does not populate uuid, so a PK would reject
+    // those inserts. Use a non-PK `uuid` column (as RELATES_TO already does) — enough for the
+    // WAL's MENTIONS MERGE to bind, without breaking native writes.
     conn.raw_query(
         "CREATE REL TABLE IF NOT EXISTS MENTIONS (\
          FROM Episodic TO Entity, \
-         group_id STRING\
+         uuid STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
+         )",
+    )?;
+    // Stub rel tables for graphiti's community/saga subsystem (see #145). Created so multi-type
+    // patterns referencing them bind/execute; no read/write paths in liminis-graph yet.
+    // Column sets match graphiti's kuzu_driver.py.
+    conn.raw_query(
+        "CREATE REL TABLE IF NOT EXISTS HAS_MEMBER (\
+         FROM Community TO Entity, \
+         FROM Community TO Community, \
+         uuid STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
+         )",
+    )?;
+    conn.raw_query(
+        "CREATE REL TABLE IF NOT EXISTS HAS_EPISODE (\
+         FROM Saga TO Episodic, \
+         uuid STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
+         )",
+    )?;
+    conn.raw_query(
+        "CREATE REL TABLE IF NOT EXISTS NEXT_EPISODE (\
+         FROM Episodic TO Episodic, \
+         uuid STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
          )",
     )?;
     Ok(())
@@ -128,6 +186,30 @@ pub fn migrate(conn: &Conn<'_>) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP") {
             eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP: {e} (non-fatal)");
+        }
+    }
+    // MENTIONS rel table gained uuid + created_at to match graphiti's Kuzu schema. The WAL's
+    // MENTIONS MERGE sets r.uuid/r.created_at; without these columns replay fails at bind time
+    // with `Cannot find property uuid for r`. Probe each column on a MENTIONS rel; ALTER if absent.
+    // Anchor the probe on Episodic.uuid (PK index) so it's an O(1) lookup that binds nothing,
+    // rather than `WHERE r.group_id = …` which can full-scan the MENTIONS rel table. The RETURN
+    // still triggers a binder error if the column is absent, which is what drives the ALTER.
+    if conn
+        .raw_query("MATCH (n:Episodic {uuid: '_probe_'})-[r:MENTIONS]->() RETURN r.uuid LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD uuid STRING") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD uuid STRING: {e} (non-fatal)");
+        }
+    }
+    if conn
+        .raw_query(
+            "MATCH (n:Episodic {uuid: '_probe_'})-[r:MENTIONS]->() RETURN r.created_at LIMIT 0",
+        )
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD created_at TIMESTAMP") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD created_at TIMESTAMP: {e} (non-fatal)");
         }
     }
 }
