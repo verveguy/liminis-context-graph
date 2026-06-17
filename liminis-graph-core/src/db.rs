@@ -1301,16 +1301,17 @@ impl<'db> Conn<'db> {
     /// RELATES_TO relationship property (lbug 0.17.0 may not support SET on rels;
     /// if it fails the error is logged but not propagated).
     pub fn invalidate_edge(&self, edge_uuid: &str, invalid_at: &str) -> Result<(), Error> {
-        // invalid_at is an RFC-3339 string; json_to_value binds it as a typed Timestamp, which
-        // lbug requires for a `SET col = $x` assignment into a TIMESTAMP column.
+        // The `invalid_at` param name is timestamp-gated (see TIMESTAMP_PARAM_NAMES), so an
+        // RFC-3339 value binds as a typed Timestamp — required for a `SET col = $x` assignment
+        // into a TIMESTAMP column (lbug does not implicitly cast STRING→TIMESTAMP there).
         self.exec_params(
-            "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.invalid_at = $ts",
-            serde_json::json!({ "uuid": edge_uuid, "ts": invalid_at }),
+            "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.invalid_at = $invalid_at",
+            serde_json::json!({ "uuid": edge_uuid, "invalid_at": invalid_at }),
         )?;
         // Attempt SET on the RELATES_TO rel — non-fatal if unsupported.
         if let Err(e) = self.exec_params(
-            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) SET r.invalid_at = $ts",
-            serde_json::json!({ "uuid": edge_uuid, "ts": invalid_at }),
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) SET r.invalid_at = $invalid_at",
+            serde_json::json!({ "uuid": edge_uuid, "invalid_at": invalid_at }),
         ) {
             eprintln!(
                 "liminis-graph: SET invalid_at on RELATES_TO rel unsupported or failed (non-fatal): {e}"
@@ -1389,8 +1390,37 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
         return Vec::new();
     };
     map.iter()
-        .map(|(k, v)| (k.clone(), json_to_value(v)))
+        .map(|(k, v)| (k.clone(), json_value_for_param(k, v)))
         .collect()
+}
+
+/// Parameter names that target `TIMESTAMP` columns. Only these bind an RFC-3339 string as a
+/// typed `Value::Timestamp`; every other string binds verbatim as `Value::String`.
+///
+/// This gate is the fix for the corruption where a value-shape sniff would rewrite any
+/// timestamp-looking string — including user content in STRING columns (`content`, `summary`,
+/// `fact`, `name`) — into a space-formatted timestamp. Timestamp coercion is needed because
+/// lbug does not implicitly cast `STRING`→`TIMESTAMP` in a `SET col = $x` assignment (it does
+/// in a CREATE property map); gating by the destination column's param name makes the coercion
+/// column-aware. `timestamp($x)`-wrapped templates also accept a typed Timestamp (idempotent),
+/// so this is safe for both bare and wrapped WAL forms.
+const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at", "expired_at"];
+
+/// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
+/// known timestamp-column param names (see `TIMESTAMP_PARAM_NAMES`).
+fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
+    if TIMESTAMP_PARAM_NAMES.contains(&key) {
+        if let serde_json::Value::String(s) = v {
+            if let Ok(odt) =
+                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+            {
+                return Value::Timestamp(odt);
+            }
+            // A non-RFC-3339 timestamp string (e.g. space-format from the Python WAL) binds as
+            // a plain String; those templates wrap it with `timestamp($x)`, which parses it.
+        }
+    }
+    json_to_value(v)
 }
 
 /// Converts a single JSON value to an lbug `Value`. Numeric arrays are forced to `Double`
@@ -1407,7 +1437,10 @@ fn json_to_value(v: &serde_json::Value) -> Value {
                 Value::Double(n.as_f64().unwrap_or(0.0))
             }
         }
-        serde_json::Value::String(s) => string_to_value(s),
+        // Strings bind verbatim. Timestamp typing is applied upstream in `json_value_for_param`,
+        // gated on the destination column's param name — never on value shape — so user content
+        // that happens to look like a timestamp is never rewritten.
+        serde_json::Value::String(s) => Value::String(s.clone()),
         serde_json::Value::Array(arr) => match arr.first() {
             Some(serde_json::Value::Number(_)) => Value::List(
                 LogicalType::Double,
@@ -1432,29 +1465,6 @@ fn json_to_value(v: &serde_json::Value) -> Value {
         // Nested objects are rare in our params; bind as JSON so lbug can store/coerce.
         serde_json::Value::Object(_) => Value::Json(v.clone()),
     }
-}
-
-/// Converts a JSON string to an lbug `Value`, binding RFC-3339 datetime strings as a typed
-/// `Value::Timestamp`.
-///
-/// Why typed rather than plain `String`: lbug coerces `STRING`→`TIMESTAMP` implicitly inside a
-/// CREATE property map (`CREATE (n {created_at: $x})`) but NOT in a `SET col = $x` assignment
-/// ("Implicit cast is not supported"). WAL replay templates use both shapes, so timestamp
-/// columns require a typed bind to replay successfully. This preserves the behavior #130
-/// implemented via a `timestamp('...')` literal — now done by binding instead of interpolation.
-///
-/// The cheap pre-filter (length, leading digit, `T`/`t` at index 10) skips the parser for the
-/// overwhelming majority of params (UUIDs, names, content) that cannot be RFC-3339.
-fn string_to_value(s: &str) -> Value {
-    let b = s.as_bytes();
-    if s.len() >= 20 && b[0].is_ascii_digit() && (b[10] == b'T' || b[10] == b't') {
-        if let Ok(odt) =
-            time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-        {
-            return Value::Timestamp(odt);
-        }
-    }
-    Value::String(s.to_string())
 }
 
 fn logical_type_of(v: &serde_json::Value) -> LogicalType {
