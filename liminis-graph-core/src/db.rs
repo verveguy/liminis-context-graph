@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
+use lbug::{LogicalType, Value};
+
 use crate::{
     error::Error,
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
@@ -16,10 +18,13 @@ pub struct Db {
 
 pub struct Conn<'db> {
     inner: lbug::Connection<'db>,
-    /// Cypher strings recorded after each successful `raw_query` / `cypher_query` call.
-    /// Callers drain this after a write operation and pass the strings to a WAL-flush helper.
-    /// See `wal_exec.rs` for the flush helpers and the drain-and-flush pattern (ADR-001).
-    executed_cyphers: RefCell<Vec<String>>,
+    /// Recorded mutations as `(cypher_template, json_params)` pairs, in execution order.
+    /// DDL / non-parameterized writes via `raw_query`/`cypher_query` record
+    /// `(sql, Value::Null)`; value-bearing writes via `exec_params` record
+    /// `(template, params)`. Callers drain this after a write and pass the pairs to a
+    /// WAL-flush helper. Order-preserving so bound-param and raw paths interleave
+    /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-001).
+    executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
 }
 
 impl Db {
@@ -76,17 +81,50 @@ impl Db {
         let conn = lbug::Connection::new(&self.inner)?;
         Ok(Conn {
             inner: conn,
-            executed_cyphers: RefCell::new(Vec::new()),
+            executed_mutations: RefCell::new(Vec::new()),
         })
     }
 }
 
 impl<'db> Conn<'db> {
-    /// Runs a raw Cypher statement returning no rows; used internally and for testing.
-    /// Records the statement in `executed_cyphers` on success for WAL flushing by callers.
+    /// Runs a raw Cypher statement returning no rows; used for DDL (schema/index) and
+    /// non-parameterized statements. Records `(sql, Null)` for WAL flushing by callers.
+    ///
+    /// Value-bearing writes should use [`Conn::exec_params`] instead, which binds typed
+    /// parameters (no string interpolation, no escaping) and records the parameterized
+    /// form into the WAL.
     pub(crate) fn raw_query(&self, sql: &str) -> Result<(), Error> {
         let _ = self.inner.query(sql)?;
-        self.executed_cyphers.borrow_mut().push(sql.to_string());
+        self.executed_mutations
+            .borrow_mut()
+            .push((sql.to_string(), serde_json::Value::Null));
+        Ok(())
+    }
+
+    /// Executes a parameterized Cypher statement via lbug prepared-statement binding,
+    /// then records `(template, params)` for WAL flushing.
+    ///
+    /// This is the bound-parameter write path: values are bound as typed lbug `Value`s
+    /// (never interpolated into the query text), so no escaping is required and lbug
+    /// coerces each bound value to its destination column type (e.g. an RFC-3339 string
+    /// into a `TIMESTAMP` column, a numeric list into a `FLOAT[N]` column).
+    ///
+    /// `cypher` must use `$name` placeholders matching keys in the `params` JSON object.
+    pub(crate) fn exec_params(&self, cypher: &str, params: serde_json::Value) -> Result<(), Error> {
+        let mut prepared = self.inner.prepare(cypher)?;
+        // Keep the keys alive in `keys` so we can hand lbug `&str` borrows alongside the
+        // owned Values it consumes.
+        let (keys, vals): (Vec<String>, Vec<Value>) =
+            json_params_to_values(&params).into_iter().unzip();
+        let bound: Vec<(&str, Value)> = keys
+            .iter()
+            .map(|k| k.as_str())
+            .zip(vals.into_iter())
+            .collect();
+        self.inner.execute(&mut prepared, bound)?;
+        self.executed_mutations
+            .borrow_mut()
+            .push((cypher.to_string(), params));
         Ok(())
     }
 
@@ -105,24 +143,27 @@ impl<'db> Conn<'db> {
     }
 
     /// Runs a raw Cypher SELECT and returns rows as string columns (T012 pass-through).
-    /// Records the statement in `executed_cyphers` on success so `handle_query_cypher`
-    /// can WAL-log mutation queries issued via this escape hatch.
+    /// Records `(sql, Null)` on success so `handle_query_cypher` can WAL-log mutation
+    /// queries issued via this escape hatch.
     pub fn cypher_query(&self, sql: &str) -> Result<Vec<Vec<String>>, Error> {
         let result = self.inner.query(sql)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(row.iter().map(value_as_string).collect());
         }
-        self.executed_cyphers.borrow_mut().push(sql.to_string());
+        self.executed_mutations
+            .borrow_mut()
+            .push((sql.to_string(), serde_json::Value::Null));
         Ok(rows)
     }
 
-    /// Drains and returns all Cypher strings recorded since the last drain (or since the
-    /// connection was opened). Pass the result to `wal_exec::wal_flush_chunk` or
-    /// `wal_exec::wal_flush_ungrouped` to append mutations to the application WAL.
-    /// Non-mutations are silently filtered inside `WalWriter::log_mutation`.
-    pub fn drain_cyphers(&self) -> Vec<String> {
-        std::mem::take(&mut *self.executed_cyphers.borrow_mut())
+    /// Drains and returns all `(cypher_template, params)` mutations recorded since the
+    /// last drain (or since the connection was opened). Pass the result to
+    /// `wal_exec::wal_flush_chunk` or `wal_exec::wal_flush_ungrouped` to append them to
+    /// the application WAL. Non-mutations are silently filtered inside
+    /// `WalWriter::log_mutation`.
+    pub fn drain_mutations(&self) -> Vec<(String, serde_json::Value)> {
+        std::mem::take(&mut *self.executed_mutations.borrow_mut())
     }
 
     /// Creates the Entity and Episodic node tables. Call once after connecting.
@@ -143,20 +184,21 @@ impl<'db> Conn<'db> {
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
         // Enforce Entity-first label-order invariant (AD-8)
         let labels = enforce_entity_first(&row.labels);
-        let sql = format!(
-            "CREATE (:Entity {{uuid: '{}', name: '{}', group_id: '{}', labels: {}, \
-             created_at: timestamp('{}'), name_embedding: {}, summary: '{}', \
-             attributes: '{}'}})",
-            escape(&row.uuid),
-            escape(&row.name),
-            escape(&row.group_id),
-            format_str_array(&labels),
-            escape(&row.created_at),
-            format_float_array(&row.name_embedding),
-            escape(&row.summary),
-            escape(&row.attributes),
-        );
-        self.raw_query(&sql)
+        self.exec_params(
+            "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
+             labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
+             summary: $summary, attributes: $attributes})",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "name": row.name,
+                "group_id": row.group_id,
+                "labels": labels,
+                "created_at": row.created_at,
+                "name_embedding": row.name_embedding,
+                "summary": row.summary,
+                "attributes": row.attributes,
+            }),
+        )
     }
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
@@ -1317,6 +1359,80 @@ impl<'db> Conn<'db> {
             });
         }
         Ok(rows)
+    }
+}
+
+// ── bound-parameter mapping ─────────────────────────────────────────────────────
+
+/// Maps a JSON params object to lbug bound `(name, Value)` pairs for prepared-statement
+/// execution. Type-agnostic by design: lbug coerces each bound value to its destination
+/// column type, so we never need to know the schema here. (Empirically verified against
+/// lbug 0.17: an RFC-3339 `String` binds into a `TIMESTAMP` column; a numeric list binds
+/// into a `FLOAT[N]` column; a string list binds into a `STRING[]` column.)
+///
+/// A non-object params value (e.g. `Null`, as recorded by `raw_query` for DDL) yields no
+/// bound params.
+fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
+    let serde_json::Value::Object(map) = params else {
+        return Vec::new();
+    };
+    map.iter()
+        .map(|(k, v)| (k.clone(), json_to_value(v)))
+        .collect()
+}
+
+/// Converts a single JSON value to an lbug `Value`. Numeric arrays are forced to `Double`
+/// children (embeddings are floats; lbug coerces `Double`→`Float` into `FLOAT[N]`), which
+/// also avoids a heterogeneous int/float list when an embedding contains an exact `0`.
+fn json_to_value(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null(LogicalType::Any),
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else {
+                Value::Double(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => match arr.first() {
+            Some(serde_json::Value::Number(_)) => Value::List(
+                LogicalType::Double,
+                arr.iter()
+                    .map(|x| Value::Double(x.as_f64().unwrap_or(0.0)))
+                    .collect(),
+            ),
+            Some(serde_json::Value::String(_)) => Value::List(
+                LogicalType::String,
+                arr.iter()
+                    .map(|x| Value::String(x.as_str().unwrap_or_default().to_string()))
+                    .collect(),
+            ),
+            Some(_) => {
+                let child = logical_type_of(&arr[0]);
+                Value::List(child, arr.iter().map(json_to_value).collect())
+            }
+            // Empty list: default to STRING[] — the only plausibly-empty array columns are
+            // STRING[] (episodes, labels, entity_edges); embeddings are always populated.
+            None => Value::List(LogicalType::String, Vec::new()),
+        },
+        // Nested objects are rare in our params; bind as JSON so lbug can store/coerce.
+        serde_json::Value::Object(_) => Value::Json(v.clone()),
+    }
+}
+
+fn logical_type_of(v: &serde_json::Value) -> LogicalType {
+    match v {
+        serde_json::Value::Bool(_) => LogicalType::Bool,
+        serde_json::Value::Number(n) => {
+            if n.as_i64().is_some() {
+                LogicalType::Int64
+            } else {
+                LogicalType::Double
+            }
+        }
+        _ => LogicalType::String,
     }
 }
 

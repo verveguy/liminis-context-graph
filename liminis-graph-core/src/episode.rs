@@ -463,7 +463,7 @@ pub async fn add_episode(
             })?;
         }
 
-        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
 
         Ok(())
     })
