@@ -228,3 +228,13 @@ pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     );
     Ok(())
 }
+
+/// Drops the 3 FTS indexes. Idempotent — errors are suppressed so this is safe to call
+/// even when the indexes are already absent (e.g. repeated reload or interrupted reload).
+/// Used by `handle_rebuild_from_wal` to enable bulk-load replay without inline FTS maintenance.
+pub(crate) fn drop_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')");
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')");
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Episodic', 'episode_content')");
+    Ok(())
+}
