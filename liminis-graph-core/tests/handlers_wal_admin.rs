@@ -773,7 +773,7 @@ async fn test_interrupted_reload_auto_heals() {
         })
         .unwrap();
         // Drop FTS indexes to simulate a mid-reload interrupt (drop ran, build did not).
-        schema::drop_fts_indexes(&conn).unwrap();
+        schema::drop_fts_indexes(&conn);
     }
 
     // State has indices_built=false (default from make_state_no_wal).
