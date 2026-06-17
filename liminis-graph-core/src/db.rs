@@ -1707,7 +1707,7 @@ mod fts_missing_index_tests {
         let db = Db::open(dir.path().join("fts_probe.db").to_str().unwrap()).unwrap();
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
-        crate::schema::drop_fts_indexes(&conn).unwrap();
+        crate::schema::drop_fts_indexes(&conn);
         conn.insert_entity(&crate::EntityRow {
             uuid: "fts-probe-1".to_string(),
             name: "FtsProbeEntity".to_string(),

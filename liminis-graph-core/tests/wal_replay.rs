@@ -1698,14 +1698,14 @@ fn throughput_half2_vs_half1_flat() {
     conn.init_schema(4).unwrap();
 
     // Bulk-load path: drop FTS so inline FTS maintenance is eliminated during replay.
-    schema::drop_fts_indexes(&conn).unwrap();
+    schema::drop_fts_indexes(&conn);
 
     let start = std::time::Instant::now();
     let half1_end: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
     let half1_end_clone = Arc::clone(&half1_end);
 
     let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
-        if p.mutations_replayed == HALF as u64 {
+        if p.mutations_replayed >= HALF as u64 {
             let mut guard = half1_end_clone.lock().unwrap();
             if guard.is_none() {
                 *guard = Some(std::time::Instant::now());
@@ -1730,7 +1730,7 @@ fn throughput_half2_vs_half1_flat() {
 
     let total_elapsed = start.elapsed();
     let half1_end_time = half1_end.lock().unwrap().unwrap_or_else(|| {
-        panic!("half1_end never set — progress_fn may not have fired at mutation {HALF}")
+        panic!("half1_end never set — progress_fn may not have fired at or after mutation {HALF}")
     });
 
     let half1_elapsed = half1_end_time - start;

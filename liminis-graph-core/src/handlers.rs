@@ -1260,7 +1260,7 @@ async fn handle_rebuild_from_wal(
                 // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
                 // bulk load. Errors suppressed — idempotent if already absent.
                 if !dry_run {
-                    let _ = crate::schema::drop_fts_indexes(&conn);
+                    crate::schema::drop_fts_indexes(&conn);
                 }
                 // Composite cancel: fire on client disconnect OR service shutdown (R9).
                 let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
@@ -1484,7 +1484,7 @@ async fn handle_rebuild_from_wal(
                 // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
                 // bulk load. Errors suppressed — idempotent if already absent.
                 if !dry_run {
-                    let _ = crate::schema::drop_fts_indexes(&conn);
+                    crate::schema::drop_fts_indexes(&conn);
                 }
                 let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
                     if let Ok(mut guard) = jobs_ref.lock() {
