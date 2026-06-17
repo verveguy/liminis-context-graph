@@ -1470,11 +1470,6 @@ fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Public escape function for use by other modules (e.g. episode.rs).
-pub fn escape_pub(s: &str) -> String {
-    escape(s)
-}
-
 /// Escapes FTS query strings for embedding in Cypher CALL statements.
 fn escape_fts(s: &str) -> String {
     // The query argument is embedded inside a Cypher single-quoted string literal
