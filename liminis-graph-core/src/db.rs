@@ -202,81 +202,73 @@ impl<'db> Conn<'db> {
     }
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
-        let sql = format!(
-            "CREATE (:Episodic {{uuid: '{}', name: '{}', group_id: '{}', \
-             created_at: timestamp('{}'), source: '{}', source_description: '{}', \
-             content: '{}', content_embedding: {}, valid_at: timestamp('{}'), \
-             entity_edges: {}}})",
-            escape(&row.uuid),
-            escape(&row.name),
-            escape(&row.group_id),
-            escape(&row.created_at),
-            escape(&row.source),
-            escape(&row.source_description),
-            escape(&row.content),
-            format_float_array(&row.content_embedding),
-            escape(&row.valid_at),
-            format_str_array(&row.entity_edges),
-        );
-        self.raw_query(&sql)
+        self.exec_params(
+            "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
+             created_at: $created_at, source: $source, source_description: $source_description, \
+             content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
+             entity_edges: $entity_edges})",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "name": row.name,
+                "group_id": row.group_id,
+                "created_at": row.created_at,
+                "source": row.source,
+                "source_description": row.source_description,
+                "content": row.content,
+                "content_embedding": row.content_embedding,
+                "valid_at": row.valid_at,
+                "entity_edges": row.entity_edges,
+            }),
+        )
     }
 
     // ── Edge insert ───────────────────────────────────────────────────────────
 
     /// Inserts a RELATES_TO rel edge and the corresponding RelatesToNode_ shadow node.
     pub fn insert_relates_to_edge(&self, edge: &RelatesToEdge) -> Result<(), Error> {
-        // Insert shadow node for vector search
-        let valid_at = edge
-            .valid_at
-            .as_deref()
-            .map(|t| format!("timestamp('{}')", escape(t)))
-            .unwrap_or_else(|| "null".to_string());
-        let invalid_at = edge
-            .invalid_at
-            .as_deref()
-            .map(|t| format!("timestamp('{}')", escape(t)))
-            .unwrap_or_else(|| "null".to_string());
+        // Shadow node for vector search. Nullable fields (valid_at/invalid_at/relation_type)
+        // bind as JSON null when absent; lbug accepts null into the nullable columns.
+        self.exec_params(
+            "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
+             created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
+             valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
+             relation_type: $relation_type})",
+            serde_json::json!({
+                "uuid": edge.uuid,
+                "name": edge.name,
+                "group_id": edge.group_id,
+                "created_at": edge.created_at,
+                "fact": edge.fact,
+                "fact_embedding": edge.fact_embedding,
+                "valid_at": edge.valid_at,
+                "invalid_at": edge.invalid_at,
+                "attributes": edge.attributes,
+                "relation_type": edge.relation_type,
+            }),
+        )?;
 
-        let relation_type_val = edge
-            .relation_type
-            .as_deref()
-            .map(|rt| format!("'{}'", escape(rt)))
-            .unwrap_or_else(|| "null".to_string());
-
-        let node_sql = format!(
-            "CREATE (:RelatesToNode_ {{uuid: '{}', name: '{}', group_id: '{}', \
-             created_at: timestamp('{}'), fact: '{}', fact_embedding: {}, \
-             valid_at: {valid_at}, invalid_at: {invalid_at}, attributes: '{}', \
-             relation_type: {relation_type_val}}})",
-            escape(&edge.uuid),
-            escape(&edge.name),
-            escape(&edge.group_id),
-            escape(&edge.created_at),
-            escape(&edge.fact),
-            format_float_array(&edge.fact_embedding),
-            escape(&edge.attributes),
-        );
-        self.raw_query(&node_sql)?;
-
-        // Insert RELATES_TO rel between source and target Entity nodes
-        let rel_sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}}), (dst:Entity {{uuid: '{}'}}) \
-             CREATE (src)-[:RELATES_TO {{uuid: '{}', name: '{}', group_id: '{}', \
-             fact: '{}', valid_at: {valid_at}, invalid_at: {invalid_at}, \
-             attributes: '{}'}}]->(dst)",
-            escape(&edge.source_node_uuid),
-            escape(&edge.target_node_uuid),
-            escape(&edge.uuid),
-            escape(&edge.name),
-            escape(&edge.group_id),
-            escape(&edge.fact),
-            escape(&edge.attributes),
-        );
         // Direct Entity→Entity rel is non-fatal: Python-schema DBs have no Entity→Entity
         // FROM-TO pair in RELATES_TO, so this insert will fail there. The two-hop links
         // below are sufficient for all reads; the direct rel is kept for schema compatibility
-        // with Rust-initialized DBs only.
-        if let Err(e) = self.raw_query(&rel_sql) {
+        // with Rust-initialized DBs only. (exec_params records to the WAL only on success,
+        // so a failed insert here is not WAL-logged — matching the prior raw_query behavior.)
+        if let Err(e) = self.exec_params(
+            "MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) \
+             CREATE (src)-[:RELATES_TO {uuid: $uuid, name: $name, group_id: $group_id, \
+             fact: $fact, valid_at: $valid_at, invalid_at: $invalid_at, \
+             attributes: $attributes}]->(dst)",
+            serde_json::json!({
+                "src": edge.source_node_uuid,
+                "dst": edge.target_node_uuid,
+                "uuid": edge.uuid,
+                "name": edge.name,
+                "group_id": edge.group_id,
+                "fact": edge.fact,
+                "valid_at": edge.valid_at,
+                "invalid_at": edge.invalid_at,
+                "attributes": edge.attributes,
+            }),
+        ) {
             eprintln!(
                 "liminis-graph: direct RELATES_TO rel insert failed (non-fatal, Python-schema DB?): {e}"
             );
@@ -285,27 +277,29 @@ impl<'db> Conn<'db> {
         // Create both two-hop links in a single statement so either both exist or neither does.
         // Reads use Entity→RelatesToNode_→Entity; the hops carry no meaningful properties —
         // all edge data lives on the RelatesToNode_ shadow node.
-        let hops_sql = format!(
-            "MATCH (src:Entity {{uuid: '{}'}}), \
-                   (rn:RelatesToNode_ {{uuid: '{}'}}), \
-                   (dst:Entity {{uuid: '{}'}}) \
+        self.exec_params(
+            "MATCH (src:Entity {uuid: $src}), \
+                   (rn:RelatesToNode_ {uuid: $rn}), \
+                   (dst:Entity {uuid: $dst}) \
              CREATE (src)-[:RELATES_TO]->(rn), (rn)-[:RELATES_TO]->(dst)",
-            escape(&edge.source_node_uuid),
-            escape(&edge.uuid),
-            escape(&edge.target_node_uuid),
-        );
-        self.raw_query(&hops_sql)
+            serde_json::json!({
+                "src": edge.source_node_uuid,
+                "rn": edge.uuid,
+                "dst": edge.target_node_uuid,
+            }),
+        )
     }
 
     pub fn insert_mentions_edge(&self, e: &MentionsEdge) -> Result<(), Error> {
-        let sql = format!(
-            "MATCH (ep:Episodic {{uuid: '{}'}}), (en:Entity {{uuid: '{}'}}) \
-             CREATE (ep)-[:MENTIONS {{group_id: '{}'}}]->(en)",
-            escape(&e.episodic_uuid),
-            escape(&e.entity_uuid),
-            escape(&e.group_id),
-        );
-        self.raw_query(&sql)
+        self.exec_params(
+            "MATCH (ep:Episodic {uuid: $ep}), (en:Entity {uuid: $en}) \
+             CREATE (ep)-[:MENTIONS {group_id: $group_id}]->(en)",
+            serde_json::json!({
+                "ep": e.episodic_uuid,
+                "en": e.entity_uuid,
+                "group_id": e.group_id,
+            }),
+        )
     }
 
     // ── HNSW / FTS indexes ────────────────────────────────────────────────────
