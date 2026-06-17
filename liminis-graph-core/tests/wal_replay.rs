@@ -1,4 +1,4 @@
-use liminis_graph_core::{Db, EntityRow, ReplayOptions, ReplayProgress, WalReplayer};
+use liminis_graph_core::{schema, Db, EntityRow, ReplayOptions, ReplayProgress, WalReplayer};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -1658,4 +1658,108 @@ fn test_large_embedding_batch_replay_does_not_corrupt_db() {
             "all episodes must persist across reopen"
         );
     }
+}
+
+// ── throughput regression ─────────────────────────────────────────────────────
+
+/// Regression guard for FR-002 / SC-001: half-2 throughput must be within 10% of half-1
+/// throughput when FTS is dropped before replay (bulk-load path).
+///
+/// Verifies that the drop-before/rebuild-after approach produces flat throughput across a
+/// 12k-mutation replay vs the ~1.85× degradation observed with inline FTS maintenance.
+///
+/// Run manually (excluded from CI due to runtime):
+///   cargo test --release -- throughput_half2_vs_half1_flat --ignored --nocapture
+#[ignore]
+#[test]
+fn throughput_half2_vs_half1_flat() {
+    const HALF: usize = 6_000;
+    const TOTAL: usize = HALF * 2;
+
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Write a single WAL file with TOTAL entity-merge mutations.
+    let mut content = String::with_capacity(TOTAL * 250);
+    for i in 0..TOTAL {
+        content.push_str(&format!(
+            r#"{{"seq":{i},"ts":"2026-06-17T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {{uuid: $uuid}}) ON CREATE SET n.name = $name, n.group_id = 'g', n.labels = ['tag'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = $name_embedding, n.summary = 's', n.attributes = '{{}}'","params":{{"uuid":"tput-{i}","name":"Entity{i}","name_embedding":[1.0,0.0,0.0,0.0]}}}}"#
+        ));
+        content.push('\n');
+    }
+    std::fs::write(
+        wal_dir.path().join("20260617_000000_tput_000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db = Db::open(db_dir.path().join("tput.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Bulk-load path: drop FTS so inline FTS maintenance is eliminated during replay.
+    schema::drop_fts_indexes(&conn).unwrap();
+
+    let start = std::time::Instant::now();
+    let half1_end: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    let half1_end_clone = Arc::clone(&half1_end);
+
+    let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
+        if p.mutations_replayed == HALF as u64 {
+            let mut guard = half1_end_clone.lock().unwrap();
+            if guard.is_none() {
+                *guard = Some(std::time::Instant::now());
+            }
+        }
+        true
+    });
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: 0,
+                dry_run: false,
+                cancel_fn: None,
+                progress_fn: Some(progress_fn),
+                failure_sample_cap: None,
+                batch_size: None,
+            },
+        )
+        .expect("replay must succeed");
+
+    let total_elapsed = start.elapsed();
+    let half1_end_time = half1_end.lock().unwrap().unwrap_or_else(|| {
+        panic!("half1_end never set — progress_fn may not have fired at mutation {HALF}")
+    });
+
+    let half1_elapsed = half1_end_time - start;
+    let half2_elapsed = total_elapsed.saturating_sub(half1_elapsed);
+
+    assert_eq!(
+        stats.lines_replayed, TOTAL as u64,
+        "all {TOTAL} mutations must replay"
+    );
+
+    let rate1 = HALF as f64 / half1_elapsed.as_secs_f64();
+    let rate2 = HALF as f64 / half2_elapsed.as_secs_f64();
+    let ratio = rate2 / rate1;
+
+    println!(
+        "half1: {:.1} mut/s over {:.2}s | half2: {:.1} mut/s over {:.2}s | ratio: {:.3}",
+        rate1,
+        half1_elapsed.as_secs_f64(),
+        rate2,
+        half2_elapsed.as_secs_f64(),
+        ratio,
+    );
+
+    // Rebuild all indexes once after bulk load (as the handler does).
+    conn.build_indices_and_constraints()
+        .expect("post-replay index build must succeed");
+
+    assert!(
+        ratio >= 0.9,
+        "half2/half1 throughput ratio must be ≥ 0.9 (flat) under the drop-before/build-after path; got {ratio:.3}"
+    );
 }
