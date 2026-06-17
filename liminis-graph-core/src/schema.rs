@@ -146,3 +146,11 @@ pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     );
     Ok(())
 }
+
+/// Drops all three FTS indexes; errors (e.g. "index not found") are suppressed for idempotency.
+/// Used before batched WAL replay to avoid the lbug FTSIndex::deleteFromTermsTable SIGBUS.
+pub(crate) fn drop_fts_indexes(conn: &Conn<'_>) {
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')");
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')");
+    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Episodic', 'episode_content')");
+}

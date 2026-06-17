@@ -1557,6 +1557,89 @@ fn batch_file_boundary_flushes_between_files() {
     assert_eq!(conn.count_nodes("Entity").unwrap(), 8);
 }
 
+/// FR-006 / SC-001: Batched MATCH+SET on FTS-indexed RelatesToNode_ columns (name, fact) must
+/// not crash (SIGBUS / EXC_BAD_ACCESS in lbug FTSIndex::deleteFromTermsTable) and must produce
+/// a queryable FTS index after replay.
+///
+/// This is the primary regression guard for #141. The fix drops FTS/HNSW indexes before the
+/// batched mutation loop and rebuilds them after — avoiding the lbug incremental FTS update bug.
+#[test]
+fn batch_fts_indexed_set_does_not_crash() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert two RelatesToNode_ nodes with initial name/fact values.
+    for (uuid, name, fact) in &[
+        ("rtn-fts-1", "init1", "init fact 1"),
+        ("rtn-fts-2", "init2", "init fact 2"),
+    ] {
+        conn.run_cypher(&format!(
+            "CREATE (:RelatesToNode_ {{uuid: '{uuid}', name: '{name}', group_id: 'g', \
+             created_at: timestamp('2026-06-16T00:00:00Z'), fact: '{fact}', \
+             fact_embedding: [0.1, 0.0, 0.0, 0.0], episodes: [], attributes: '', \
+             relation_type: 'TEST'}})"
+        ))
+        .unwrap();
+    }
+
+    // Write WAL lines that MATCH both nodes and SET the FTS-indexed columns (name + fact).
+    // Both lines share the same template so they batch together with batch_size=2.
+    let line1 = r#"{"seq":0,"ts":"2026-06-16T00:00:00.000000+00:00","db":"","cypher":"MATCH (r:RelatesToNode_ {uuid: $uuid}) SET r.name = $name, r.fact = $fact","params":{"uuid":"rtn-fts-1","name":"searchable name one","fact":"searchable fact one"}}"#;
+    let line2 = r#"{"seq":1,"ts":"2026-06-16T00:00:01.000000+00:00","db":"","cypher":"MATCH (r:RelatesToNode_ {uuid: $uuid}) SET r.name = $name, r.fact = $fact","params":{"uuid":"rtn-fts-2","name":"searchable name two","fact":"searchable fact two"}}"#;
+    fs::write(
+        wal_dir.path().join("20260616_000000_fts_test_0000.jsonl"),
+        format!("{line1}\n{line2}\n"),
+    )
+    .unwrap();
+
+    // Replay with batch_size=2 (triggers the FTS batched UNWIND SET path that caused SIGBUS).
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(2),
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("batched FTS-indexed SET must not panic or crash");
+
+    assert_eq!(
+        stats.failed_lines,
+        0,
+        "no failures expected; batched SET on FTS-indexed columns must succeed; \
+         got {} failures with samples: {:?}",
+        stats.failed_lines,
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| (&s.cypher, &s.error))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both MATCH+SET mutations must be replayed"
+    );
+
+    // Verify FTS index is present and populated post-replay (SC-002).
+    let hits = conn
+        .fts_search_edges("searchable", &["g"], 10)
+        .expect("FTS search must succeed after index rebuild");
+    let uuids: Vec<&str> = hits.iter().map(|(uuid, _)| uuid.as_str()).collect();
+    assert!(
+        uuids.contains(&"rtn-fts-1"),
+        "rtn-fts-1 must be FTS-searchable after batched replay; hits: {uuids:?}"
+    );
+    assert!(
+        uuids.contains(&"rtn-fts-2"),
+        "rtn-fts-2 must be FTS-searchable after batched replay; hits: {uuids:?}"
+    );
+}
+
 /// Invalid batch sizes (0 and 257) must cause an error before any WAL is read (FR-005).
 #[test]
 fn batch_invalid_size_returns_error() {

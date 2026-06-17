@@ -167,6 +167,14 @@ impl WalReplayer {
         files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
         let files_total = files.len() as u64;
 
+        // Drop FTS and HNSW indexes before batched replay to avoid the lbug
+        // FTSIndex::deleteFromTermsTable SIGBUS triggered by batched UNWIND SET on indexed columns.
+        // Per-row replay (batch_size == 1) is not affected by this bug and is left unchanged (FR-005).
+        if batch_size > 1 && !opts.dry_run {
+            crate::schema::drop_fts_indexes(conn);
+            conn.drop_vector_indexes();
+        }
+
         let mut batch = ReplayBatch::new();
 
         'files: for file_path in &files {
@@ -345,6 +353,14 @@ impl WalReplayer {
         // Flush any remaining batch after cancel/abort or EOF (FR-007, FR-011).
         if !opts.dry_run {
             flush_batch(&mut batch, conn, &mut stats, sample_cap);
+        }
+
+        // Rebuild FTS and HNSW indexes after batched replay completes (mirrors the drop above).
+        // Non-fatal: index build failure is logged but does not propagate as a replay error.
+        if batch_size > 1 && !opts.dry_run {
+            if let Err(e) = conn.build_indices_and_constraints() {
+                eprintln!("[WAL WARN] index rebuild after batched replay failed: {e} (non-fatal)");
+            }
         }
 
         let threshold: f64 = std::env::var("LCG_REPLAY_FIDELITY_THRESHOLD")

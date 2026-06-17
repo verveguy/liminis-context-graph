@@ -1297,7 +1297,9 @@ async fn handle_rebuild_from_wal(
         });
 
         // After a successful non-dry-run WAL replay the graph is fully under the current ontology.
+        // Indexes are now rebuilt inside replay_opts (batched path), so mark indices_built = true.
         if !dry_run {
+            state.indices_built.store(true, Ordering::Release);
             if let Some(ref root) = state.workspace_root {
                 let ontology_ref = state.ontology.as_deref();
                 if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
@@ -1446,6 +1448,7 @@ async fn handle_rebuild_from_wal(
     let bg_ontology = state.ontology.clone();
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
     let bg_sink = Arc::clone(&state.sink);
+    let bg_indices_built = Arc::clone(&state.indices_built);
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -1519,7 +1522,9 @@ async fn handle_rebuild_from_wal(
                             "fidelity_warning": stats.fidelity_warning,
                         }));
                         // Update the sidecar so drift clears after a successful WAL rebuild.
+                        // Indexes are rebuilt inside replay_opts (batched path), so mark indices_built = true.
                         if !dry_run {
+                            bg_indices_built.store(true, Ordering::Release);
                             if let Some(ref root) = bg_workspace_root {
                                 let ontology_ref = bg_ontology.as_deref();
                                 if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref)
