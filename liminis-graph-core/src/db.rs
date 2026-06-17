@@ -112,19 +112,34 @@ impl<'db> Conn<'db> {
     /// `cypher` must use `$name` placeholders matching keys in the `params` JSON object.
     pub(crate) fn exec_params(&self, cypher: &str, params: serde_json::Value) -> Result<(), Error> {
         let mut prepared = self.inner.prepare(cypher)?;
-        // Keep the keys alive in `keys` so we can hand lbug `&str` borrows alongside the
-        // owned Values it consumes.
-        let (keys, vals): (Vec<String>, Vec<Value>) =
-            json_params_to_values(&params).into_iter().unzip();
-        let bound: Vec<(&str, Value)> = keys
-            .iter()
-            .map(|k| k.as_str())
-            .zip(vals.into_iter())
-            .collect();
-        self.inner.execute(&mut prepared, bound)?;
+        self.execute_prepared(&mut prepared, &params)?;
         self.executed_mutations
             .borrow_mut()
             .push((cypher.to_string(), params));
+        Ok(())
+    }
+
+    /// Prepares a parameterized Cypher statement for repeated execution. Used by the WAL
+    /// replay path to prepare a template once and execute many rows against it (the
+    /// throughput win over re-planning per row), via [`Conn::execute_prepared`].
+    pub(crate) fn prepare(&self, cypher: &str) -> Result<lbug::PreparedStatement, Error> {
+        Ok(self.inner.prepare(cypher)?)
+    }
+
+    /// Binds `params` and executes an already-prepared statement. Does **not** record to the
+    /// WAL — used by WAL replay (which is rebuilding *from* the WAL and must not re-log) and
+    /// internally by [`Conn::exec_params`] (which records separately on success).
+    pub(crate) fn execute_prepared(
+        &self,
+        prepared: &mut lbug::PreparedStatement,
+        params: &serde_json::Value,
+    ) -> Result<(), Error> {
+        // Keep the keys alive in `keys` so we can hand lbug `&str` borrows alongside the
+        // owned Values it consumes.
+        let (keys, vals): (Vec<String>, Vec<Value>) =
+            json_params_to_values(params).into_iter().unzip();
+        let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
+        self.inner.execute(prepared, bound)?;
         Ok(())
     }
 
@@ -1389,7 +1404,7 @@ fn json_to_value(v: &serde_json::Value) -> Value {
                 Value::Double(n.as_f64().unwrap_or(0.0))
             }
         }
-        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::String(s) => string_to_value(s),
         serde_json::Value::Array(arr) => match arr.first() {
             Some(serde_json::Value::Number(_)) => Value::List(
                 LogicalType::Double,
@@ -1414,6 +1429,29 @@ fn json_to_value(v: &serde_json::Value) -> Value {
         // Nested objects are rare in our params; bind as JSON so lbug can store/coerce.
         serde_json::Value::Object(_) => Value::Json(v.clone()),
     }
+}
+
+/// Converts a JSON string to an lbug `Value`, binding RFC-3339 datetime strings as a typed
+/// `Value::Timestamp`.
+///
+/// Why typed rather than plain `String`: lbug coerces `STRING`→`TIMESTAMP` implicitly inside a
+/// CREATE property map (`CREATE (n {created_at: $x})`) but NOT in a `SET col = $x` assignment
+/// ("Implicit cast is not supported"). WAL replay templates use both shapes, so timestamp
+/// columns require a typed bind to replay successfully. This preserves the behavior #130
+/// implemented via a `timestamp('...')` literal — now done by binding instead of interpolation.
+///
+/// The cheap pre-filter (length, leading digit, `T`/`t` at index 10) skips the parser for the
+/// overwhelming majority of params (UUIDs, names, content) that cannot be RFC-3339.
+fn string_to_value(s: &str) -> Value {
+    let b = s.as_bytes();
+    if s.len() >= 20 && b[0].is_ascii_digit() && (b[10] == b'T' || b[10] == b't') {
+        if let Ok(odt) =
+            time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        {
+            return Value::Timestamp(odt);
+        }
+    }
+    Value::String(s.to_string())
 }
 
 fn logical_type_of(v: &serde_json::Value) -> LogicalType {
