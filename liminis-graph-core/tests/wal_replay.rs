@@ -1599,3 +1599,60 @@ fn batch_invalid_size_returns_error() {
         "error must be a Config error: {err_big}"
     );
 }
+
+/// Regression for #139: replaying a large batch of embedding-bearing creates must NOT corrupt
+/// lbug's internal `db.wal`. The prior inline-UNWIND path built multi-MB Cypher strings by
+/// inlining every 768-float embedding as a literal, which corrupted the DB on the first big
+/// batch; the bound-parameter path (prepare-once + execute-per-row) cannot.
+///
+/// The decisive check is that the DB **re-opens from disk** after replay — a torn `db.wal`
+/// surfaces as `lbug_wal_corrupt` on the next `Db::open`, exactly the #139 symptom.
+#[test]
+fn test_large_embedding_batch_replay_does_not_corrupt_db() {
+    const DIM: usize = 32;
+    const N: usize = 250; // > default batch_size (64): forces multiple full batches
+
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+
+    // One WAL file, N parameterized creates sharing an identical template so they batch.
+    let mut buf = String::new();
+    for i in 0..N {
+        // A non-trivial embedding (varies per row) bound as a JSON array param.
+        let emb: Vec<String> = (0..DIM)
+            .map(|j| format!("{:.6}", ((i * 7 + j * 13) % 1000) as f64 / 1000.0))
+            .collect();
+        buf.push_str(&format!(
+            r#"{{"seq":{i},"ts":"2026-03-25T16:58:57.000000+00:00","db":"","cypher":"CREATE (n:Episodic {{uuid: $uuid, name: $name, group_id: $group_id, created_at: $created_at, source: $source, source_description: $source_description, content: $content, content_embedding: $content_embedding, valid_at: $valid_at, entity_edges: $entity_edges}})","params":{{"uuid":"ep-{i}","name":"chunk-{i}","group_id":"g","created_at":"2026-03-25T16:58:57.000000+00:00","source":"text","source_description":"doc:{i}","content":"body {i} with an apostrophe ' and a quote \" inside","content_embedding":[{emb}],"valid_at":"2026-03-25T16:58:57.000000+00:00","entity_edges":[]}}}}"#,
+            emb = emb.join(",")
+        ));
+        buf.push('\n');
+    }
+    fs::write(wal_dir.path().join("20260325_000000_aaa_0000.jsonl"), buf).unwrap();
+
+    // Replay into a fresh DB.
+    {
+        let db = Db::open(db_path.to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(DIM).unwrap();
+        let stats = WalReplayer::new(wal_dir.path())
+            .replay(&conn)
+            .expect("replay");
+        assert_eq!(stats.lines_replayed, N as u64, "all rows must replay");
+        assert_eq!(stats.failed_lines, 0, "no failures expected");
+        assert_eq!(conn.count_nodes("Episodic").unwrap(), N as u64);
+    }
+
+    // Re-open from disk: a corrupt db.wal would fail here (the #139 symptom). Fidelity intact.
+    {
+        let db =
+            Db::open(db_path.to_str().unwrap()).expect("DB must re-open (not lbug_wal_corrupt)");
+        let conn = db.connect().unwrap();
+        assert_eq!(
+            conn.count_nodes("Episodic").unwrap(),
+            N as u64,
+            "all episodes must persist across reopen"
+        );
+    }
+}

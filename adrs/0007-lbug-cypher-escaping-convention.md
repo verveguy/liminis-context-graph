@@ -1,6 +1,9 @@
 # ADR-0007: lbug Cypher Escaping Convention — Backslash, Not SQL Doubling
 
-**Status**: Accepted
+**Status**: Superseded by ADR-0009 — the string-interpolation/escaping layer this ADR
+describes has been deleted. All DB statements now use lbug prepared-statement bound
+parameters (no interpolation, no escaping). Retained for historical context on why #128
+happened.
 **Date**: 2026-06-12
 **Issue**: #128
 

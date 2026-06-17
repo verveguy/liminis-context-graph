@@ -372,8 +372,9 @@ impl WalReplayer {
 ///
 /// Valid range is 1–256. Values outside this range, or non-numeric env strings, cause a
 /// `Error::Config` so that invalid configuration aborts before any WAL files are processed.
-/// Note: batch_size=64 with 768-dim embeddings produces ~400 KB inline query strings; reduce
-/// via `LCG_REPLAY_BATCH_SIZE` if lbug rejects oversized queries.
+/// `batch_size` bounds how many same-template rows are prepared-once then executed per
+/// flush (a memory/granularity knob); it no longer affects query-string size since rows are
+/// bound as parameters rather than inlined.
 fn resolve_batch_size(opts: &ReplayOptions) -> Result<usize, Error> {
     let size = if let Some(s) = opts.batch_size {
         s
@@ -397,66 +398,6 @@ fn resolve_batch_size(opts: &ReplayOptions) -> Result<usize, Error> {
         )));
     }
     Ok(size)
-}
-
-/// Rewrites `$key` placeholders in `template` to `row.key` for use in an UNWIND query.
-///
-/// Uses the same longest-key-first strategy as `interpolate_params` so that `$name_embedding`
-/// is matched before `$name` when both keys exist.
-fn rewrite_params_for_unwind(template: &str, keys: &[&str]) -> String {
-    if keys.is_empty() {
-        return template.to_string();
-    }
-    let mut sorted_keys: Vec<&str> = keys.to_vec();
-    sorted_keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
-
-    let mut result = String::with_capacity(template.len());
-    let mut remaining = template;
-    while let Some(dollar_pos) = remaining.find('$') {
-        result.push_str(&remaining[..dollar_pos]);
-        let after_dollar = &remaining[dollar_pos + 1..];
-        if let Some(k) = sorted_keys.iter().find(|&&k| {
-            after_dollar.starts_with(k)
-                && after_dollar[k.len()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
-        }) {
-            result.push_str("row.");
-            result.push_str(k);
-            remaining = &remaining[dollar_pos + 1 + k.len()..];
-        } else {
-            result.push('$');
-            remaining = after_dollar;
-        }
-    }
-    result.push_str(remaining);
-    result
-}
-
-/// Serializes a JSON object map directly to a Cypher map literal without wrapping in Value::Object.
-fn map_to_cypher_literal(obj: &serde_json::Map<String, serde_json::Value>) -> String {
-    let pairs: Vec<String> = obj
-        .iter()
-        .map(|(k, v)| format!("{k}: {}", json_to_cypher_literal(v)))
-        .collect();
-    format!("{{{}}}", pairs.join(", "))
-}
-
-/// Builds an inline-literal UNWIND Cypher query from a rewritten template and a list of row maps.
-///
-/// lbug (Kuzu) has no parameterized query API (ADR-001), so the row list is inlined as a Cypher
-/// list literal: `UNWIND [{k: v, ...}, ...] AS row <rewritten_template>`.
-fn build_unwind_query(
-    rewritten_template: &str,
-    rows: &[serde_json::Map<String, serde_json::Value>],
-) -> String {
-    let row_literals: Vec<String> = rows.iter().map(map_to_cypher_literal).collect();
-    format!(
-        "UNWIND [{}] AS row\n{}",
-        row_literals.join(", "),
-        rewritten_template
-    )
 }
 
 /// Accumulator for consecutive WAL mutations sharing an identical post-normalization template.
@@ -490,12 +431,17 @@ impl ReplayBatch {
     }
 }
 
-/// Executes accumulated batch mutations against `conn`, updating `stats`.
+/// Executes accumulated batch mutations against `conn` via prepared-statement binding.
 ///
-/// - Empty batch: no-op.
-/// - Batch of 1: uses the existing single-statement path (`interpolate_params` + `raw_query`).
-/// - Batch of N > 1: builds an UNWIND query. On UNWIND failure, falls back to per-row execution
-///   so that one invalid mutation cannot suppress N-1 valid writes.
+/// Prepares the batch's shared (post-normalization) template ONCE, then binds and executes
+/// each row's params against it — no string interpolation, no inline `UNWIND` literal, so no
+/// oversized query strings (the cause of lbug `db.wal` corruption in the prior inline-UNWIND
+/// design, #139). Values are bound as typed lbug `Value`s and coerced to their column types.
+///
+/// A *prepare* failure (e.g. a legacy construct or missing column that survived
+/// normalization) makes the template unusable, so every row sharing it is classified from
+/// that single error. A per-row *execute* failure is classified for that row only, so one
+/// bad row cannot suppress its siblings.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
@@ -505,323 +451,70 @@ fn flush_batch(
     if batch.is_empty() {
         return;
     }
+    let rows = std::mem::take(&mut batch.rows);
+    let match_prefixed = std::mem::take(&mut batch.match_prefixed);
 
-    if batch.len() == 1 {
-        // Single-entry path: use interpolate_params to produce the final Cypher.
-        let row = std::mem::take(&mut batch.rows[0]);
-        let params = serde_json::Value::Object(row);
-        let cypher = interpolate_params(&batch.template, &params);
-        execute_single(
-            &cypher,
-            batch.match_prefixed[0],
-            conn,
-            stats,
-            sample_cap,
-            "batch(1)",
-        );
-        batch.clear();
-        return;
-    }
-
-    // Multi-entry UNWIND path.
-    let keys: Vec<&str> = batch.rows[0].keys().map(|k| k.as_str()).collect();
-    let rewritten = rewrite_params_for_unwind(&batch.template, &keys);
-    let unwind_cypher = build_unwind_query(&rewritten, &batch.rows);
-
-    match conn.raw_query(&unwind_cypher) {
-        Ok(_) => {
-            stats.lines_replayed += batch.len() as u64;
-            stats.match_prefixed_replayed +=
-                batch.match_prefixed.iter().filter(|&&b| b).count() as u64;
-        }
+    let mut prepared = match conn.prepare(&batch.template) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "[WAL WARN] UNWIND batch of {} failed ({}); falling back to per-row: {}",
-                batch.len(),
-                &batch.template[..batch.template.len().min(80)],
-                e
-            );
-            // Fallback: re-execute each row individually so valid mutations still succeed.
-            let rows = std::mem::take(&mut batch.rows);
-            let match_prefixed = std::mem::take(&mut batch.match_prefixed);
-            for (row, is_match) in rows.into_iter().zip(match_prefixed) {
-                let params = serde_json::Value::Object(row);
-                let cypher = interpolate_params(&batch.template, &params);
-                execute_single(&cypher, is_match, conn, stats, sample_cap, "batch fallback");
+            let err_str = e.to_string();
+            for _ in &match_prefixed {
+                classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
             }
+            batch.clear();
+            return;
+        }
+    };
+
+    for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
+        let params = serde_json::Value::Object(row);
+        match conn.execute_prepared(&mut prepared, &params) {
+            Ok(_) => {
+                stats.lines_replayed += 1;
+                if is_match_prefixed {
+                    stats.match_prefixed_replayed += 1;
+                }
+            }
+            Err(e) => classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap),
         }
     }
     batch.clear();
 }
 
-/// Executes a single interpolated Cypher mutation and updates `stats`.
-fn execute_single(
-    cypher: &str,
-    is_match_prefixed: bool,
-    conn: &Conn<'_>,
+/// Classifies a replay failure (from prepare or execute) as legacy-skipped vs. genuine
+/// failure, updating `stats`. Genuine failures record a sample using the template (there is
+/// no interpolated string under bound-parameter execution).
+fn classify_replay_failure(
+    err_str: &str,
+    template: &str,
     stats: &mut ReplayStats,
     sample_cap: usize,
-    context: &str,
 ) {
-    match conn.raw_query(cypher) {
-        Ok(_) => {
-            stats.lines_replayed += 1;
-            if is_match_prefixed {
-                stats.match_prefixed_replayed += 1;
-            }
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            let err_lower = err_str.to_lowercase();
-            let is_legacy = LEGACY_SCHEMA_ERROR_PATTERNS
-                .iter()
-                .any(|pat| err_lower.contains(pat));
-            if is_legacy {
-                eprintln!("[WAL SKIP] legacy-schema mutation ({context}): {}", err_str);
-                stats.legacy_skipped_lines += 1;
-            } else {
-                eprintln!("[WAL WARN] replay execution error ({context}): {}", err_str);
-                stats.failed_lines += 1;
-                if stats.failed_samples.len() < sample_cap {
-                    stats.failed_samples.push(FailureSample {
-                        cypher: cypher.chars().take(200).collect(),
-                        error: err_str,
-                    });
-                }
-            }
-        }
-    }
-}
-
-/// Substitutes `$key` placeholders in `cypher` with Cypher literal representations of the
-/// corresponding JSON values. Uses a single left-to-right pass so already-substituted literal
-/// text is never re-scanned, preventing double-interpolation if a value contains `$key` patterns.
-/// Longest-key matching at each `$` prevents `$name` from consuming part of `$name_embedding`.
-fn interpolate_params(cypher: &str, params: &serde_json::Value) -> String {
-    let serde_json::Value::Object(map) = params else {
-        return cypher.to_string();
-    };
-    if map.is_empty() {
-        return cypher.to_string();
-    }
-
-    let mut pairs: Vec<(&str, &serde_json::Value)> =
-        map.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    // Longest key first so that at each `$` position we greedily match the longest param name.
-    pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
-
-    let mut result = String::with_capacity(cypher.len());
-    let mut remaining = cypher;
-    while let Some(dollar_pos) = remaining.find('$') {
-        result.push_str(&remaining[..dollar_pos]);
-        let after_dollar = &remaining[dollar_pos + 1..];
-        // Try each key (longest first) to find a match immediately after `$`.
-        if let Some((k, v)) = pairs.iter().find(|(k, _)| after_dollar.starts_with(k)) {
-            result.push_str(&json_to_cypher_literal(v));
-            remaining = &remaining[dollar_pos + 1 + k.len()..];
-        } else {
-            // `$` not followed by a known key — emit it literally.
-            result.push('$');
-            remaining = after_dollar;
-        }
-    }
-    result.push_str(remaining);
-    result
-}
-
-/// Converts a serde_json::Value to a Cypher literal string.
-fn json_to_cypher_literal(val: &serde_json::Value) -> String {
-    match val {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => {
-            // Detect RFC-3339 datetime strings and emit the typed timestamp() constructor
-            // that lbug requires. Without this, STRING→TIMESTAMP implicit casts fail and
-            // every subsequent MATCH on the node/edge yields "Cannot find property" cascades.
-            // Pre-filter: a valid RFC-3339 datetime is at least 20 chars, starts with a digit
-            // (year), and has 'T' at index 10. This skips the chrono parser for the majority
-            // of params (UUIDs, names, content) without changing correctness.
-            if s.len() >= 20
-                && s.as_bytes()[0].is_ascii_digit()
-                && (s.as_bytes()[10] == b'T' || s.as_bytes()[10] == b't')
-                && chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(s).is_ok()
-            {
-                format!("timestamp('{}')", crate::db::escape_pub(s))
-            } else {
-                format!("'{}'", crate::db::escape_pub(s))
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            let items: Vec<_> = arr.iter().map(json_to_cypher_literal).collect();
-            format!("[{}]", items.join(", "))
-        }
-        serde_json::Value::Object(obj) => {
-            let pairs: Vec<_> = obj
-                .iter()
-                .map(|(k, v)| format!("{k}: {}", json_to_cypher_literal(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+    let err_lower = err_str.to_lowercase();
+    let is_legacy = LEGACY_SCHEMA_ERROR_PATTERNS
+        .iter()
+        .any(|pat| err_lower.contains(pat));
+    if is_legacy {
+        eprintln!("[WAL SKIP] legacy-schema mutation: {err_str}");
+        stats.legacy_skipped_lines += 1;
+    } else {
+        eprintln!("[WAL WARN] replay execution error: {err_str}");
+        stats.failed_lines += 1;
+        if stats.failed_samples.len() < sample_cap {
+            stats.failed_samples.push(FailureSample {
+                cypher: template.chars().take(200).collect(),
+                error: err_str.to_string(),
+            });
         }
     }
 }
 
 #[cfg(test)]
-mod interpolate_tests {
+mod replay_tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn test_interpolate_string_param() {
-        let cypher = "MERGE (n:Entity {uuid: $uuid})";
-        let params = json!({"uuid": "abc-123"});
-        let result = interpolate_params(cypher, &params);
-        assert_eq!(result, "MERGE (n:Entity {uuid: 'abc-123'})");
-    }
-
-    #[test]
-    fn test_interpolate_longest_first_avoids_partial_match() {
-        let cypher = "SET n.name_embedding = $name_embedding, n.name = $name";
-        let params = json!({"name": "Alice", "name_embedding": [1.0, 0.0]});
-        let result = interpolate_params(cypher, &params);
-        assert!(
-            result.contains("[1.0, 0.0]"),
-            "embedding should be an array"
-        );
-        assert!(result.contains("'Alice'"), "name should be a string");
-        assert!(
-            !result.contains("'Alice'_embedding"),
-            "must not partially replace $name_embedding"
-        );
-    }
-
-    #[test]
-    fn test_interpolate_nested_object() {
-        let cypher = "SET n += $props";
-        let params = json!({"props": {"name": "Alice", "age": 30}});
-        let result = interpolate_params(cypher, &params);
-        assert!(result.contains("SET n += {"), "should produce map literal");
-    }
-
-    #[test]
-    fn test_json_to_cypher_literal_string() {
-        let val = serde_json::Value::String("it's here".to_string());
-        assert_eq!(json_to_cypher_literal(&val), "'it\\'s here'");
-    }
-
-    #[test]
-    fn test_json_to_cypher_literal_array() {
-        let val = json!([1.0, 2.0]);
-        assert_eq!(json_to_cypher_literal(&val), "[1.0, 2.0]");
-    }
-
-    #[test]
-    fn test_no_double_interpolation_when_value_contains_placeholder() {
-        // If param 'a' has value "$b" and param 'b' has value "secret", a multi-pass replace
-        // would substitute "$b" → "secret", producing "secret" in the result. Single-pass must not.
-        let cypher = "SET n.x = $a, n.y = $b";
-        let params = json!({"a": "$b", "b": "secret"});
-        let result = interpolate_params(cypher, &params);
-        // $a must expand to the literal string '$b' (escaped), not to 'secret'.
-        assert!(
-            result.contains("'$b'"),
-            "value containing placeholder must not be re-expanded"
-        );
-        assert!(
-            result.contains("'secret'"),
-            "$b must still expand to 'secret'"
-        );
-    }
-
-    #[test]
-    fn test_timestamp_with_offset_emits_typed_literal() {
-        let val = serde_json::Value::String("2026-03-25T16:58:57.761788+00:00".to_string());
-        assert_eq!(
-            json_to_cypher_literal(&val),
-            "timestamp('2026-03-25T16:58:57.761788+00:00')"
-        );
-    }
-
-    #[test]
-    fn test_timestamp_utc_z_emits_typed_literal() {
-        let val = serde_json::Value::String("2026-03-25T16:58:57Z".to_string());
-        assert_eq!(
-            json_to_cypher_literal(&val),
-            "timestamp('2026-03-25T16:58:57Z')"
-        );
-    }
-
-    #[test]
-    fn test_timestamp_nonzero_offset_emits_typed_literal() {
-        let val = serde_json::Value::String("2026-03-25T16:58:57+05:30".to_string());
-        assert_eq!(
-            json_to_cypher_literal(&val),
-            "timestamp('2026-03-25T16:58:57+05:30')"
-        );
-    }
-
-    #[test]
-    fn test_space_separated_datetime_no_tz_emits_bare_string() {
-        // "2026-05-19 00:00:00" is the format used in existing fixtures where the template
-        // already wraps with timestamp(...). parse_from_rfc3339 rejects it (no T, no tz).
-        let val = serde_json::Value::String("2026-05-19 00:00:00".to_string());
-        assert_eq!(json_to_cypher_literal(&val), "'2026-05-19 00:00:00'");
-    }
-
-    #[test]
-    fn test_ordinary_string_emits_bare_string() {
-        let val = serde_json::Value::String("not a timestamp".to_string());
-        assert_eq!(json_to_cypher_literal(&val), "'not a timestamp'");
-    }
-
-    #[test]
-    fn test_rewrite_basic_param() {
-        let result = rewrite_params_for_unwind("MERGE (n:Entity {uuid: $uuid})", &["uuid"]);
-        assert_eq!(result, "MERGE (n:Entity {uuid: row.uuid})");
-    }
-
-    #[test]
-    fn test_rewrite_longest_key_first() {
-        // $name_embedding must be matched before $name
-        let template = "SET n.name_embedding = $name_embedding, n.name = $name";
-        let result = rewrite_params_for_unwind(template, &["name", "name_embedding"]);
-        assert_eq!(
-            result,
-            "SET n.name_embedding = row.name_embedding, n.name = row.name"
-        );
-    }
-
-    #[test]
-    fn test_rewrite_no_params_unchanged() {
-        let template = "MERGE (n:Entity {uuid: 'literal'})";
-        let result = rewrite_params_for_unwind(template, &[]);
-        assert_eq!(result, template);
-    }
-
-    #[test]
-    fn test_rewrite_no_dollar_refs_unchanged() {
-        let template = "MERGE (n:Entity {uuid: 'no-params'}) ON CREATE SET n.x = 1";
-        let result = rewrite_params_for_unwind(template, &["uuid"]);
-        assert_eq!(result, template);
-    }
-
-    #[test]
-    fn test_rewrite_boundary_check_prevents_partial_match() {
-        // Keys: only "name". Template has $name_embedding.
-        // Without boundary check, "name" would greedily match $name from $name_embedding.
-        // With boundary check, "_" after "name" stops the match, so $name_embedding is untouched.
-        let template = "SET n.name_embedding = $name_embedding";
-        let result = rewrite_params_for_unwind(template, &["name"]);
-        assert_eq!(
-            result, template,
-            "$name_embedding must not be rewritten when only 'name' is in keys"
-        );
-    }
 
     #[test]
     fn test_resolve_batch_size_defaults_to_64() {
-        // When batch_size is None and env var is unset, default is 64.
-        // We can't safely unset env vars in parallel tests, so just test via opts.
         let opts = ReplayOptions {
             batch_size: Some(64),
             ..Default::default()
@@ -854,25 +547,5 @@ mod interpolate_tests {
             ..Default::default()
         };
         assert_eq!(resolve_batch_size(&opts).unwrap(), 256);
-    }
-
-    #[test]
-    fn test_build_unwind_query_shape() {
-        use serde_json::json;
-        let rows = vec![
-            match json!({"uuid": "a-1", "name": "A"}) {
-                serde_json::Value::Object(m) => m,
-                _ => unreachable!(),
-            },
-            match json!({"uuid": "b-2", "name": "B"}) {
-                serde_json::Value::Object(m) => m,
-                _ => unreachable!(),
-            },
-        ];
-        let q = build_unwind_query("MERGE (n:Entity {uuid: row.uuid})", &rows);
-        assert!(q.starts_with("UNWIND ["), "must start with UNWIND [");
-        assert!(q.contains("] AS row\n"), "must have ] AS row");
-        assert!(q.contains("'a-1'"), "must inline first uuid");
-        assert!(q.contains("'b-2'"), "must inline second uuid");
     }
 }

@@ -577,7 +577,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         conn.remove_episode(&episode_uuid)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(())
     })
     .await??;
@@ -656,7 +656,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<String>>, Error> {
         let conn = db.connect()?;
         let rows = conn.cypher_query(&query)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(rows)
     })
     .await??;
@@ -941,7 +941,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(uuids)
     })
     .await??;
@@ -984,7 +984,7 @@ async fn handle_delete_chunk_episode(
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(uuids)
     })
     .await??;
@@ -1634,7 +1634,7 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let apply_result = corrections::apply_corrections_file(&conn, &workspace_root, dry_run);
         if !dry_run {
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         }
         Ok::<_, Error>(apply_result)
     })
@@ -1724,7 +1724,7 @@ async fn handle_reprocess_entity_types(
     let reclassified = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let count = corrections::apply_entity_type_labels(&conn, &updates)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(count)
     })
     .await??;

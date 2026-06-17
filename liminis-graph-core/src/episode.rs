@@ -5,7 +5,6 @@ use chrono::DateTime;
 
 use crate::{
     app_state::{AppState, OntologyDriftState},
-    db::escape_pub,
     error::Error,
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
@@ -388,11 +387,10 @@ pub async fn add_episode(
                     existing_uuid,
                     merged_summary,
                 } => {
-                    conn.run_cypher(&format!(
-                        "MATCH (e:Entity {{uuid: '{}'}}) SET e.summary = '{}'",
-                        escape_pub(&existing_uuid),
-                        escape_pub(&merged_summary),
-                    ))?;
+                    conn.exec_params(
+                        "MATCH (e:Entity {uuid: $uuid}) SET e.summary = $summary",
+                        serde_json::json!({ "uuid": &existing_uuid, "summary": &merged_summary }),
+                    )?;
                     entity_uuids.push(existing_uuid);
                 }
                 DedupDecision::Insert { row } => {
@@ -463,7 +461,7 @@ pub async fn add_episode(
             })?;
         }
 
-        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_cyphers(), &sink_c);
+        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
 
         Ok(())
     })
