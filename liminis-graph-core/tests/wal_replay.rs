@@ -882,9 +882,12 @@ fn test_fidelity_warning_fires_above_threshold() {
     );
 }
 
-/// SC-005: legacy-schema mutations (Community node) increment legacy_skipped_lines, not failed_lines.
+/// #144 supersedes #133 SC-005 for Community: the Community table is now a stub table (added so
+/// the community/saga subsystem's multi-type patterns — e.g. the `…|HAS_MEMBER` edge-delete —
+/// bind and execute). A Community node CREATE therefore REPLAYS into it rather than being
+/// legacy-skipped. Both lines replay; nothing is skipped or failed.
 #[test]
-fn test_legacy_skip_community_node() {
+fn test_community_node_replays_into_stub_table() {
     let wal_dir = TempDir::new().unwrap();
     let db_dir = TempDir::new().unwrap();
     let db_path = db_dir.path().join("test.db");
@@ -892,7 +895,7 @@ fn test_legacy_skip_community_node() {
     let conn = db.connect().unwrap();
     conn.init_schema(4).unwrap();
 
-    // Line 1: Community node CREATE — references a table that doesn't exist in current schema.
+    // Line 1: Community node CREATE — Community is now a (stub) table, so this replays.
     let community_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Community {uuid: 'comm-1', name: 'Test Community'})","params":{}}"#;
     // Line 2: valid Entity MERGE — should succeed normally.
     let entity_line = make_entity_line(1, "legacy-skip-entity");
@@ -907,14 +910,14 @@ fn test_legacy_skip_community_node() {
         .replay(&conn)
         .expect("replay must succeed");
 
-    assert_eq!(stats.lines_replayed, 1, "valid Entity must be replayed");
     assert_eq!(
-        stats.failed_lines, 0,
-        "Community must not count as a failure"
+        stats.lines_replayed, 2,
+        "both Community (now a stub table) and Entity must replay"
     );
+    assert_eq!(stats.failed_lines, 0, "no failures");
     assert_eq!(
-        stats.legacy_skipped_lines, 1,
-        "Community CREATE must be counted as legacy_skipped_lines"
+        stats.legacy_skipped_lines, 0,
+        "Community is a real (stub) table now — not legacy-skipped"
     );
     assert_eq!(
         stats.lines_skipped(),

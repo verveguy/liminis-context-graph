@@ -497,7 +497,12 @@ fn classify_replay_failure(
     // Log a whitespace-collapsed preview of the failing statement alongside the error. Without
     // this, WAL warnings showed only the error string, hiding which Cypher actually failed —
     // making "Cannot find property X for Y" undebuggable from the log alone.
+    // Bound the input to ~400 chars before collapsing whitespace so an extremely large template
+    // doesn't allocate its full length just to truncate the preview to 200 chars.
     let cypher_preview: String = template
+        .chars()
+        .take(400)
+        .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

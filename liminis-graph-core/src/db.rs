@@ -1672,4 +1672,23 @@ mod relates_to_merge_repro {
             res.err()
         );
     }
+
+    /// Regression for the missing community/saga stub tables. graphiti's bulk edge-delete lists
+    /// multiple rel types incl. HAS_MEMBER; before the stubs the missing HAS_MEMBER table made the
+    /// whole multi-type pattern fail to prepare (`Table HAS_MEMBER does not exist`), silently
+    /// skipping the MENTIONS/RELATES_TO deletes too. With the stub tables present it must prepare.
+    #[test]
+    fn multi_type_edge_delete_prepares_with_stub_tables() {
+        let (_dir, db) = open_db();
+        let conn = db.connect().unwrap();
+        conn.init_schema(768).unwrap();
+        let cypher =
+            "MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m) WHERE e.uuid IN $uuids DELETE e";
+        let res = conn.prepare(cypher);
+        assert!(
+            res.is_ok(),
+            "multi-type edge DELETE must prepare with stub tables present; got: {:?}",
+            res.err()
+        );
+    }
 }
