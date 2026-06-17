@@ -76,7 +76,6 @@ fn timestamp_shaped_string_columns_stored_verbatim() {
         content_embedding: vec![0.1, 0.2, 0.3, 0.4],
         valid_at: "2026-03-25T16:58:57.000000+00:00".into(),
         entity_edges: vec![],
-        ..Default::default()
     })
     .unwrap();
 
