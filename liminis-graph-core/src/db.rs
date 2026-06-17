@@ -1607,3 +1607,69 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     dot / (norm_a * norm_b)
 }
+
+#[cfg(test)]
+mod relates_to_merge_repro {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn open_db() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    /// Applies the replay-time legacy normalization (`strip_vecf32` + bulk-`SET` expansion) the
+    /// way `WalReplayer` does before `prepare()`, so these tests feed `prepare()` the exact
+    /// template the replay would.
+    fn normalize(raw: &str) -> String {
+        let n = crate::legacy_wal::strip_vecf32(raw);
+        let (n, _p) = crate::legacy_wal::expand_bulk_property_set(&n, serde_json::json!({}));
+        n
+    }
+
+    /// Regression for the MENTIONS schema gap. graphiti's MENTIONS edge carries `uuid` and
+    /// `created_at` on the relationship, but liminis-graph's MENTIONS rel table previously
+    /// declared only `group_id`. As a result this WAL statement failed to `prepare()` with
+    /// `Binder exception: Cannot find property uuid for r`, and the batched replay then
+    /// classified *every* MENTIONS mutation sharing the template as failed — silently dropping
+    /// the entire episode→entity mention layer. With `uuid`/`created_at` added it must prepare.
+    #[test]
+    fn mentions_edge_merge_prepares_against_real_schema() {
+        let (_dir, db) = open_db();
+        let conn = db.connect().unwrap();
+        conn.init_schema(768).unwrap();
+        let cypher = "MATCH (src:Episodic {uuid: $src_uuid}) \
+             MATCH (dst:Entity {uuid: $dst_uuid}) \
+             MERGE (src)-[r:MENTIONS {uuid: $uuid}]->(dst) \
+             SET r.group_id = $group_id, r.created_at = $created_at";
+        let res = conn.prepare(&normalize(cypher));
+        assert!(
+            res.is_ok(),
+            "MENTIONS edge MERGE must prepare after the schema fix; got: {:?}",
+            res.err()
+        );
+    }
+
+    /// Guard: the reified-edge (`RelatesToNode_`) two-hop MERGE — the dominant edge write —
+    /// must `prepare()` against the real schema after `strip_vecf32` normalization. Uses the
+    /// exact WAL shape (two `SET` clauses + a `vecf32(...)` embedding wrapper).
+    #[test]
+    fn relates_to_two_hop_merge_prepares_against_real_schema() {
+        let (_dir, db) = open_db();
+        let conn = db.connect().unwrap();
+        conn.init_schema(768).unwrap();
+        let cypher = "MATCH (src:Entity {uuid: $src_uuid}) \
+             MATCH (dst:Entity {uuid: $dst_uuid}) \
+             MERGE (src)-[:RELATES_TO]->(r:RelatesToNode_ {uuid: $uuid})-[:RELATES_TO]->(dst) \
+             SET r.name = $name, r.fact = $fact, r.group_id = $group_id, r.episodes = $episodes, \
+             r.created_at = $created_at, r.valid_at = $valid_at \
+             SET r.fact_embedding = vecf32($fact_embedding)";
+        let res = conn.prepare(&normalize(cypher));
+        assert!(
+            res.is_ok(),
+            "reified-edge two-hop MERGE must prepare against the real schema; got: {:?}",
+            res.err()
+        );
+    }
+}

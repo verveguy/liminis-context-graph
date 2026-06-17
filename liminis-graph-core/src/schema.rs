@@ -85,10 +85,16 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
          attributes STRING\
          )",
     )?;
+    // graphiti's Kuzu schema declares `uuid STRING PRIMARY KEY` on MENTIONS, but the Rust
+    // native write path (`insert_mentions_edge`) does not populate uuid, so a PK would reject
+    // those inserts. Use a non-PK `uuid` column (as RELATES_TO already does) — enough for the
+    // WAL's MENTIONS MERGE to bind, without breaking native writes.
     conn.raw_query(
         "CREATE REL TABLE IF NOT EXISTS MENTIONS (\
          FROM Episodic TO Entity, \
-         group_id STRING\
+         uuid STRING, \
+         group_id STRING, \
+         created_at TIMESTAMP\
          )",
     )?;
     Ok(())
@@ -128,6 +134,27 @@ pub fn migrate(conn: &Conn<'_>) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP") {
             eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP: {e} (non-fatal)");
+        }
+    }
+    // MENTIONS rel table gained uuid + created_at to match graphiti's Kuzu schema. The WAL's
+    // MENTIONS MERGE sets r.uuid/r.created_at; without these columns replay fails at bind time
+    // with `Cannot find property uuid for r`. Probe each column on a MENTIONS rel; ALTER if absent.
+    if conn
+        .raw_query("MATCH ()-[r:MENTIONS]->() WHERE r.group_id = '_probe_' RETURN r.uuid LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD uuid STRING") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD uuid STRING: {e} (non-fatal)");
+        }
+    }
+    if conn
+        .raw_query(
+            "MATCH ()-[r:MENTIONS]->() WHERE r.group_id = '_probe_' RETURN r.created_at LIMIT 0",
+        )
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD created_at TIMESTAMP") {
+            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD created_at TIMESTAMP: {e} (non-fatal)");
         }
     }
 }

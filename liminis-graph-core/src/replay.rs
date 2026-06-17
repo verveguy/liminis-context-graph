@@ -494,11 +494,21 @@ fn classify_replay_failure(
     let is_legacy = LEGACY_SCHEMA_ERROR_PATTERNS
         .iter()
         .any(|pat| err_lower.contains(pat));
+    // Log a whitespace-collapsed preview of the failing statement alongside the error. Without
+    // this, WAL warnings showed only the error string, hiding which Cypher actually failed —
+    // making "Cannot find property X for Y" undebuggable from the log alone.
+    let cypher_preview: String = template
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(200)
+        .collect();
     if is_legacy {
-        eprintln!("[WAL SKIP] legacy-schema mutation: {err_str}");
+        eprintln!("[WAL SKIP] legacy-schema mutation: {err_str} | cypher: {cypher_preview}");
         stats.legacy_skipped_lines += 1;
     } else {
-        eprintln!("[WAL WARN] replay execution error: {err_str}");
+        eprintln!("[WAL WARN] replay execution error: {err_str} | cypher: {cypher_preview}");
         stats.failed_lines += 1;
         if stats.failed_samples.len() < sample_cap {
             stats.failed_samples.push(FailureSample {
