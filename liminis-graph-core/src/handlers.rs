@@ -1253,9 +1253,15 @@ async fn handle_rebuild_from_wal(
                 }
             }
         }
+        let bg_indices_built = Arc::clone(&state.indices_built);
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
+                // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
+                // bulk load. Errors suppressed — idempotent if already absent.
+                if !dry_run {
+                    let _ = crate::schema::drop_fts_indexes(&conn);
+                }
                 // Composite cancel: fire on client disconnect OR service shutdown (R9).
                 let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
                     let t = t.clone();
@@ -1271,7 +1277,7 @@ async fn handle_rebuild_from_wal(
                     });
                     f
                 });
-                WalReplayer::new(&wal_dir_c).replay_opts(
+                let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
                         from_seq,
@@ -1281,7 +1287,18 @@ async fn handle_rebuild_from_wal(
                         failure_sample_cap: None,
                         batch_size: None,
                     },
-                )
+                )?;
+                // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
+                // Non-fatal: a build failure leaves the graph unindexed but the auto-heal path
+                // will recover on the first search.
+                if !dry_run {
+                    if let Err(e) = conn.build_indices_and_constraints() {
+                        eprintln!("liminis-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
+                    } else {
+                        bg_indices_built.store(true, Ordering::Release);
+                    }
+                }
+                Ok(stats)
             })
             .await??;
         drop(_write_guard);
@@ -1446,6 +1463,7 @@ async fn handle_rebuild_from_wal(
     let bg_ontology = state.ontology.clone();
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
     let bg_sink = Arc::clone(&state.sink);
+    let bg_indices_built = Arc::clone(&state.indices_built);
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -1458,10 +1476,16 @@ async fn handle_rebuild_from_wal(
         let jobs_ref = Arc::clone(&rebuild_jobs);
         let jid = job_id_task.clone();
         let replay_started_at = std::time::Instant::now();
+        let ib = Arc::clone(&bg_indices_built);
 
         let result =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
+                // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
+                // bulk load. Errors suppressed — idempotent if already absent.
+                if !dry_run {
+                    let _ = crate::schema::drop_fts_indexes(&conn);
+                }
                 let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
                     if let Ok(mut guard) = jobs_ref.lock() {
                         if let Some(job) = guard.get_mut(&jid) {
@@ -1472,7 +1496,7 @@ async fn handle_rebuild_from_wal(
                     }
                     true
                 });
-                WalReplayer::new(&wal_dir_c).replay_opts(
+                let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
                         from_seq,
@@ -1482,7 +1506,16 @@ async fn handle_rebuild_from_wal(
                         failure_sample_cap: None,
                         batch_size: None,
                     },
-                )
+                )?;
+                // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
+                if !dry_run {
+                    if let Err(e) = conn.build_indices_and_constraints() {
+                        eprintln!("liminis-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
+                    } else {
+                        ib.store(true, Ordering::Release);
+                    }
+                }
+                Ok(stats)
             })
             .await;
 

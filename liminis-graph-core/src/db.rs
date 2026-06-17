@@ -1692,3 +1692,41 @@ mod relates_to_merge_repro {
         );
     }
 }
+
+#[cfg(test)]
+mod fts_missing_index_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Regression: lbug 0.17 returns a "Binder exception: ... doesn't have an index with name"
+    /// error for both HNSW *and* FTS missing indexes. is_missing_index_error already matches
+    /// both cases — this test guards against future lbug versions changing the error text for FTS.
+    #[test]
+    fn fts_missing_index_error_matches_binder_exception() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("fts_probe.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        crate::schema::drop_fts_indexes(&conn).unwrap();
+        conn.insert_entity(&crate::EntityRow {
+            uuid: "fts-probe-1".to_string(),
+            name: "FtsProbeEntity".to_string(),
+            group_id: "g".to_string(),
+            labels: vec![],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0f32; 4],
+            summary: "probe".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let err = conn
+            .fts_search_entities("probe", &["g"], 5)
+            .expect_err("should fail with missing FTS index");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Binder exception:") && msg.contains("doesn't have an index with name"),
+            "FTS missing-index error must match the same pattern as HNSW — got: {msg}"
+        );
+    }
+}
