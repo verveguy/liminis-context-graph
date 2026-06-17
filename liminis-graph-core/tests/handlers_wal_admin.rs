@@ -2,7 +2,7 @@
 // knowledge_prepare_checkpoint, knowledge_rebuild_from_wal, knowledge_rebuild_status
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use std::time::Duration;
@@ -17,8 +17,9 @@ use liminis_graph_core::{
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
+    schema,
     telemetry::{NoopSink, TelemetrySink},
-    WalWriter,
+    EntityRow, WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -678,4 +679,132 @@ async fn test_rebuild_from_wal_streaming_progress_has_new_fields() {
             "progress event must include numeric 'legacy_skipped_lines_so_far': {ev}"
         );
     }
+}
+
+// ── index lifecycle tests (FR-002, FR-003, FR-004, FR-005) ───────────────────
+
+/// After a streaming (non-dry-run) WAL reload, all FTS and vector indexes exist and
+/// knowledge_find_entities succeeds without triggering an on-demand index build.
+#[tokio::test]
+async fn test_reload_builds_all_indexes() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    // Write 3 entity mutations to the WAL.
+    let content = [
+        entity_wal_line(0, "reload-idx-a"),
+        entity_wal_line(1, "reload-idx-b"),
+        entity_wal_line(2, "reload-idx-c"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260617_000000_reload_idx.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // Run the reload via the streaming path (progress_tx makes is_streaming=true).
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(50),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_eq!(v["result"]["success"], true, "reload must succeed: {v}");
+    assert_eq!(v["result"]["mutations_replayed"], 3, "{v}");
+
+    // FR-002: indices_built flag must be set after a successful non-dry-run reload.
+    assert!(
+        state.indices_built.load(Ordering::Acquire),
+        "indices_built must be true after reload"
+    );
+
+    // FR-003: knowledge_find_entities must succeed without triggering an on-demand build.
+    // The flag is already true, so no auto-heal fires — the search uses the rebuilt indexes.
+    let find_req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(51),
+        method: "knowledge_find_entities".to_string(),
+        params: json!({"query": "reload", "group_ids": ["g"], "num_results": 5}),
+    };
+    let find_resp = handlers::dispatch(find_req, Arc::clone(&state), None).await;
+    let fv = serde_json::to_value(find_resp).unwrap();
+
+    assert!(
+        fv.get("result").is_some(),
+        "knowledge_find_entities must succeed after reload: {fv}"
+    );
+    assert!(fv.get("error").is_none(), "no error after reload: {fv}");
+
+    // Flag must still be true (search did not reset it).
+    assert!(
+        state.indices_built.load(Ordering::Acquire),
+        "indices_built must remain true after a post-reload search"
+    );
+}
+
+/// An interrupted reload (drop completed, build not yet run) self-heals on the next search.
+/// Simulates the crash scenario: FTS dropped, indices_built=false, data present.
+#[tokio::test]
+async fn test_interrupted_reload_auto_heals() {
+    let (db, _db_dir) = make_db(4);
+
+    // Insert entity data directly so the search has something to work with.
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "interrupted-heal-1".to_string(),
+            name: "InterruptedHealEntity".to_string(),
+            group_id: "g".to_string(),
+            labels: vec![],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0f32; 4],
+            summary: "auto-heal after interrupted reload".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        // Drop FTS indexes to simulate a mid-reload interrupt (drop ran, build did not).
+        schema::drop_fts_indexes(&conn).unwrap();
+    }
+
+    // State has indices_built=false (default from make_state_no_wal).
+    let state = make_state_no_wal(db);
+    assert!(
+        !state.indices_built.load(Ordering::Acquire),
+        "indices_built must start false"
+    );
+
+    // FR-005: knowledge_find_entities must auto-heal by rebuilding both FTS and vector indexes.
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(52),
+        method: "knowledge_find_entities".to_string(),
+        params: json!({"query": "InterruptedHealEntity", "group_ids": ["g"], "num_results": 5}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), None).await;
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert!(
+        v.get("result").is_some(),
+        "knowledge_find_entities must succeed after auto-heal of interrupted reload: {v}"
+    );
+    assert!(
+        v.get("error").is_none(),
+        "no error expected after auto-heal: {v}"
+    );
+
+    // Auto-heal sets the flag so subsequent searches skip it.
+    assert!(
+        state.indices_built.load(Ordering::Acquire),
+        "indices_built must be true after auto-heal"
+    );
 }
