@@ -374,11 +374,10 @@ impl<'db> Conn<'db> {
 
     /// Deletes an Episodic node and all its connected edges.
     pub fn remove_episode(&self, episode_uuid: &str) -> Result<(), Error> {
-        let sql = format!(
-            "MATCH (ep:Episodic {{uuid: '{}'}}) DETACH DELETE ep",
-            escape(episode_uuid),
-        );
-        self.raw_query(&sql)
+        self.exec_params(
+            "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
+            serde_json::json!({ "uuid": episode_uuid }),
+        )
     }
 
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
@@ -407,11 +406,10 @@ impl<'db> Conn<'db> {
         let result = self.inner.query(&match_sql)?;
         let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
         if !uuids.is_empty() {
-            let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-            let uuid_list = format_str_list(&uuid_refs);
-            let delete_sql =
-                format!("MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep");
-            self.raw_query(&delete_sql)?;
+            self.exec_params(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+                serde_json::json!({ "uuids": uuids }),
+            )?;
         }
         Ok(uuids)
     }
@@ -443,11 +441,10 @@ impl<'db> Conn<'db> {
         let result = self.inner.query(&match_sql)?;
         let uuids: Vec<String> = result.map(|row| value_as_string(&row[0])).collect();
         if !uuids.is_empty() {
-            let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-            let uuid_list = format_str_list(&uuid_refs);
-            let delete_sql =
-                format!("MATCH (ep:Episodic) WHERE ep.uuid IN {uuid_list} DETACH DELETE ep");
-            self.raw_query(&delete_sql)?;
+            self.exec_params(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+                serde_json::json!({ "uuids": uuids }),
+            )?;
         }
         Ok(uuids)
     }
@@ -1275,13 +1272,10 @@ impl<'db> Conn<'db> {
 
     /// Updates the labels array on the Entity with the given UUID.
     pub fn update_entity_labels(&self, uuid: &str, labels: &[String]) -> Result<(), Error> {
-        let labels_lit = format_str_array(labels);
-        let sql = format!(
-            "MATCH (e:Entity {{uuid: '{}'}}) SET e.labels = {}",
-            escape(uuid),
-            labels_lit,
-        );
-        self.raw_query(&sql)
+        self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid}) SET e.labels = $labels",
+            serde_json::json!({ "uuid": uuid, "labels": labels }),
+        )
     }
 
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
@@ -1491,11 +1485,6 @@ fn escape_fts(s: &str) -> String {
 
 pub(crate) fn format_float_array(v: &[f32]) -> String {
     let parts: Vec<String> = v.iter().map(|f| format!("{f:.6}")).collect();
-    format!("[{}]", parts.join(","))
-}
-
-fn format_str_array(v: &[String]) -> String {
-    let parts: Vec<String> = v.iter().map(|s| format!("'{}'", escape(s))).collect();
     format!("[{}]", parts.join(","))
 }
 
