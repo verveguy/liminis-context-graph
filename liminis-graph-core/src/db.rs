@@ -143,6 +143,25 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
+    /// Runs a parameterized read query via prepared-statement binding and materializes the
+    /// result rows. Used by read paths so query values are bound (no string interpolation /
+    /// escaping). Does not record to the WAL (reads are not mutations).
+    ///
+    /// Rows are collected into a `Vec` before returning so the result does not borrow the
+    /// transient `PreparedStatement`.
+    pub(crate) fn query_params(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<Vec<Value>>, Error> {
+        let mut prepared = self.inner.prepare(cypher)?;
+        let (keys, vals): (Vec<String>, Vec<Value>) =
+            json_params_to_values(&params).into_iter().unzip();
+        let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
+        let result = self.inner.execute(&mut prepared, bound)?;
+        Ok(result.collect())
+    }
+
     /// Public pass-through for raw Cypher statements with no result rows.
     pub fn run_cypher(&self, sql: &str) -> Result<(), Error> {
         self.raw_query(sql)
@@ -451,13 +470,12 @@ impl<'db> Conn<'db> {
 
     /// Returns all Entity nodes in the given group_ids.
     pub fn get_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<EntityRow>, Error> {
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
-            "MATCH (e:Entity) WHERE e.group_id IN {gid_list} \
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id IN $gids \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes"
-        );
-        let result = self.inner.query(&sql)?;
+             e.summary, e.attributes",
+            serde_json::json!({ "gids": group_ids }),
+        )?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -476,14 +494,13 @@ impl<'db> Conn<'db> {
 
     /// Returns all RELATES_TO edges in the given group_ids.
     pub fn get_edges_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<RelatesToEdge>, Error> {
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
+        self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
-             WHERE rn.group_id IN {gid_list} \
+             WHERE rn.group_id IN $gids \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
-        );
-        self.collect_relates_to_edges(&sql)
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+            serde_json::json!({ "gids": group_ids }),
+        )
     }
 
     /// Returns RELATES_TO edges for the given UUIDs.
@@ -491,18 +508,21 @@ impl<'db> Conn<'db> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
-        let uuid_list = format_str_list(uuids);
-        let sql = format!(
+        self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
-             WHERE rn.uuid IN {uuid_list} \
+             WHERE rn.uuid IN $uuids \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
-        );
-        self.collect_relates_to_edges(&sql)
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+            serde_json::json!({ "uuids": uuids }),
+        )
     }
 
-    fn collect_relates_to_edges(&self, sql: &str) -> Result<Vec<RelatesToEdge>, Error> {
-        let result = self.inner.query(sql)?;
+    fn collect_relates_to_edges(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let result = self.query_params(cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(RelatesToEdge {
@@ -531,15 +551,13 @@ impl<'db> Conn<'db> {
         group_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
-            "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', '{}') \
-             WITH node, score WHERE node.group_id IN {gid_list} \
+        self.collect_uuid_score_pairs(
+            "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', $q) \
+             WITH node, score WHERE node.group_id IN $gids \
              RETURN node.uuid, score \
-             ORDER BY score DESC LIMIT {limit}",
-            escape_fts(query),
-        );
-        self.collect_uuid_score_pairs(&sql)
+             ORDER BY score DESC LIMIT $limit",
+            serde_json::json!({ "q": query, "gids": group_ids, "limit": limit as i64 }),
+        )
     }
 
     /// BM25 full-text search on RelatesToNode_ (facts); returns (uuid, score) pairs.
@@ -549,15 +567,13 @@ impl<'db> Conn<'db> {
         group_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
-            "CALL QUERY_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', '{}') \
-             WITH node, score WHERE node.group_id IN {gid_list} \
+        self.collect_uuid_score_pairs(
+            "CALL QUERY_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', $q) \
+             WITH node, score WHERE node.group_id IN $gids \
              RETURN node.uuid, score \
-             ORDER BY score DESC LIMIT {limit}",
-            escape_fts(query),
-        );
-        self.collect_uuid_score_pairs(&sql)
+             ORDER BY score DESC LIMIT $limit",
+            serde_json::json!({ "q": query, "gids": group_ids, "limit": limit as i64 }),
+        )
     }
 
     /// HNSW vector search on Entity nodes; returns (uuid, distance) pairs (lower = closer).
@@ -567,15 +583,13 @@ impl<'db> Conn<'db> {
         group_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let vec_lit = format_float_array(embedding);
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
-            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', {vec_lit}, {limit}) \
-             WITH node, distance WHERE node.group_id IN {gid_list} \
+        self.collect_uuid_score_pairs(
+            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', $emb, $limit) \
+             WITH node, distance WHERE node.group_id IN $gids \
              RETURN node.uuid, distance \
-             ORDER BY distance ASC LIMIT {limit}"
-        );
-        self.collect_uuid_score_pairs(&sql)
+             ORDER BY distance ASC LIMIT $limit",
+            serde_json::json!({ "emb": embedding, "gids": group_ids, "limit": limit as i64 }),
+        )
     }
 
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
@@ -585,16 +599,14 @@ impl<'db> Conn<'db> {
         group_ids: &[&str],
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let vec_lit = format_float_array(embedding);
-        let gid_list = format_str_list(group_ids);
-        let sql = format!(
+        self.collect_uuid_score_pairs(
             "CALL QUERY_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
-             {vec_lit}, {limit}) \
-             WITH node, distance WHERE node.group_id IN {gid_list} \
+             $emb, $limit) \
+             WITH node, distance WHERE node.group_id IN $gids \
              RETURN node.uuid, distance \
-             ORDER BY distance ASC LIMIT {limit}"
-        );
-        self.collect_uuid_score_pairs(&sql)
+             ORDER BY distance ASC LIMIT $limit",
+            serde_json::json!({ "emb": embedding, "gids": group_ids, "limit": limit as i64 }),
+        )
     }
 
     /// HNSW vector search on Episodic nodes; returns PassageResult rows with score = raw distance.
@@ -606,21 +618,24 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<PassageResult>, Error> {
-        let vec_lit = format_float_array(embedding);
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                format!("WHERE node.group_id IN {}", format_str_list(gids))
-            }
-            _ => String::new(),
+            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
+            _ => "",
         };
-        let sql = format!(
-            "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', {vec_lit}, {limit}) \
+        let cypher = format!(
+            "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', $emb, $limit) \
              WITH node, distance {gid_filter} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, distance \
-             ORDER BY distance ASC LIMIT {limit}"
+             ORDER BY distance ASC LIMIT $limit"
         );
-        let result = self.inner.query(&sql)?;
+        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        if let Some(gids) = group_ids {
+            if !gids.is_empty() {
+                params["gids"] = serde_json::json!(gids);
+            }
+        }
+        let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             let valid_at = match value_as_optional_timestamp_str(&row[6]) {
@@ -647,22 +662,21 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
-        let sql = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                let gid_list = format_str_list(gids);
-                format!(
-                    "MATCH (e:Entity) WHERE e.group_id IN {gid_list} \
-                     RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                     e.summary, e.attributes ORDER BY e.uuid DESC LIMIT {limit}"
-                )
-            }
-            _ => format!(
+        let (cypher, params) = match group_ids {
+            Some(gids) if !gids.is_empty() => (
+                "MATCH (e:Entity) WHERE e.group_id IN $gids \
+                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
+                serde_json::json!({ "gids": gids, "limit": limit as i64 }),
+            ),
+            _ => (
                 "MATCH (e:Entity) \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT {limit}"
+                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
+                serde_json::json!({ "limit": limit as i64 }),
             ),
         };
-        let result = self.inner.query(&sql)?;
+        let result = self.query_params(cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -685,23 +699,22 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<RelatesToEdge>, Error> {
-        let sql = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                let gid_list = format_str_list(gids);
-                format!(
-                    "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
-                     WHERE rn.group_id IN {gid_list} \
-                     RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                     rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {limit}"
-                )
-            }
-            _ => format!(
+        let (cypher, params) = match group_ids {
+            Some(gids) if !gids.is_empty() => (
+                "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+                 WHERE rn.group_id IN $gids \
+                 RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                serde_json::json!({ "gids": gids, "limit": limit as i64 }),
+            ),
+            _ => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {limit}"
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                serde_json::json!({ "limit": limit as i64 }),
             ),
         };
-        self.collect_relates_to_edges(&sql)
+        self.collect_relates_to_edges(cypher, params)
     }
 
     /// Returns 1-hop neighbors via two directed queries (outgoing + incoming), merged in Rust.
@@ -712,29 +725,35 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         num_results: usize,
     ) -> Result<(Vec<RelatesToEdge>, Vec<String>), Error> {
-        let uuid_esc = escape(entity_uuid);
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => {
-                format!("WHERE rn.group_id IN {}", format_str_list(gids))
+            Some(gids) if !gids.is_empty() => "WHERE rn.group_id IN $gids",
+            _ => "",
+        };
+        let mk_params = || {
+            let mut p = serde_json::json!({ "uuid": entity_uuid, "limit": num_results as i64 });
+            if let Some(gids) = group_ids {
+                if !gids.is_empty() {
+                    p["gids"] = serde_json::json!(gids);
+                }
             }
-            _ => String::new(),
+            p
         };
 
         let out_sql = format!(
-            "MATCH (c:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
+            "MATCH (c:Entity {{uuid: $uuid}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {num_results}"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
         );
         let in_sql = format!(
-            "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: '{uuid_esc}'}}) \
+            "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: $uuid}}) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT {num_results}"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
         );
 
-        let mut edges = self.collect_relates_to_edges(&out_sql)?;
-        edges.extend(self.collect_relates_to_edges(&in_sql)?);
+        let mut edges = self.collect_relates_to_edges(&out_sql, mk_params())?;
+        edges.extend(self.collect_relates_to_edges(&in_sql, mk_params())?);
         edges.truncate(num_results);
 
         let mut seen = std::collections::HashSet::new();
@@ -799,8 +818,12 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
-    fn collect_uuid_score_pairs(&self, sql: &str) -> Result<Vec<(String, f64)>, Error> {
-        let result = self.inner.query(sql)?;
+    fn collect_uuid_score_pairs(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let result = self.query_params(cypher, params)?;
         let mut pairs = Vec::new();
         for row in result {
             let uuid = value_as_string(&row[0]);
@@ -1241,32 +1264,30 @@ impl<'db> Conn<'db> {
 
     /// Returns a full RelatesToEdge by UUID, joining via the RelatesToNode_ shadow node.
     pub fn get_edge_by_uuid(&self, uuid: &str) -> Result<Option<RelatesToEdge>, Error> {
-        let sql = format!(
+        let mut rows = self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
-             WHERE rn.uuid = '{}' \
+             WHERE rn.uuid = $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
              rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
-            escape(uuid),
-        );
-        let mut rows = self.collect_relates_to_edges(&sql)?;
+            serde_json::json!({ "uuid": uuid }),
+        )?;
         Ok(rows.pop())
     }
 
     /// Returns all RELATES_TO edges where the entity with `entity_uuid` is either source or target.
     pub fn get_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
-        let uuid_esc = escape(entity_uuid);
-        let out_sql = format!(
-            "MATCH (src:Entity {{uuid: '{uuid_esc}'}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+        let mut edges = self.collect_relates_to_edges(
+            "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
-        );
-        let in_sql = format!(
-            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {{uuid: '{uuid_esc}'}}) \
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+            serde_json::json!({ "uuid": entity_uuid }),
+        )?;
+        edges.extend(self.collect_relates_to_edges(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type"
-        );
-        let mut edges = self.collect_relates_to_edges(&out_sql)?;
-        edges.extend(self.collect_relates_to_edges(&in_sql)?);
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+            serde_json::json!({ "uuid": entity_uuid }),
+        )?);
         Ok(edges)
     }
 
@@ -1471,17 +1492,6 @@ fn escape(s: &str) -> String {
 }
 
 /// Escapes FTS query strings for embedding in Cypher CALL statements.
-fn escape_fts(s: &str) -> String {
-    // The query argument is embedded inside a Cypher single-quoted string literal
-    // (CALL QUERY_FTS_INDEX(..., '...')), so it requires the same Cypher-compliant
-    // backslash escaping as escape(). SQL-style '' doubling causes Cypher parser failure.
-    escape(s)
-}
-
-pub(crate) fn format_float_array(v: &[f32]) -> String {
-    let parts: Vec<String> = v.iter().map(|f| format!("{f:.6}")).collect();
-    format!("[{}]", parts.join(","))
-}
 
 pub(crate) fn format_str_list(v: &[&str]) -> String {
     if v.is_empty() {
