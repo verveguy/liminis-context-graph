@@ -322,19 +322,16 @@ async fn test_knowledge_recover_full_idempotent_on_healthy_engine() {
     drop(db_snap);
 
     // Call knowledge_recover_full on healthy engine
-    let resp = dispatch(
-        1,
-        "knowledge_recover_full",
-        json!({}),
-        Arc::clone(&state),
-    )
-    .await;
+    let resp = dispatch(1, "knowledge_recover_full", json!({}), Arc::clone(&state)).await;
 
     assert_eq!(resp["jsonrpc"], "2.0");
     assert!(resp.get("result").is_some(), "Expected result: {resp}");
     let result = &resp["result"];
     assert_eq!(result["success"], true);
-    assert_eq!(result["recovery_needed"], false, "Should be no-op: {result}");
+    assert_eq!(
+        result["recovery_needed"], false,
+        "Should be no-op: {result}"
+    );
     assert_eq!(result["mutations_replayed"], 0);
     assert_eq!(result["indexes_rebuilt"], false);
     assert_eq!(result["episodes_before"], episodes_before as i64);
@@ -374,18 +371,15 @@ async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
     // Actually, keep the directory to force Db::open to fail → fallback triggers
     // The fallback full_rebuild will call remove_dir_all(&db_path) first, then create fresh DB
 
-    let resp = dispatch(
-        1,
-        "knowledge_recover_full",
-        json!({}),
-        Arc::clone(&state),
-    )
-    .await;
+    let resp = dispatch(1, "knowledge_recover_full", json!({}), Arc::clone(&state)).await;
 
     assert_eq!(resp["jsonrpc"], "2.0");
     assert!(resp.get("result").is_some(), "Expected result: {resp}");
     let result = &resp["result"];
-    assert_eq!(result["success"], true, "Fallback recovery should succeed: {result}");
+    assert_eq!(
+        result["success"], true,
+        "Fallback recovery should succeed: {result}"
+    );
     assert_eq!(result["recovery_needed"], true);
     // After full rebuild from WAL, the episode should be present
     assert_eq!(

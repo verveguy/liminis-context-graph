@@ -1162,9 +1162,9 @@ impl<'db> Conn<'db> {
     /// Returns the uuid of the most-recently created Episodic node across all groups, or `None`
     /// if there are no episodes yet. Used by episode-cursor derivation during WAL recovery.
     pub fn get_latest_episode_uuid(&self) -> Result<Option<String>, Error> {
-        let result = self.inner.query(
-            "MATCH (ep:Episodic) RETURN ep.uuid ORDER BY ep.created_at DESC LIMIT 1",
-        )?;
+        let result = self
+            .inner
+            .query("MATCH (ep:Episodic) RETURN ep.uuid ORDER BY ep.created_at DESC LIMIT 1")?;
         Ok(result
             .into_iter()
             .next()
