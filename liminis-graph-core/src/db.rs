@@ -1159,6 +1159,18 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_timestamp_str(&row[0])))
     }
 
+    /// Returns the uuid of the most-recently created Episodic node across all groups, or `None`
+    /// if there are no episodes yet. Used by episode-cursor derivation during WAL recovery.
+    pub fn get_latest_episode_uuid(&self) -> Result<Option<String>, Error> {
+        let result = self.inner.query(
+            "MATCH (ep:Episodic) RETURN ep.uuid ORDER BY ep.created_at DESC LIMIT 1",
+        )?;
+        Ok(result
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_string(&row[0])))
+    }
+
     /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
     pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
         let mut result = self
