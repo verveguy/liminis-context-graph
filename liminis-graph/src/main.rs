@@ -366,8 +366,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
     };
 
+    // Derive wal_dir using the same env-var logic as AppState::from_env.
+    // Available before DB open so startup recovery can use it without AppState.
+    let startup_wal_dir = std::path::PathBuf::from(
+        lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
+            .unwrap_or_else(|_| ".lcg/wal".to_string()),
+    );
+
     // Attempt to open database and initialize schema. Classify errors:
-    //   - Recoverable (lbug WAL corruption, permission denied, missing file) → degraded mode
+    //   - Recoverable (lbug WAL corruption, permission denied, missing file) → autonomous
+    //     startup self-recovery first; degraded mode only if recovery itself fails.
     //   - Fatal (everything else) → propagate via ? and let the process exit
     let (maybe_db, degraded_reason): (Option<Arc<Db>>, Option<String>) = {
         let open_result = (|| -> Result<Db, Box<dyn std::error::Error>> {
@@ -388,14 +396,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     || msg.contains("No such file or directory");
 
                 if is_recoverable {
-                    let reason = "lbug_wal_corrupt".to_string();
-                    telemetry_sink.emit(TelemetryEvent::ServiceState {
-                        ts_ms: now_ms(),
-                        state: "degraded".to_string(),
-                        reason: Some(reason.clone()),
-                        detail: Some(serde_json::Value::String(msg)),
-                    });
-                    (None, Some(reason))
+                    // Attempt autonomous self-recovery before entering degraded mode (FR-001).
+                    let recovery_db_path = db_path.clone();
+                    let recovery_wal_dir = startup_wal_dir.clone();
+                    let recovery_sink = Arc::clone(&telemetry_sink);
+                    let recovery_result = tokio::task::spawn_blocking(move || {
+                        liminis_graph_core::recovery::run_full_recovery_sequence(
+                            &recovery_db_path,
+                            &recovery_wal_dir,
+                            embedding_dim,
+                            recovery_sink,
+                        )
+                    })
+                    .await;
+
+                    match recovery_result {
+                        Ok(Ok((db, report))) => {
+                            eprintln!(
+                                "liminis-context-graph: startup self-recovery complete — \
+                                 episodes_before={} mutations_replayed={} episodes_after={} \
+                                 from_seq={} cursor={}",
+                                report.episodes_before,
+                                report.mutations_replayed,
+                                report.episodes_after,
+                                report.from_seq,
+                                report.cursor_reason.as_str(),
+                            );
+                            telemetry_sink.emit(TelemetryEvent::ServiceState {
+                                ts_ms: now_ms(),
+                                state: "healthy".to_string(),
+                                reason: Some("startup_auto_recovery".to_string()),
+                                detail: None,
+                            });
+                            (Some(Arc::new(db)), None)
+                        }
+                        Ok(Err(recovery_err)) => {
+                            // Recovery sequence failed — fall back to degraded mode.
+                            let reason = "lbug_wal_corrupt".to_string();
+                            eprintln!(
+                                "liminis-context-graph: startup self-recovery failed: \
+                                 {recovery_err} — entering degraded mode"
+                            );
+                            telemetry_sink.emit(TelemetryEvent::ServiceState {
+                                ts_ms: now_ms(),
+                                state: "degraded".to_string(),
+                                reason: Some(reason.clone()),
+                                detail: Some(serde_json::Value::String(msg)),
+                            });
+                            (None, Some(reason))
+                        }
+                        Err(join_err) => {
+                            // spawn_blocking panicked — fall back to degraded mode.
+                            let reason = "lbug_wal_corrupt".to_string();
+                            eprintln!(
+                                "liminis-context-graph: startup self-recovery task panicked: \
+                                 {join_err} — entering degraded mode"
+                            );
+                            telemetry_sink.emit(TelemetryEvent::ServiceState {
+                                ts_ms: now_ms(),
+                                state: "degraded".to_string(),
+                                reason: Some(reason.clone()),
+                                detail: Some(serde_json::Value::String(msg)),
+                            });
+                            (None, Some(reason))
+                        }
+                    }
                 } else {
                     return Err(e);
                 }
