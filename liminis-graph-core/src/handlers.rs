@@ -1939,6 +1939,7 @@ async fn recover_rebuild_from_workspace_wal(
                 legacy_skipped_lines: stats.legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
+            conn.build_indices_and_constraints()?;
         }
         Ok(RecoverOutcome {
             db: Some(db),

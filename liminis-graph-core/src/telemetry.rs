@@ -75,6 +75,24 @@ pub enum TelemetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<serde_json::Value>,
     },
+    /// Emitted at each phase of autonomous WAL-corruption self-recovery.
+    /// Valid `phase` values: `"corruption_detected"`, `"checkpoint_drop_complete"`,
+    /// `"cursor_derived"`, `"replay_complete"`, `"index_build_complete"`,
+    /// `"recovery_complete"`, `"fallback_triggered"`.
+    WalAutoRecovery {
+        ts_ms: u64,
+        phase: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_seq: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cursor_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mutations_replayed: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fallback_reason: Option<String>,
+    },
 }
 
 pub fn now_ms() -> u64 {
