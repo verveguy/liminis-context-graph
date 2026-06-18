@@ -9,20 +9,22 @@ use crate::error::Error;
 use crate::legacy_wal::{expand_bulk_property_set, strip_vecf32};
 use crate::wal::{strip_quoted_literals, WalLine};
 
-/// lbug error-message substrings (lowercase) that identify legacy graphiti/FalkorDB-era schema
-/// constructs (Community node label, HAS relationship type) not present in the current lbug
-/// schema. Mutations matching these patterns are counted in `ReplayStats::legacy_skipped_lines`
-/// rather than `failed_lines` so they don't inflate the fidelity-warning ratio. Patterns are
-/// compared case-insensitively against the lowercased error string to guard against minor casing
-/// variations across lbug versions.
+/// lbug error-message substrings (lowercase) that classify a replay failure as a known legacy
+/// graphiti/FalkorDB-era construct — counted in `ReplayStats::legacy_skipped_lines` rather than
+/// `failed_lines` so it does not inflate the fidelity-warning ratio. Matched case-insensitively
+/// against lbug 0.17.x error text.
 ///
-/// NOTE: `episodes` was intentionally removed from this list in #133: `RelatesToNode_` now has an
-/// `episodes STRING[]` column, so episodes mutations succeed and must NOT be silently skipped.
+/// Currently EMPTY. The previous entries (`"table community does not exist"`, `"table has does
+/// not exist"`) became dead once #144 added `Community`/`Saga`/`HAS_MEMBER`/`HAS_EPISODE`/
+/// `NEXT_EPISODE` as stub tables: those tables now exist, so the "does not exist" errors can no
+/// longer occur and a `Community` CREATE replays into the stub (see #144's
+/// `test_community_node_replays_into_stub_table`; #145 tracks the community/saga roadmap). Other
+/// former legacy constructs are handled at the source — `episodes`/`expired_at` columns
+/// (#133/#136) and `vecf32(...)` + bulk-`SET` translation (`legacy_wal`, ADR-0008).
 ///
-/// NOTE: These patterns are matched against lbug 0.17.x error text. If lbug changes its error
-/// message format in a future version these patterns may silently stop matching. See ADR-0007.
-const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] =
-    &["table community does not exist", "table has does not exist"];
+/// The mechanism is retained (not removed) so a future legacy construct can be re-added as a
+/// one-line pattern without reintroducing the classification plumbing.
+const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[];
 
 /// A single captured failure from a `raw_query` execution error during replay.
 #[derive(Serialize)]
