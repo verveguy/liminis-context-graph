@@ -214,9 +214,9 @@ pub fn run_full_recovery_sequence(
     };
 
     // Count episodes before replay (for the report)
-    let episodes_before: u64 = {
+    let episodes_before = {
         let conn = db.connect()?;
-        conn.count_nodes("Episodic").unwrap_or(0) as u64
+        conn.count_nodes("Episodic").unwrap_or(0)
     };
 
     // ── Step 3: drop FTS, replay WAL mutations at seq >= from_seq ────────────
@@ -224,14 +224,13 @@ pub fn run_full_recovery_sequence(
     let stats = {
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
-        let stats = WalReplayer::new(wal_dir).replay_opts(
+        WalReplayer::new(wal_dir).replay_opts(
             &conn,
             ReplayOptions {
                 from_seq,
                 ..Default::default()
             },
-        )?;
-        stats
+        )?
     };
     let replay_elapsed_ms = replay_started.elapsed().as_millis() as u64;
 
@@ -261,9 +260,9 @@ pub fn run_full_recovery_sequence(
         fallback_reason: fallback_reason.clone(),
     });
 
-    let episodes_after: u64 = {
+    let episodes_after = {
         let conn = db.connect()?;
-        conn.count_nodes("Episodic").unwrap_or(0) as u64
+        conn.count_nodes("Episodic").unwrap_or(0)
     };
 
     sink.emit(TelemetryEvent::WalAutoRecovery {

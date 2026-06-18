@@ -119,7 +119,11 @@ async fn handle(
     // when the DB is unavailable. See ADR-0046.
     let exempt_in_degraded = matches!(
         req.method.as_str(),
-        "health_check" | "knowledge_status" | "knowledge_recover" | "knowledge_close"
+        "health_check"
+            | "knowledge_status"
+            | "knowledge_recover"
+            | "knowledge_recover_full"
+            | "knowledge_close"
     );
     if !exempt_in_degraded && state.db.load_full().is_none() {
         let reason = state
@@ -152,6 +156,7 @@ async fn handle(
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
         "knowledge_recover" => handle_knowledge_recover(req, state).await,
+        "knowledge_recover_full" => handle_knowledge_recover_full(req, state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
         "knowledge_search_passages" => handle_search_passages(req, state).await,
         "knowledge_list_entities" => handle_list_entities(req, state).await,
@@ -1856,6 +1861,75 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             "success": false,
             "error": e.to_string(),
             "restart_required": false,
+        })),
+    }
+}
+
+/// Single-call full recovery: checkpoint-drop → episode-cursor → resume-replay → reindex.
+/// Idempotent: if the engine is already healthy, returns a no-op response (FR-007).
+/// Exempt from the degraded-mode guard so it can be called when DB is None.
+async fn handle_knowledge_recover_full(
+    _req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    // Idempotency gate: if DB is healthy, return no-op.
+    if let Some(arc_db) = state.db.load_full() {
+        let conn = arc_db.connect()?;
+        let episodes = conn.count_nodes("Episodic").unwrap_or(0);
+        return Ok(json!({
+            "success": true,
+            "recovery_needed": false,
+            "episodes_before": episodes,
+            "mutations_replayed": 0,
+            "episodes_after": episodes,
+            "indexes_rebuilt": false,
+        }));
+    }
+
+    // Serialize recovery via write_lock (try_write for concurrent callers).
+    let _write_guard = state
+        .write_lock
+        .try_write()
+        .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
+
+    let db_path = state.db_path.clone();
+    let wal_dir = state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+    let embedding_dim = state.embedder.dim();
+    let sink = Arc::clone(&state.sink);
+
+    let result = tokio::task::spawn_blocking(move || {
+        crate::recovery::run_full_recovery_sequence(&db_path, &wal_dir, embedding_dim, sink)
+    })
+    .await?;
+
+    // Hold write guard through db.store() — see ADR-0042.
+    match result {
+        Ok((new_db, report)) => {
+            state.db.store(Some(Arc::new(new_db)));
+            if let Ok(mut g) = state.degraded_reason.lock() {
+                *g = None;
+            }
+            state.sink.emit(TelemetryEvent::ServiceState {
+                ts_ms: now_ms(),
+                state: "healthy".to_string(),
+                reason: None,
+                detail: None,
+            });
+            Ok(json!({
+                "success": true,
+                "recovery_needed": true,
+                "episodes_before": report.episodes_before,
+                "mutations_replayed": report.mutations_replayed,
+                "episodes_after": report.episodes_after,
+                "indexes_rebuilt": report.indexes_rebuilt,
+            }))
+        }
+        Err(e) => Ok(json!({
+            "success": false,
+            "error": e.to_string(),
         })),
     }
 }
