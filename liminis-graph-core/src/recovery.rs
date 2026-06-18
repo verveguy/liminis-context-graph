@@ -14,14 +14,14 @@ use crate::{
 // ── Public types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CursorReason {
+pub enum CursorReason {
     UuidMatch,
     NoEpisodes,
     UuidNotFound,
 }
 
 impl CursorReason {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             CursorReason::UuidMatch => "uuid_match",
             CursorReason::NoEpisodes => "no_episodes",
@@ -30,14 +30,14 @@ impl CursorReason {
     }
 }
 
-pub(crate) struct RecoveryReport {
-    pub(crate) episodes_before: u64,
-    pub(crate) mutations_replayed: u64,
-    pub(crate) episodes_after: u64,
-    pub(crate) indexes_rebuilt: bool,
-    pub(crate) from_seq: u64,
-    pub(crate) cursor_reason: CursorReason,
-    pub(crate) drop_elapsed_ms: u64,
+pub struct RecoveryReport {
+    pub episodes_before: u64,
+    pub mutations_replayed: u64,
+    pub episodes_after: u64,
+    pub indexes_rebuilt: bool,
+    pub from_seq: u64,
+    pub cursor_reason: CursorReason,
+    pub drop_elapsed_ms: u64,
 }
 
 // ── Episode-cursor derivation ─────────────────────────────────────────────────
@@ -53,7 +53,7 @@ pub(crate) struct RecoveryReport {
 ///
 /// Scans ALL files to find the global minimum seq (episode uuid may appear in
 /// multiple files, e.g. as `params["ep"]` on MENTIONS edges).
-pub(crate) fn derive_episode_cursor(
+pub fn derive_episode_cursor(
     conn: &crate::db::Conn<'_>,
     wal_dir: &Path,
 ) -> Result<(u64, CursorReason), Error> {
@@ -142,7 +142,7 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
 /// 2. Derive episode-cursor (`from_seq`) from the last episode in the DB.
 /// 3. Drop FTS indexes, replay WAL mutations at `seq >= from_seq`, rebuild indexes.
 /// 4. Return recovered `Db` with report.
-pub(crate) fn run_full_recovery_sequence(
+pub fn run_full_recovery_sequence(
     db_path: &str,
     wal_dir: &Path,
     embedding_dim: usize,
