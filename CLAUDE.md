@@ -108,9 +108,9 @@ The running service speaks **newline-delimited JSON-RPC 2.0** over its Unix sock
 import socket, json
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(".lcg/service.sock")
 s.sendall((json.dumps({"jsonrpc":"2.0","id":1,"method":"knowledge_status","params":{}})+"\n").encode())
-print(json.loads(s.makefile("r").readline())["result"])  # entity_count, episode_count, relationship_count, ontology, wal, ...
+print(json.loads(s.makefile("r", encoding="utf-8").readline())["result"])  # entity_count, episode_count, relationship_count, ontology, wal, ...
 ```
 
-Useful read methods: `knowledge_status`, `knowledge_get_episodes {last_n}`, `knowledge_find_entities {query,limit}` (FTS+vector), `knowledge_find_relationships`, `knowledge_get_nodes_by_group` / `knowledge_get_edges_by_group`. Adding `"_progress_token":"..."` to a long op (e.g. `knowledge_rebuild_from_wal`) makes it stream `{"type":"progress",...}` lines before the terminal result.
+Useful read methods: `knowledge_status`, `knowledge_get_episodes {last_n}`, `knowledge_find_entities {query,num_results}` (FTS+vector; note `num_results`, **not** `limit` — an unknown key is silently ignored and defaults to 10), `knowledge_find_relationships`, `knowledge_get_nodes_by_group` / `knowledge_get_edges_by_group`. Adding `"_progress_token":"..."` to a long op (e.g. `knowledge_rebuild_from_wal`) makes it stream `{"type":"progress",...}` lines before the terminal result.
 
 **WAL-corruption recovery** (corrupt `db.wal` → degraded mode): the service binds its socket before opening the DB, so `knowledge_recover` is reachable even when degraded. The fast path is `drop_lbug_wal` (reopen at last checkpoint) → resume only the WAL tail (using the last episode as the resume cursor) → rebuild indexes — see **ADR-0046** (degraded-mode startup & recovery), **ADR-0047** (auto-heal index build), and **ADR-0051** (episode-cursor WAL resume) for the full model and the validated playbook.
