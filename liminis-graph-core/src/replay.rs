@@ -79,6 +79,8 @@ impl ReplayStats {
 pub type ProgressFn = Box<dyn Fn(&ReplayProgress) -> bool + Send>;
 /// Callback invoked once per mutation; returning `true` aborts immediately.
 pub type CancelFn = Box<dyn Fn() -> bool + Send>;
+/// Callback that receives a `[WAL PROGRESS]` log line; replaces `eprintln!` in tests.
+pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
 
 /// Options for `WalReplayer::replay_opts`.
 #[derive(Default)]
@@ -105,7 +107,7 @@ pub struct ReplayOptions {
     /// Optional sink for `[WAL PROGRESS]` log lines (replaces `eprintln!`). When `None`,
     /// lines are written to stderr via `eprintln!`. Production passes `None`; tests inject a
     /// closure capturing to `Arc<Mutex<Vec<String>>>` to verify throttle behaviour.
-    pub progress_log_fn: Option<Box<dyn Fn(&str) + Send>>,
+    pub progress_log_fn: Option<ProgressLogFn>,
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -200,7 +202,7 @@ impl WalReplayer {
             stats.files_read += 1;
 
             // Progress: once per file
-            let should_log = last_log_at.map_or(true, |t| t.elapsed() >= log_interval);
+            let should_log = last_log_at.is_none_or(|t| t.elapsed() >= log_interval);
             if opts.progress_fn.is_some() || should_log {
                 let p = ReplayProgress {
                     files_processed: stats.files_read,
@@ -363,7 +365,7 @@ impl WalReplayer {
 
                 // Progress: once per 1000 mutations within a file
                 if mutations_in_file.is_multiple_of(1000) {
-                    let should_log = last_log_at.map_or(true, |t| t.elapsed() >= log_interval);
+                    let should_log = last_log_at.is_none_or(|t| t.elapsed() >= log_interval);
                     if opts.progress_fn.is_some() || should_log {
                         let p = ReplayProgress {
                             files_processed: stats.files_read,

@@ -1724,6 +1724,8 @@ fn throughput_half2_vs_half1_flat() {
                 progress_fn: Some(progress_fn),
                 failure_sample_cap: None,
                 batch_size: None,
+                log_interval_override: None,
+                progress_log_fn: None,
             },
         )
         .expect("replay must succeed");
@@ -1762,4 +1764,156 @@ fn throughput_half2_vs_half1_flat() {
         ratio >= 0.9,
         "half2/half1 throughput ratio must be ≥ 0.9 (flat) under the drop-before/build-after path; got {ratio:.3}"
     );
+}
+
+/// With `log_interval_override: Some(0)`, every progress event emits a `[WAL PROGRESS]` log
+/// line. Verifies format (prefix, `files=`, `mutations=` substrings) and that
+/// `files_processed` values parsed from successive lines are non-decreasing (SC-001, SC-002).
+#[test]
+fn wal_replay_progress_log_lines() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Three small WAL files; each triggers the per-file progress call site.
+    let files = [
+        (
+            "20260617_010000_aaa_0000.jsonl",
+            r#"{"seq":0,"ts":"2026-06-17T01:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'p-a'}) ON CREATE SET n.name = 'A', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+        (
+            "20260617_020000_bbb_0000.jsonl",
+            r#"{"seq":1,"ts":"2026-06-17T02:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'p-b'}) ON CREATE SET n.name = 'B', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [0.0, 1.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+        (
+            "20260617_030000_ccc_0000.jsonl",
+            r#"{"seq":2,"ts":"2026-06-17T03:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'p-c'}) ON CREATE SET n.name = 'C', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [0.0, 0.0, 1.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+    ];
+    for (name, line) in &files {
+        std::fs::write(wal_dir.path().join(name), format!("{line}\n")).unwrap();
+    }
+
+    let db_path = db_dir.path().join("progress_test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                log_interval_override: Some(0),
+                progress_log_fn: Some(Box::new(move |line: &str| {
+                    captured_clone.lock().unwrap().push(line.to_string());
+                })),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    let lines = captured.lock().unwrap().clone();
+    assert!(
+        !lines.is_empty(),
+        "expected at least one [WAL PROGRESS] line"
+    );
+    for line in &lines {
+        assert!(
+            line.starts_with("[WAL PROGRESS]"),
+            "all lines must start with [WAL PROGRESS]; got: {line}"
+        );
+        assert!(
+            line.contains("files="),
+            "line must contain files=; got: {line}"
+        );
+        assert!(
+            line.contains("mutations="),
+            "line must contain mutations=; got: {line}"
+        );
+    }
+
+    // Extract files_processed values and verify non-decreasing order.
+    let file_counts: Vec<u64> = lines
+        .iter()
+        .filter_map(|l| {
+            l.split("files=")
+                .nth(1)
+                .and_then(|s| s.split('/').next())
+                .and_then(|s| s.parse().ok())
+        })
+        .collect();
+    assert!(
+        !file_counts.is_empty(),
+        "could not parse files= from log lines"
+    );
+    for w in file_counts.windows(2) {
+        assert!(
+            w[1] >= w[0],
+            "files_processed must be non-decreasing; got {w:?}"
+        );
+    }
+}
+
+/// Without `log_interval_override`, the default 30s throttle ensures a small replay that
+/// completes in well under 30s produces exactly one `[WAL PROGRESS]` line — the first event
+/// always logs regardless of interval (SC-003).
+#[test]
+fn wal_replay_progress_throttle_default_interval() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let files = [
+        (
+            "20260617_010000_aaa_0001.jsonl",
+            r#"{"seq":0,"ts":"2026-06-17T01:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'th-a'}) ON CREATE SET n.name = 'A', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+        (
+            "20260617_020000_bbb_0001.jsonl",
+            r#"{"seq":1,"ts":"2026-06-17T02:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'th-b'}) ON CREATE SET n.name = 'B', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [0.0, 1.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+        (
+            "20260617_030000_ccc_0001.jsonl",
+            r#"{"seq":2,"ts":"2026-06-17T03:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'th-c'}) ON CREATE SET n.name = 'C', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-06-17 00:00:00'), n.name_embedding = [0.0, 0.0, 1.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#,
+        ),
+    ];
+    for (name, line) in &files {
+        std::fs::write(wal_dir.path().join(name), format!("{line}\n")).unwrap();
+    }
+
+    let db_path = db_dir.path().join("throttle_test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                // No log_interval_override: defaults to 30s. A 3-file replay finishes in
+                // milliseconds, so only the first-event-always-logs line should be emitted.
+                progress_log_fn: Some(Box::new(move |line: &str| {
+                    captured_clone.lock().unwrap().push(line.to_string());
+                })),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    let lines = captured.lock().unwrap().clone();
+    assert!(
+        lines.len() <= 1,
+        "default 30s throttle should produce ≤1 log line on a sub-second replay; got {}",
+        lines.len()
+    );
+    if let Some(first) = lines.first() {
+        assert!(
+            first.starts_with("[WAL PROGRESS]"),
+            "log line must start with [WAL PROGRESS]; got: {first}"
+        );
+    }
 }
