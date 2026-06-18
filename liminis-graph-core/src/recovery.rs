@@ -99,8 +99,8 @@ fn collect_wal_files(wal_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Scans `path` line by line for the first occurrence of `target_uuid` in
-/// `params["uuid"]` or `params["ep"]`. Returns the minimum `seq` found, or `None`.
+/// Scans `path` line by line for all occurrences of `target_uuid` in
+/// `params["uuid"]` or `params["ep"]`. Returns the minimum `seq` across all matches, or `None`.
 fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Error> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
