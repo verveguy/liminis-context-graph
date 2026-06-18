@@ -174,7 +174,9 @@ pub fn run_full_recovery_sequence(
                     elapsed_ms: None,
                     fallback_reason: Some(reason.clone()),
                 });
-                eprintln!("liminis-graph: startup recovery: {reason}, falling back to full rebuild");
+                eprintln!(
+                    "liminis-graph: startup recovery: {reason}, falling back to full rebuild"
+                );
                 let fallback_db = full_rebuild(db_path, embedding_dim)?;
                 (fallback_db, true, Some(reason))
             }

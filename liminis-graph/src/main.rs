@@ -369,8 +369,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Derive wal_dir using the same env-var logic as AppState::from_env.
     // Available before DB open so startup recovery can use it without AppState.
     let startup_wal_dir = std::path::PathBuf::from(
-        lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
-            .unwrap_or_else(|_| ".lcg/wal".to_string()),
+        lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").unwrap_or_else(|_| ".lcg/wal".to_string()),
     );
 
     // Attempt to open database and initialize schema. Classify errors:
