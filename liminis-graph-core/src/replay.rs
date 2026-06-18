@@ -152,10 +152,12 @@ impl WalReplayer {
                 .unwrap_or(10)
         });
 
-        // `[WAL PROGRESS]` throttle — emits one grep-able log line per interval so a durable
-        // record survives after a crash or connection loss (see LCG_REPLAY_LOG_INTERVAL_SECS).
-        // `last_log_at = None` means the very first progress event always logs, giving a
-        // "replay started at file 1/N" anchor even when the replay completes quickly.
+        // `[WAL PROGRESS]` throttle — emits a grep-able log line at a configurable interval so
+        // a durable record survives crashes and IPC disconnects. Format:
+        //   [WAL PROGRESS] elapsed=12s files=1234/43821 mutations=567890 failed=0 legacy_skipped=0 | <message>
+        // Grep: `grep '[WAL PROGRESS]' service.log`
+        // Interval: `LCG_REPLAY_LOG_INTERVAL_SECS` env var (default 30s). The first progress
+        // event always logs regardless of interval, providing a "replay started" anchor.
         let log_interval = Duration::from_secs(opts.log_interval_override.unwrap_or_else(|| {
             std::env::var("LCG_REPLAY_LOG_INTERVAL_SECS")
                 .ok()
