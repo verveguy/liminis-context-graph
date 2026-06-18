@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -97,6 +98,14 @@ pub struct ReplayOptions {
     /// Valid range: 1–256. When `None`, reads `LCG_REPLAY_BATCH_SIZE` env var, defaulting to 64.
     /// Set to `Some(1)` to disable batching and reproduce the pre-batching per-row behavior.
     pub batch_size: Option<usize>,
+    /// Throttle interval in seconds for `[WAL PROGRESS]` log lines. When `None`, reads
+    /// `LCG_REPLAY_LOG_INTERVAL_SECS` env var, defaulting to 30s. Production passes `None`;
+    /// tests may pass `Some(0)` to force every progress event to emit a log line.
+    pub log_interval_override: Option<u64>,
+    /// Optional sink for `[WAL PROGRESS]` log lines (replaces `eprintln!`). When `None`,
+    /// lines are written to stderr via `eprintln!`. Production passes `None`; tests inject a
+    /// closure capturing to `Arc<Mutex<Vec<String>>>` to verify throttle behaviour.
+    pub progress_log_fn: Option<Box<dyn Fn(&str) + Send>>,
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -142,6 +151,20 @@ impl WalReplayer {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(10)
         });
+
+        // `[WAL PROGRESS]` throttle — emits one grep-able log line per interval so a durable
+        // record survives after a crash or connection loss (see LCG_REPLAY_LOG_INTERVAL_SECS).
+        // `last_log_at = None` means the very first progress event always logs, giving a
+        // "replay started at file 1/N" anchor even when the replay completes quickly.
+        let log_interval = Duration::from_secs(opts.log_interval_override.unwrap_or_else(|| {
+            std::env::var("LCG_REPLAY_LOG_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30)
+        }));
+        let replay_start = Instant::now();
+        let mut last_log_at: Option<Instant> = None;
+
         let mut stats = ReplayStats {
             lines_replayed: 0,
             unrecognised_lines: 0,
@@ -175,7 +198,8 @@ impl WalReplayer {
             stats.files_read += 1;
 
             // Progress: once per file
-            if let Some(ref f) = opts.progress_fn {
+            let should_log = last_log_at.map_or(true, |t| t.elapsed() >= log_interval);
+            if opts.progress_fn.is_some() || should_log {
                 let p = ReplayProgress {
                     files_processed: stats.files_read,
                     files_total,
@@ -184,8 +208,27 @@ impl WalReplayer {
                     legacy_skipped_lines_so_far: stats.legacy_skipped_lines,
                     message: format!("processing file {}", file_path.display()),
                 };
-                if !f(&p) {
-                    break 'files;
+                if let Some(ref f) = opts.progress_fn {
+                    if !f(&p) {
+                        break 'files;
+                    }
+                }
+                if should_log {
+                    let line = format!(
+                        "[WAL PROGRESS] elapsed={}s files={}/{} mutations={} failed={} legacy_skipped={} | {}",
+                        replay_start.elapsed().as_secs(),
+                        p.files_processed,
+                        p.files_total,
+                        p.mutations_replayed,
+                        p.failed_lines_so_far,
+                        p.legacy_skipped_lines_so_far,
+                        p.message,
+                    );
+                    match opts.progress_log_fn {
+                        Some(ref log_fn) => log_fn(&line),
+                        None => eprintln!("{line}"),
+                    }
+                    last_log_at = Some(Instant::now());
                 }
             }
 
@@ -318,7 +361,8 @@ impl WalReplayer {
 
                 // Progress: once per 1000 mutations within a file
                 if mutations_in_file.is_multiple_of(1000) {
-                    if let Some(ref f) = opts.progress_fn {
+                    let should_log = last_log_at.map_or(true, |t| t.elapsed() >= log_interval);
+                    if opts.progress_fn.is_some() || should_log {
                         let p = ReplayProgress {
                             files_processed: stats.files_read,
                             files_total,
@@ -331,8 +375,27 @@ impl WalReplayer {
                                 file_path.display()
                             ),
                         };
-                        if !f(&p) {
-                            break 'files;
+                        if let Some(ref f) = opts.progress_fn {
+                            if !f(&p) {
+                                break 'files;
+                            }
+                        }
+                        if should_log {
+                            let line = format!(
+                                "[WAL PROGRESS] elapsed={}s files={}/{} mutations={} failed={} legacy_skipped={} | {}",
+                                replay_start.elapsed().as_secs(),
+                                p.files_processed,
+                                p.files_total,
+                                p.mutations_replayed,
+                                p.failed_lines_so_far,
+                                p.legacy_skipped_lines_so_far,
+                                p.message,
+                            );
+                            match opts.progress_log_fn {
+                                Some(ref log_fn) => log_fn(&line),
+                                None => eprintln!("{line}"),
+                            }
+                            last_log_at = Some(Instant::now());
                         }
                     }
                 }

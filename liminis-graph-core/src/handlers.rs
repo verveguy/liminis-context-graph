@@ -1286,6 +1286,8 @@ async fn handle_rebuild_from_wal(
                         progress_fn: build_progress_fn(tx),
                         failure_sample_cap: None,
                         batch_size: None,
+                        log_interval_override: None,
+                        progress_log_fn: None,
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
@@ -1399,6 +1401,8 @@ async fn handle_rebuild_from_wal(
                         cancel_fn: None,
                         failure_sample_cap: None,
                         batch_size: None,
+                        log_interval_override: None,
+                        progress_log_fn: None,
                     },
                 )
             })
@@ -1505,6 +1509,8 @@ async fn handle_rebuild_from_wal(
                         cancel_fn: None,
                         failure_sample_cap: None,
                         batch_size: None,
+                        log_interval_override: None,
+                        progress_log_fn: None,
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
