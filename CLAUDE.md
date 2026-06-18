@@ -95,3 +95,22 @@ Tests live in `liminis-graph-core/tests/*.rs` AND inline `#[cfg(test)] mod tests
 ## Build artifact
 
 The `liminis-graph` binary is consumed by the liminis Electron app via `graphiti_service.py` over a Unix socket. Breaking the IPC protocol (defined in `liminis-graph-core/src/handlers.rs` + the Python-side `service_protocol.py`) breaks the app. When adding or changing a method, keep both sides aligned and update the Tier 1a/1b/1c parity tests in `liminis-graph-core/tests/ipc_parity.rs`.
+
+## Schema parity with graphiti
+
+`liminis-graph-core/src/schema.rs` must track parity with graphiti's Kuzu driver, `graphiti_core/driver/kuzu_driver.py` — that file is the canonical source of truth for node/rel tables and their column sets (lbug *is* Kuzu, renamed; see `docs.ladybugdb.com`). A missing or mistyped column makes the WAL's `MERGE`/`SET` fail to *prepare*, and under batched replay one `prepare()` failure is attributed to **every** row sharing that template — so a single schema gap can silently drop an entire category of mutations. When touching schema, diff against `kuzu_driver.py` and add the missing columns/stub tables rather than guessing. (History: #128/#130/#133/#136/#144 were all FalkorDB-dialect or schema-parity gaps; note also `VECF32(...)` is FalkorDB-only — Kuzu/lbug embeddings are bare `FLOAT[]` list literals.)
+
+## Debugging a live or degraded service
+
+The running service speaks **newline-delimited JSON-RPC 2.0** over its Unix socket (`<workspace>/.lcg/service.sock`). You can query a live graph directly — useful for inspection, analysis, or driving a recovery by hand:
+
+```python
+import socket, json
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.connect(".lcg/service.sock")
+s.sendall((json.dumps({"jsonrpc":"2.0","id":1,"method":"knowledge_status","params":{}})+"\n").encode())
+print(json.loads(s.makefile("r", encoding="utf-8").readline())["result"])  # entity_count, episode_count, relationship_count, ontology, wal, ...
+```
+
+Useful read methods: `knowledge_status`, `knowledge_get_episodes {last_n}`, `knowledge_find_entities {query,num_results}` (FTS+vector; note `num_results`, **not** `limit` — an unknown key is silently ignored and defaults to 10), `knowledge_find_relationships`, `knowledge_get_nodes_by_group` / `knowledge_get_edges_by_group`. Adding `"_progress_token":"..."` to a long op (e.g. `knowledge_rebuild_from_wal`) makes it stream `{"type":"progress",...}` lines before the terminal result.
+
+**WAL-corruption recovery** (corrupt `db.wal` → degraded mode): the service binds its socket before opening the DB, so `knowledge_recover` is reachable even when degraded. The fast path is `drop_lbug_wal` (reopen at last checkpoint) → resume only the WAL tail (using the last episode as the resume cursor) → rebuild indexes — see **ADR-0046** (degraded-mode startup & recovery), **ADR-0047** (auto-heal index build), and **ADR-0051** (episode-cursor WAL resume) for the full model and the validated playbook.
