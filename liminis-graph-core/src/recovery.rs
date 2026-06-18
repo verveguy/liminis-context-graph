@@ -99,12 +99,15 @@ fn collect_wal_files(wal_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Scans `path` line by line for all occurrences of `target_uuid` in
-/// `params["uuid"]` or `params["ep"]`. Returns the minimum `seq` across all matches, or `None`.
+/// Scans `path` line by line for the first match of `target_uuid` in
+/// `params["uuid"]` or `params["ep"]`. Returns that line's `seq`, or `None`.
+///
+/// WAL files are append-only with a globally monotonic seq counter, so within a
+/// single file seq is strictly increasing. The first match is therefore the minimum
+/// seq for the file — no need to scan further.
 fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Error> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
-    let mut min_seq: Option<u64> = None;
 
     for line in reader.lines() {
         let line = match line {
@@ -121,12 +124,12 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
             let matches = params.get("uuid").and_then(|v| v.as_str()) == Some(target_uuid)
                 || params.get("ep").and_then(|v| v.as_str()) == Some(target_uuid);
             if matches {
-                min_seq = Some(min_seq.map_or(wal_line.seq, |m: u64| m.min(wal_line.seq)));
+                return Ok(Some(wal_line.seq));
             }
         }
     }
 
-    Ok(min_seq)
+    Ok(None)
 }
 
 // ── Full recovery sequence ────────────────────────────────────────────────────
