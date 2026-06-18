@@ -37,6 +37,43 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 
 > **Embedder required at runtime**: The binary connects to an out-of-process embedding service on startup. See the Configuration section for `LCG_EMBEDDING_URL`.
 
+### Bundling in downstream apps
+
+For consumers (e.g. Electron apps or CI pipelines) that need to download a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases.
+
+**Download a specific tagged version:**
+
+```sh
+curl -L https://github.com/verveguy/liminis-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
+  -o liminis-context-graph-aarch64-apple-darwin.tar.gz
+```
+
+**Extract the archive:**
+
+```sh
+tar -xzf liminis-context-graph-aarch64-apple-darwin.tar.gz
+# binary is at: liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
+```
+
+The archive inner directory is `liminis-context-graph-aarch64-apple-darwin/` and the binary is `liminis-context-graph-aarch64-apple-darwin/liminis-context-graph`. This structure is set by cargo-dist 0.32.0; if cargo-dist is upgraded in the future, verify the archive layout before updating consumer scripts.
+
+> **Checksum verification**: Each release includes a `.sha256` companion file. To verify the download:
+> ```sh
+> shasum -a 256 -c liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256
+> ```
+
+> **macOS Gatekeeper note**: The binary is not code-signed. Downloads via `curl` or a browser are quarantined by macOS and will fail silently in scripts. Clear the quarantine attribute before use:
+> ```sh
+> xattr -d com.apple.quarantine liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
+> ```
+> Code signing will be added in a future release.
+
+**Discover the latest release tag programmatically:**
+
+```sh
+curl -s https://api.github.com/repos/verveguy/liminis-graph/releases/latest | jq -r '.tag_name'
+```
+
 ### Build from source
 
 Requires [Rust/Cargo](https://rustup.rs/) and `cmake` (for the lbug C++ build, ~20–30 min cold):
