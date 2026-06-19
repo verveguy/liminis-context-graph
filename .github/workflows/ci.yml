@@ -2,7 +2,20 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+# Run CI once per change, not twice. Previously `on: { push, pull_request }` with no
+# concurrency control meant every push to a PR branch triggered two concurrent CI runs
+# (one `push`, one `pull_request`) on the same commit. They raced on the shared lbug C++
+# build cache (same key), and one would intermittently link against a half-written / doubled
+# archive set — surfacing as `duplicate symbol: yyjson_*` / `antlr4::*` link failures that
+# falsely failed the build and paused Fabrik. Scoping `push` to `main` means a PR branch runs
+# CI exactly once (via `pull_request`); `main` still runs on merge. The concurrency group
+# additionally cancels superseded in-flight runs when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 env:
   # Bump this date to manually bust the lbug C++ build cache (e.g., if a cache entry is corrupted).
