@@ -1,5 +1,5 @@
 [workspace]
-members = ["liminis-graph-core", "liminis-graph"]
+members = ["crates/core", "crates/service"]
 resolver = "2"
 
 [workspace.package]

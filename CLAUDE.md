@@ -84,7 +84,7 @@ Grep ALL constructor call sites, including test files:
 grep -rn "StructName {" --include="*.rs" .
 ```
 
-Tests live in `liminis-graph-core/tests/*.rs` AND inline `#[cfg(test)] mod tests { }` blocks within source files. Both compile separately from the library and will silently break if you only update the lib sites. This has burned us repeatedly (e.g. #46, #58 CI fix cycles).
+Tests live in `crates/core/tests/*.rs` AND inline `#[cfg(test)] mod tests { }` blocks within source files. Both compile separately from the library and will silently break if you only update the lib sites. This has burned us repeatedly (e.g. #46, #58 CI fix cycles).
 
 ## Toolchain
 
@@ -94,11 +94,11 @@ Tests live in `liminis-graph-core/tests/*.rs` AND inline `#[cfg(test)] mod tests
 
 ## Build artifact
 
-The `liminis-graph` binary is consumed by the liminis Electron app via `graphiti_service.py` over a Unix socket. Breaking the IPC protocol (defined in `liminis-graph-core/src/handlers.rs` + the Python-side `service_protocol.py`) breaks the app. When adding or changing a method, keep both sides aligned and update the Tier 1a/1b/1c parity tests in `liminis-graph-core/tests/ipc_parity.rs`.
+The `liminis-context-graph` binary (built from the `lcg-service` crate at `crates/service`) is consumed by the liminis Electron app via `graphiti_service.py` over a Unix socket. Breaking the IPC protocol (defined in `crates/core/src/handlers.rs` + the Python-side `service_protocol.py`) breaks the app. When adding or changing a method, keep both sides aligned and update the Tier 1a/1b/1c parity tests in `crates/core/tests/ipc_parity.rs`.
 
 ## Schema parity with graphiti
 
-`liminis-graph-core/src/schema.rs` must track parity with graphiti's Kuzu driver, `graphiti_core/driver/kuzu_driver.py` — that file is the canonical source of truth for node/rel tables and their column sets (lbug *is* Kuzu, renamed; see `docs.ladybugdb.com`). A missing or mistyped column makes the WAL's `MERGE`/`SET` fail to *prepare*, and under batched replay one `prepare()` failure is attributed to **every** row sharing that template — so a single schema gap can silently drop an entire category of mutations. When touching schema, diff against `kuzu_driver.py` and add the missing columns/stub tables rather than guessing. (History: #128/#130/#133/#136/#144 were all FalkorDB-dialect or schema-parity gaps; note also `VECF32(...)` is FalkorDB-only — Kuzu/lbug embeddings are bare `FLOAT[]` list literals.)
+`crates/core/src/schema.rs` must track parity with graphiti's Kuzu driver, `graphiti_core/driver/kuzu_driver.py` — that file is the canonical source of truth for node/rel tables and their column sets (lbug *is* Kuzu, renamed; see `docs.ladybugdb.com`). A missing or mistyped column makes the WAL's `MERGE`/`SET` fail to *prepare*, and under batched replay one `prepare()` failure is attributed to **every** row sharing that template — so a single schema gap can silently drop an entire category of mutations. When touching schema, diff against `kuzu_driver.py` and add the missing columns/stub tables rather than guessing. (History: #128/#130/#133/#136/#144 were all FalkorDB-dialect or schema-parity gaps; note also `VECF32(...)` is FalkorDB-only — Kuzu/lbug embeddings are bare `FLOAT[]` list literals.)
 
 ## Debugging a live or degraded service
 

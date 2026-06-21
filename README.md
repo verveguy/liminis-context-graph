@@ -92,13 +92,13 @@ Requires [Rust/Cargo](https://rustup.rs/) and `cmake` (for the lbug C++ build, ~
 cargo build --release
 
 # Run the integration test (validates LadybugDB round-trip)
-cargo test -p liminis-graph-core
+cargo test -p lcg-core
 
 # Run the example consumer (ingests 3 docs, searches, prints results)
-cargo run --example basic_ingest -p liminis-graph-core
+cargo run --example basic_ingest -p lcg-core
 
-# Run the binary stub
-cargo run -p liminis-context-graph
+# Run the service binary (liminis-context-graph)
+cargo run -p lcg-service
 ```
 
 ### Release runbook (maintainers)
@@ -114,12 +114,12 @@ If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fi
 ## Workspace layout
 
 ```
-liminis-graph-core/          # library crate — all DB interaction
-liminis-graph-core/benches/  # performance benchmarks (criterion)
-liminis-graph/               # binary crate — IPC service (depends on core)
-examples/                    # standalone consumers demonstrating the library API
-docs/adr/                    # architecture decision records
-specs/                       # feature specifications
+crates/core/             # lcg-core: library crate — all DB interaction
+crates/core/benches/     # performance benchmarks (criterion)
+crates/core/examples/    # standalone consumers demonstrating the library API
+crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
+docs/adr/                # architecture decision records
+specs/                   # feature specifications
 ```
 
 ## Configuration (environment variables)

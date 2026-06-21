@@ -1,0 +1,23 @@
+[package]
+name = "lcg-service"
+version.workspace = true
+edition = "2021"
+description = "LadybugDB knowledge-graph IPC service binary"
+license = "MIT"
+repository.workspace = true
+
+# Binary name is a public contract (consumed by the liminis app, electron-builder
+# bundling, and cargo-dist installer). Keep it `liminis-context-graph` even though
+# the package is the terser `lcg-service`.
+[[bin]]
+name = "liminis-context-graph"
+path = "src/main.rs"
+
+[dependencies]
+lcg-core = { path = "../core" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
