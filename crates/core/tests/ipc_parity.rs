@@ -1759,3 +1759,71 @@ async fn test_same_as_correction_timestamp_type() {
         );
     }
 }
+
+/// Without an ontology in AppState → -32000 error mentioning relation_types.
+#[tokio::test]
+async fn parity_canonicalize_no_ontology_error_shape() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        60,
+        "knowledge_canonicalize_relations",
+        json!({ "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 60, -32000);
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("relation_type") || msg.contains("ontology"),
+        "error must mention relation_types or ontology: {v}"
+    );
+}
+
+/// With a valid ontology + empty DB + dry_run:true → result has expected shape.
+#[tokio::test]
+async fn parity_canonicalize_relations_shape() {
+    let (db, _dir) = make_db(4);
+    let ontology = Arc::new(Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef {
+            name: "Entity".to_string(),
+            description: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "RELATES_TO".to_string(),
+            description: Some("generic relation".to_string()),
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec!["relat".to_string()],
+        }],
+    });
+    let state = make_state_with_ontology(db, ontology);
+    let v = dispatch_val(
+        61,
+        "knowledge_canonicalize_relations",
+        json!({ "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 61);
+    let r = &v["result"];
+    assert_eq!(r["dry_run"], true, "dry_run must be true: {v}");
+    assert!(
+        r["total_edges"].is_number(),
+        "total_edges must be numeric: {v}"
+    );
+    assert!(
+        r["mapped_count"].is_number(),
+        "mapped_count must be numeric: {v}"
+    );
+    assert!(
+        r["noise_count"].is_number(),
+        "noise_count must be numeric: {v}"
+    );
+    assert!(
+        r["residual_count"].is_number(),
+        "residual_count must be numeric: {v}"
+    );
+}
