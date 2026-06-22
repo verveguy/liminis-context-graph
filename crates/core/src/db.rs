@@ -317,7 +317,7 @@ impl<'db> Conn<'db> {
             }),
         ) {
             eprintln!(
-                "liminis-graph: direct RELATES_TO rel insert failed (non-fatal, Python-schema DB?): {e}"
+                "liminis-context-graph: direct RELATES_TO rel insert failed (non-fatal, Python-schema DB?): {e}"
             );
         }
 
@@ -1339,7 +1339,7 @@ impl<'db> Conn<'db> {
             serde_json::json!({ "uuid": edge_uuid, "invalid_at": invalid_at }),
         ) {
             eprintln!(
-                "liminis-graph: SET invalid_at on RELATES_TO rel unsupported or failed (non-fatal): {e}"
+                "liminis-context-graph: SET invalid_at on RELATES_TO rel unsupported or failed (non-fatal): {e}"
             );
         }
         Ok(())

@@ -64,7 +64,7 @@ fn validate_llm_timestamp(s: Option<String>) -> Option<String> {
         Some(trimmed.to_string())
     } else {
         eprintln!(
-            "liminis-graph: dropping invalid LLM timestamp: {:?}",
+            "liminis-context-graph: dropping invalid LLM timestamp: {:?}",
             trimmed
         );
         None
@@ -127,7 +127,7 @@ pub async fn add_episode(
                     true
                 } else {
                     eprintln!(
-                        "liminis-graph: ontology strict: dropping entity '{}' (type '{}' not in vocabulary)",
+                        "liminis-context-graph: ontology strict: dropping entity '{}' (type '{}' not in vocabulary)",
                         e.name, e.entity_type
                     );
                     false
@@ -139,7 +139,7 @@ pub async fn add_episode(
             }
             if extraction.entities.is_empty() {
                 eprintln!(
-                    "liminis-graph: ontology strict: no entities remain after vocabulary filtering for this chunk"
+                    "liminis-context-graph: ontology strict: no entities remain after vocabulary filtering for this chunk"
                 );
                 // Clear edges to avoid wasted embedding work; endpoints are gone.
                 extraction.edges.clear();
@@ -156,14 +156,14 @@ pub async fn add_episode(
                     Some(rt) if vocab.contains(rt.as_str()) => true,
                     Some(rt) => {
                         eprintln!(
-                            "liminis-graph: ontology strict: dropping edge '{}' → '{}' (relation_type '{}' not in vocabulary)",
+                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (relation_type '{}' not in vocabulary)",
                             e.source_name, e.target_name, rt
                         );
                         false
                     }
                     None => {
                         eprintln!(
-                            "liminis-graph: ontology strict: dropping edge '{}' → '{}' (no relation_type)",
+                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (no relation_type)",
                             e.source_name, e.target_name
                         );
                         false
@@ -183,7 +183,7 @@ pub async fn add_episode(
         extraction.edges.retain(|edge| {
             if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
                 eprintln!(
-                    "liminis-graph: dropping self-referential edge: '{}' → '{}'",
+                    "liminis-context-graph: dropping self-referential edge: '{}' → '{}'",
                     edge.source_name, edge.target_name
                 );
                 return false;
@@ -192,7 +192,7 @@ pub async fn add_episode(
             let dst_ok = entity_name_set.contains(&edge.target_name.trim().to_lowercase());
             if !src_ok || !dst_ok {
                 eprintln!(
-                    "liminis-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_in_list={}, dst_in_list={})",
+                    "liminis-context-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_in_list={}, dst_in_list={})",
                     edge.source_name, edge.target_name, src_ok, dst_ok
                 );
                 return false;
@@ -475,7 +475,7 @@ pub async fn add_episode(
         let ontology_ref = state.ontology.as_deref();
         if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
             eprintln!(
-                "liminis-graph: ontology-sidecar: failed to update {:?}: {} — drift indicator may persist",
+                "liminis-context-graph: ontology-sidecar: failed to update {:?}: {} — drift indicator may persist",
                 root, e
             );
         } else if let Ok(mut guard) = state.ontology_drift.lock() {

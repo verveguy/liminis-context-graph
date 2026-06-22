@@ -111,7 +111,7 @@ impl AppState {
             .and_then(|v| {
                 v.parse::<usize>().map_err(|_| {
                     eprintln!(
-                        "liminis-graph: LCG_WAL_MAX_EVENTS_PER_FILE={v:?} is not a valid usize; using default 10000"
+                        "liminis-context-graph: LCG_WAL_MAX_EVENTS_PER_FILE={v:?} is not a valid usize; using default 10000"
                     );
                 }).ok()
             })
@@ -121,7 +121,7 @@ impl AppState {
             .and_then(|v| {
                 v.parse::<u64>().map_err(|_| {
                     eprintln!(
-                        "liminis-graph: LCG_WAL_MAX_BYTES_PER_FILE={v:?} is not a valid u64; using default 5242880"
+                        "liminis-context-graph: LCG_WAL_MAX_BYTES_PER_FILE={v:?} is not a valid u64; using default 5242880"
                     );
                 }).ok()
             })
@@ -135,7 +135,7 @@ impl AppState {
         let ontology = load_ontology(workspace_root.as_deref()).map(Arc::new);
         if ontology.is_none() {
             eprintln!(
-                "liminis-graph: ontology: none — free-form extraction (restart required to pick up changes)"
+                "liminis-context-graph: ontology: none — free-form extraction (restart required to pick up changes)"
             );
         }
         // For pre-#98 workspaces that have no sidecar file, check whether the DB already
@@ -159,7 +159,7 @@ impl AppState {
         );
         if drifted {
             eprintln!(
-                "liminis-graph: ontology: drift detected — {} — recommend Recreate + re-ingest",
+                "liminis-context-graph: ontology: drift detected — {} — recommend Recreate + re-ingest",
                 drift_summary.as_deref().unwrap_or("unknown change")
             );
         }

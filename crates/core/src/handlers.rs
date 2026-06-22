@@ -1123,7 +1123,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
                         Ok(g) => g,
                         Err(e) => {
                             eprintln!(
-                                "liminis-graph: WAL writer mutex was poisoned — \
+                                "liminis-context-graph: WAL writer mutex was poisoned — \
                                  recovering for Recreate re-init"
                             );
                             e.into_inner()
@@ -1132,7 +1132,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
                     *guard = Some(writer);
                 }
                 Err(e) => eprintln!(
-                    "liminis-graph: WAL re-init failed after Recreate: {e} — \
+                    "liminis-context-graph: WAL re-init failed after Recreate: {e} — \
                      WAL writes disabled until restart"
                 ),
             }
@@ -1300,7 +1300,7 @@ async fn handle_rebuild_from_wal(
                 // will recover on the first search.
                 if !dry_run {
                     if let Err(e) = conn.build_indices_and_constraints() {
-                        eprintln!("liminis-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
+                        eprintln!("liminis-context-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
                     } else {
                         bg_indices_built.store(true, Ordering::Release);
                     }
@@ -1326,7 +1326,7 @@ async fn handle_rebuild_from_wal(
                 let ontology_ref = state.ontology.as_deref();
                 if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref) {
                     eprintln!(
-                        "liminis-graph: ontology-sidecar: WAL replay write failed {:?}: {}",
+                        "liminis-context-graph: ontology-sidecar: WAL replay write failed {:?}: {}",
                         root, e
                     );
                 } else if let Ok(mut guard) = state.ontology_drift.lock() {
@@ -1521,7 +1521,7 @@ async fn handle_rebuild_from_wal(
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
                 if !dry_run {
                     if let Err(e) = conn.build_indices_and_constraints() {
-                        eprintln!("liminis-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
+                        eprintln!("liminis-context-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
                     } else {
                         ib.store(true, Ordering::Release);
                     }
@@ -1569,7 +1569,7 @@ async fn handle_rebuild_from_wal(
                                 if let Err(e) = ontology_sidecar::write_sidecar(root, ontology_ref)
                                 {
                                     eprintln!(
-                                        "liminis-graph: ontology-sidecar: bg WAL replay write failed {:?}: {}",
+                                        "liminis-context-graph: ontology-sidecar: bg WAL replay write failed {:?}: {}",
                                         root, e
                                     );
                                 } else if let Ok(mut guard) = bg_ontology_drift.lock() {

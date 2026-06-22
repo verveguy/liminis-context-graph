@@ -26,7 +26,7 @@ pub fn read_sidecar(workspace_root: &Path) -> Option<OntologySidecar> {
         Ok(s) => Some(s),
         Err(e) => {
             eprintln!(
-                "liminis-graph: ontology-sidecar: failed to parse {:?}: {} — treating as absent",
+                "liminis-context-graph: ontology-sidecar: failed to parse {:?}: {} — treating as absent",
                 path, e
             );
             None

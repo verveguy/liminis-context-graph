@@ -169,7 +169,7 @@ pub fn migrate(conn: &Conn<'_>) {
         .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD relation_type STRING") {
-            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD relation_type STRING: {e} (non-fatal)");
         }
     }
     if conn
@@ -177,7 +177,7 @@ pub fn migrate(conn: &Conn<'_>) {
         .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD episodes STRING[]") {
-            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD episodes STRING[]: {e} (non-fatal)");
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD episodes STRING[]: {e} (non-fatal)");
         }
     }
     if conn
@@ -185,7 +185,7 @@ pub fn migrate(conn: &Conn<'_>) {
         .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP") {
-            eprintln!("liminis-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP: {e} (non-fatal)");
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE RelatesToNode_ ADD expired_at TIMESTAMP: {e} (non-fatal)");
         }
     }
     // MENTIONS rel table gained uuid + created_at to match graphiti's Kuzu schema. The WAL's
@@ -199,7 +199,7 @@ pub fn migrate(conn: &Conn<'_>) {
         .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD uuid STRING") {
-            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD uuid STRING: {e} (non-fatal)");
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE MENTIONS ADD uuid STRING: {e} (non-fatal)");
         }
     }
     if conn
@@ -209,7 +209,7 @@ pub fn migrate(conn: &Conn<'_>) {
         .is_err()
     {
         if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD created_at TIMESTAMP") {
-            eprintln!("liminis-graph: schema migrate: ALTER TABLE MENTIONS ADD created_at TIMESTAMP: {e} (non-fatal)");
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE MENTIONS ADD created_at TIMESTAMP: {e} (non-fatal)");
         }
     }
 }
