@@ -17,8 +17,8 @@ For external contributors, the standard fork-branch-PR flow applies:
 
 ```bash
 # Fork the repo on GitHub, then clone your fork
-gh repo fork verveguy/liminis-graph --clone
-cd liminis-graph
+gh repo fork verveguy/liminis-context-graph --clone
+cd liminis-context-graph
 
 # Create a branch for your change
 git checkout -b fix/my-bug-description

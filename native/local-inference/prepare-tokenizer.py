@@ -76,7 +76,7 @@ _STUB_ETAG = "prepare-tokenizer-stub-etag"
 def default_output(model: str) -> Path:
     # Mirrors HubApi(downloadBase:) expectations: <root>/models/<org>/<model>/
     here = Path(__file__).resolve().parent  # native/local-inference
-    repo_root = here.parent.parent          # liminis-graph repo root
+    repo_root = here.parent.parent          # liminis-context-graph repo root
     return repo_root / "resources" / "models" / "tokenizer" / "models" / model
 
 
