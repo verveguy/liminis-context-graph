@@ -1160,6 +1160,21 @@ impl<'db> Conn<'db> {
         self.count_nodes("RelatesToNode_")
     }
 
+    pub fn count_mentions_edges(&self) -> Result<u64, Error> {
+        let result = self
+            .inner
+            .query("MATCH ()-[r:MENTIONS]->() RETURN count(*)")?;
+        for row in result {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
     /// Returns the `created_at` of the most-recently created Episodic node, or `None` if there
     /// are no episodes yet.
     pub fn get_latest_episode_time(&self) -> Result<Option<String>, Error> {
