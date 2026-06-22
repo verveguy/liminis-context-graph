@@ -8,8 +8,8 @@
 /// WAL lines can resolve their endpoint nodes during replay. See ADR-0049.
 use crate::{
     db::{
-        format_datetime_rfc3339_subsecond, value_as_float_array, value_as_str_list,
-        value_as_string, Conn,
+        format_datetime_rfc3339_subsecond, normalize_ts_str_for_dump, value_as_float_array,
+        value_as_str_list, value_as_string, Conn,
     },
     error::Error,
     wal::WalWriter,
@@ -588,7 +588,10 @@ fn dump_next_episode_edges(
 fn dump_ts_str(v: &lbug::Value) -> String {
     match v {
         lbug::Value::Timestamp(dt) => format_datetime_rfc3339_subsecond(*dt),
-        lbug::Value::String(s) => s.clone(),
+        // Normalize string timestamps (RFC-3339 or space-format read-back) to RFC-3339+µs so
+        // that WAL dump output is always in a consistent format regardless of how lbug returned
+        // the value. Falls through verbatim if the string is not a recognized timestamp format.
+        lbug::Value::String(s) => normalize_ts_str_for_dump(s),
         lbug::Value::Null(_) => String::new(),
         _ => v.to_string(),
     }

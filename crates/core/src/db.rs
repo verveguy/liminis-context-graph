@@ -2055,6 +2055,8 @@ fn format_datetime_iso8601(dt: time::OffsetDateTime) -> String {
 /// Do NOT use this for IPC responses: the Python layer expects the space-format produced by
 /// `format_datetime`. This function is dump-path-only.
 pub(crate) fn format_datetime_rfc3339_subsecond(dt: time::OffsetDateTime) -> String {
+    // Convert to UTC so the hardcoded 'Z' suffix is correct even if dt carries a non-UTC offset.
+    let dt = dt.to_offset(time::UtcOffset::UTC);
     // Kuzu stores TIMESTAMP with microsecond precision; truncate nanoseconds.
     let microseconds = dt.microsecond();
     format!(
@@ -2067,6 +2069,24 @@ pub(crate) fn format_datetime_rfc3339_subsecond(dt: time::OffsetDateTime) -> Str
         dt.second(),
         microseconds
     )
+}
+
+/// Normalizes a timestamp string (RFC-3339 or space-format) to RFC-3339 with microseconds.
+///
+/// Used by the WAL dump path to ensure that TIMESTAMP columns stored as strings (e.g., a
+/// read-back from lbug via `Value::String`) are re-emitted with the same format and precision
+/// as columns returned as `Value::Timestamp`. Falls through verbatim if neither format parses.
+pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
+    if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+    {
+        return format_datetime_rfc3339_subsecond(odt);
+    }
+    const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
+        return format_datetime_rfc3339_subsecond(pdt.assume_utc());
+    }
+    s.to_string()
 }
 
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {
