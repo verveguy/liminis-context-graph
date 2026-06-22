@@ -28,7 +28,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
-    EntityRow,
+    EntityRow, RelatesToEdge,
 };
 use regex::Regex;
 use serde_json::{json, Value};
@@ -1566,4 +1566,173 @@ async fn parity_merge_entities_noop_single_entity() {
         "edges_deduplicated must be numeric: {v}"
     );
     assert!(r["errors"].is_array(), "errors must be an array: {v}");
+}
+
+// ── FR-011, SC-004: RELATES_TO / MENTIONS edge type correctness ───────────────
+
+/// Inserts a RELATES_TO edge with a known `created_at` timestamp, queries it back, and asserts
+/// the returned `created_at` is a non-empty, valid datetime string — not a TYPE_MISMATCH error.
+///
+/// SC-004: zero TYPE_MISMATCH errors produced by direct-write paths.
+#[tokio::test]
+async fn test_relates_to_edge_timestamp_type() {
+    let (db, _dir) = make_db(4);
+
+    // Insert two entities and a RELATES_TO edge directly via the Conn API.
+    // This exercises `insert_relates_to_edge` → `exec_params` → `json_value_for_param`.
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "irt-src-001".to_string(),
+            name: "SourceEntity".to_string(),
+            group_id: "irt-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-03-01T08:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "source entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "irt-dst-001".to_string(),
+            name: "TargetEntity".to_string(),
+            group_id: "irt-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-03-01T08:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "target entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_relates_to_edge(&RelatesToEdge {
+            uuid: "irt-edge-001".to_string(),
+            name: "relates to".to_string(),
+            source_node_uuid: "irt-src-001".to_string(),
+            target_node_uuid: "irt-dst-001".to_string(),
+            group_id: "irt-group".to_string(),
+            fact: "SourceEntity relates to TargetEntity".to_string(),
+            fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+            created_at: "2024-03-01T08:00:02Z".to_string(),
+            valid_at: None,
+            invalid_at: None,
+            attributes: "{}".to_string(),
+            relation_type: None,
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        })
+        .unwrap();
+    }
+
+    // Query the RelatesToNode_ created_at directly via Cypher to verify correct type storage.
+    // A TYPE_MISMATCH during insert would cause lbug to store the wrong type; reading back via
+    // cypher_query() would then return an error string or empty value (SC-004).
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("RelatesToNode_").unwrap(),
+        1,
+        "must have exactly one RelatesToNode_ shadow node"
+    );
+    let rows = conn
+        .cypher_query(
+            "MATCH (rn:RelatesToNode_ {uuid: 'irt-edge-001'}) RETURN rn.created_at",
+        )
+        .expect("querying created_at on RelatesToNode_ must succeed (SC-004)");
+    assert_eq!(rows.len(), 1, "must return exactly one row");
+    let created_at = &rows[0][0];
+    assert!(
+        !created_at.is_empty(),
+        "created_at must be non-empty — TYPE_MISMATCH would cause empty or error string (SC-004): {created_at}"
+    );
+    assert!(
+        created_at.len() >= 10 && (created_at.contains('-') || created_at.contains('T')),
+        "created_at must look like a datetime string, got: {created_at}"
+    );
+}
+
+// ── FR-012: same_as correction timestamp safety ───────────────────────────────
+
+/// Applies a `same_as` correction between two real entities and verifies the correction
+/// completes without error. A TYPE_MISMATCH on any timestamp written by `apply_same_as`
+/// would cause the correction to fail or return an error (FR-012).
+#[tokio::test]
+async fn test_same_as_correction_timestamp_type() {
+    let (db, _dir) = make_db(4);
+
+    // Insert two entities: one canonical, one to be merged as an alias.
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "samc-canonical-001".to_string(),
+            name: "CanonicalPerson".to_string(),
+            group_id: "samc-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-04-01T09:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "the canonical person".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "samc-alias-001".to_string(),
+            name: "AliasPerson".to_string(),
+            group_id: "samc-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-04-01T09:00:01Z".to_string(),
+            name_embedding: vec![0.9, 0.1, 0.0, 0.0],
+            summary: "an alias for the canonical person".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    // Write a corrections YAML with a same_as entry.
+    let workspace_dir = tempfile::TempDir::new().unwrap();
+    let liminis_dir = workspace_dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    let corrections_path = liminis_dir.join("knowledge-corrections.yaml");
+    std::fs::write(
+        &corrections_path,
+        "corrections:\n  - id: samc-001\n    type: same_as\n    canonical: \"CanonicalPerson\"\n    aliases:\n      - \"AliasPerson\"\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_workspace(db.clone(), workspace_dir.path().to_path_buf());
+    let v = dispatch_val(
+        72,
+        "knowledge_apply_corrections",
+        json!({}),
+        state,
+    )
+    .await;
+
+    // The correction must succeed. A TYPE_MISMATCH on any timestamp write would propagate as
+    // an error in the result (FR-012).
+    assert_ok_resp(&v, 72);
+    let r = &v["result"];
+    assert_eq!(
+        r["success"], true,
+        "same_as correction must succeed without TYPE_MISMATCH (FR-012): {v}"
+    );
+    assert!(
+        r["errors"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "same_as correction must produce zero errors: {v}"
+    );
+
+    // Verify the canonical entity still has a valid created_at after the correction.
+    let canonical = db
+        .connect()
+        .unwrap()
+        .get_entity_by_uuid("samc-canonical-001")
+        .expect("canonical entity must be queryable after same_as correction");
+    if let Some(e) = canonical {
+        let created_at = &e.created_at;
+        assert!(
+            !created_at.is_empty() && created_at.len() >= 10,
+            "canonical entity created_at must be a valid datetime after correction: {created_at}"
+        );
+    }
 }
