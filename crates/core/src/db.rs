@@ -1035,6 +1035,26 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// Counts Entity nodes whose lowercased name matches the given name (case-insensitive)
+    /// within a group. Primarily used in tests for asserting dedup correctness.
+    pub fn count_entities_by_name_ci(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<usize, Error> {
+        let lower_name = name.trim().to_lowercase();
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
+             RETURN count(e)",
+            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|r| value_as_usize(&r[0]))
+            .unwrap_or(0))
+    }
+
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
         let rows = self.query_params(
