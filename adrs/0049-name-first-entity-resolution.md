@@ -36,13 +36,22 @@ The ordering is: name lookup → embedding lookup (only if name lookup misses) �
 - Case variants ("brett" vs "Brett") resolve correctly (FR-001 edge case).
 - Resolution is durable across service restarts because it reads from the persisted lbug graph,
   not from in-process cache (FR-003, SC-003).
-- Name lookup is O(1) index-scan in lbug; total cost per entity remains ≤ 1 name query +
-  1 embedding query (FR-009).
-- Empty-name entities bypass the name lookup (a whitespace-only trim guard) and fall through
-  to the embedding path, then insert as-is if no embedding candidate is found.
+- Total cost per entity remains ≤ 1 name query + 1 embedding query (FR-009).
+- Empty-name entities (whitespace-only after trim) are dropped via `retain` before Phase B and
+  are never inserted into the graph, per the spec edge case.
+- When historical duplicates exist, `get_entity_by_name_ci` uses `ORDER BY e.created_at ASC,
+  e.uuid ASC` to deterministically pick the oldest node, making successive calls stable.
 
 ### Negative / Residual risks
 
+- **Full-table scan on name lookup**: Kuzu (and therefore lbug) does not support
+  function-based indexes such as `CREATE INDEX ON Entity(lower(name))`. The
+  `lower(e.name) = $lower_name` WHERE clause therefore causes a full scan over all Entity
+  nodes in the group. For groups below `hybrid_threshold` (default 1 000) the brute-force
+  embedding path already does an in-Rust full scan, so this is not a regression. For very
+  large groups the name-lookup cost is bounded by the group's Entity count (same as a property
+  scan). A `name_lower` stored column with a standard Kuzu property index is the path to O(1)
+  name lookups; that schema migration is deferred to a follow-up issue.
 - **TOCTOU race**: Two concurrent `add_episode` calls for the same entity name will both see
   zero existing matches (Phase B runs without the write lock), and both will commit an insert
   in Phase C. This creates duplicates under concurrent ingest. Strict serializability under
