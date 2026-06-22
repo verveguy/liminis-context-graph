@@ -1016,7 +1016,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes LIMIT 1",
+             e.summary, e.attributes ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
             serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
         )?;
         if let Some(row) = rows.into_iter().next() {
