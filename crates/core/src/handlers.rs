@@ -1995,7 +1995,7 @@ async fn handle_reprocess_entity_types(
 /// - `embedding_threshold: f32` (default 0.7) — cosine similarity threshold for embedding fallback.
 ///
 /// Callers must add `knowledge_canonicalize_relations` to `service_protocol.py` in the
-/// liminis-app repo (see FR-014 note in spec #163).
+/// liminis-app repo (spec #163).
 async fn handle_canonicalize_relations(
     req: &IpcRequest,
     state: Arc<AppState>,

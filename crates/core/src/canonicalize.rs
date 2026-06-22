@@ -133,13 +133,14 @@ pub fn is_noise_edge(s: &str) -> bool {
 
 /// Classifies a single edge lexically using the ontology index.
 ///
-/// Order of checks:
+/// Order of checks (FR-002: match against both `name` and `relation_type`):
 /// 1. Noise pattern on `name` field → Noise
 /// 2. Noise pattern on `relation_type` field → Noise
-/// 3. Normalized `name` in exact map → Mapped
+/// 3. Normalized `name` in exact map (canonical name or alias) → Mapped
 /// 4. Any keyword matches a substring of the lowercase normalized name → Mapped
 /// 5. `relation_type` is already a canonical name → Mapped (idempotent)
-/// 6. → Residual
+/// 6. Normalized `relation_type` in exact map (alias) or keyword match → Mapped
+/// 7. → Residual
 pub fn classify_edge_lexically(
     name: &str,
     current_rt: Option<&str>,
@@ -169,10 +170,23 @@ pub fn classify_edge_lexically(
         }
     }
 
-    // Current relation_type is already a known canonical name (post-#94 ingestion)
+    // Secondary signal: check relation_type field (FR-002 — match on name *or* relation_type).
+    // Covers edges where name is uninformative but relation_type was set to an alias by an
+    // earlier pass, or the extractor used a variant that normalized to an alias form.
     if let Some(rt) = current_rt {
         if idx.canonical_names.contains(rt) {
+            // Already canonical — idempotent (post-#94 ingestion path)
             return EdgeClass::Mapped(rt.to_string());
+        }
+        let rt_normalized = normalize_relation_type(rt);
+        if let Some(canonical) = idx.exact.get(&rt_normalized) {
+            return EdgeClass::Mapped(canonical.clone());
+        }
+        let rt_lower = rt_normalized.to_lowercase();
+        for (kw, canonical) in &idx.keywords {
+            if rt_lower.contains(kw.as_str()) {
+                return EdgeClass::Mapped(canonical.clone());
+            }
         }
     }
 
@@ -390,38 +404,45 @@ pub async fn canonicalize_relations(
         let _write_guard = state.write_lock.write().await;
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let conn = db_d.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            let mut exec_result: Result<(), Error> = Ok(());
             for (uuid, current_rt, class) in &batch_data {
-                match class {
+                let res = match class {
                     EdgeClass::Mapped(canonical) => {
                         // Idempotency: skip if already set to the target value
                         if current_rt.as_deref() == Some(canonical.as_str()) {
-                            continue;
+                            Ok(())
+                        } else {
+                            conn.exec_params(
+                                "MATCH (n:RelatesToNode_ {uuid: $uuid}) SET n.relation_type = $rt",
+                                json!({ "uuid": uuid, "rt": canonical }),
+                            )
                         }
-                        conn.exec_params(
-                            "MATCH (n:RelatesToNode_ {uuid: $uuid}) SET n.relation_type = $rt",
-                            json!({ "uuid": uuid, "rt": canonical }),
-                        )?;
                     }
                     EdgeClass::Residual => {
                         // Idempotency: skip if already UNCLASSIFIED
                         if current_rt.as_deref() == Some("UNCLASSIFIED") {
-                            continue;
+                            Ok(())
+                        } else {
+                            conn.exec_params(
+                                "MATCH (n:RelatesToNode_ {uuid: $uuid}) SET n.relation_type = $rt",
+                                json!({ "uuid": uuid, "rt": "UNCLASSIFIED" }),
+                            )
                         }
-                        conn.exec_params(
-                            "MATCH (n:RelatesToNode_ {uuid: $uuid}) SET n.relation_type = $rt",
-                            json!({ "uuid": uuid, "rt": "UNCLASSIFIED" }),
-                        )?;
                     }
-                    EdgeClass::Noise => {
-                        conn.exec_params(
-                            "MATCH (n:RelatesToNode_ {uuid: $uuid}) DETACH DELETE n",
-                            json!({ "uuid": uuid }),
-                        )?;
-                    }
+                    EdgeClass::Noise => conn.exec_params(
+                        "MATCH (n:RelatesToNode_ {uuid: $uuid}) DETACH DELETE n",
+                        json!({ "uuid": uuid }),
+                    ),
+                };
+                if res.is_err() {
+                    exec_result = res;
+                    break;
                 }
             }
+            // Always flush whatever succeeded before any failure — the DB already committed
+            // those mutations; skipping the WAL flush would leave DB/WAL out of sync.
             wal_exec::wal_flush_ungrouped(&wal_writer, conn.drain_mutations(), &sink);
-            Ok(())
+            exec_result
         })
         .await??;
         drop(_write_guard);
@@ -595,6 +616,35 @@ mod tests {
         match class {
             EdgeClass::Mapped(t) => assert_eq!(t, "AUTHORED"),
             _ => panic!("expected Mapped(AUTHORED)"),
+        }
+    }
+
+    // ── relation_type alias/keyword as secondary signal (FR-002) ─────────────
+
+    #[test]
+    fn test_classify_via_relation_type_alias() {
+        let ontology = make_ontology_with_rules();
+        let idx = build_lexical_index(&ontology);
+
+        // name has no signal; relation_type is an alias → should be Mapped via secondary path
+        let class = classify_edge_lexically("SOME_UNRECOGNIZED_PREDICATE", Some("WROTE"), &idx);
+        match class {
+            EdgeClass::Mapped(t) => assert_eq!(t, "AUTHORED"),
+            _ => panic!("expected Mapped(AUTHORED) via relation_type alias, got {class:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_via_relation_type_keyword() {
+        let ontology = make_ontology_with_rules();
+        let idx = build_lexical_index(&ontology);
+
+        // name has no signal; relation_type contains a keyword when normalized/lowercased
+        let class =
+            classify_edge_lexically("SOME_UNRECOGNIZED_PREDICATE", Some("WAS_EMPLOYED_BY"), &idx);
+        match class {
+            EdgeClass::Mapped(t) => assert_eq!(t, "AFFILIATED_WITH"),
+            _ => panic!("expected Mapped(AFFILIATED_WITH) via relation_type keyword, got {class:?}"),
         }
     }
 }
