@@ -235,7 +235,7 @@ async fn test_empty_name_entity_skipped() {
     let ext = ConfigurableExtractor::new(vec![empty_entity]);
     let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
 
-    // Should not crash, should not create a node with an empty/whitespace name.
+    // Should not crash and must not create a node for a whitespace-only name.
     episode::add_episode(
         Arc::clone(&state),
         "ep-a",
@@ -250,9 +250,13 @@ async fn test_empty_name_entity_skipped() {
     .await
     .unwrap();
 
-    // The empty-name entity may be inserted (empty name is not filtered at the ingest level,
-    // only at the resolution level), but no crash should occur.
-    // Primary assertion: no panic above.
+    // Empty-named entities are dropped before Phase B; no entity node should be created.
+    let conn = db.connect().unwrap();
+    let count = conn.entity_count_in_group(GROUP).unwrap();
+    assert_eq!(
+        count, 0,
+        "empty-name entity must be dropped at ingest, got {count} nodes"
+    );
 }
 
 // ── FR-008: embedding-based dedup for high-similarity name variants ────────────

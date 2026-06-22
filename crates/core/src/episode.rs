@@ -182,6 +182,11 @@ pub async fn add_episode(
         }
     }
 
+    // Drop entities with empty or whitespace-only names before edge validation so that
+    // any edges referencing them are also dropped as unresolvable (spec edge case: treat
+    // empty-name extraction as a failure and do not create a node for it).
+    extraction.entities.retain(|e| !e.name.trim().is_empty());
+
     // Post-extraction edge validation: drop self-referential and unresolvable edges.
     {
         let entity_name_set: std::collections::HashSet<String> = extraction
@@ -267,11 +272,6 @@ pub async fn add_episode(
         let mut out = Vec::with_capacity(entity_names_b.len());
         for (i, name) in entity_names_b.iter().enumerate() {
             let trimmed = name.trim();
-            // Empty names skip resolution; Phase C will insert them as-is.
-            if trimmed.is_empty() {
-                out.push(PhaseBResult::EmbeddingCandidate { candidate: None });
-                continue;
-            }
             // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
             if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &gid_b)? {
                 out.push(PhaseBResult::NameMatch { existing });
