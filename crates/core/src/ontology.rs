@@ -39,6 +39,12 @@ struct RelationTypeRaw {
     source_type: Option<String>,
     #[serde(default)]
     target_type: Option<String>,
+    /// Exact SCREAMING_SNAKE_CASE name variants that map to this canonical type.
+    #[serde(default)]
+    aliases: Option<Vec<String>>,
+    /// Lowercase substring keywords — if any keyword appears in the normalized name, maps here.
+    #[serde(default)]
+    keywords: Option<Vec<String>>,
 }
 
 // ── Runtime types ─────────────────────────────────────────────────────────────
@@ -70,6 +76,10 @@ pub struct RelationTypeDef {
     pub description: Option<String>,
     pub source_type: Option<String>,
     pub target_type: Option<String>,
+    /// Exact SCREAMING_SNAKE_CASE name variants that map to this canonical type.
+    pub aliases: Vec<String>,
+    /// Lowercase substring keywords for fuzzy name matching.
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,11 +291,27 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
             }
             let source_type = raw.source_type.map(|s| normalize_entity_type(&s));
             let target_type = raw.target_type.map(|s| normalize_entity_type(&s));
+            let aliases: Vec<String> = raw
+                .aliases
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| normalize_relation_type(&a))
+                .filter(|a| !a.is_empty())
+                .collect();
+            let keywords: Vec<String> = raw
+                .keywords
+                .unwrap_or_default()
+                .into_iter()
+                .map(|k| k.to_lowercase())
+                .filter(|k| !k.is_empty())
+                .collect();
             Some(RelationTypeDef {
                 name: normalized,
                 description: raw.description,
                 source_type,
                 target_type,
+                aliases,
+                keywords,
             })
         })
         .collect();
@@ -336,12 +362,18 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
         .relation_types
         .iter()
         .map(|r| {
+            let mut aliases = r.aliases.clone();
+            aliases.sort_unstable();
+            let mut keywords = r.keywords.clone();
+            keywords.sort_unstable();
             format!(
-                "{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}",
                 r.name,
                 r.source_type.as_deref().unwrap_or(""),
                 r.target_type.as_deref().unwrap_or(""),
-                r.description.as_deref().unwrap_or("")
+                r.description.as_deref().unwrap_or(""),
+                aliases.join("\0"),
+                keywords.join("\0"),
             )
         })
         .collect();
@@ -538,6 +570,8 @@ relation_types:
                     source_type: src.map(|s| s.to_string()),
                     target_type: tgt.map(|s| s.to_string()),
                     description: desc.map(|s| s.to_string()),
+                    aliases: vec![],
+                    keywords: vec![],
                 })
                 .collect(),
         }

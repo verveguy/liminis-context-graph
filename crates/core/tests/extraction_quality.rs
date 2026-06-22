@@ -268,6 +268,8 @@ fn edge_prompt_with_relation_types_injects_fact_types() {
             description: Some("person authored a paper".to_string()),
             source_type: Some("Person".to_string()),
             target_type: Some("Paper".to_string()),
+            aliases: vec![],
+            keywords: vec![],
         }],
     };
     let prompt = prompts::edge_system_prompt(Some(&onto));
