@@ -1002,6 +1002,39 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// Returns an EntityRow by case-insensitive, whitespace-normalised name match.
+    ///
+    /// Input name is trimmed and lowercased in Rust before being passed as the `$lower_name`
+    /// parameter. The query also applies `lower()` to the stored name so that entities
+    /// inserted with mixed-case names are found. Returns the first match if multiple exist.
+    pub fn get_entity_by_name_ci(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        let lower_name = name.trim().to_lowercase();
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes LIMIT 1",
+            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
+        )?;
+        if let Some(row) = rows.into_iter().next() {
+            Ok(Some(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
         let rows = self.query_params(
