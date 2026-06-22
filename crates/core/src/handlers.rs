@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{AppState, OntologyDriftState},
-    corrections,
+    canonicalize, corrections,
     db::Db,
     episode,
     error::Error,
@@ -168,6 +168,9 @@ async fn handle(
         "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
         "knowledge_merge_entities" => handle_merge_entities(req, state).await,
         "knowledge_reprocess_entity_types" => handle_reprocess_entity_types(req, state).await,
+        "knowledge_canonicalize_relations" => {
+            handle_canonicalize_relations(req, state, progress_tx).await
+        }
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
 }
@@ -1981,6 +1984,51 @@ async fn handle_reprocess_entity_types(
         "reclassified_count": reclassified,
         "group_id": group_id,
     }))
+}
+
+// ── Relation canonicalization handler ────────────────────────────────────────
+
+/// Runs the relation canonicalization pass over all edges in the workspace graph.
+///
+/// Parameters (from req.params):
+/// - `dry_run: bool` (default false) — report coverage without mutating the graph or WAL.
+/// - `embedding_threshold: f32` (default 0.7) — cosine similarity threshold for embedding fallback.
+///
+/// Callers must add `knowledge_canonicalize_relations` to `service_protocol.py` in the
+/// liminis-app repo (see FR-014 note in spec #163).
+async fn handle_canonicalize_relations(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    // FR-013: fail fast if no ontology with relation_types is loaded
+    let ontology = state
+        .ontology
+        .as_ref()
+        .ok_or_else(|| {
+            Error::Ipc(
+                "knowledge_canonicalize_relations requires a workspace ontology with relation_types \
+                 defined in .lcg/ontology.yaml"
+                    .to_string(),
+            )
+        })?
+        .clone();
+    if !ontology.has_relation_types() {
+        return Err(Error::Ipc(
+            "knowledge_canonicalize_relations requires at least one relation_type in the ontology"
+                .to_string(),
+        ));
+    }
+
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    let embedding_threshold = req.params["embedding_threshold"].as_f64().map(|v| v as f32);
+
+    let params = canonicalize::CanonicalizeParams {
+        dry_run,
+        embedding_threshold,
+    };
+
+    canonicalize::canonicalize_relations(state, params, progress_tx, ontology).await
 }
 
 // ── Recovery handler ─────────────────────────────────────────────────────────
