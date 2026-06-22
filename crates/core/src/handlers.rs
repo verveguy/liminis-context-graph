@@ -1180,6 +1180,15 @@ async fn handle_dump_wal(req: &IpcRequest, state: Arc<AppState>) -> Result<Value
     let target_dir_c = target_dir.clone();
     let group_id_c = group_id.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<crate::dump::DumpResult, Error> {
+        // Authoritative FR-004 re-check under the write lock to close the TOCTOU window between
+        // the pre-lock fast-fail above and actual WalWriter creation.
+        if target_dir_c.exists() && has_jsonl_files(&target_dir_c) {
+            return Err(Error::Ipc(format!(
+                "knowledge_dump_wal: target_dir '{}' already contains .jsonl files; \
+                 supply a clean path or remove existing files first",
+                target_dir_c.display()
+            )));
+        }
         let mut writer = WalWriter::new(&target_dir_c, max_events, 0).map_err(|e| {
             Error::Ipc(format!(
                 "knowledge_dump_wal: failed to create WalWriter: {e}"
