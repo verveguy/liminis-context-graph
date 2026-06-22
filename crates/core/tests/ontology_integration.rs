@@ -296,6 +296,8 @@ async fn strict_mode_relation_type_drops_non_matching_edges() {
             description: None,
             source_type: None,
             target_type: None,
+            aliases: vec![],
+            keywords: vec![],
         }],
     };
     let state = make_state(db, Some(ontology));
@@ -347,6 +349,8 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
             description: None,
             source_type: None,
             target_type: None,
+            aliases: vec![],
+            keywords: vec![],
         }],
     };
     let state = make_state(db, Some(ontology));
@@ -416,6 +420,8 @@ fn drift_detected_after_relation_type_rename() {
             description: None,
             source_type: None,
             target_type: None,
+            aliases: vec![],
+            keywords: vec![],
         }],
     };
     let o2 = Ontology {
@@ -429,6 +435,8 @@ fn drift_detected_after_relation_type_rename() {
             description: None,
             source_type: None,
             target_type: None,
+            aliases: vec![],
+            keywords: vec![],
         }],
     };
     assert_ne!(
