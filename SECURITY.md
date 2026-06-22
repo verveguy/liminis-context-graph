@@ -17,13 +17,13 @@ This project is pre-1.0. The latest commit on `main` is the only supported line.
 
 Use GitHub's private vulnerability reporting to disclose findings confidentially:
 
-**[Report a vulnerability](https://github.com/verveguy/liminis-graph/security/advisories/new)**
+**[Report a vulnerability](https://github.com/verveguy/liminis-context-graph/security/advisories/new)**
 
 This creates a private advisory visible only to the maintainer and any collaborators you add.
 
 ### Fallback: email
 
-If the GitHub advisory form is unavailable or you prefer email, contact the maintainer directly at **bpjadam@gmail.com** with "[SECURITY] liminis-graph" in the subject line.
+If the GitHub advisory form is unavailable or you prefer email, contact the maintainer directly at **bpjadam@gmail.com** with "[SECURITY] liminis-context-graph" in the subject line.
 
 ## Response time
 

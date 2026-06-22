@@ -1,4 +1,4 @@
-# liminis-graph — Claude guidance
+# liminis-context-graph — Claude guidance
 
 ## Specs use Spec Kit (NON-NEGOTIABLE)
 
@@ -24,9 +24,9 @@ Two rules govern how changes land in this repo:
 **How to work in a worktree:**
 
 ```bash
-# from the main checkout (~/dev/liminis-project/liminis-graph)
-git worktree add ../liminis-graph-worktrees/<short-slug> -b feat/<short-slug> main
-cd ../liminis-graph-worktrees/<short-slug>
+# from the main checkout (~/dev/liminis-project/liminis-context-graph)
+git worktree add ../liminis-context-graph-worktrees/<short-slug> -b feat/<short-slug> main
+cd ../liminis-context-graph-worktrees/<short-slug>
 # ... edit, test, commit ...
 cargo fmt --all
 cargo test
@@ -35,11 +35,11 @@ git push -u origin feat/<short-slug>
 gh pr create --fill
 # after merge, return to main checkout to clean up:
 cd -
-git worktree remove ../liminis-graph-worktrees/<short-slug>
+git worktree remove ../liminis-context-graph-worktrees/<short-slug>
 git branch -D feat/<short-slug>
 ```
 
-Worktrees live as siblings to the main checkout under `../liminis-graph-worktrees/<short-slug>/`, not inside the repo. Always run `cargo fmt --all && cargo test && cargo clippy --all-targets -- -D warnings` from inside the worktree before pushing — see the Rust pre-commit checks section below for the detailed gate behavior.
+Worktrees live as siblings to the main checkout under `../liminis-context-graph-worktrees/<short-slug>/`, not inside the repo. Always run `cargo fmt --all && cargo test && cargo clippy --all-targets -- -D warnings` from inside the worktree before pushing — see the Rust pre-commit checks section below for the detailed gate behavior.
 
 The Spec Kit threshold and the worktree threshold are the same: features go through Spec Kit + Fabrik; everything else still gets a worktree + PR.
 

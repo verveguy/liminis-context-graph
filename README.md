@@ -24,7 +24,7 @@ A purpose-built Rust knowledge-graph service over [LadybugDB](https://github.com
 The fastest way to get `liminis-context-graph` — no Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-graph/releases/latest/download/liminis-context-graph-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/liminis-context-graph-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
@@ -44,7 +44,7 @@ For consumers (e.g. Electron apps or CI pipelines) that need to download a pinne
 **Download a specific tagged version:**
 
 ```sh
-curl -L https://github.com/verveguy/liminis-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
+curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
   -o liminis-context-graph-aarch64-apple-darwin.tar.gz
 ```
 
@@ -59,7 +59,7 @@ The archive inner directory is `liminis-context-graph-aarch64-apple-darwin/` and
 
 > **Checksum verification**: Each release includes a `.sha256` companion file. Download it and verify:
 > ```sh
-> curl -L https://github.com/verveguy/liminis-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256 \
+> curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256 \
 >   -o liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256
 > shasum -a 256 -c liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256
 > ```
@@ -73,13 +73,13 @@ The archive inner directory is `liminis-context-graph-aarch64-apple-darwin/` and
 **Discover the latest release tag programmatically** (requires `jq`; available by default on most CI images):
 
 ```sh
-curl -s https://api.github.com/repos/verveguy/liminis-graph/releases/latest | jq -r '.tag_name'
+curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
 ```
 
 If `jq` is not available, use `python3` instead:
 
 ```sh
-curl -s https://api.github.com/repos/verveguy/liminis-graph/releases/latest \
+curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])"
 ```
 
@@ -147,7 +147,7 @@ specs/                   # feature specifications
 
 ## Ontology
 
-liminis-graph supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
+liminis-context-graph supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
 
 ### File location
 
@@ -278,4 +278,4 @@ Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to f
 
 ## Security
 
-To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/verveguy/liminis-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.
+To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/verveguy/liminis-context-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.

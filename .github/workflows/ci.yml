@@ -55,7 +55,7 @@ jobs:
             target/release/deps/liblbug-*
 
       # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
-      # /home/runner/work/liminis-graph/liminis-graph/ — stable on GHA ubuntu-latest
+      # /home/runner/work/liminis-context-graph/liminis-context-graph/ — stable on GHA ubuntu-latest
       # but not portable to self-hosted runners with non-standard workspace paths.
       # Note: lbug 0.17.0+ prebuilt is a self-contained fat bundle; LBUG_BUILD_FROM_SOURCE
       # is no longer needed. This step just populates the cache so the test job gets a hit.

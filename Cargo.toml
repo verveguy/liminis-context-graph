@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
-repository = "https://github.com/verveguy/liminis-graph"
+repository = "https://github.com/verveguy/liminis-context-graph"
 
 # Strip debuginfo from dev/test builds. Linking the six integration-test
 # binaries against the full lbug static archive (+ third-party deps) with
