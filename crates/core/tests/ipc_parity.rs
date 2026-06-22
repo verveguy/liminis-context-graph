@@ -28,6 +28,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
+    EntityRow,
 };
 use regex::Regex;
 use serde_json::{json, Value};
@@ -1460,4 +1461,109 @@ async fn parity_dump_wal_empty_graph() {
         r["target_dir"].is_string(),
         "target_dir must be a string: {v}"
     );
+}
+
+// ── knowledge_merge_entities ──────────────────────────────────────────────────
+
+/// Validation error: neither canonical_uuid nor canonical_name provided → success: false.
+#[tokio::test]
+async fn parity_merge_entities_missing_canonical() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        55,
+        "knowledge_merge_entities",
+        json!({ "merge_all_by_name": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 55);
+    let r = &v["result"];
+    assert_eq!(
+        r["success"], false,
+        "must fail when no canonical provided: {v}"
+    );
+    assert!(
+        r["errors"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "errors must be non-empty: {v}"
+    );
+}
+
+/// Canonical not found on empty graph → success: false with canonical error.
+#[tokio::test]
+async fn parity_merge_entities_canonical_not_found() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        56,
+        "knowledge_merge_entities",
+        json!({ "canonical_name": "Brett", "merge_all_by_name": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 56);
+    let r = &v["result"];
+    assert_eq!(
+        r["success"], false,
+        "must fail when canonical not found: {v}"
+    );
+    assert!(
+        r["errors"]
+            .as_array()
+            .map(|a| a
+                .iter()
+                .any(|e| e.as_str().map(|s| s.contains("not found")).unwrap_or(false)))
+            .unwrap_or(false),
+        "error must mention 'not found': {v}"
+    );
+}
+
+/// Single entity with given name → merged_count: 0, success: true (noop through handler).
+#[tokio::test]
+async fn parity_merge_entities_noop_single_entity() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "brett-parity-001".to_string(),
+            name: "Brett".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state(db);
+    let v = dispatch_val(
+        57,
+        "knowledge_merge_entities",
+        json!({ "canonical_name": "Brett", "merge_all_by_name": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 57);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "single entity must succeed: {v}");
+    assert_eq!(r["merged_count"], 0, "nothing to merge: {v}");
+    assert_eq!(r["skipped"], 0, "nothing skipped: {v}");
+    assert!(
+        r["canonical_uuid"].is_string(),
+        "canonical_uuid must be present: {v}"
+    );
+    assert!(
+        r["edges_rewritten"].is_number(),
+        "edges_rewritten must be numeric: {v}"
+    );
+    assert!(
+        r["edges_deduplicated"].is_number(),
+        "edges_deduplicated must be numeric: {v}"
+    );
+    assert!(r["errors"].is_array(), "errors must be an array: {v}");
 }
