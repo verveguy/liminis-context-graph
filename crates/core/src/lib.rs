@@ -30,7 +30,9 @@ pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;
-pub use extractor::{AnthropicExtractor, ConfigurableExtractor, ExtractOptions, Extractor, MockExtractor};
+pub use extractor::{
+    AnthropicExtractor, ConfigurableExtractor, ExtractOptions, Extractor, MockExtractor,
+};
 pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;
 pub use ontology::Ontology;

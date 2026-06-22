@@ -664,12 +664,7 @@ impl Extractor for ConfigurableExtractor {
         &'a self,
         _opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
-        let result = self
-            .queue
-            .lock()
-            .unwrap()
-            .pop_front()
-            .unwrap_or_default();
+        let result = self.queue.lock().unwrap().pop_front().unwrap_or_default();
         Box::pin(async move { Ok(result) })
     }
 
