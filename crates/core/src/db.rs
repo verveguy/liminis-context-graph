@@ -1104,6 +1104,47 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
+    /// Returns ALL entities with the given `name` in `group_id`, ordered by
+    /// `created_at ASC, uuid ASC`. Unlike `get_entity_by_name`, this method has no `LIMIT 1`
+    /// and returns every matching node — used by `merge_entities` for canonical selection
+    /// and alias expansion.
+    pub fn get_entities_by_name_all(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes ORDER BY e.created_at ASC, e.uuid ASC",
+            serde_json::json!({ "name": name, "gid": group_id }),
+        )?;
+        let mut result = Vec::new();
+        for row in rows {
+            result.push(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            });
+        }
+        Ok(result)
+    }
+
+    /// Sets `created_at` on the Entity with `uuid` to `created_at`.
+    /// Must use `timestamp($created_at)` in Cypher because lbug requires the `timestamp()`
+    /// function to accept the stored "YYYY-MM-DD HH:MM:SS" format in a SET assignment.
+    pub fn update_entity_created_at(&self, uuid: &str, created_at: &str) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($created_at)",
+            serde_json::json!({ "uuid": uuid, "created_at": created_at }),
+        )
+    }
+
     /// Batch-fetches episode info for a set of entity UUIDs via the MENTIONS relationship.
     ///
     /// Returns a map from entity UUID → (episode_uuids, source_descriptions), positionally
