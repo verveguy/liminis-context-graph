@@ -6,8 +6,8 @@
 //!
 //! **Module split rule** (follow this when adding future legacy-compat fixes):
 //! - Transforms that rewrite the Cypher string or reshape the params map → this module
-//! - Transforms that change only how a param *value* is formatted as a Cypher literal →
-//!   `replay.rs::json_to_cypher_literal` (e.g., string escaping, RFC-3339 timestamp literals)
+//! - Transforms that change only how a param *value* is typed/formatted →
+//!   `db.rs::json_value_for_param` (e.g., RFC-3339 and space-format timestamp coercion)
 //!
 //! Pipeline order in `replay.rs`: `strip_vecf32` → `expand_bulk_property_set` → `interpolate_params`
 
