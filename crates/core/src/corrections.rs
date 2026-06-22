@@ -80,6 +80,46 @@ pub struct ReprocessResult {
     pub error: Option<String>,
 }
 
+// ── Merge-entities types ──────────────────────────────────────────────────────
+
+#[derive(Debug, Default)]
+pub struct MergeEntitiesParams {
+    pub canonical_uuid: Option<String>,
+    pub canonical_name: Option<String>,
+    pub alias_uuids: Vec<String>,
+    pub alias_names: Vec<String>,
+    pub merge_all_by_name: bool,
+    pub group_id: String,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct AliasInfo {
+    pub uuid: String,
+    pub name: String,
+    pub active_edges: usize,
+    pub duplicate_edges: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct MergePlan {
+    pub aliases: Vec<AliasInfo>,
+    pub total_edges_rewritten: usize,
+    pub total_edges_collapsed: usize,
+}
+
+#[derive(Debug, Default)]
+pub struct MergeEntitiesResult {
+    pub success: bool,
+    pub canonical_uuid: String,
+    pub merged_count: usize,
+    pub skipped: usize,
+    pub edges_rewritten: usize,
+    pub edges_deduplicated: usize,
+    pub errors: Vec<String>,
+    pub plan: Option<MergePlan>,
+}
+
 // ── File location ─────────────────────────────────────────────────────────────
 
 pub fn corrections_file_path(workspace_root: &Path) -> PathBuf {
@@ -634,6 +674,324 @@ pub fn apply_entity_type_labels(conn: &Conn, updates: &[(String, String)]) -> Re
         count += 1;
     }
     Ok(count)
+}
+
+// ── merge_entities ────────────────────────────────────────────────────────────
+
+/// Inner edge-rewrite loop for a single alias → canonical merge.
+///
+/// Returns `(edges_rewritten, edges_deduplicated, self_loops_dropped)`.
+/// In `dry_run` mode, reads DB state to compute counts but does not mutate anything.
+fn merge_entities_inner(
+    conn: &Conn,
+    canonical_uuid: &str,
+    alias: &EntityRow,
+    ts: &str,
+    dry_run: bool,
+) -> Result<(usize, usize, usize), Error> {
+    let alias_uuid = &alias.uuid;
+    let alias_edges = conn.get_full_edges_for_entity(alias_uuid)?;
+
+    let mut rewritten = 0usize;
+    let mut deduped = 0usize;
+    let mut self_loops = 0usize;
+
+    for old_edge in &alias_edges {
+        if old_edge.invalid_at.is_some() {
+            continue; // skip already-invalid edges (FR-011)
+        }
+
+        let new_src = if old_edge.source_node_uuid == *alias_uuid {
+            canonical_uuid.to_string()
+        } else {
+            old_edge.source_node_uuid.clone()
+        };
+        let new_dst = if old_edge.target_node_uuid == *alias_uuid {
+            canonical_uuid.to_string()
+        } else {
+            old_edge.target_node_uuid.clone()
+        };
+
+        // Drop self-loop edges that would arise from merging two ends of an existing edge (FR-010)
+        if new_src == new_dst {
+            if !dry_run {
+                conn.invalidate_edge(&old_edge.uuid, ts)?;
+            }
+            self_loops += 1;
+            continue;
+        }
+
+        // Dedup: skip if canonical already has this directed edge (FR-009)
+        if conn.has_directed_edge(&new_src, &new_dst, &old_edge.name)? {
+            if !dry_run {
+                conn.invalidate_edge(&old_edge.uuid, ts)?;
+            }
+            deduped += 1;
+            continue;
+        }
+
+        if !dry_run {
+            let new_edge = RelatesToEdge {
+                uuid: Uuid::new_v4().to_string(),
+                name: old_edge.name.clone(),
+                source_node_uuid: new_src,
+                target_node_uuid: new_dst,
+                group_id: old_edge.group_id.clone(),
+                fact: old_edge.fact.clone(),
+                fact_embedding: old_edge.fact_embedding.clone(),
+                created_at: old_edge.created_at.clone(),
+                valid_at: old_edge.valid_at.clone(),
+                invalid_at: None,
+                attributes: old_edge.attributes.clone(),
+                relation_type: old_edge.relation_type.clone(),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            };
+            conn.insert_relates_to_edge(&new_edge)?;
+            conn.invalidate_edge(&old_edge.uuid, ts)?;
+        }
+        rewritten += 1;
+    }
+
+    Ok((rewritten, deduped, self_loops))
+}
+
+/// Merges one or more alias entities into a canonical entity.
+///
+/// Resolves the canonical by UUID (preferred) or by name (earliest `created_at, uuid`).
+/// Alias sets are resolved from explicit UUIDs, explicit names, and/or `merge_all_by_name`.
+/// In dry-run mode, returns the merge plan without mutating the graph.
+pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> MergeEntitiesResult {
+    // Validate inputs
+    if params.canonical_uuid.is_none() && params.canonical_name.is_none() {
+        return MergeEntitiesResult {
+            success: false,
+            errors: vec![
+                "at least one of canonical_uuid or canonical_name must be provided".to_string(),
+            ],
+            ..Default::default()
+        };
+    }
+    if params.alias_uuids.is_empty() && params.alias_names.is_empty() && !params.merge_all_by_name {
+        return MergeEntitiesResult {
+            success: false,
+            errors: vec![
+                "at least one of alias_uuids, alias_names, or merge_all_by_name must be provided"
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+    }
+
+    let group_id = if params.group_id.is_empty() {
+        "liminis"
+    } else {
+        &params.group_id
+    };
+
+    // Resolve canonical entity (FR-003)
+    let canonical = match &params.canonical_uuid {
+        Some(uuid) => match conn.get_entity_by_uuid(uuid) {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                return MergeEntitiesResult {
+                    success: false,
+                    errors: vec![format!("canonical entity not found: uuid={uuid}")],
+                    ..Default::default()
+                };
+            }
+            Err(e) => {
+                return MergeEntitiesResult {
+                    success: false,
+                    errors: vec![format!("canonical lookup failed: {e}")],
+                    ..Default::default()
+                };
+            }
+        },
+        None => {
+            let name = params.canonical_name.as_deref().unwrap();
+            match conn.get_entities_by_name_all(name, group_id) {
+                Ok(mut rows) if !rows.is_empty() => rows.remove(0),
+                Ok(_) => {
+                    return MergeEntitiesResult {
+                        success: false,
+                        errors: vec![format!(
+                            "canonical entity not found: name={name}, group={group_id}"
+                        )],
+                        ..Default::default()
+                    };
+                }
+                Err(e) => {
+                    return MergeEntitiesResult {
+                        success: false,
+                        errors: vec![format!("canonical lookup failed: {e}")],
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+    };
+
+    // Canonical must not already be merged
+    if canonical.labels.contains(&"Merged".to_string()) {
+        return MergeEntitiesResult {
+            success: false,
+            canonical_uuid: canonical.uuid.clone(),
+            errors: vec![
+                "canonical entity is already merged — cannot use as merge target".to_string(),
+            ],
+            ..Default::default()
+        };
+    }
+
+    let canonical_uuid = canonical.uuid.clone();
+
+    // Expand alias set (FR-004, FR-005)
+    let mut alias_map: std::collections::HashMap<String, EntityRow> =
+        std::collections::HashMap::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // From explicit UUIDs
+    if !params.alias_uuids.is_empty() {
+        match conn.get_entities_by_uuids(&params.alias_uuids) {
+            Ok(rows) => {
+                for row in rows {
+                    if row.uuid != canonical_uuid {
+                        alias_map.insert(row.uuid.clone(), row);
+                    }
+                }
+                // Report UUIDs that weren't found
+                for uuid in &params.alias_uuids {
+                    if uuid != &canonical_uuid && !alias_map.contains_key(uuid) {
+                        errors.push(format!("alias uuid not found: {uuid}"));
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("alias UUID lookup failed: {e}")),
+        }
+    }
+
+    // From explicit names
+    for alias_name in &params.alias_names {
+        match conn.get_entities_by_name_all(alias_name, group_id) {
+            Ok(rows) => {
+                if rows.is_empty() {
+                    errors.push(format!(
+                        "alias name '{alias_name}' matches no entities in group '{group_id}'"
+                    ));
+                }
+                for row in rows {
+                    if row.uuid != canonical_uuid {
+                        alias_map.entry(row.uuid.clone()).or_insert(row);
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("alias name lookup failed for '{alias_name}': {e}")),
+        }
+    }
+
+    // From merge_all_by_name: all same-name entities in same group except the canonical
+    if params.merge_all_by_name {
+        let name = canonical.name.as_str();
+        match conn.get_entities_by_name_all(name, group_id) {
+            Ok(rows) => {
+                for row in rows {
+                    if row.uuid != canonical_uuid {
+                        alias_map.entry(row.uuid.clone()).or_insert(row);
+                    }
+                }
+            }
+            Err(e) => errors.push(format!("merge_all_by_name lookup failed: {e}")),
+        }
+    }
+
+    // Process aliases
+    let mut merged_count = 0usize;
+    let mut skipped = 0usize;
+    let mut total_rewritten = 0usize;
+    let mut total_deduped = 0usize;
+    let mut plan_aliases: Vec<AliasInfo> = Vec::new();
+    let mut earliest_created_at = canonical.created_at.clone();
+
+    // Collect and sort aliases for deterministic ordering
+    let mut aliases: Vec<EntityRow> = alias_map.into_values().collect();
+    aliases.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+
+    for alias in &aliases {
+        // Skip already-merged aliases (FR-013)
+        if alias.labels.contains(&"Merged".to_string()) {
+            skipped += 1;
+            continue;
+        }
+
+        match merge_entities_inner(conn, &canonical_uuid, alias, ts, params.dry_run) {
+            Ok((rewritten, deduped, _self_loops)) => {
+                total_rewritten += rewritten;
+                total_deduped += deduped;
+
+                if params.dry_run {
+                    plan_aliases.push(AliasInfo {
+                        uuid: alias.uuid.clone(),
+                        name: alias.name.clone(),
+                        active_edges: rewritten,
+                        duplicate_edges: deduped,
+                    });
+                } else {
+                    // Mark alias as merged (FR-008)
+                    let mut new_labels = alias.labels.clone();
+                    if !new_labels.contains(&"Merged".to_string()) {
+                        new_labels.push("Merged".to_string());
+                    }
+                    if let Err(e) = conn.update_entity_labels(&alias.uuid, &new_labels) {
+                        errors.push(format!(
+                            "failed to mark alias {} as merged: {e}",
+                            alias.uuid
+                        ));
+                    }
+                    // Track earliest created_at across canonical + aliases (FR-007)
+                    if !alias.created_at.is_empty() && alias.created_at < earliest_created_at {
+                        earliest_created_at = alias.created_at.clone();
+                    }
+                }
+                merged_count += 1;
+            }
+            Err(e) => {
+                errors.push(format!("merge failed for alias {}: {e}", alias.uuid));
+            }
+        }
+    }
+
+    // Update canonical's created_at to earliest value across all merged (FR-007)
+    if !params.dry_run && merged_count > 0 && earliest_created_at != canonical.created_at {
+        if let Err(e) = conn.update_entity_created_at(&canonical_uuid, &earliest_created_at) {
+            errors.push(format!("failed to update canonical created_at: {e}"));
+        }
+    }
+
+    let plan = if params.dry_run {
+        Some(MergePlan {
+            total_edges_rewritten: total_rewritten,
+            total_edges_collapsed: total_deduped,
+            aliases: plan_aliases,
+        })
+    } else {
+        None
+    };
+
+    MergeEntitiesResult {
+        success: errors.iter().all(|e| {
+            // Non-fatal errors (alias not found, label update failures) don't mark success=false
+            // only if at least aliases were processed successfully
+            !e.starts_with("canonical")
+        }),
+        canonical_uuid,
+        merged_count,
+        skipped,
+        edges_rewritten: total_rewritten,
+        edges_deduplicated: total_deduped,
+        errors,
+        plan,
+    }
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
