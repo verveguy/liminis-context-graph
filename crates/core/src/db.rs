@@ -294,12 +294,9 @@ impl<'db> Conn<'db> {
             }),
         )?;
 
-        // Direct Entity→Entity rel is non-fatal: Python-schema DBs have no Entity→Entity
-        // FROM-TO pair in RELATES_TO, so this insert will fail there. The two-hop links
-        // below are sufficient for all reads; the direct rel is kept for schema compatibility
-        // with Rust-initialized DBs only. (exec_params records to the WAL only on success,
-        // so a failed insert here is not WAL-logged — matching the prior raw_query behavior.)
-        if let Err(e) = self.exec_params(
+        // Direct Entity→Entity rel. All deployments use the canonical TIMESTAMP schema;
+        // the former "non-fatal" catch for Python-schema DBs is removed.
+        self.exec_params(
             "MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) \
              CREATE (src)-[:RELATES_TO {uuid: $uuid, name: $name, group_id: $group_id, \
              fact: $fact, valid_at: $valid_at, invalid_at: $invalid_at, \
@@ -315,11 +312,7 @@ impl<'db> Conn<'db> {
                 "invalid_at": edge.invalid_at,
                 "attributes": edge.attributes,
             }),
-        ) {
-            eprintln!(
-                "liminis-context-graph: direct RELATES_TO rel insert failed (non-fatal, Python-schema DB?): {e}"
-            );
-        }
+        )?;
 
         // Create both two-hop links in a single statement so either both exist or neither does.
         // Reads use Entity→RelatesToNode_→Entity; the hops carry no meaningful properties —
@@ -1835,6 +1828,12 @@ const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at",
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
 /// known timestamp-column param names (see `TIMESTAMP_PARAM_NAMES`).
+///
+/// Accepts two timestamp formats:
+/// - RFC-3339 (e.g. `"2026-06-01T12:00:00Z"`) — produced by the WAL write path.
+/// - Space format (e.g. `"2026-06-01 00:00:00"`) — produced by `value_as_timestamp_str` when
+///   reading timestamps back from lbug. Parsed as UTC. This covers the merge round-trip path
+///   where edges are read from the DB and re-inserted via `insert_relates_to_edge`.
 fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
     if TIMESTAMP_PARAM_NAMES.contains(&key) {
         if let serde_json::Value::String(s) = v {
@@ -1843,8 +1842,17 @@ fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
             {
                 return Value::Timestamp(odt);
             }
-            // A non-RFC-3339 timestamp string (e.g. space-format from the Python WAL) binds as
-            // a plain String; those templates wrap it with `timestamp($x)`, which parses it.
+            // Space-format "YYYY-MM-DD HH:MM:SS" — DB read-back format. Assumed UTC.
+            static SPACE_FMT: std::sync::OnceLock<
+                Vec<time::format_description::FormatItem<'static>>,
+            > = std::sync::OnceLock::new();
+            let fmt = SPACE_FMT.get_or_init(|| {
+                time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
+                    .expect("static space-format description is valid")
+            });
+            if let Ok(pdt) = time::PrimitiveDateTime::parse(s, fmt) {
+                return Value::Timestamp(pdt.assume_utc());
+            }
         }
     }
     json_to_value(v)
