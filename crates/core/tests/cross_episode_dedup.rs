@@ -265,19 +265,10 @@ async fn test_embedding_based_dedup_variant_names() {
     // "Brett A."      → [cos(22.5°), sin(22.5°), 0, 0] ≈ [0.924, 0.383, 0, 0]
     // cosine_similarity([1,0,0,0], [0.924, 0.383, 0, 0]) = 0.924 > DEDUP_THRESHOLD (0.85)
     let mut emb_map: HashMap<String, Vec<f32>> = HashMap::new();
-    emb_map.insert(
-        "Brett Adamson".to_string(),
-        vec![1.0_f32, 0.0, 0.0, 0.0],
-    );
-    emb_map.insert(
-        "Brett A.".to_string(),
-        vec![0.9239_f32, 0.3827, 0.0, 0.0],
-    );
+    emb_map.insert("Brett Adamson".to_string(), vec![1.0_f32, 0.0, 0.0, 0.0]);
+    emb_map.insert("Brett A.".to_string(), vec![0.9239_f32, 0.3827, 0.0, 0.0]);
 
-    let ext = ConfigurableExtractor::new(vec![
-        one_entity("Brett Adamson"),
-        one_entity("Brett A."),
-    ]);
+    let ext = ConfigurableExtractor::new(vec![one_entity("Brett Adamson"), one_entity("Brett A.")]);
     let state = make_state_with(Arc::clone(&db), ext, NameMapEmbedder::new(EMB_DIM, emb_map));
 
     episode::add_episode(
@@ -332,10 +323,7 @@ async fn test_no_false_collapse_dissimilar_names() {
     emb_map.insert("Alice Wang".to_string(), vec![1.0_f32, 0.0, 0.0, 0.0]);
     emb_map.insert("Bob Chen".to_string(), vec![0.0_f32, 1.0, 0.0, 0.0]);
 
-    let ext = ConfigurableExtractor::new(vec![
-        one_entity("Alice Wang"),
-        one_entity("Bob Chen"),
-    ]);
+    let ext = ConfigurableExtractor::new(vec![one_entity("Alice Wang"), one_entity("Bob Chen")]);
     let state = make_state_with(Arc::clone(&db), ext, NameMapEmbedder::new(EMB_DIM, emb_map));
 
     episode::add_episode(

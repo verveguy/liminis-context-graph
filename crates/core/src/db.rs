@@ -1037,11 +1037,7 @@ impl<'db> Conn<'db> {
 
     /// Counts Entity nodes whose lowercased name matches the given name (case-insensitive)
     /// within a group. Primarily used in tests for asserting dedup correctness.
-    pub fn count_entities_by_name_ci(
-        &self,
-        name: &str,
-        group_id: &str,
-    ) -> Result<usize, Error> {
+    pub fn count_entities_by_name_ci(&self, name: &str, group_id: &str) -> Result<usize, Error> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
