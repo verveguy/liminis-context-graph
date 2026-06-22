@@ -1817,16 +1817,47 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
         .collect()
 }
 
-/// Parameter names that target `TIMESTAMP` columns. Only these bind an RFC-3339 string as a
-/// typed `Value::Timestamp`; every other string binds verbatim as `Value::String`.
+/// Parameter names that target `TIMESTAMP` columns. Only these bind an RFC-3339 or space-format
+/// string as a typed `Value::Timestamp`; every other string binds verbatim as `Value::String`.
 ///
-/// This gate is the fix for the corruption where a value-shape sniff would rewrite any
-/// timestamp-looking string — including user content in STRING columns (`content`, `summary`,
-/// `fact`, `name`) — into a space-formatted timestamp. Timestamp coercion is needed because
-/// lbug does not implicitly cast `STRING`→`TIMESTAMP` in a `SET col = $x` assignment (it does
-/// in a CREATE property map); gating by the destination column's param name makes the coercion
-/// column-aware. `timestamp($x)`-wrapped templates also accept a typed Timestamp (idempotent),
-/// so this is safe for both bare and wrapped WAL forms.
+/// This gate prevents value-shape sniffing from rewriting user content in STRING columns
+/// (`content`, `summary`, `fact`, `name`) into timestamps. Explicit coercion is required because
+/// lbug does not implicitly cast `STRING`→`TIMESTAMP` in `SET col = $x` assignments (it does in
+/// CREATE property maps); gating by param name makes coercion column-aware.
+/// `timestamp($x)`-wrapped templates also accept a typed Timestamp (idempotent).
+///
+/// # Write-path inventory (Issue #170)
+///
+/// Every write path that sends data to lbug is listed below with its coercion status. When you
+/// add a new write path or a new TIMESTAMP column to the schema:
+///   - If the Cypher uses bare `SET col = $param` → add the param name to `TIMESTAMP_PARAM_NAMES`
+///   - If the Cypher uses `timestamp($param)` or `CASE WHEN … THEN NULL ELSE timestamp($param) END`
+///     → the Cypher wrapper handles coercion; no change to `TIMESTAMP_PARAM_NAMES` needed
+///   - NEVER interpolate a timestamp string directly into a Cypher literal — always use bound params
+///
+/// | Write path                              | Method           | Status                      |
+/// |-----------------------------------------|------------------|-----------------------------|
+/// | `insert_entity`                         | `exec_params`    | ✓ exec_params gate          |
+/// | `insert_episodic`                       | `exec_params`    | ✓ exec_params gate          |
+/// | `insert_relates_to_edge`                | `exec_params`    | ✓ exec_params gate          |
+/// | `insert_mentions_edge`                  | `exec_params`    | ✓ exec_params gate          |
+/// | `invalidate_edge`                       | `exec_params`    | ✓ exec_params gate          |
+/// | `update_entity_labels`                  | `exec_params`    | ✓ no timestamp fields       |
+/// | `update_entity_created_at`              | `exec_params`    | ✓ Cypher wrapper (see note) |
+/// | `corrections::apply_same_as`            | via insert/inval | ✓ exec_params gate          |
+/// | `corrections::apply_retract`            | via invalidate   | ✓ exec_params gate          |
+/// | `corrections::apply_entity_type_labels` | via update_labels| ✓ no timestamp fields       |
+/// | `merge_entities`                        | via insert/inval | ✓ exec_params gate          |
+/// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
+/// |                                         |                  |   wrapper coerces on replay |
+/// | `knowledge_query_cypher`                | `cypher_query`   | safe — raw Cypher, no param |
+/// |                                         |                  | interpolation (FR-008)      |
+/// | Relation canonicalization (#163)        | not yet impl.    | deferred — #163 pending     |
+///
+/// Note: `update_entity_created_at` uses param name `$new_created_at` (NOT in this list) plus a
+/// `timestamp($new_created_at)` Cypher wrapper. This is intentional — the value arrives as a
+/// space-format string from `value_as_timestamp_str` and the wrapper handles coercion. Do NOT add
+/// `new_created_at` to this list; doing so would double-apply coercion and break the path.
 const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at", "expired_at"];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
@@ -2015,6 +2046,29 @@ fn format_datetime_iso8601(dt: time::OffsetDateTime) -> String {
     )
 }
 
+/// Formats an `OffsetDateTime` as RFC-3339 with exactly 6 fractional-second digits (microseconds).
+///
+/// Used by the WAL dump path to preserve sub-second precision through dump→wipe→replay cycles.
+/// Always emits `YYYY-MM-DDTHH:MM:SS.ffffffZ` — exactly 6 digits — regardless of the
+/// nanosecond remainder, so the format is stable and predictable for the replay-time parser.
+///
+/// Do NOT use this for IPC responses: the Python layer expects the space-format produced by
+/// `format_datetime`. This function is dump-path-only.
+pub(crate) fn format_datetime_rfc3339_subsecond(dt: time::OffsetDateTime) -> String {
+    // Kuzu stores TIMESTAMP with microsecond precision; truncate nanoseconds.
+    let microseconds = dt.microsecond();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+        dt.year(),
+        dt.month() as u8,
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        microseconds
+    )
+}
+
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {
     if labels.first().map(String::as_str) == Some("Entity") {
         return labels.to_vec();
@@ -2160,6 +2214,101 @@ mod fts_missing_index_tests {
         assert!(
             msg.contains("Binder exception:") && msg.contains("doesn't have an index with name"),
             "FTS missing-index error must match the same pattern as HNSW — got: {msg}"
+        );
+    }
+}
+
+// ── FR-009: unit tests for json_value_for_param and json_to_value ─────────────
+#[cfg(test)]
+mod coerce_unit_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn rfc3339_timestamp_param_coerced_to_value_timestamp() {
+        let v = json_value_for_param("created_at", &json!("2024-01-15T10:30:00Z"));
+        assert!(
+            matches!(v, Value::Timestamp(_)),
+            "RFC-3339 created_at must yield Value::Timestamp, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn space_format_timestamp_param_coerced_to_value_timestamp() {
+        let v = json_value_for_param("created_at", &json!("2024-01-15 10:30:00"));
+        assert!(
+            matches!(v, Value::Timestamp(_)),
+            "space-format created_at must yield Value::Timestamp, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn rfc3339_string_in_non_timestamp_column_stays_string() {
+        let v = json_value_for_param("name", &json!("2024-01-15T10:30:00Z"));
+        assert!(
+            matches!(v, Value::String(_)),
+            "datetime-looking string in 'name' column must stay Value::String, got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn float_array_becomes_double_list() {
+        let v = json_to_value(&json!([0.1, 0.2, 0.3]));
+        match &v {
+            Value::List(lt, elems) => {
+                assert_eq!(
+                    *lt,
+                    LogicalType::Double,
+                    "float array must use Double child type"
+                );
+                assert_eq!(elems.len(), 3, "element count must match");
+                assert!(
+                    matches!(elems[0], Value::Double(_)),
+                    "elements must be Value::Double"
+                );
+            }
+            other => panic!("expected Value::List, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn null_becomes_value_null_any() {
+        let v = json_to_value(&json!(null));
+        assert!(
+            matches!(v, Value::Null(LogicalType::Any)),
+            "json null must yield Value::Null(Any), got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn apostrophe_string_binds_verbatim() {
+        let v = json_to_value(&json!("O'Brien"));
+        match v {
+            Value::String(s) => assert_eq!(s, "O'Brien", "apostrophe must be preserved verbatim"),
+            other => panic!("expected Value::String, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn integer_becomes_int64() {
+        let v = json_to_value(&json!(42));
+        assert!(
+            matches!(v, Value::Int64(42)),
+            "integer 42 must yield Value::Int64(42), got: {v:?}"
+        );
+    }
+
+    #[test]
+    fn bool_becomes_value_bool() {
+        let v_true = json_to_value(&json!(true));
+        let v_false = json_to_value(&json!(false));
+        assert!(
+            matches!(v_true, Value::Bool(true)),
+            "true must yield Value::Bool(true), got: {v_true:?}"
+        );
+        assert!(
+            matches!(v_false, Value::Bool(false)),
+            "false must yield Value::Bool(false), got: {v_false:?}"
         );
     }
 }

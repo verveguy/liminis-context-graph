@@ -662,6 +662,9 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     let _guard = state.write_lock.write().await;
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<String>>, Error> {
         let conn = db.connect()?;
+        // Raw Cypher is passed directly to lbug with no param interpolation or value coercion.
+        // User-supplied strings are never rewritten, so this path has no type-coercion surface
+        // and is explicitly out of scope per Issue #170 FR-008.
         let rows = conn.cypher_query(&query)?;
         wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(rows)

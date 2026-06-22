@@ -8,8 +8,8 @@
 /// WAL lines can resolve their endpoint nodes during replay. See ADR-0049.
 use crate::{
     db::{
-        value_as_float_array, value_as_optional_timestamp_str, value_as_str_list, value_as_string,
-        value_as_timestamp_str, Conn,
+        format_datetime_rfc3339_subsecond, value_as_float_array, value_as_str_list,
+        value_as_string, Conn,
     },
     error::Error,
     wal::WalWriter,
@@ -154,7 +154,7 @@ fn dump_entity_nodes(
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
                     let labels = value_as_str_list(&row[3]);
-                    let created_at = value_as_timestamp_str(&row[4]);
+                    let created_at = dump_ts_str(&row[4]);
                     let embedding = value_as_float_array(&row[5]);
                     let summary = value_as_string(&row[6]);
                     let attributes = value_as_string(&row[7]);
@@ -200,12 +200,12 @@ fn dump_episodic_nodes(
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
-                    let created_at = value_as_timestamp_str(&row[3]);
+                    let created_at = dump_ts_str(&row[3]);
                     let source = value_as_string(&row[4]);
                     let source_desc = value_as_string(&row[5]);
                     let content = value_as_string(&row[6]);
                     let embedding = value_as_float_array(&row[7]);
-                    let valid_at = opt_ts_json(value_as_optional_timestamp_str(&row[8]));
+                    let valid_at = dump_opt_ts_json(&row[8]);
                     let entity_edges = value_as_str_list(&row[9]);
                     let params = serde_json::json!({
                         "uuid": uuid,
@@ -251,13 +251,13 @@ fn dump_relato_nodes(
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
-                    let created_at = value_as_timestamp_str(&row[3]);
+                    let created_at = dump_ts_str(&row[3]);
                     let fact = value_as_string(&row[4]);
                     let embedding = value_as_float_array(&row[5]);
                     let episodes = value_as_str_list(&row[6]);
-                    let expired_at = opt_ts_json(value_as_optional_timestamp_str(&row[7]));
-                    let valid_at = opt_ts_json(value_as_optional_timestamp_str(&row[8]));
-                    let invalid_at = opt_ts_json(value_as_optional_timestamp_str(&row[9]));
+                    let expired_at = dump_opt_ts_json(&row[7]);
+                    let valid_at = dump_opt_ts_json(&row[8]);
+                    let invalid_at = dump_opt_ts_json(&row[9]);
                     let attributes = value_as_string(&row[10]);
                     let relation_type = value_as_string(&row[11]);
                     let params = serde_json::json!({
@@ -305,7 +305,7 @@ fn dump_community_nodes(
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
-                    let created_at = value_as_timestamp_str(&row[3]);
+                    let created_at = dump_ts_str(&row[3]);
                     let embedding = value_as_float_array(&row[4]);
                     let summary = value_as_string(&row[5]);
                     let params = serde_json::json!({
@@ -347,7 +347,7 @@ fn dump_saga_nodes(
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
-                    let created_at = value_as_timestamp_str(&row[3]);
+                    let created_at = dump_ts_str(&row[3]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -448,7 +448,7 @@ fn dump_mentions_edges(
                         continue;
                     }
                     let r_group_id = value_as_string(&row[3]);
-                    let r_created_at = opt_ts_json(value_as_optional_timestamp_str(&row[4]));
+                    let r_created_at = dump_opt_ts_json(&row[4]);
                     let params = serde_json::json!({
                         "ep_uuid": ep_uuid,
                         "en_uuid": en_uuid,
@@ -495,7 +495,7 @@ where
                     let dst_uuid = value_as_string(&row[1]);
                     let r_uuid = value_as_string(&row[2]);
                     let r_group_id = value_as_string(&row[3]);
-                    let r_created_at = opt_ts_json(value_as_optional_timestamp_str(&row[4]));
+                    let r_created_at = dump_opt_ts_json(&row[4]);
                     let params = serde_json::json!({
                         src_key: src_uuid,
                         dst_key: dst_uuid,
@@ -579,6 +579,29 @@ fn dump_next_episode_edges(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Formats an lbug Timestamp value as RFC-3339 with microseconds for WAL serialization.
+///
+/// WAL params use RFC-3339+µs (e.g. `"2024-06-01T12:00:00.123456Z"`) so that dump→wipe→replay
+/// cycles preserve sub-second precision. The replay-time `json_value_for_param` handles
+/// RFC-3339 as its primary format. Note: this differs from `value_as_timestamp_str`, which
+/// emits space-format (`"YYYY-MM-DD HH:MM:SS"`) for Python IPC compatibility.
+fn dump_ts_str(v: &lbug::Value) -> String {
+    match v {
+        lbug::Value::Timestamp(dt) => format_datetime_rfc3339_subsecond(*dt),
+        lbug::Value::String(s) => s.clone(),
+        lbug::Value::Null(_) => String::new(),
+        _ => v.to_string(),
+    }
+}
+
+/// Like `dump_ts_str` but returns JSON null for a DB null value.
+fn dump_opt_ts_json(v: &lbug::Value) -> serde_json::Value {
+    match v {
+        lbug::Value::Null(_) => serde_json::Value::Null,
+        other => serde_json::Value::String(dump_ts_str(other)),
+    }
+}
+
 fn float_slice_to_json(v: &[f32]) -> serde_json::Value {
     serde_json::Value::Array(
         v.iter()
@@ -589,11 +612,4 @@ fn float_slice_to_json(v: &[f32]) -> serde_json::Value {
             })
             .collect(),
     )
-}
-
-fn opt_ts_json(ts: Option<String>) -> serde_json::Value {
-    match ts {
-        Some(s) => serde_json::Value::String(s),
-        None => serde_json::Value::Null,
-    }
 }
