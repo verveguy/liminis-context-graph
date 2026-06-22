@@ -1152,39 +1152,46 @@ async fn handle_dump_wal(req: &IpcRequest, state: Arc<AppState>) -> Result<Value
     let p = &req.params;
     let group_id = p["group_id"].as_str().map(|s| s.to_string());
 
-    // Resolve target_dir: caller-supplied or default to {db_path_parent}/wal-compacted/.
+    // Resolve target_dir: caller-supplied, or default to {workspace}/.lcg/wal-compacted/.
+    // db_path is typically "{workspace}/.lcg/db/liminis.db", so we go up two levels to reach
+    // the .lcg directory.
     let target_dir: std::path::PathBuf = if let Some(s) = p["target_dir"].as_str() {
         std::path::PathBuf::from(s)
     } else {
         std::path::Path::new(&state.db_path)
-            .parent()
+            .parent() // .lcg/db
+            .and_then(|p| p.parent()) // .lcg
             .unwrap_or_else(|| std::path::Path::new("."))
             .join("wal-compacted")
     };
 
-    // Refuse to write into a directory that already contains WAL files (FR-004).
-    if target_dir.exists() && has_jsonl_files(&target_dir) {
+    // Fast-fail pre-lock check (FR-004): refuse any non-empty target_dir so callers cannot
+    // accidentally mix a dump with pre-existing files or a prior dump.
+    if target_dir.exists() && is_nonempty_dir(&target_dir) {
         return Err(Error::Ipc(format!(
-            "knowledge_dump_wal: target_dir '{}' already contains .jsonl files; \
+            "knowledge_dump_wal: target_dir '{}' already exists and is not empty; \
              supply a clean path or remove existing files first",
             target_dir.display()
         )));
     }
 
+    // Track whether the directory was created by us so cleanup-on-failure is safe (FR-012).
+    let dir_existed_before = target_dir.exists();
+
     let max_events = state.wal_max_events_per_file;
-    let db = load_db(&state)?;
     // Write lock held for the entire dump to prevent concurrent mutations from interleaving
-    // with the snapshot (FR-009).
+    // with the snapshot (FR-009). Load the DB under the lock so any in-flight DB swap
+    // (e.g. from knowledge_clear_all) is visible to us.
     let _guard = state.write_lock.write().await;
+    let db = load_db(&state)?;
 
     let target_dir_c = target_dir.clone();
     let group_id_c = group_id.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<crate::dump::DumpResult, Error> {
-        // Authoritative FR-004 re-check under the write lock to close the TOCTOU window between
-        // the pre-lock fast-fail above and actual WalWriter creation.
-        if target_dir_c.exists() && has_jsonl_files(&target_dir_c) {
+        // Authoritative FR-004 re-check under the write lock to close the TOCTOU window.
+        if target_dir_c.exists() && is_nonempty_dir(&target_dir_c) {
             return Err(Error::Ipc(format!(
-                "knowledge_dump_wal: target_dir '{}' already contains .jsonl files; \
+                "knowledge_dump_wal: target_dir '{}' already exists and is not empty; \
                  supply a clean path or remove existing files first",
                 target_dir_c.display()
             )));
@@ -1203,6 +1210,22 @@ async fn handle_dump_wal(req: &IpcRequest, state: Arc<AppState>) -> Result<Value
     .await;
 
     // On any failure: clean up partial output (FR-012).
+    // If we created the directory, remove it entirely. If it pre-existed, remove only the
+    // .jsonl files we wrote so we don't destroy the caller's pre-existing non-WAL files.
+    let cleanup = |dir: &std::path::Path| {
+        if dir_existed_before {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for e in entries.flatten() {
+                    if e.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
+        } else {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    };
+
     match result {
         Ok(Ok(dump_result)) => {
             drop(_guard);
@@ -1217,12 +1240,12 @@ async fn handle_dump_wal(req: &IpcRequest, state: Arc<AppState>) -> Result<Value
         }
         Ok(Err(e)) => {
             drop(_guard);
-            let _ = std::fs::remove_dir_all(&target_dir);
+            cleanup(&target_dir);
             Err(e)
         }
         Err(join_err) => {
             drop(_guard);
-            let _ = std::fs::remove_dir_all(&target_dir);
+            cleanup(&target_dir);
             Err(Error::Ipc(format!(
                 "knowledge_dump_wal: spawn_blocking panicked: {join_err}"
             )))
@@ -2228,6 +2251,13 @@ fn has_jsonl_files(dir: &std::path::Path) -> bool {
             rd.filter_map(|e| e.ok())
                 .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
         })
+        .unwrap_or(false)
+}
+
+fn is_nonempty_dir(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|mut rd| rd.next().is_some())
         .unwrap_or(false)
 }
 
