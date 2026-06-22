@@ -50,6 +50,15 @@ enum DedupDecision {
     },
 }
 
+/// Result of Phase B's per-entity resolution attempt.
+/// Name-matched entities skip the async dedup-adapter check entirely.
+enum PhaseBResult {
+    /// Exact case-insensitive name match found in the persisted graph.
+    NameMatch { existing: EntityRow },
+    /// No name match; embedding-based candidate (may be None if no similar entity exists).
+    EmbeddingCandidate { candidate: Option<EntityRow> },
+}
+
 /// Validates and returns a timestamp string from LLM output.
 ///
 /// Returns `None` for empty strings or values that cannot be parsed as RFC 3339,
@@ -253,17 +262,29 @@ pub async fn add_episode(
     let db_b = Arc::clone(&db_shared);
     let gid_b = group_id.to_string();
     let entity_names_b = entity_names.clone();
-    let candidates: Vec<Option<EntityRow>> = tokio::task::spawn_blocking(move || {
+    let phase_b_results: Vec<PhaseBResult> = tokio::task::spawn_blocking(move || {
         let conn = db_b.connect()?;
         let mut out = Vec::with_capacity(entity_names_b.len());
-        for (i, _name) in entity_names_b.iter().enumerate() {
+        for (i, name) in entity_names_b.iter().enumerate() {
+            let trimmed = name.trim();
+            // Empty names skip resolution; Phase C will insert them as-is.
+            if trimmed.is_empty() {
+                out.push(PhaseBResult::EmbeddingCandidate { candidate: None });
+                continue;
+            }
+            // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
+            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &gid_b)? {
+                out.push(PhaseBResult::NameMatch { existing });
+                continue;
+            }
+            // Embedding-based resolution fallback.
             let emb = &name_embs_b[i];
             let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(emb, _name, &gid_b, DEDUP_THRESHOLD)?
+                conn.hybrid_dedup_similar_entity(emb, name, &gid_b, DEDUP_THRESHOLD)?
             } else {
                 conn.brute_force_similar_entity(emb, &gid_b, DEDUP_THRESHOLD)?
             };
-            out.push(candidate);
+            out.push(PhaseBResult::EmbeddingCandidate { candidate });
         }
         Ok::<_, Error>(out)
     })
@@ -278,63 +299,65 @@ pub async fn add_episode(
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
         }
-        let decision = if let Some(existing) = &candidates[i] {
-            let is_dup = tokio::select! {
-                r = state.dedup.is_duplicate(existing, extracted) => r?,
-                _ = state.cancel_token.cancelled() => {
-                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                    return Err(Error::Cancelled);
+        let make_insert_row = |name_embedding: Vec<f32>| DedupDecision::Insert {
+            row: EntityRow {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                name: extracted.name.clone(),
+                group_id: gid_owned.clone(),
+                labels: {
+                    let mut labels = vec!["Entity".to_string()];
+                    if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
+                        labels.push(extracted.entity_type.clone());
+                    }
+                    labels
+                },
+                created_at: ref_time_owned.clone(),
+                name_embedding,
+                summary: extracted.summary.clone(),
+                attributes: "{}".to_string(),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            },
+        };
+        let decision = match &phase_b_results[i] {
+            PhaseBResult::NameMatch { existing } => {
+                // Exact name match — resolve immediately, no dedup-adapter check needed.
+                if !extracted.entity_type.is_empty()
+                    && extracted.entity_type != "Entity"
+                    && !existing.labels.contains(&extracted.entity_type)
+                {
+                    eprintln!(
+                        "liminis-context-graph: entity resolution: type conflict for '{}': \
+                         existing labels {:?}, extracted type '{}'",
+                        existing.name, existing.labels, extracted.entity_type
+                    );
                 }
-            };
-            if is_dup {
                 DedupDecision::Merge {
                     existing_uuid: existing.uuid.clone(),
                     merged_summary: format!("{} {}", existing.summary, extracted.summary),
                 }
-            } else {
-                DedupDecision::Insert {
-                    row: EntityRow {
-                        uuid: uuid::Uuid::new_v4().to_string(),
-                        name: extracted.name.clone(),
-                        group_id: gid_owned.clone(),
-                        labels: {
-                            let mut labels = vec!["Entity".to_string()];
-                            if !extracted.entity_type.is_empty()
-                                && extracted.entity_type != "Entity"
-                            {
-                                labels.push(extracted.entity_type.clone());
-                            }
-                            labels
-                        },
-                        created_at: ref_time_owned.clone(),
-                        name_embedding: name_embeddings[i].clone(),
-                        summary: extracted.summary.clone(),
-                        attributes: "{}".to_string(),
-                        episode_uuids: vec![],
-                        source_descriptions: vec![],
-                    },
+            }
+            PhaseBResult::EmbeddingCandidate {
+                candidate: Some(existing),
+            } => {
+                let is_dup = tokio::select! {
+                    r = state.dedup.is_duplicate(existing, extracted) => r?,
+                    _ = state.cancel_token.cancelled() => {
+                        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                        return Err(Error::Cancelled);
+                    }
+                };
+                if is_dup {
+                    DedupDecision::Merge {
+                        existing_uuid: existing.uuid.clone(),
+                        merged_summary: format!("{} {}", existing.summary, extracted.summary),
+                    }
+                } else {
+                    make_insert_row(name_embeddings[i].clone())
                 }
             }
-        } else {
-            DedupDecision::Insert {
-                row: EntityRow {
-                    uuid: uuid::Uuid::new_v4().to_string(),
-                    name: extracted.name.clone(),
-                    group_id: gid_owned.clone(),
-                    labels: {
-                        let mut labels = vec!["Entity".to_string()];
-                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                            labels.push(extracted.entity_type.clone());
-                        }
-                        labels
-                    },
-                    created_at: ref_time_owned.clone(),
-                    name_embedding: name_embeddings[i].clone(),
-                    summary: extracted.summary.clone(),
-                    attributes: "{}".to_string(),
-                    episode_uuids: vec![],
-                    source_descriptions: vec![],
-                },
+            PhaseBResult::EmbeddingCandidate { candidate: None } => {
+                make_insert_row(name_embeddings[i].clone())
             }
         };
         decisions.push(decision);
