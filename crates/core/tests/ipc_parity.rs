@@ -1635,9 +1635,7 @@ async fn test_relates_to_edge_timestamp_type() {
         "must have exactly one RelatesToNode_ shadow node"
     );
     let rows = conn
-        .cypher_query(
-            "MATCH (rn:RelatesToNode_ {uuid: 'irt-edge-001'}) RETURN rn.created_at",
-        )
+        .cypher_query("MATCH (rn:RelatesToNode_ {uuid: 'irt-edge-001'}) RETURN rn.created_at")
         .expect("querying created_at on RelatesToNode_ must succeed (SC-004)");
     assert_eq!(rows.len(), 1, "must return exactly one row");
     let created_at = &rows[0][0];
@@ -1701,13 +1699,7 @@ async fn test_same_as_correction_timestamp_type() {
     .unwrap();
 
     let state = make_state_with_workspace(db.clone(), workspace_dir.path().to_path_buf());
-    let v = dispatch_val(
-        72,
-        "knowledge_apply_corrections",
-        json!({}),
-        state,
-    )
-    .await;
+    let v = dispatch_val(72, "knowledge_apply_corrections", json!({}), state).await;
 
     // The correction must succeed. A TYPE_MISMATCH on any timestamp write would propagate as
     // an error in the result (FR-012).
