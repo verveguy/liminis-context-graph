@@ -1431,3 +1431,33 @@ async fn list_relationships_includes_relation_type() {
         );
     }
 }
+
+// ── knowledge_dump_wal ────────────────────────────────────────────────────────
+
+/// SC-004: dump on an empty graph returns success with zero counts.
+#[tokio::test]
+async fn parity_dump_wal_empty_graph() {
+    let (db, dir) = make_db(4);
+    let state = make_state(db);
+
+    // Use an explicit target_dir inside the TempDir so the test is self-contained.
+    let target_dir = dir.path().join("dump-out");
+    let v = dispatch_val(
+        50,
+        "knowledge_dump_wal",
+        json!({ "target_dir": target_dir.to_str().unwrap() }),
+        state,
+    )
+    .await;
+
+    assert_ok_resp(&v, 50);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "success field: {v}");
+    assert_eq!(r["nodes_dumped"], 0, "nodes_dumped: {v}");
+    assert_eq!(r["edges_dumped"], 0, "edges_dumped: {v}");
+    assert_eq!(r["files_written"], 0, "files_written: {v}");
+    assert!(
+        r["target_dir"].is_string(),
+        "target_dir must be a string: {v}"
+    );
+}
