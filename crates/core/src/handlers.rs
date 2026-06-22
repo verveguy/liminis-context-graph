@@ -166,6 +166,7 @@ async fn handle(
         "knowledge_get_entities_by_source" => handle_get_entities_by_source(req, state).await,
         "knowledge_validate_corrections" => handle_validate_corrections(state).await,
         "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
+        "knowledge_merge_entities" => handle_merge_entities(req, state).await,
         "knowledge_reprocess_entity_types" => handle_reprocess_entity_types(req, state).await,
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
@@ -1813,6 +1814,86 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
     if let Some(msg) = result.message {
         resp["message"] = json!(msg);
     }
+    Ok(resp)
+}
+
+async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+
+    let params = corrections::MergeEntitiesParams {
+        canonical_uuid: p["canonical_uuid"].as_str().map(|s| s.to_string()),
+        canonical_name: p["canonical_name"].as_str().map(|s| s.to_string()),
+        alias_uuids: p["alias_uuids"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        alias_names: p["alias_names"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        merge_all_by_name: p["merge_all_by_name"].as_bool().unwrap_or(false),
+        group_id: p["group_id"]
+            .as_str()
+            .unwrap_or(DEFAULT_GROUP_ID)
+            .to_string(),
+        dry_run,
+    };
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        let ts = chrono::Utc::now().to_rfc3339();
+        let merge_result = corrections::merge_entities(&conn, &params, &ts);
+        if !dry_run {
+            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        }
+        Ok::<_, Error>(merge_result)
+    })
+    .await??;
+    drop(_guard);
+
+    let mut resp = json!({
+        "success": result.success,
+        "canonical_uuid": result.canonical_uuid,
+        "merged_count": result.merged_count,
+        "skipped": result.skipped,
+        "edges_rewritten": result.edges_rewritten,
+        "edges_deduplicated": result.edges_deduplicated,
+        "errors": result.errors,
+    });
+
+    if let Some(plan) = result.plan {
+        let aliases: Vec<Value> = plan
+            .aliases
+            .into_iter()
+            .map(|a| {
+                json!({
+                    "uuid": a.uuid,
+                    "name": a.name,
+                    "active_edges": a.active_edges,
+                    "duplicate_edges": a.duplicate_edges,
+                })
+            })
+            .collect();
+        resp["plan"] = json!({
+            "aliases": aliases,
+            "total_edges_rewritten": plan.total_edges_rewritten,
+            "total_edges_collapsed": plan.total_edges_collapsed,
+        });
+    }
+
     Ok(resp)
 }
 
