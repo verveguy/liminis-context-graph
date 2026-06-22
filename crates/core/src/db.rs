@@ -1377,6 +1377,299 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
+    // ── dump/compaction query methods ─────────────────────────────────────────
+    // Used exclusively by dump.rs for `knowledge_dump_wal`. Return raw column vectors so
+    // dump.rs can access embedding values without extra allocations.
+    //
+    // Column ordering is fixed; dump.rs uses named const indices to avoid magic numbers.
+
+    /// Page of Entity rows for dump.
+    /// Columns: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes]
+    pub(crate) fn dump_entities_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:Entity) WHERE n.group_id = $gid \
+                 RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
+                 n.name_embedding, n.summary, n.attributes \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:Entity) \
+                 RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
+                 n.name_embedding, n.summary, n.attributes \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of Episodic rows for dump.
+    /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
+    ///            content_embedding, valid_at, entity_edges]
+    pub(crate) fn dump_episodics_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:Episodic) WHERE n.group_id = $gid \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
+                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:Episodic) \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
+                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of RelatesToNode_ rows for dump.
+    /// Columns: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
+    ///            expired_at, valid_at, invalid_at, attributes, relation_type]
+    pub(crate) fn dump_relatos_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:RelatesToNode_) WHERE n.group_id = $gid \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
+                 n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
+                 n.attributes, n.relation_type \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:RelatesToNode_) \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
+                 n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
+                 n.attributes, n.relation_type \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of Community rows for dump.
+    /// Columns: [uuid, name, group_id, created_at, name_embedding, summary]
+    pub(crate) fn dump_community_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:Community) WHERE n.group_id = $gid \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.name_embedding, n.summary \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:Community) \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at, n.name_embedding, n.summary \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of Saga rows for dump.
+    /// Columns: [uuid, name, group_id, created_at]
+    pub(crate) fn dump_saga_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:Saga) WHERE n.group_id = $gid \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:Saga) \
+                 RETURN n.uuid, n.name, n.group_id, n.created_at \
+                 ORDER BY n.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of RELATES_TO two-hop links for dump (src→RelatesToNode_→dst pattern).
+    /// Columns: [src_uuid, rn_uuid, dst_uuid]
+    pub(crate) fn dump_relates_to_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+                 WHERE rn.group_id = $gid \
+                 RETURN src.uuid, rn.uuid, dst.uuid \
+                 ORDER BY rn.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+                 RETURN src.uuid, rn.uuid, dst.uuid \
+                 ORDER BY rn.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of MENTIONS edges for dump.
+    /// Columns: [ep_uuid, en_uuid, r_uuid, r_group_id, r_created_at]
+    /// Rows with null r_uuid must be skipped by the caller (pre-migration edges).
+    pub(crate) fn dump_mentions_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) WHERE r.group_id = $gid \
+                 RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) \
+                 RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of HAS_EPISODE edges (Saga→Episodic) for dump.
+    /// Columns: [sg_uuid, ep_uuid, r_uuid, r_group_id, r_created_at]
+    pub(crate) fn dump_has_episode_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (sg:Saga)-[r:HAS_EPISODE]->(ep:Episodic) WHERE r.group_id = $gid \
+                 RETURN sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY sg.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (sg:Saga)-[r:HAS_EPISODE]->(ep:Episodic) \
+                 RETURN sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY sg.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of HAS_MEMBER edges (Community→Entity) for dump.
+    /// Columns: [c_uuid, e_uuid, r_uuid, r_group_id, r_created_at]
+    pub(crate) fn dump_has_member_entity_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (c:Community)-[r:HAS_MEMBER]->(e:Entity) WHERE r.group_id = $gid \
+                 RETURN c.uuid, e.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (c:Community)-[r:HAS_MEMBER]->(e:Entity) \
+                 RETURN c.uuid, e.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of HAS_MEMBER edges (Community→Community) for dump.
+    /// Columns: [c_uuid, m_uuid, r_uuid, r_group_id, r_created_at]
+    pub(crate) fn dump_has_member_community_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (c:Community)-[r:HAS_MEMBER]->(m:Community) WHERE r.group_id = $gid \
+                 RETURN c.uuid, m.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (c:Community)-[r:HAS_MEMBER]->(m:Community) \
+                 RETURN c.uuid, m.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
+    /// Page of NEXT_EPISODE edges (Episodic→Episodic) for dump.
+    /// Columns: [ep1_uuid, ep2_uuid, r_uuid, r_group_id, r_created_at]
+    pub(crate) fn dump_next_episode_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (ep1:Episodic)-[r:NEXT_EPISODE]->(ep2:Episodic) WHERE r.group_id = $gid \
+                 RETURN ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY ep1.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (ep1:Episodic)-[r:NEXT_EPISODE]->(ep2:Episodic) \
+                 RETURN ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at \
+                 ORDER BY ep1.uuid SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        }
+    }
+
     /// Returns entities whose name starts with `name_prefix`.
     /// Pass `""` to return all entities.
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
@@ -1508,7 +1801,7 @@ fn logical_type_of(v: &serde_json::Value) -> LogicalType {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn value_as_string(v: &lbug::Value) -> String {
+pub(crate) fn value_as_string(v: &lbug::Value) -> String {
     match v {
         lbug::Value::String(s) => s.clone(),
         lbug::Value::Null(_) => String::new(),
@@ -1516,7 +1809,7 @@ fn value_as_string(v: &lbug::Value) -> String {
     }
 }
 
-fn value_as_timestamp_str(v: &lbug::Value) -> String {
+pub(crate) fn value_as_timestamp_str(v: &lbug::Value) -> String {
     match v {
         lbug::Value::Timestamp(dt) => format_datetime(*dt),
         lbug::Value::String(s) => s.clone(),
@@ -1525,7 +1818,7 @@ fn value_as_timestamp_str(v: &lbug::Value) -> String {
     }
 }
 
-fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String> {
+pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String> {
     match v {
         lbug::Value::Null(_) => None,
         other => Some(value_as_timestamp_str(other)),
@@ -1559,7 +1852,7 @@ fn value_as_usize(v: &lbug::Value) -> usize {
     }
 }
 
-fn value_as_float_array(v: &lbug::Value) -> Vec<f32> {
+pub(crate) fn value_as_float_array(v: &lbug::Value) -> Vec<f32> {
     match v {
         lbug::Value::Array(_, elems) | lbug::Value::List(_, elems) => elems
             .iter()
@@ -1573,7 +1866,7 @@ fn value_as_float_array(v: &lbug::Value) -> Vec<f32> {
     }
 }
 
-fn value_as_str_list(v: &lbug::Value) -> Vec<String> {
+pub(crate) fn value_as_str_list(v: &lbug::Value) -> Vec<String> {
     match v {
         lbug::Value::Array(_, elems) | lbug::Value::List(_, elems) => {
             elems.iter().map(value_as_string).collect()
