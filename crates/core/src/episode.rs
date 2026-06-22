@@ -280,7 +280,7 @@ pub async fn add_episode(
             // Embedding-based resolution fallback.
             let emb = &name_embs_b[i];
             let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(emb, name, &gid_b, DEDUP_THRESHOLD)?
+                conn.hybrid_dedup_similar_entity(emb, trimmed, &gid_b, DEDUP_THRESHOLD)?
             } else {
                 conn.brute_force_similar_entity(emb, &gid_b, DEDUP_THRESHOLD)?
             };
