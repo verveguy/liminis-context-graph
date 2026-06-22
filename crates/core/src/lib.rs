@@ -28,9 +28,9 @@ pub(crate) mod wal_exec;
 pub use app_state::AppState;
 pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
-pub use embedder::{Embedder, MockEmbedder, OaiEmbedder};
+pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;
-pub use extractor::{AnthropicExtractor, ExtractOptions, Extractor, MockExtractor};
+pub use extractor::{AnthropicExtractor, ConfigurableExtractor, ExtractOptions, Extractor, MockExtractor};
 pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;
 pub use ontology::Ontology;
@@ -39,6 +39,7 @@ pub use replay::{FailureSample, ReplayOptions, ReplayProgress, ReplayStats, WalR
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink};
 pub use types::{
-    EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType,
+    EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionResult, MentionsEdge,
+    RelatesToEdge, SourceType,
 };
 pub use wal::{WalLine, WalRotationInfo, WalWriter};
