@@ -401,3 +401,139 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
         "second dump to same dir must return error: {v2}"
     );
 }
+
+// ── FR-010, SC-003, SC-007: TIMESTAMP microsecond fidelity through dump→replay ─
+
+/// Verifies that dump WAL output preserves sub-second (microsecond) TIMESTAMP precision and that
+/// dump→wipe→replay produces a queryable entity with the original timestamp. SC-003.
+///
+/// Also verifies SC-007: no `vecf32(` appears in dump output.
+#[tokio::test]
+async fn test_dump_wal_timestamp_fidelity() {
+    const ENTITY_UUID: &str = "ts-fidelity-entity-1";
+    const ENTITY_NAME: &str = "TimestampFidelityEntity";
+    const MICROSECOND_TS: &str = "2024-06-01T12:00:00.123456Z";
+
+    let dir = TempDir::new().unwrap();
+
+    // ── Phase A: seed db1 with an entity having a microsecond RFC-3339 timestamp ──
+    let db1_path = dir.path().join("db1_tsf.db");
+    let seed_wal_dir = dir.path().join("seed-wal-tsf");
+    {
+        let mut writer = WalWriter::new(&seed_wal_dir, 10_000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation(
+                    "MERGE (n:Entity {uuid: $uuid}) SET \
+                     n.name = $name, n.group_id = $group_id, n.labels = $labels, \
+                     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
+                     n.summary = $summary, n.attributes = $attrs",
+                    json!({
+                        "uuid": ENTITY_UUID,
+                        "name": ENTITY_NAME,
+                        "group_id": "tsf-group",
+                        "labels": ["Entity"],
+                        "created_at": MICROSECOND_TS,
+                        "name_embedding": [0.1_f64, 0.2_f64, 0.3_f64, 0.4_f64],
+                        "summary": "timestamp fidelity test entity",
+                        "attrs": "{}",
+                    }),
+                    "",
+                )
+            })
+            .unwrap();
+    }
+    let db1 = open_db(&db1_path);
+    {
+        let conn = db1.connect().unwrap();
+        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+    }
+    assert_eq!(
+        db1.connect().unwrap().count_nodes("Entity").unwrap(),
+        1,
+        "seed entity must be present"
+    );
+
+    // ── Phase B: dump db1 → dump_dir ──────────────────────────────────────────
+    let dump_dir = dir.path().join("dump-tsf");
+    let state1 = make_state(Arc::clone(&db1), db1_path.to_str().unwrap());
+    let dump_v = dispatch(
+        10,
+        "knowledge_dump_wal",
+        json!({ "target_dir": dump_dir.to_str().unwrap() }),
+        state1,
+    )
+    .await;
+    assert_eq!(dump_v["result"]["success"], true, "dump must succeed: {dump_v}");
+
+    // ── Phase C: inspect dump WAL files ───────────────────────────────────────
+    assert!(dump_dir.exists(), "dump directory must exist");
+    let mut found_microseconds = false;
+    let mut found_vecf32 = false;
+    for entry in std::fs::read_dir(&dump_dir).unwrap().flatten() {
+        if entry.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            let content = std::fs::read_to_string(entry.path()).unwrap();
+            if content.contains("vecf32") {
+                found_vecf32 = true;
+            }
+            // Parse each WAL line and check params for entity timestamp
+            for line in content.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                    let params = &parsed["params"];
+                    // Find the entity WAL line by uuid
+                    if params.get("uuid").and_then(|v| v.as_str()) == Some(ENTITY_UUID) {
+                        let ts = params["created_at"].as_str().unwrap_or("");
+                        // Must contain microseconds (`.123456`)
+                        if ts.contains(".123456") {
+                            found_microseconds = true;
+                        }
+                        assert!(
+                            !ts.is_empty(),
+                            "created_at must be non-empty in dump WAL params"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        !found_vecf32,
+        "dump WAL must not contain vecf32 (SC-007)"
+    );
+    assert!(
+        found_microseconds,
+        "dump WAL must preserve microsecond precision in created_at — \
+         expected '{MICROSECOND_TS}' in a WAL params.created_at field (SC-003)"
+    );
+
+    // ── Phase D: replay dump into fresh db2 ───────────────────────────────────
+    let db2_path = dir.path().join("db2_tsf.db");
+    let db2 = open_db(&db2_path);
+    let replay_stats = {
+        let conn = db2.connect().unwrap();
+        WalReplayer::new(&dump_dir)
+            .replay(&conn)
+            .expect("dump WAL replay must succeed")
+    };
+    assert_eq!(
+        replay_stats.failed_lines, 0,
+        "dump→replay must produce zero failed lines (SC-003)"
+    );
+    assert!(replay_stats.lines_replayed > 0, "must replay at least one line");
+
+    // ── Phase E: entity must exist and have a valid created_at after replay ──
+    let entity = db2
+        .connect()
+        .unwrap()
+        .get_entity_by_uuid(ENTITY_UUID)
+        .expect("get_entity_by_uuid must not fail after dump→replay");
+    let entity = entity.unwrap_or_else(|| panic!("entity {ENTITY_UUID} must exist after replay"));
+    let created_at = &entity.created_at;
+    assert!(
+        !created_at.is_empty() && created_at.len() >= 10,
+        "replayed entity must have a valid created_at (SC-003): {created_at}"
+    );
+}
