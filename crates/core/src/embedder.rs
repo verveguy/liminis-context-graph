@@ -285,3 +285,34 @@ impl Embedder for MockEmbedder {
         self.dim
     }
 }
+
+// ── NameMapEmbedder ───────────────────────────────────────────────────────────
+
+/// Test embedder that maps specific strings to caller-provided vectors.
+/// Unknown strings return a zero vector. Useful for controlling cosine
+/// similarity precisely in cross-episode dedup tests.
+pub struct NameMapEmbedder {
+    dim: usize,
+    map: std::collections::HashMap<String, Vec<f32>>,
+}
+
+impl NameMapEmbedder {
+    pub fn new(dim: usize, map: std::collections::HashMap<String, Vec<f32>>) -> Self {
+        Self { dim, map }
+    }
+}
+
+impl Embedder for NameMapEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        let v = self
+            .map
+            .get(text)
+            .cloned()
+            .unwrap_or_else(|| vec![0.0f32; self.dim]);
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}

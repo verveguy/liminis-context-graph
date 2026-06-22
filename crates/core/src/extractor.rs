@@ -642,6 +642,46 @@ impl Extractor for MockExtractor {
     }
 }
 
+// ── ConfigurableExtractor ─────────────────────────────────────────────────────
+
+/// Test extractor that returns caller-specified extraction results in FIFO order.
+/// Each call to `extract` pops the front of the queue. When the queue is empty,
+/// returns an empty ExtractionResult (no entities, no edges).
+pub struct ConfigurableExtractor {
+    queue: Arc<std::sync::Mutex<std::collections::VecDeque<ExtractionResult>>>,
+}
+
+impl ConfigurableExtractor {
+    pub fn new(results: Vec<ExtractionResult>) -> Self {
+        Self {
+            queue: Arc::new(std::sync::Mutex::new(results.into_iter().collect())),
+        }
+    }
+}
+
+impl Extractor for ConfigurableExtractor {
+    fn extract<'a>(
+        &'a self,
+        _opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        let result = self
+            .queue
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
+        Box::pin(async move { Ok(result) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn extract_json_block(s: &str) -> &str {
