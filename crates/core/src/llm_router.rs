@@ -150,7 +150,7 @@ impl LlmRouter {
                                 error_reason: err.to_string(),
                             });
                             eprintln!(
-                                "liminis-graph: extraction primary '{}' failed ({}); switching to fallback '{}' for this session",
+                                "liminis-context-graph: extraction primary '{}' failed ({}); switching to fallback '{}' for this session",
                                 self.primary_model_name, err, self.fallback_model_name
                             );
                         }

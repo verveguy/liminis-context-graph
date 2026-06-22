@@ -212,7 +212,7 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         Ok(t) => t,
         Err(e) => {
             eprintln!(
-                "liminis-graph: ontology: failed to read {:?}: {} — falling back to free-form extraction",
+                "liminis-context-graph: ontology: failed to read {:?}: {} — falling back to free-form extraction",
                 path, e
             );
             return None;
@@ -228,7 +228,7 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         Ok(f) => f,
         Err(e) => {
             eprintln!(
-                "liminis-graph: ontology: YAML parse error in {:?}: {} — falling back to free-form extraction",
+                "liminis-context-graph: ontology: YAML parse error in {:?}: {} — falling back to free-form extraction",
                 path, e
             );
             return None;
@@ -246,12 +246,12 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         .filter_map(|raw| {
             let normalized = normalize_entity_type(&raw.name);
             if normalized.is_empty() {
-                eprintln!("liminis-graph: ontology: skipping entity type with blank name");
+                eprintln!("liminis-context-graph: ontology: skipping entity type with blank name");
                 return None;
             }
             if normalized != raw.name {
                 eprintln!(
-                    "liminis-graph: ontology: entity type '{}' normalized to '{}'",
+                    "liminis-context-graph: ontology: entity type '{}' normalized to '{}'",
                     raw.name, normalized
                 );
             }
@@ -268,12 +268,14 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         .filter_map(|raw| {
             let normalized = normalize_relation_type(&raw.name);
             if normalized.is_empty() {
-                eprintln!("liminis-graph: ontology: skipping relation type with blank name");
+                eprintln!(
+                    "liminis-context-graph: ontology: skipping relation type with blank name"
+                );
                 return None;
             }
             if normalized != raw.name {
                 eprintln!(
-                    "liminis-graph: ontology: relation type '{}' normalized to '{}'",
+                    "liminis-context-graph: ontology: relation type '{}' normalized to '{}'",
                     raw.name, normalized
                 );
             }
@@ -294,7 +296,7 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
     }
 
     eprintln!(
-        "liminis-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={} from {:?}",
+        "liminis-context-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={} from {:?}",
         entity_types.len(),
         relation_types.len(),
         mode,

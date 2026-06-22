@@ -160,7 +160,7 @@ fn load_pricing() -> &'static Value {
             }) {
                 Ok(v) => return v,
                 Err(e) => eprintln!(
-                    "liminis-graph: LIMINIS_LLM_COST_TABLE_PATH={path} unreadable or invalid JSON, \
+                    "liminis-context-graph: LIMINIS_LLM_COST_TABLE_PATH={path} unreadable or invalid JSON, \
                      using built-in pricing: {e}"
                 ),
             }

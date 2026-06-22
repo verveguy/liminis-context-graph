@@ -48,7 +48,7 @@ pub(crate) fn wal_flush_chunk(
     let mut guard = match wal.lock() {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("liminis-graph: wal_flush_chunk: lock poisoned: {e}");
+            eprintln!("liminis-context-graph: wal_flush_chunk: lock poisoned: {e}");
             return;
         }
     };
@@ -61,7 +61,9 @@ pub(crate) fn wal_flush_chunk(
         });
         match result {
             Ok(_) => emit_rotation_if_any(writer, sink),
-            Err(e) => eprintln!("liminis-graph: wal_flush_chunk: write failed (non-fatal): {e}"),
+            Err(e) => {
+                eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}")
+            }
         }
     }
 }
@@ -80,7 +82,7 @@ pub(crate) fn wal_flush_ungrouped(
     let mut guard = match wal.lock() {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("liminis-graph: wal_flush_ungrouped: lock poisoned: {e}");
+            eprintln!("liminis-context-graph: wal_flush_ungrouped: lock poisoned: {e}");
             return;
         }
     };
@@ -90,7 +92,9 @@ pub(crate) fn wal_flush_ungrouped(
             match result {
                 Ok(_) => emit_rotation_if_any(writer, sink),
                 Err(e) => {
-                    eprintln!("liminis-graph: wal_flush_ungrouped: write failed (non-fatal): {e}")
+                    eprintln!(
+                        "liminis-context-graph: wal_flush_ungrouped: write failed (non-fatal): {e}"
+                    )
                 }
             }
         }

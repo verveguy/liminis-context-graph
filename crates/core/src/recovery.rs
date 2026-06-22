@@ -73,7 +73,7 @@ pub fn derive_episode_cursor(
             Ok(None) => {}
             Err(_) => {
                 eprintln!(
-                    "liminis-graph: WAL recovery: skipping unreadable file {:?}",
+                    "liminis-context-graph: WAL recovery: skipping unreadable file {:?}",
                     wal_file
                 );
             }
@@ -178,8 +178,8 @@ pub fn run_full_recovery_sequence(
                     fallback_reason: Some(reason.clone()),
                 });
                 eprintln!(
-                    "liminis-graph: startup recovery: {reason}, falling back to full rebuild"
-                );
+                "liminis-context-graph: startup recovery: {reason}, falling back to full rebuild"
+            );
                 let fallback_db = full_rebuild(db_path, embedding_dim)?;
                 (fallback_db, true, Some(reason))
             }

@@ -336,7 +336,7 @@ impl AnthropicExtractor {
                             let normalized = normalize_relation_type(rt);
                             if normalized != *rt {
                                 eprintln!(
-                                    "liminis-graph: relation_type normalized: '{}' → '{}'",
+                                    "liminis-context-graph: relation_type normalized: '{}' → '{}'",
                                     rt, normalized
                                 );
                                 edge.relation_type = Some(normalized);
@@ -363,7 +363,7 @@ impl AnthropicExtractor {
                         retry_succeeded: false,
                     });
                     // Edge budget exhaustion is not fatal — return empty list.
-                    eprintln!("liminis-graph: edge extraction budget exhausted; returning empty edge list");
+                    eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
                     return Ok(vec![]);
                 }
                 EdgeOutcome::ParseError(e) => return Err(e),
