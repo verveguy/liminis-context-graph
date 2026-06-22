@@ -811,15 +811,21 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         None => {
             let name = params.canonical_name.as_deref().unwrap();
             match conn.get_entities_by_name_all(name, group_id) {
-                Ok(mut rows) if !rows.is_empty() => rows.remove(0),
-                Ok(_) => {
-                    return MergeEntitiesResult {
-                        success: false,
-                        errors: vec![format!(
-                            "canonical entity not found: name={name}, group={group_id}"
-                        )],
-                        ..Default::default()
-                    };
+                Ok(mut rows) => {
+                    // Skip already-merged entities — canonical must be active (FR-003).
+                    // A previous UUID-based merge may have left the chronologically-earliest
+                    // entity marked as merged; we want the earliest *active* entity.
+                    rows.retain(|r| !r.labels.contains(&"Merged".to_string()));
+                    if rows.is_empty() {
+                        return MergeEntitiesResult {
+                            success: false,
+                            errors: vec![format!(
+                                "canonical entity not found: name={name}, group={group_id}"
+                            )],
+                            ..Default::default()
+                        };
+                    }
+                    rows.remove(0)
                 }
                 Err(e) => {
                     return MergeEntitiesResult {
@@ -980,9 +986,10 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
 
     MergeEntitiesResult {
         success: errors.iter().all(|e| {
-            // Non-fatal errors (alias not found, label update failures) don't mark success=false
-            // only if at least aliases were processed successfully
-            !e.starts_with("canonical")
+            // "alias … not found" and "matches no entities" are soft warnings — processing
+            // continues and the caller already saw them in errors[]. All other errors
+            // (DB write failures, lookup errors) are hard failures that set success=false.
+            e.contains("not found") || e.contains("matches no entities")
         }),
         canonical_uuid,
         merged_count,
