@@ -1,15 +1,15 @@
 //! Legacy-WAL translation layer: Cypher-text and param-shape transforms.
 //!
 //! This module handles FalkorDB-dialect Cypher constructs that lbug cannot execute directly.
-//! It operates on the raw Cypher string and/or the shape of the params object — before
-//! `interpolate_params` converts param values to Cypher literals.
+//! It operates on the raw Cypher string and/or the shape of the params object before the
+//! prepared-statement execution path in `replay.rs` sends them to lbug.
 //!
 //! **Module split rule** (follow this when adding future legacy-compat fixes):
 //! - Transforms that rewrite the Cypher string or reshape the params map → this module
 //! - Transforms that change only how a param *value* is typed/formatted →
 //!   `db.rs::json_value_for_param` (e.g., RFC-3339 and space-format timestamp coercion)
 //!
-//! Pipeline order in `replay.rs`: `strip_vecf32` → `expand_bulk_property_set` → `interpolate_params`
+//! Pipeline order in `replay.rs`: `strip_vecf32` → `expand_bulk_property_set` → bound-param execution
 
 use std::sync::OnceLock;
 
