@@ -644,7 +644,9 @@ mod tests {
             classify_edge_lexically("SOME_UNRECOGNIZED_PREDICATE", Some("WAS_EMPLOYED_BY"), &idx);
         match class {
             EdgeClass::Mapped(t) => assert_eq!(t, "AFFILIATED_WITH"),
-            _ => panic!("expected Mapped(AFFILIATED_WITH) via relation_type keyword, got {class:?}"),
+            _ => {
+                panic!("expected Mapped(AFFILIATED_WITH) via relation_type keyword, got {class:?}")
+            }
         }
     }
 }
