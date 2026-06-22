@@ -464,7 +464,10 @@ async fn test_dump_wal_timestamp_fidelity() {
         state1,
     )
     .await;
-    assert_eq!(dump_v["result"]["success"], true, "dump must succeed: {dump_v}");
+    assert_eq!(
+        dump_v["result"]["success"], true,
+        "dump must succeed: {dump_v}"
+    );
 
     // ── Phase C: inspect dump WAL files ───────────────────────────────────────
     assert!(dump_dir.exists(), "dump directory must exist");
@@ -499,10 +502,7 @@ async fn test_dump_wal_timestamp_fidelity() {
             }
         }
     }
-    assert!(
-        !found_vecf32,
-        "dump WAL must not contain vecf32 (SC-007)"
-    );
+    assert!(!found_vecf32, "dump WAL must not contain vecf32 (SC-007)");
     assert!(
         found_microseconds,
         "dump WAL must preserve microsecond precision in created_at — \
@@ -522,7 +522,10 @@ async fn test_dump_wal_timestamp_fidelity() {
         replay_stats.failed_lines, 0,
         "dump→replay must produce zero failed lines (SC-003)"
     );
-    assert!(replay_stats.lines_replayed > 0, "must replay at least one line");
+    assert!(
+        replay_stats.lines_replayed > 0,
+        "must replay at least one line"
+    );
 
     // ── Phase E: entity must exist and have a valid created_at after replay ──
     let entity = db2
