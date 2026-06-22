@@ -27,8 +27,9 @@ use lcg_core::{
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
+    ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     telemetry::{NoopSink, TelemetrySink},
-    EntityRow, RelatesToEdge,
+    EntityRow, Ontology, RelatesToEdge,
 };
 use regex::Regex;
 use serde_json::{json, Value};
@@ -73,6 +74,33 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         cancel_token: CancellationToken::new(),
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
 }
