@@ -432,6 +432,7 @@ fn dump_mentions_edges(
         let rows = conn.dump_mentions_page(group_id, offset, PAGE_SIZE)?;
         let count = rows.len();
         if count > 0 {
+            let mut page_written = 0usize;
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [ep_uuid, en_uuid, r_uuid, r_group_id, r_created_at]
@@ -456,10 +457,11 @@ fn dump_mentions_edges(
                         "created_at": r_created_at,
                     });
                     w.log_mutation(MENTIONS_CYPHER, params, "")?;
+                    page_written += 1;
                 }
                 Ok(())
             })?;
-            total += count;
+            total += page_written;
         }
         if count < PAGE_SIZE {
             break;
