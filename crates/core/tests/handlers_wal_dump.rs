@@ -476,7 +476,7 @@ async fn test_dump_wal_timestamp_fidelity() {
     for entry in std::fs::read_dir(&dump_dir).unwrap().flatten() {
         if entry.path().extension().and_then(|x| x.to_str()) == Some("jsonl") {
             let content = std::fs::read_to_string(entry.path()).unwrap();
-            if content.contains("vecf32") {
+            if content.contains("vecf32(") {
                 found_vecf32 = true;
             }
             // Parse each WAL line and check params for entity timestamp
@@ -535,8 +535,33 @@ async fn test_dump_wal_timestamp_fidelity() {
         .expect("get_entity_by_uuid must not fail after dump→replay");
     let entity = entity.unwrap_or_else(|| panic!("entity {ENTITY_UUID} must exist after replay"));
     let created_at = &entity.created_at;
+    // `get_entity_by_uuid` returns the space-format read-back ("YYYY-MM-DD HH:MM:SS"). Assert the
+    // expected date portion is present — this confirms the correct timestamp was replayed, not
+    // truncated or corrupted (a TYPE_MISMATCH would have caused the replay to fail at Phase D).
     assert!(
-        !created_at.is_empty() && created_at.len() >= 10,
-        "replayed entity must have a valid created_at (SC-003): {created_at}"
+        created_at.contains("2024-06-01"),
+        "replayed entity created_at must contain the expected date '2024-06-01' (SC-003): {created_at}"
+    );
+
+    // Query the raw TIMESTAMP value via Cypher to verify lbug stored a real TIMESTAMP type.
+    // The raw representation includes sub-second precision; check it starts with the expected date.
+    let raw_rows = db2
+        .connect()
+        .unwrap()
+        .cypher_query(&format!(
+            "MATCH (n:Entity {{uuid: '{ENTITY_UUID}'}}) RETURN n.created_at"
+        ))
+        .expect("Cypher query for created_at must succeed after replay (SC-003)");
+    assert_eq!(raw_rows.len(), 1, "must return exactly one row");
+    let raw_ts = &raw_rows[0][0];
+    assert!(
+        raw_ts.contains("2024-06-01"),
+        "raw Cypher-returned created_at must contain the expected date after replay (SC-003): {raw_ts}"
+    );
+    // Verify microsecond component is preserved in the raw TIMESTAMP.
+    // lbug/Kuzu includes sub-second digits in its string representation when non-zero.
+    assert!(
+        raw_ts.contains(".123456") || raw_ts.contains("123456"),
+        "raw TIMESTAMP must preserve microsecond component .123456 after dump→replay (SC-003): {raw_ts}"
     );
 }

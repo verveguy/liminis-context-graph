@@ -1639,13 +1639,13 @@ async fn test_relates_to_edge_timestamp_type() {
         .expect("querying created_at on RelatesToNode_ must succeed (SC-004)");
     assert_eq!(rows.len(), 1, "must return exactly one row");
     let created_at = &rows[0][0];
+    // Check for the specific date we inserted: "2024-03-01T08:00:02Z" → stored as TIMESTAMP.
+    // lbug returns TIMESTAMP as "YYYY-MM-DD HH:MM:SS[.ffffff]" or RFC-3339; either way it
+    // contains the date portion. TYPE_MISMATCH or an error string won't contain "2024-03-01".
     assert!(
-        !created_at.is_empty(),
-        "created_at must be non-empty — TYPE_MISMATCH would cause empty or error string (SC-004): {created_at}"
-    );
-    assert!(
-        created_at.len() >= 10 && (created_at.contains('-') || created_at.contains('T')),
-        "created_at must look like a datetime string, got: {created_at}"
+        created_at.contains("2024-03-01"),
+        "created_at must contain the expected date '2024-03-01' — \
+         a TYPE_MISMATCH or wrong type would not match (SC-004): {created_at}"
     );
 }
 
@@ -1722,9 +1722,12 @@ async fn test_same_as_correction_timestamp_type() {
         .expect("canonical entity must be queryable after same_as correction");
     if let Some(e) = canonical {
         let created_at = &e.created_at;
+        // Check for the specific date we inserted: "2024-04-01T09:00:00Z" → stored and read back
+        // as "2024-04-01 09:00:00" (space-format). A TYPE_MISMATCH artifact won't contain this.
         assert!(
-            !created_at.is_empty() && created_at.len() >= 10,
-            "canonical entity created_at must be a valid datetime after correction: {created_at}"
+            created_at.contains("2024-04-01"),
+            "canonical entity created_at must contain the expected date '2024-04-01' \
+             after same_as correction (FR-012): {created_at}"
         );
     }
 }
