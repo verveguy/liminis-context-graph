@@ -590,10 +590,17 @@ async fn test_wal_round_trip_fidelity() {
     let db = open_db(&dir);
     let onto = test_ontology();
 
-    // Insert seed data and capture mutations for WAL
     let src = make_entity("Alice");
     let dst = make_entity("Bob");
-    let seed_mutations;
+
+    // Create AppState first so seed mutations and canonicalize mutations are written
+    // through the same WalWriter session — guarantees file-sequence ordering on replay.
+    // (Two separate WalWriter instances for the same wal_dir share a second-precision
+    // timestamp prefix but have different random session_ids, making their alphabetical
+    // sort order — and therefore replay order — non-deterministic.)
+    let state = make_state_with_wal(db.clone(), wal_dir.path(), Some(onto));
+
+    // Insert seed data and write its mutations through state's WalWriter
     {
         let conn = db.connect().unwrap();
         conn.insert_entity(&src).unwrap();
@@ -610,23 +617,21 @@ async fn test_wal_round_trip_fidelity() {
             "some unique fact",
         ))
         .unwrap();
-        seed_mutations = conn.drain_mutations();
+        let seed_mutations = conn.drain_mutations();
+        let mut wal_guard = state.wal_writer.lock().unwrap();
+        if let Some(ref mut writer) = *wal_guard {
+            writer
+                .with_chunk(|w| {
+                    for (cypher, params) in &seed_mutations {
+                        w.log_mutation(cypher, params.clone(), "")?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
-    // Write seed mutations to WAL
-    {
-        let mut wal = WalWriter::new(wal_dir.path(), 10_000, 0).unwrap();
-        wal.with_chunk(|w| {
-            for (cypher, params) in &seed_mutations {
-                w.log_mutation(cypher, params.clone(), "")?;
-            }
-            Ok(())
-        })
-        .unwrap();
-    }
-
-    // Run canonicalize pass (appends mutations to WAL)
-    let state = make_state_with_wal(db.clone(), wal_dir.path(), Some(onto));
+    // Run canonicalize pass (appends mutations to same WAL session)
     dispatch(
         "knowledge_canonicalize_relations",
         json!({ "dry_run": false }),
