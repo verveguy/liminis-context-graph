@@ -1,4 +1,4 @@
-# ADR-0049: Name-First Entity Resolution in add_episode Phase B
+# ADR-0050: Name-First Entity Resolution in add_episode Phase B
 
 **Status**: Accepted
 **Date**: 2026-06-22
