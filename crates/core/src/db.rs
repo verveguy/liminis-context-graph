@@ -1130,10 +1130,13 @@ impl<'db> Conn<'db> {
 
     /// Sets `created_at` on the Entity with `uuid` to `created_at`.
     /// Must use `timestamp($new_created_at)` in Cypher because lbug requires the `timestamp()`
-    /// function to accept the stored "YYYY-MM-DD HH:MM:SS" format in a SET assignment.
-    /// The param is named `new_created_at` (not `created_at`) to avoid TIMESTAMP_PARAM_NAMES
-    /// auto-coercion, which would bind an RFC-3339 string as `Value::Timestamp` before it
-    /// reaches `timestamp()`, causing a type error in lbug.
+    /// function when assigning a string value to a TIMESTAMP column in a SET clause (bare
+    /// `SET col = $x` with a string binds fail; see ADR-0009).
+    /// The param is named `new_created_at` (not `created_at`) to bypass TIMESTAMP_PARAM_NAMES
+    /// auto-coercion: the input is always a space-format string ("YYYY-MM-DD HH:MM:SS") from
+    /// the DB, and we want `timestamp()` to receive it as a string — the natural, unambiguous
+    /// path. (`timestamp(Value::Timestamp)` is also accepted by lbug and is idempotent, as
+    /// confirmed by dump-replay tests, but the rename keeps the intent explicit.)
     pub fn update_entity_created_at(&self, uuid: &str, created_at: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($new_created_at)",
@@ -1843,14 +1846,9 @@ fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
                 return Value::Timestamp(odt);
             }
             // Space-format "YYYY-MM-DD HH:MM:SS" — DB read-back format. Assumed UTC.
-            static SPACE_FMT: std::sync::OnceLock<
-                Vec<time::format_description::FormatItem<'static>>,
-            > = std::sync::OnceLock::new();
-            let fmt = SPACE_FMT.get_or_init(|| {
-                time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]")
-                    .expect("static space-format description is valid")
-            });
-            if let Ok(pdt) = time::PrimitiveDateTime::parse(s, fmt) {
+            const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
+                time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+            if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
                 return Value::Timestamp(pdt.assume_utc());
             }
         }
