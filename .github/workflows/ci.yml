@@ -61,7 +61,7 @@ jobs:
       # is no longer needed. This step just populates the cache so the test job gets a hit.
       - name: Populate lbug prebuilt cache (skipped on cache hit)
         if: steps.lbug-cache.outputs.cache-hit != 'true'
-        run: cargo build --release -p liminis-graph-core
+        run: cargo build --release -p lcg-core
 
   test:
     name: test (ubuntu-latest)
