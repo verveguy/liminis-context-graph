@@ -1087,12 +1087,15 @@ impl<'db> Conn<'db> {
     }
 
     /// Sets `created_at` on the Entity with `uuid` to `created_at`.
-    /// Must use `timestamp($created_at)` in Cypher because lbug requires the `timestamp()`
+    /// Must use `timestamp($new_created_at)` in Cypher because lbug requires the `timestamp()`
     /// function to accept the stored "YYYY-MM-DD HH:MM:SS" format in a SET assignment.
+    /// The param is named `new_created_at` (not `created_at`) to avoid TIMESTAMP_PARAM_NAMES
+    /// auto-coercion, which would bind an RFC-3339 string as `Value::Timestamp` before it
+    /// reaches `timestamp()`, causing a type error in lbug.
     pub fn update_entity_created_at(&self, uuid: &str, created_at: &str) -> Result<(), Error> {
         self.exec_params(
-            "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($created_at)",
-            serde_json::json!({ "uuid": uuid, "created_at": created_at }),
+            "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($new_created_at)",
+            serde_json::json!({ "uuid": uuid, "new_created_at": created_at }),
         )
     }
 
@@ -1330,6 +1333,7 @@ impl<'db> Conn<'db> {
     ) -> Result<bool, Error> {
         let rows = self.query_params(
             "MATCH (src:Entity {uuid: $src})-[:RELATES_TO]->(rn:RelatesToNode_ {name: $name})-[:RELATES_TO]->(dst:Entity {uuid: $dst}) \
+             WHERE rn.invalid_at IS NULL \
              RETURN count(rn)",
             serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid }),
         )?;
