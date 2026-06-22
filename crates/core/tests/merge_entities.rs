@@ -532,3 +532,100 @@ fn test_single_entity_no_aliases_noop() {
     assert_eq!(result.skipped, 0);
     assert_eq!(count_active_entities_named(&db, "Brett"), 1);
 }
+
+// ── Test 9: TIMESTAMP-valued edges survive merge round-trip (regression #169) ─
+
+/// SC-003 / FR-001 / FR-005: edges with non-null valid_at (RFC-3339) are read back from
+/// lbug as space-format strings and re-inserted during merge. Without the space-format
+/// fallback in json_value_for_param this produces "STRING but expected TIMESTAMP" and
+/// merged_count stays 0. This test MUST fail against unfixed code.
+#[test]
+fn test_merge_with_timestamp_edges() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let other_uuid = "casey-target-001";
+    conn.insert_entity(&make_entity(other_uuid, "Target", "2026-06-01 00:00:00"))
+        .unwrap();
+
+    let casey_uuids: Vec<String> = (1..=3).map(|i| format!("casey-{i:03}")).collect();
+    for (i, uuid) in casey_uuids.iter().enumerate() {
+        conn.insert_entity(&make_entity(
+            uuid,
+            "Casey",
+            &format!("2026-06-01 00:0{i}:00"),
+        ))
+        .unwrap();
+        // Edge with explicit RFC-3339 valid_at — stored as TIMESTAMP, read back as space-format
+        let edge = RelatesToEdge {
+            uuid: Uuid::new_v4().to_string(),
+            name: format!("knows_{i}"),
+            source_node_uuid: uuid.clone(),
+            target_node_uuid: other_uuid.to_string(),
+            group_id: "liminis".to_string(),
+            fact: format!("{uuid} knows {other_uuid}"),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            created_at: "2026-06-01T00:00:00Z".to_string(),
+            valid_at: Some("2026-06-01T12:00:00Z".to_string()),
+            invalid_at: None,
+            attributes: "{}".to_string(),
+            relation_type: None,
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        };
+        conn.insert_relates_to_edge(&edge).unwrap();
+    }
+
+    let params = MergeEntitiesParams {
+        canonical_name: Some("Casey".to_string()),
+        merge_all_by_name: true,
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(
+        result.success,
+        "merge should succeed; errors: {:?}",
+        result.errors
+    );
+    assert_eq!(
+        result.merged_count, 2,
+        "2 Casey aliases should be merged; errors: {:?}",
+        result.errors
+    );
+    assert!(
+        result.edges_rewritten >= 2,
+        "at least 2 edges should be rewritten, got {}",
+        result.edges_rewritten
+    );
+    assert!(
+        result.errors.is_empty(),
+        "no errors expected, got: {:?}",
+        result.errors
+    );
+
+    // Exactly 1 active Casey remains
+    assert_eq!(count_active_entities_named(&db, "Casey"), 1);
+
+    // Canonical has the rewritten edges with correct timestamps
+    let canonical = conn
+        .get_entities_by_name_all("Casey", "liminis")
+        .unwrap()
+        .into_iter()
+        .find(|e| !e.labels.contains(&"Merged".to_string()))
+        .expect("one active Casey must remain");
+    let edges = conn.get_full_edges_for_entity(&canonical.uuid).unwrap();
+    let active_edges: Vec<_> = edges.iter().filter(|e| e.invalid_at.is_none()).collect();
+    assert!(
+        active_edges.len() >= 2,
+        "canonical should have at least 2 active edges, got {}",
+        active_edges.len()
+    );
+    // All active edges that were rewritten should have a valid_at value
+    assert!(
+        active_edges.iter().all(|e| e.valid_at.is_some()),
+        "all active rewritten edges should retain valid_at"
+    );
+}
