@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 
 use lbug::{LogicalType, Value};
 
@@ -27,13 +28,25 @@ pub struct Conn<'db> {
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
 }
 
+/// Serializes `Db::open` across threads. `INSTALL`/`LOAD EXTENSION` mutate a
+/// *process-global* extension install location (not per-Database), so two
+/// threads opening fresh Databases concurrently race that shared state and can
+/// segfault the lbug C++ engine — a Linux-specific, schedule-sensitive crash
+/// that surfaces under parallel `cargo test` (each test opens its own temp DB).
+/// Production opens exactly one Database per service, so this lock is
+/// contention-free outside the test suite. Poison-tolerant: a panic mid-open
+/// must not wedge every other open.
+static OPEN_LOCK: Mutex<()> = Mutex::new(());
+
 impl Db {
     pub fn open(path: &str) -> Result<Self, Error> {
+        let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let inner = lbug::Database::new(path, lbug::SystemConfig::default())?;
         // Both INSTALL and LOAD EXTENSION are write transactions in lbug,
         // and both must run before any vector / FTS use. Extensions persist at
         // the Database level (not per-Connection), so we set them up once here
-        // — running them in connect() races concurrent callers.
+        // — running them in connect() races concurrent callers. The OPEN_LOCK
+        // above additionally serializes this block across Databases.
         let setup_conn = lbug::Connection::new(&inner)?;
         let _ = setup_conn.query("INSTALL vector")?;
         let _ = setup_conn.query("LOAD EXTENSION vector")?;
