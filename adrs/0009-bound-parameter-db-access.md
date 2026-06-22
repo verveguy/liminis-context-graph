@@ -42,6 +42,10 @@ parameters, and **delete the entire interpolation/escaping layer**.
   exception is RFC-3339 strings, bound as typed `Value::Timestamp` because lbug does **not**
   implicitly cast `STRING`→`TIMESTAMP` in a `SET col = $x` assignment (it does in a CREATE
   property map) — so #130's detection moves into the binding rather than being deleted outright.
+  `json_value_for_param` additionally handles the DB round-trip case (#169): timestamps read back
+  from lbug via `value_as_timestamp_str` are in "YYYY-MM-DD HH:MM:SS" space format (no timezone).
+  A second parse attempt converts these to `Value::Timestamp` assuming UTC, so paths that read
+  edges from the DB and re-insert them (e.g. `merge_entities`) do not regress to `Value::String`.
 - Deleted: `escape`, `escape_fts`, `escape_pub`, `format_str_list`, `format_float_array`,
   `interpolate_params`, `json_to_cypher_literal`, `build_unwind_query`,
   `rewrite_params_for_unwind`, `map_to_cypher_literal`, `execute_single`.
