@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod corrections;
 pub mod db;
 pub mod dedup_adapter;
+pub(crate) mod dump;
 pub mod embedder;
 pub mod env;
 pub mod episode;

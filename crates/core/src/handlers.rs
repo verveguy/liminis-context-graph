@@ -152,6 +152,7 @@ async fn handle(
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
+        "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
@@ -1145,6 +1146,91 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 }
 
 // ── WAL admin handlers ────────────────────────────────────────────────────────
+
+// FR-014: callers must add knowledge_dump_wal to service_protocol.py in the liminis-app repo.
+async fn handle_dump_wal(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = p["group_id"].as_str().map(|s| s.to_string());
+
+    // Resolve target_dir: caller-supplied or default to {db_path_parent}/wal-compacted/.
+    let target_dir: std::path::PathBuf = if let Some(s) = p["target_dir"].as_str() {
+        std::path::PathBuf::from(s)
+    } else {
+        std::path::Path::new(&state.db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("wal-compacted")
+    };
+
+    // Refuse to write into a directory that already contains WAL files (FR-004).
+    if target_dir.exists() && has_jsonl_files(&target_dir) {
+        return Err(Error::Ipc(format!(
+            "knowledge_dump_wal: target_dir '{}' already contains .jsonl files; \
+             supply a clean path or remove existing files first",
+            target_dir.display()
+        )));
+    }
+
+    let max_events = state.wal_max_events_per_file;
+    let db = load_db(&state)?;
+    // Write lock held for the entire dump to prevent concurrent mutations from interleaving
+    // with the snapshot (FR-009).
+    let _guard = state.write_lock.write().await;
+
+    let target_dir_c = target_dir.clone();
+    let group_id_c = group_id.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<crate::dump::DumpResult, Error> {
+        let mut writer = WalWriter::new(&target_dir_c, max_events, 0).map_err(|e| {
+            Error::Ipc(format!(
+                "knowledge_dump_wal: failed to create WalWriter: {e}"
+            ))
+        })?;
+        let conn = db.connect()?;
+        let params = crate::dump::DumpParams {
+            group_id: group_id_c,
+        };
+        crate::dump::run_dump(&conn, &params, &mut writer)
+    })
+    .await;
+
+    // On any failure: clean up partial output (FR-012).
+    match result {
+        Ok(Ok(dump_result)) => {
+            drop(_guard);
+            let files_written = count_jsonl_files_in_dir(&target_dir);
+            Ok(json!({
+                "success": true,
+                "nodes_dumped": dump_result.nodes_dumped,
+                "edges_dumped": dump_result.edges_dumped,
+                "files_written": files_written,
+                "target_dir": target_dir.to_string_lossy(),
+            }))
+        }
+        Ok(Err(e)) => {
+            drop(_guard);
+            let _ = std::fs::remove_dir_all(&target_dir);
+            Err(e)
+        }
+        Err(join_err) => {
+            drop(_guard);
+            let _ = std::fs::remove_dir_all(&target_dir);
+            Err(Error::Ipc(format!(
+                "knowledge_dump_wal: spawn_blocking panicked: {join_err}"
+            )))
+        }
+    }
+}
+
+fn count_jsonl_files_in_dir(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .ok()
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+                .count()
+        })
+        .unwrap_or(0)
+}
 
 async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error> {
     let wal_dir = state.wal_dir.clone();
