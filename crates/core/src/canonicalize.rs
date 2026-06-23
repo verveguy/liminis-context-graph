@@ -432,9 +432,12 @@ pub async fn canonicalize_relations(
                         }
                     }
                     EdgeClass::Noise => {
-                        // ADR-0054: never delete noise edges — reclassify to UNCLASSIFIED.
-                        // Idempotency: skip if already set (second run adds zero WAL mutations).
-                        if current_rt.as_deref() == Some("UNCLASSIFIED") {
+                        // ADR-0054: never delete noise edges. Only set UNCLASSIFIED when the
+                        // edge has no relation_type. If a non-empty value already exists, preserve
+                        // it — name-based noise classification bypasses relation_type mapping, so
+                        // rich existing predicates on arrow-named edges must not be overwritten.
+                        let rt_val = current_rt.as_deref().unwrap_or("").trim();
+                        if !rt_val.is_empty() {
                             Ok(())
                         } else {
                             conn.exec_params(

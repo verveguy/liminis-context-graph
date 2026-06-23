@@ -53,10 +53,10 @@ An operator calls the backfill method with `dry_run: true` and receives an accur
 
 **Acceptance Scenarios**:
 
-1. **Given** a graph with 100 edges, 40 of which have empty `relation_type`, **When** the backfill is called with `dry_run: true`, **Then** the response reports `{would_backfill: 40, total_edges: 100, dry_run: true}` and no mutations are made.
+1. **Given** a graph with 100 edges, 40 of which have empty `relation_type`, **When** the backfill is called with `dry_run: true`, **Then** the response reports `{backfilled: 40, total_edges: 100, dry_run: true}` and no mutations are made.
 2. **Given** a dry-run completes, **When** any edge is inspected, **Then** no `relation_type` values have changed.
 3. **Given** `dry_run: true` is called, **When** the WAL file is inspected, **Then** no new mutation lines were appended.
-4. **Given** a graph where all edges already have `relation_type` populated, **When** `dry_run: true` is called, **Then** the response reports `{would_backfill: 0}`.
+4. **Given** a graph where all edges already have `relation_type` populated, **When** `dry_run: true` is called, **Then** the response reports `{backfilled: 0}`.
 
 ---
 
@@ -134,7 +134,7 @@ After the safety correction to `canonicalize_relations`, calling it on a graph c
 **Part 2 — Additive backfill IPC method**
 
 - **FR-005**: A new IPC method (to be named by Research/Plan; suggested: `knowledge_backfill_relation_types`) MUST accept at minimum a `dry_run: bool` parameter.
-- **FR-006**: In `dry_run: true` mode, the method MUST return a report including at minimum `{would_backfill: usize, total_edges: usize, dry_run: true}` and MUST make zero mutations to the graph or WAL.
+- **FR-006**: In `dry_run: true` mode, the method MUST return a report including at minimum `{backfilled: usize, total_edges: usize, dry_run: true}` and MUST make zero mutations to the graph or WAL.
 - **FR-007**: In live mode (`dry_run: false`), the method MUST iterate over all edges with an empty or null `relation_type` and set a derived value on each. It MUST NOT touch edges where `relation_type` is already non-empty.
 - **FR-008**: The derivation logic MUST use the `name` field when it is a recognizable predicate (e.g. a SCREAMING_SNAKE_CASE token, a normalized verb phrase), and fall back to the `fact` field when the `name` is uninformative (e.g. matches the `X → Y` arrow pattern or is otherwise empty/whitespace).
 - **FR-009**: When neither `name` nor `fact` provides a usable signal, the method MUST set `relation_type` to the sentinel value `UNCLASSIFIED`. No edge is left with an empty `relation_type` after a live pass.
@@ -168,7 +168,7 @@ After the safety correction to `canonicalize_relations`, calling it on a graph c
 - **SC-003**: All pre-existing `relation_type` values that were non-empty before the backfill are unchanged after the backfill — verifiable by comparing a pre/post snapshot.
 - **SC-004**: No edges are deleted by either the backfill pass or the corrected `canonicalize_relations` — edge count is non-decreasing after these operations.
 - **SC-005**: WAL round-trip: after a live backfill, wiping the DB and replaying the WAL via `knowledge_rebuild_from_wal` reproduces identical `relation_type` values on every edge (backfilled values survive replay).
-- **SC-006**: `dry_run: true` call on a test graph with N edges missing `relation_type` reports `would_backfill = N`, makes no mutations, and writes no WAL entries.
+- **SC-006**: `dry_run: true` call on a test graph with N edges missing `relation_type` reports `backfilled = N`, makes no mutations, and writes no WAL entries.
 - **SC-007**: Calling `canonicalize_relations` on a graph containing arrow-named edges results in zero deletions of arrow-named edges.
 - **SC-008**: All existing tests pass without regression; new tests for the extractor fix (FR-004), backfill parity (FR-015), backfill idempotency (FR-013), and canonicalize_relations safety (FR-019) pass.
 

@@ -1874,12 +1874,30 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
         "canonicalize must not delete arrow-named edges (ADR-0054): only {edge_count} of 10 remain"
     );
 
-    // noise_count should be 10 (reclassified, not deleted)
+    // noise_count should be 10 (classified as noise, but not deleted)
     let r = &v["result"];
     assert_eq!(
         r["noise_count"], 10,
-        "noise_count must reflect 10 reclassified edges: {v}"
+        "noise_count must reflect 10 noise-classified edges: {v}"
     );
+
+    // Pre-existing relation_type values on noise edges must be preserved — the Noise branch
+    // must NOT overwrite a populated relation_type with UNCLASSIFIED (Copilot review fix).
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'BRETT → RAJI' \
+             RETURN n.relation_type ORDER BY n.uuid",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 10, "all 10 noise edges must still exist");
+    for row in &rows {
+        assert_eq!(
+            row[0], "KNOWS",
+            "noise edge relation_type must not be overwritten by canonicalize (ADR-0054): {:?}",
+            row[0]
+        );
+    }
 }
 
 /// With a valid ontology + empty DB + dry_run:true → result has expected shape.
