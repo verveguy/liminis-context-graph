@@ -662,18 +662,44 @@ pub fn list_all_generic_entities(conn: &Conn, group_id: &str) -> Result<Vec<Enti
 
 /// Phase B: applies specific entity type labels.
 /// `updates` is a slice of (entity_uuid, specific_type_label) pairs.
+/// `ancestor_map` is precomputed from the workspace ontology and used to stamp ancestor labels.
 /// Returns the number of entities actually updated.
-pub fn apply_entity_type_labels(conn: &Conn, updates: &[(String, String)]) -> Result<usize, Error> {
+pub fn apply_entity_type_labels(
+    conn: &Conn,
+    updates: &[(String, String)],
+    ancestor_map: &std::collections::HashMap<String, Vec<String>>,
+) -> Result<usize, Error> {
     let mut count = 0;
     for (uuid, entity_type) in updates {
         if entity_type.is_empty() {
             continue;
         }
-        let labels = vec!["Entity".to_string(), entity_type.clone()];
+        let mut labels = vec!["Entity".to_string()];
+        if let Some(ancestors) = ancestor_map.get(entity_type) {
+            labels.extend(ancestors.iter().cloned());
+        }
+        labels.push(entity_type.clone());
         conn.update_entity_labels(uuid, &labels)?;
         count += 1;
     }
     Ok(count)
+}
+
+/// Phase D helper: lists all typed entities (those with a specific type label beyond "Entity").
+/// Returns all pages concatenated.
+pub fn list_all_typed_entities(conn: &Conn, group_id: &str) -> Result<Vec<EntityRow>, Error> {
+    let mut all = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = conn.list_typed_entities_page(group_id, offset, REPROCESS_BATCH_SIZE)?;
+        let page_len = page.len();
+        all.extend(page);
+        if page_len < REPROCESS_BATCH_SIZE {
+            break;
+        }
+        offset += REPROCESS_BATCH_SIZE;
+    }
+    Ok(all)
 }
 
 // ── merge_entities ────────────────────────────────────────────────────────────

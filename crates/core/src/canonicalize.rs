@@ -468,7 +468,9 @@ mod tests {
             entity_types: vec![EntityTypeDef {
                 name: "Person".to_string(),
                 description: None,
+                parent: None,
             }],
+            ancestor_map: std::collections::HashMap::new(),
             relation_types: vec![
                 RelationTypeDef {
                     name: "AUTHORED".to_string(),

@@ -43,7 +43,9 @@ fn test_ontology() -> Arc<Ontology> {
         entity_types: vec![EntityTypeDef {
             name: "Person".to_string(),
             description: None,
+            parent: None,
         }],
+        ancestor_map: HashMap::new(),
         relation_types: vec![
             RelationTypeDef {
                 name: "AUTHORED".to_string(),

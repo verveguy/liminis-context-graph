@@ -1966,22 +1966,81 @@ async fn handle_reprocess_entity_types(
         .map(|(e, t)| (e.uuid.clone(), t.clone()))
         .collect();
 
+    // Pre-extract ancestor map before spawn_blocking (HashMap<String, Vec<String>> is Send)
+    let ancestor_map = state
+        .ontology
+        .as_deref()
+        .map(|o| o.ancestor_map.clone())
+        .unwrap_or_default();
+
     let db = load_db(&state)?;
     let wal_writer_c = Arc::clone(&state.wal_writer);
     let sink_c = Arc::clone(&state.sink);
+    let ancestor_map_c = ancestor_map.clone();
     let _write_guard = state.write_lock.write().await;
     let reclassified = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        let count = corrections::apply_entity_type_labels(&conn, &updates)?;
+        let count = corrections::apply_entity_type_labels(&conn, &updates, &ancestor_map_c)?;
         wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
         Ok(count)
     })
     .await??;
     drop(_write_guard);
 
+    // Phase D (write lock): re-stamp typed entities that are missing ancestor labels.
+    // Skip if no ontology is loaded or no hierarchy is declared.
+    let restamped = if !ancestor_map.is_empty() {
+        let db = load_db(&state)?;
+        let wal_writer_d = Arc::clone(&state.wal_writer);
+        let sink_d = Arc::clone(&state.sink);
+        let group_id_d = group_id.clone();
+        let ancestor_map_d = ancestor_map.clone();
+        let _write_guard_d = state.write_lock.write().await;
+        tokio::task::spawn_blocking(move || -> Result<usize, Error> {
+            let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            let typed = corrections::list_all_typed_entities(&conn, &group_id_d)?;
+            let mut restamped_count = 0usize;
+            for entity in &typed {
+                // Find the specific type (labels minus "Entity")
+                let specific: Vec<&str> = entity
+                    .labels
+                    .iter()
+                    .filter(|l| l.as_str() != "Entity")
+                    .map(|l| l.as_str())
+                    .collect();
+                // Only re-stamp entities with exactly one specific type (skip multi-labeled)
+                if specific.len() != 1 {
+                    continue;
+                }
+                let entity_type = specific[0];
+                // Compute expected labels
+                let mut expected = vec!["Entity".to_string()];
+                if let Some(ancestors) = ancestor_map_d.get(entity_type) {
+                    expected.extend(ancestors.iter().cloned());
+                }
+                expected.push(entity_type.to_string());
+                // Re-stamp only if labels differ
+                let mut current = entity.labels.clone();
+                current.sort_unstable();
+                let mut exp_sorted = expected.clone();
+                exp_sorted.sort_unstable();
+                if current != exp_sorted {
+                    conn.update_entity_labels(&entity.uuid, &expected)?;
+                    restamped_count += 1;
+                }
+            }
+            wal_exec::wal_flush_ungrouped(&wal_writer_d, conn.drain_mutations(), &sink_d);
+            Ok(restamped_count)
+        })
+        .await??
+    } else {
+        0
+    };
+
     Ok(json!({
         "success": true,
         "reclassified_count": reclassified,
+        "restamped_count": restamped,
         "group_id": group_id,
     }))
 }

@@ -1789,6 +1789,7 @@ async fn parity_canonicalize_relations_shape() {
         entity_types: vec![EntityTypeDef {
             name: "Entity".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![RelationTypeDef {
             name: "RELATES_TO".to_string(),
@@ -1798,6 +1799,7 @@ async fn parity_canonicalize_relations_shape() {
             aliases: vec![],
             keywords: vec!["relat".to_string()],
         }],
+        ancestor_map: std::collections::HashMap::new(),
     });
     let state = make_state_with_ontology(db, ontology);
     let v = dispatch_val(
