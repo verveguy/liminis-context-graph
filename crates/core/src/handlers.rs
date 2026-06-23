@@ -1946,7 +1946,7 @@ async fn handle_reprocess_entity_types(
             .iter()
             .map(|(n, s)| (n.as_str(), s.as_str()))
             .collect();
-        match state.extractor.classify_entities(&refs).await {
+        match state.extractor.classify_entities(&refs, None).await {
             Ok(mut batch) => {
                 batch.resize(chunk.len(), String::new());
                 types.extend(batch);
