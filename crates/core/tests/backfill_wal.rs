@@ -203,8 +203,14 @@ async fn test_backfill_wal_round_trip() {
         Arc::clone(&state),
     )
     .await;
-    assert_eq!(result["backfilled"], 3, "must backfill 3 empty edges: {result}");
-    assert_eq!(result["total_edges"], 5, "must count 5 total edges: {result}");
+    assert_eq!(
+        result["backfilled"], 3,
+        "must backfill 3 empty edges: {result}"
+    );
+    assert_eq!(
+        result["total_edges"], 5,
+        "must count 5 total edges: {result}"
+    );
 
     // WAL has mutations from the backfill (seed + 3 SET mutations)
     let wal_after_backfill = count_wal_lines(wal_dir.path());
@@ -238,7 +244,10 @@ async fn test_backfill_wal_round_trip() {
         let conn2 = db2.connect().unwrap();
         conn2.init_schema(DIM).unwrap();
         let stats = WalReplayer::new(wal_dir.path()).replay(&conn2).unwrap();
-        assert!(stats.lines_replayed > 0, "WAL replay must replay lines (SC-005)");
+        assert!(
+            stats.lines_replayed > 0,
+            "WAL replay must replay lines (SC-005)"
+        );
     }
 
     let replayed: Vec<(String, Option<String>)> = {

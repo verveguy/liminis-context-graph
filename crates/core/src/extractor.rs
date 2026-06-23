@@ -962,7 +962,10 @@ mod tests {
     #[test]
     fn extractor_fallback_derives_non_empty_relation_type() {
         let rt = derive_relation_type_from_fact("Brett Adam lives in Seattle");
-        assert!(!rt.is_empty(), "fallback must produce non-empty relation_type");
+        assert!(
+            !rt.is_empty(),
+            "fallback must produce non-empty relation_type"
+        );
         assert!(
             !rt.contains('→') && !rt.contains("->"),
             "fallback must not produce an arrow-pattern: {rt}"

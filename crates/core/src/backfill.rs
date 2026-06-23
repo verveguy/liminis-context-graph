@@ -19,10 +19,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    app_state::AppState,
-    db::value_as_string,
-    error::Error,
-    ontology::normalize_relation_type,
+    app_state::AppState, db::value_as_string, error::Error, ontology::normalize_relation_type,
     wal_exec,
 };
 
