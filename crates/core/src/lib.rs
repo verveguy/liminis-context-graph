@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod backfill;
 pub mod canonicalize;
 pub mod corrections;
 pub mod db;
