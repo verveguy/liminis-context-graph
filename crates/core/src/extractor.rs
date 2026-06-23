@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::{
+    backfill::derive_relation_type_from_fact,
     env::lcg_env_var,
     error::Error,
     ontology::{normalize_relation_type, Ontology},
@@ -341,6 +342,17 @@ impl AnthropicExtractor {
                                 );
                                 edge.relation_type = Some(normalized);
                             }
+                        }
+                    }
+                    // FR-001: ensure every extracted edge has a non-empty relation_type.
+                    // Falls back to a fact-derived value when the LLM omits the field.
+                    for edge in &mut edges {
+                        match edge.relation_type.as_deref() {
+                            None | Some("") => {
+                                edge.relation_type =
+                                    Some(derive_relation_type_from_fact(&edge.fact));
+                            }
+                            _ => {}
                         }
                     }
                     return Ok(edges);
