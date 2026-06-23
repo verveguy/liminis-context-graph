@@ -4,8 +4,10 @@
 //!   1. Lexical pass: stem/keyword rules driven from the workspace ontology.
 //!   2. Embedding fallback (P2): cosine similarity against canonical type description glosses.
 //!
-//! Co-occurrence noise edges (`ALICE → BOB` pattern) are deleted and WAL-recorded.
-//! Unmatched residual edges are marked `UNCLASSIFIED`.
+//! Co-occurrence noise edges (`ALICE → BOB` pattern) are reclassified to UNCLASSIFIED and
+//! WAL-recorded. They are NEVER deleted — 94% of arrow-named edges carry rich `relation_type`
+//! values that would be irreversibly lost. See ADR-0054.
+//! Unmatched residual edges are also marked `UNCLASSIFIED`.
 //!
 //! Crash mid-pass: only committed batches appear in the WAL. The pass is idempotent, so
 //! re-running after recovery is safe — a second run adds zero new WAL mutations.
@@ -66,7 +68,7 @@ impl CanonicalizeReport {
 pub enum EdgeClass {
     /// Edge maps to this canonical relation type.
     Mapped(String),
-    /// Co-occurrence noise edge — should be deleted.
+    /// Co-occurrence noise edge — reclassified to UNCLASSIFIED (never deleted; see ADR-0054).
     Noise,
     /// No lexical or embedding rule matched — mark UNCLASSIFIED.
     Residual,
@@ -429,10 +431,18 @@ pub async fn canonicalize_relations(
                             )
                         }
                     }
-                    EdgeClass::Noise => conn.exec_params(
-                        "MATCH (n:RelatesToNode_ {uuid: $uuid}) DETACH DELETE n",
-                        json!({ "uuid": uuid }),
-                    ),
+                    EdgeClass::Noise => {
+                        // ADR-0054: never delete noise edges — reclassify to UNCLASSIFIED.
+                        // Idempotency: skip if already set (second run adds zero WAL mutations).
+                        if current_rt.as_deref() == Some("UNCLASSIFIED") {
+                            Ok(())
+                        } else {
+                            conn.exec_params(
+                                "MATCH (n:RelatesToNode_ {uuid: $uuid}) SET n.relation_type = $rt",
+                                json!({ "uuid": uuid, "rt": "UNCLASSIFIED" }),
+                            )
+                        }
+                    }
                 };
                 if res.is_err() {
                     exec_result = res;
