@@ -27,7 +27,9 @@ Only extract facts that:
 # RELATION TYPE RULES
 
 {{FACT_TYPES_SECTION}}
+You MUST always provide a non-null relation_type for every edge. Leaving it null or empty is not acceptable.
 Derive a relation_type from the relationship predicate in SCREAMING_SNAKE_CASE (e.g., WORKS_AT, LIVES_IN, IS_FRIENDS_WITH, WROTE, AUTHORED, MARRIED_TO).
+If the predicate is unclear, derive one from the fact description using a concise verb phrase.
 Use concise, consistent vocabulary — prefer established verbs that would apply broadly.
 
 # DATETIME RULES
