@@ -18,17 +18,20 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
+use futures::future::BoxFuture;
 use arc_swap::ArcSwapOption;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::{MockEmbedder, OaiEmbedder},
-    extractor::MockExtractor,
+    error::Error as LcgError,
+    extractor::{ExtractOptions, Extractor, MockExtractor},
     handlers,
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     telemetry::{NoopSink, TelemetrySink},
+    types::ExtractionResult,
     EntityRow, Ontology, RelatesToEdge,
 };
 use regex::Regex;
@@ -388,6 +391,104 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
+}
+
+/// Test extractor that returns a fixed `type_label` for every entity in `classify_entities`.
+/// Used to drive `scope=off_ontology` / `scope=all` tests without a real LLM.
+struct ClassifyingExtractor {
+    type_label: String,
+}
+
+impl ClassifyingExtractor {
+    fn new(type_label: &str) -> Self {
+        Self {
+            type_label: type_label.to_string(),
+        }
+    }
+}
+
+impl Extractor for ClassifyingExtractor {
+    fn extract<'a>(
+        &'a self,
+        _opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
+        Box::pin(async { Ok(ExtractionResult::default()) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let label = self.type_label.clone();
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![label; count]) })
+    }
+}
+
+fn make_state_with_ontology_and_extractor(
+    db: Arc<Db>,
+    ontology: Arc<Ontology>,
+    extractor: Arc<dyn Extractor>,
+    workspace_root: PathBuf,
+) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor,
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: Some(workspace_root),
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: Some(ontology),
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+/// Builds a minimal `Ontology` with a single entity type `Person` (no parent).
+fn make_person_ontology() -> Arc<Ontology> {
+    let entity_types = vec![EntityTypeDef {
+        name: "Person".to_string(),
+        description: None,
+        parent: None,
+    }];
+    let ancestor_map = std::collections::HashMap::from([("Person".to_string(), vec![])]);
+    Arc::new(Ontology {
+        mode: OntologyMode::Strict,
+        entity_types,
+        relation_types: vec![],
+        ancestor_map,
+    })
+}
+
+/// Inserts an entity with the given name, group, labels, and uuid.
+fn insert_test_entity(db: &Arc<Db>, uuid: &str, name: &str, group: &str, labels: Vec<String>) {
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&EntityRow {
+        uuid: uuid.to_string(),
+        name: name.to_string(),
+        group_id: group.to_string(),
+        labels,
+        created_at: "2026-01-01 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: format!("{name} summary"),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
 }
 
 // ── Tier 1a: health_check ─────────────────────────────────────────────────────
@@ -2278,5 +2379,229 @@ async fn parity_backfill_idempotent() {
     assert_eq!(
         v2["result"]["total_edges"], 3,
         "total_edges unchanged: {v2}"
+    );
+}
+
+// ── #177: reprocess_entity_types scope / dry_run ──────────────────────────────
+
+/// Backward-compat: calling with no `scope` param must behave identically to pre-#177.
+#[tokio::test]
+async fn test_reprocess_scope_untyped_default() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        90,
+        "knowledge_reprocess_entity_types",
+        json!({"group_id": "liminis"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 90);
+    assert_eq!(v["result"]["success"], true, "no scope → success: {v}");
+    assert_eq!(
+        v["result"]["reclassified_count"], 0,
+        "no entities → 0 reclassified: {v}"
+    );
+}
+
+/// `scope=off_ontology` without an ontology loaded → structured error, not a crash.
+#[tokio::test]
+async fn test_reprocess_scope_off_ontology_no_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        91,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 91);
+    assert_eq!(
+        v["result"]["success"], false,
+        "off_ontology without ontology must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// `scope=all` without an ontology loaded → structured error.
+#[tokio::test]
+async fn test_reprocess_scope_all_requires_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        92,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "all"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 92);
+    assert_eq!(
+        v["result"]["success"], false,
+        "scope=all without ontology must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// Unknown scope value → structured error, not a crash.
+#[tokio::test]
+async fn test_reprocess_scope_invalid() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        93,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "bad_value"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 93);
+    assert_eq!(
+        v["result"]["success"], false,
+        "invalid scope must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// `dry_run: true` with `scope=off_ontology` returns a plan but mutates nothing.
+#[tokio::test]
+async fn test_reprocess_dry_run_returns_plan() {
+    let (db, _dir) = make_db(4);
+    // Seed 2 entities with an off-ontology label ("Council" is not in the Person ontology).
+    insert_test_entity(
+        &db,
+        "dry-run-001",
+        "Alice",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "dry-run-002",
+        "Bob",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+
+    let ontology = make_person_ontology();
+    let extractor = Arc::new(ClassifyingExtractor::new("Person"));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        94,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "off_ontology", "dry_run": true}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 94);
+    let r = &v["result"];
+    assert_eq!(
+        r["would_reclassify_count"], 2,
+        "dry_run must report 2 planned reclassifications: {v}"
+    );
+    assert!(r["plan"].is_array(), "plan must be an array: {v}");
+    assert_eq!(r["plan"].as_array().unwrap().len(), 2, "plan must have 2 entries: {v}");
+
+    // Verify labels are unchanged after dry_run.
+    let conn = db.connect().unwrap();
+    let e1 = conn.get_entity_by_uuid("dry-run-001").unwrap().unwrap();
+    assert_eq!(
+        e1.labels,
+        vec!["Entity".to_string(), "Council".to_string()],
+        "dry_run must not mutate labels: {:?}",
+        e1.labels
+    );
+    let e2 = conn.get_entity_by_uuid("dry-run-002").unwrap().unwrap();
+    assert_eq!(
+        e2.labels,
+        vec!["Entity".to_string(), "Council".to_string()],
+        "dry_run must not mutate labels: {:?}",
+        e2.labels
+    );
+}
+
+/// Two consecutive `scope=off_ontology` runs: second run produces `reclassified_count: 0`.
+#[tokio::test]
+async fn test_reprocess_scope_off_ontology_idempotency() {
+    let (db, _dir) = make_db(4);
+    // Seed 2 entities with off-ontology label "Council".
+    insert_test_entity(
+        &db,
+        "idempotent-001",
+        "Carol",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "idempotent-002",
+        "Dave",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+
+    let ontology = make_person_ontology();
+    let extractor = Arc::new(ClassifyingExtractor::new("Person"));
+    let workspace = TempDir::new().unwrap();
+
+    // First run: should reclassify both entities from Council → Person.
+    let state1 = make_state_with_ontology_and_extractor(
+        db.clone(),
+        Arc::clone(&ontology),
+        Arc::clone(&extractor) as Arc<dyn Extractor>,
+        workspace.path().to_path_buf(),
+    );
+    let v1 = dispatch_val(
+        95,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "off_ontology"}),
+        state1,
+    )
+    .await;
+    assert_ok_resp(&v1, 95);
+    assert_eq!(
+        v1["result"]["reclassified_count"], 2,
+        "first run must reclassify 2 entities: {v1}"
+    );
+
+    // Second run: entities are now ontology-aligned; nothing to reclassify.
+    let state2 = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+    let v2 = dispatch_val(
+        96,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "off_ontology"}),
+        state2,
+    )
+    .await;
+    assert_ok_resp(&v2, 96);
+    assert_eq!(
+        v2["result"]["reclassified_count"], 0,
+        "second run on corrected graph must report 0 (FR-016): {v2}"
     );
 }
