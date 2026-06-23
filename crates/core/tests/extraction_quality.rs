@@ -327,6 +327,7 @@ impl Extractor for SelfRefExtractor {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
@@ -363,6 +364,7 @@ impl Extractor for BadEndpointExtractor {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
