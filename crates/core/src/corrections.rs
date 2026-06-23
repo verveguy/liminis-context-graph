@@ -702,6 +702,110 @@ pub fn list_all_typed_entities(conn: &Conn, group_id: &str) -> Result<Vec<Entity
     Ok(all)
 }
 
+// ── reprocess_entity_types scope helpers ─────────────────────────────────────
+
+/// Scope of entities targeted by `reprocess_entity_types`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReprocessScope {
+    /// Only entities with no specific type (sole label is `Entity`). Default; preserves
+    /// pre-#177 behavior.
+    Untyped,
+    /// Entities whose specific type is absent from the declared ontology, plus untyped
+    /// entities. Requires an ontology to be loaded.
+    OffOntology,
+    /// Every entity in the group, regardless of current type. Requires an ontology.
+    All,
+}
+
+/// Finds the leaf (most-derived) specific entity type from a label set.
+///
+/// Uses `ancestor_map` to identify a declared type that is not an ancestor of any other
+/// specific label on the same entity. Returns `None` if no unambiguous leaf is found (e.g.,
+/// the type is not declared in `ancestor_map`, or there are multiple independent leaf types).
+pub(crate) fn find_leaf_type(
+    labels: &[String],
+    ancestor_map: &HashMap<String, Vec<String>>,
+) -> Option<String> {
+    let specific: Vec<&str> = labels
+        .iter()
+        .filter(|l| l.as_str() != "Entity")
+        .map(|l| l.as_str())
+        .collect();
+    let leaf_types: Vec<&str> = specific
+        .iter()
+        .copied()
+        .filter(|&t| {
+            ancestor_map.contains_key(t)
+                && !specific.iter().any(|&other| {
+                    t != other
+                        && ancestor_map
+                            .get(other)
+                            .is_some_and(|anc| anc.iter().any(|a| a.as_str() == t))
+                })
+        })
+        .collect();
+    if leaf_types.len() == 1 {
+        Some(leaf_types[0].to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns `true` if an entity's specific type is absent from the declared ontology.
+///
+/// For hierarchical ontologies (`ancestor_map` non-empty), uses `find_leaf_type` to determine
+/// the most-derived specific type, then checks it against `type_names`.
+/// For flat ontologies (types not declared in `ancestor_map`), falls back to checking whether
+/// any non-`Entity` label is absent from `type_names`.
+fn is_off_ontology(
+    labels: &[String],
+    type_names: &std::collections::HashSet<String>,
+    ancestor_map: &HashMap<String, Vec<String>>,
+) -> bool {
+    if let Some(leaf) = find_leaf_type(labels, ancestor_map) {
+        return !type_names.contains(&leaf);
+    }
+    // Flat ontology or undeclared types: off-ontology if any non-Entity label is absent.
+    labels
+        .iter()
+        .filter(|l| l.as_str() != "Entity")
+        .any(|l| !type_names.contains(l))
+}
+
+/// Collects candidate entities for `reprocess_entity_types` based on `scope`.
+///
+/// - `Untyped`: entities with no specific type (preserves pre-#177 behavior).
+/// - `OffOntology`: untyped entities plus typed entities whose leaf type is absent from
+///   `ontology_type_names`. `ontology_type_names` must be `Some`.
+/// - `All`: every entity in the group. `ontology_type_names` must be `Some`.
+pub(crate) fn list_entities_for_scope(
+    conn: &Conn,
+    group_id: &str,
+    scope: ReprocessScope,
+    ontology_type_names: Option<&std::collections::HashSet<String>>,
+    ancestor_map: &HashMap<String, Vec<String>>,
+) -> Result<Vec<EntityRow>, Error> {
+    match scope {
+        ReprocessScope::Untyped => list_all_generic_entities(conn, group_id),
+        ReprocessScope::OffOntology => {
+            let type_names = ontology_type_names
+                .expect("caller must supply type_names for OffOntology scope");
+            let mut candidates = list_all_generic_entities(conn, group_id)?;
+            for entity in list_all_typed_entities(conn, group_id)? {
+                if is_off_ontology(&entity.labels, type_names, ancestor_map) {
+                    candidates.push(entity);
+                }
+            }
+            Ok(candidates)
+        }
+        ReprocessScope::All => {
+            let mut all = list_all_generic_entities(conn, group_id)?;
+            all.extend(list_all_typed_entities(conn, group_id)?);
+            Ok(all)
+        }
+    }
+}
+
 // ── merge_entities ────────────────────────────────────────────────────────────
 
 /// Inner edge-rewrite loop for a single alias → canonical merge.
@@ -1190,6 +1294,54 @@ mod tests {
         assert_eq!(
             path,
             PathBuf::from("/workspace/.liminis/knowledge-corrections.yaml")
+        );
+    }
+
+    // ── find_leaf_type ─────────────────────────────────────────────────────────
+
+    fn make_ancestor_map(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| (k.to_string(), vs.iter().map(|v| v.to_string()).collect()))
+            .collect()
+    }
+
+    fn labels(vs: &[&str]) -> Vec<String> {
+        vs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn find_leaf_type_single_label_entity_returns_none() {
+        let map = HashMap::new();
+        assert_eq!(find_leaf_type(&labels(&["Entity"]), &map), None);
+    }
+
+    #[test]
+    fn find_leaf_type_flat_typed_entity_returns_leaf() {
+        let map = make_ancestor_map(&[("Person", &[])]);
+        assert_eq!(
+            find_leaf_type(&labels(&["Entity", "Person"]), &map),
+            Some("Person".to_string())
+        );
+    }
+
+    #[test]
+    fn find_leaf_type_multi_label_ancestor_returns_leaf() {
+        // RFC is the leaf; Document is its ancestor
+        let map = make_ancestor_map(&[("Document", &[]), ("Rfc", &["Document"])]);
+        assert_eq!(
+            find_leaf_type(&labels(&["Entity", "Document", "Rfc"]), &map),
+            Some("Rfc".to_string())
+        );
+    }
+
+    #[test]
+    fn find_leaf_type_undeclared_type_returns_none() {
+        // Council is not in the ancestor_map (flat ontology with no declarations)
+        let map = HashMap::new();
+        assert_eq!(
+            find_leaf_type(&labels(&["Entity", "Council"]), &map),
+            None
         );
     }
 }
