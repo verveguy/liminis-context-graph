@@ -492,6 +492,17 @@ impl AnthropicExtractor {
             // Ensure length matches input; pad/truncate defensively.
             let mut result = types;
             result.resize(entities.len(), String::new());
+            // Server-side enforcement: convert out-of-set responses to empty string (FR-010).
+            // Guards against LLMs that ignore the constraint prompt.
+            if let Some(types_list) = allowed_types {
+                let allowed_set: std::collections::HashSet<&str> =
+                    types_list.iter().map(|s| s.as_str()).collect();
+                for entry in &mut result {
+                    if !entry.is_empty() && !allowed_set.contains(entry.as_str()) {
+                        *entry = String::new();
+                    }
+                }
+            }
             return Ok(result);
         }
     }

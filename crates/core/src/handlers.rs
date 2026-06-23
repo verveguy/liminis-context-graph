@@ -1961,7 +1961,15 @@ async fn handle_reprocess_entity_types(
         .map(|o| o.ancestor_map.clone())
         .unwrap_or_default();
     let ontology_type_names: Option<std::collections::HashSet<String>> = if requires_ontology {
-        Some(state.ontology.as_deref().unwrap().entity_type_names())
+        let names = state.ontology.as_deref().unwrap().entity_type_names();
+        if names.is_empty() {
+            return Ok(json!({
+                "success": false,
+                "error": "the configured ontology declares no entity types; scope requires at \
+                          least one declared entity type to constrain classification",
+            }));
+        }
+        Some(names)
     } else {
         None
     };
@@ -1969,7 +1977,6 @@ async fn handle_reprocess_entity_types(
     // Phase A (read lock): collect candidate entities based on scope.
     let db = load_db(&state)?;
     let group_id_a = group_id.clone();
-    let ancestor_map_a = ancestor_map.clone();
     let ontology_type_names_a = ontology_type_names.clone();
     let _read_guard = state.write_lock.read().await;
     let entities = tokio::task::spawn_blocking(move || {
@@ -1979,7 +1986,6 @@ async fn handle_reprocess_entity_types(
             &group_id_a,
             scope,
             ontology_type_names_a.as_ref(),
-            &ancestor_map_a,
         )
     })
     .await??;
