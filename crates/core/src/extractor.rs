@@ -44,9 +44,13 @@ pub trait Extractor: Send + Sync {
     /// Returns a `Vec<String>` of the same length as `entities`. Each entry is the
     /// specific entity type label for that entity (e.g. `"Person"`, `"Organization"`),
     /// or an empty string if the entity could not be classified.
+    ///
+    /// When `allowed_types` is `Some(types)`, the LLM is constrained to return only types
+    /// from that list. Pass `None` for the existing open-ended behavior.
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
 }
 
@@ -396,16 +400,32 @@ impl AnthropicExtractor {
         Ok(ExtractionResult { entities, edges })
     }
 
-    async fn do_classify_entities(&self, entities: &[(&str, &str)]) -> Result<Vec<String>, Error> {
+    async fn do_classify_entities(
+        &self,
+        entities: &[(&str, &str)],
+        allowed_types: Option<&[String]>,
+    ) -> Result<Vec<String>, Error> {
         if entities.is_empty() {
             return Ok(vec![]);
         }
 
-        let system_text = "You are a knowledge graph entity classifier. Given a list of entities \
+        let system_text: String = if let Some(types) = allowed_types {
+            let type_list = types.join(", ");
+            format!(
+                "You are a knowledge graph entity classifier. Given a list of entities \
+                (name and summary), assign each a specific entity type label from the \
+                following allowed types: {type_list}. Do not use any other types. \
+                Return ONLY valid JSON: an array of strings, one per input entity, in the same \
+                order as the input. If no allowed type fits, return an empty string for that entity."
+            )
+        } else {
+            "You are a knowledge graph entity classifier. Given a list of entities \
             (name and summary), assign each a specific entity type label. Use concise PascalCase \
             labels such as Person, Organization, Location, Concept, Product, Event, Technology. \
             Return ONLY valid JSON: an array of strings, one per input entity, in the same order \
-            as the input. Use an empty string for an entity whose type cannot be determined.";
+            as the input. Use an empty string for an entity whose type cannot be determined."
+                .to_string()
+        };
 
         let system_value: Value = if self.is_sonnet() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
@@ -516,8 +536,9 @@ impl Extractor for AnthropicExtractor {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
-        Box::pin(self.do_classify_entities(entities))
+        Box::pin(self.do_classify_entities(entities, allowed_types))
     }
 }
 
@@ -647,6 +668,7 @@ impl Extractor for MockExtractor {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         // MockExtractor returns empty string for each entity — no reclassification.
         let count = entities.len();
@@ -683,6 +705,7 @@ impl Extractor for ConfigurableExtractor {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })

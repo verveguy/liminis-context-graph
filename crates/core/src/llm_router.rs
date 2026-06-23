@@ -86,12 +86,16 @@ impl LlmRouter {
         }
     }
 
-    async fn do_classify_entities(&self, entities: &[(&str, &str)]) -> Result<Vec<String>, Error> {
+    async fn do_classify_entities(
+        &self,
+        entities: &[(&str, &str)],
+        allowed_types: Option<&[String]>,
+    ) -> Result<Vec<String>, Error> {
         if !self
             .primary_failed
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            match self.primary.classify_entities(entities).await {
+            match self.primary.classify_entities(entities, allowed_types).await {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     if let Some(fb) = &self.fallback {
@@ -113,14 +117,14 @@ impl LlmRouter {
                                 error_reason: err.to_string(),
                             });
                         }
-                        return fb.classify_entities(entities).await;
+                        return fb.classify_entities(entities, allowed_types).await;
                     }
                     return Err(err);
                 }
             }
         }
         if let Some(fb) = &self.fallback {
-            fb.classify_entities(entities).await
+            fb.classify_entities(entities, allowed_types).await
         } else {
             Err(Error::Ipc(
                 "BUG: primary_failed set without fallback".to_string(),
@@ -186,7 +190,8 @@ impl Extractor for LlmRouter {
     fn classify_entities<'a>(
         &'a self,
         entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
-        Box::pin(self.do_classify_entities(entities))
+        Box::pin(self.do_classify_entities(entities, allowed_types))
     }
 }
