@@ -1482,8 +1482,10 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
-    /// Returns a paged list of Entity nodes that have a specific type label (size >= 2 labels).
-    /// These are candidates for Phase D re-stamping when the ontology hierarchy changes.
+    /// Returns a paged list of Entity nodes that carry at least one specific type label
+    /// (i.e., `size(labels) >= 2`). Phase D inspects these to add missing ancestor labels,
+    /// covering both nodes that never had hierarchy (`["Entity", "Rfc"]`) and nodes whose
+    /// ancestor labels are stale after a hierarchy change (`["Entity", "Document", "Rfc"]`).
     pub fn list_typed_entities_page(
         &self,
         group_id: &str,
