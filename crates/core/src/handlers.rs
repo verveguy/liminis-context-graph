@@ -1919,22 +1919,92 @@ async fn handle_reprocess_entity_types(
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
 
-    // Phase A (read lock): list all generic-only entities for the group
+    // Parse scope (default: untyped preserves pre-#177 behavior).
+    let scope = match req.params["scope"].as_str().unwrap_or("untyped") {
+        "untyped" => corrections::ReprocessScope::Untyped,
+        "off_ontology" => corrections::ReprocessScope::OffOntology,
+        "all" => corrections::ReprocessScope::All,
+        other => {
+            return Ok(json!({
+                "success": false,
+                "error": format!(
+                    "unknown scope '{other}'; valid values: untyped, off_ontology, all"
+                ),
+            }));
+        }
+    };
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+
+    // Scopes that constrain classification to the ontology require an ontology to be loaded.
+    let requires_ontology = matches!(
+        scope,
+        corrections::ReprocessScope::OffOntology | corrections::ReprocessScope::All
+    );
+    if requires_ontology && state.ontology.is_none() {
+        return Ok(json!({
+            "success": false,
+            "error": format!(
+                "scope '{scope_str}' requires an ontology to be configured",
+                scope_str = if matches!(scope, corrections::ReprocessScope::OffOntology) {
+                    "off_ontology"
+                } else {
+                    "all"
+                }
+            ),
+        }));
+    }
+
+    // Pre-extract ancestor_map and allowed type names before async/spawn_blocking boundaries.
+    let ancestor_map: HashMap<String, Vec<String>> = state
+        .ontology
+        .as_deref()
+        .map(|o| o.ancestor_map.clone())
+        .unwrap_or_default();
+    let ontology_type_names: Option<std::collections::HashSet<String>> = if requires_ontology {
+        Some(state.ontology.as_deref().unwrap().entity_type_names())
+    } else {
+        None
+    };
+
+    // Phase A (read lock): collect candidate entities based on scope.
     let db = load_db(&state)?;
     let group_id_a = group_id.clone();
+    let ancestor_map_a = ancestor_map.clone();
+    let ontology_type_names_a = ontology_type_names.clone();
     let _read_guard = state.write_lock.read().await;
     let entities = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        corrections::list_all_generic_entities(&conn, &group_id_a)
+        corrections::list_entities_for_scope(
+            &conn,
+            &group_id_a,
+            scope,
+            ontology_type_names_a.as_ref(),
+            &ancestor_map_a,
+        )
     })
     .await??;
     drop(_read_guard);
 
     if entities.is_empty() {
-        return Ok(json!({ "success": true, "reclassified_count": 0, "group_id": group_id }));
+        if dry_run {
+            return Ok(json!({ "would_reclassify_count": 0, "plan": [] }));
+        }
+        return Ok(json!({
+            "success": true,
+            "reclassified_count": 0,
+            "unchanged_count": 0,
+            "group_id": group_id,
+        }));
     }
 
-    // Phase B (no lock): classify entities via LLM in batches to avoid token limit violations.
+    // Build the allowed_types list for constrained scopes (sorted for deterministic prompts).
+    let allowed_types: Option<Vec<String>> = ontology_type_names.map(|tn| {
+        let mut v: Vec<String> = tn.into_iter().collect();
+        v.sort_unstable();
+        v
+    });
+
+    // Phase B (no lock): classify entities via LLM in batches.
     let pairs: Vec<(String, String)> = entities
         .iter()
         .map(|e| (e.name.clone(), e.summary.clone()))
@@ -1946,7 +2016,11 @@ async fn handle_reprocess_entity_types(
             .iter()
             .map(|(n, s)| (n.as_str(), s.as_str()))
             .collect();
-        match state.extractor.classify_entities(&refs, None).await {
+        match state
+            .extractor
+            .classify_entities(&refs, allowed_types.as_deref())
+            .await
+        {
             Ok(mut batch) => {
                 batch.resize(chunk.len(), String::new());
                 types.extend(batch);
@@ -1961,34 +2035,58 @@ async fn handle_reprocess_entity_types(
         }
     }
 
-    // Phase C (write lock): apply label mutations
-    let updates: Vec<(String, String)> = entities
-        .iter()
-        .zip(types.iter())
-        .filter(|(_, t)| !t.is_empty())
-        .map(|(e, t)| (e.uuid.clone(), t.clone()))
-        .collect();
+    // Build plan + updates, applying idempotency and low-confidence skips.
+    let mut plan: Vec<serde_json::Value> = Vec::new();
+    let mut updates: Vec<(String, String)> = Vec::new();
+    let mut unchanged_count: usize = 0;
+    for (entity, assigned_type) in entities.iter().zip(types.iter()) {
+        if assigned_type.is_empty() {
+            // LLM returned no assignment (FR-010): leave unchanged.
+            unchanged_count += 1;
+            continue;
+        }
+        let current_leaf = corrections::find_leaf_type(&entity.labels, &ancestor_map);
+        if current_leaf.as_deref() == Some(assigned_type.as_str()) {
+            // Already has the correct type (FR-009): no write needed.
+            unchanged_count += 1;
+            continue;
+        }
+        plan.push(json!({
+            "entity_id": entity.uuid,
+            "entity_name": entity.name,
+            "old_type": current_leaf,
+            "new_type": assigned_type,
+        }));
+        updates.push((entity.uuid.clone(), assigned_type.clone()));
+    }
 
-    // Pre-extract ancestor map before spawn_blocking (HashMap<String, Vec<String>> is Send)
-    let ancestor_map = state
-        .ontology
-        .as_deref()
-        .map(|o| o.ancestor_map.clone())
-        .unwrap_or_default();
+    if dry_run {
+        return Ok(json!({
+            "would_reclassify_count": plan.len(),
+            "plan": plan,
+        }));
+    }
 
-    let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
-    let ancestor_map_c = ancestor_map.clone();
-    let _write_guard = state.write_lock.write().await;
-    let reclassified = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
-        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        let count = corrections::apply_entity_type_labels(&conn, &updates, &ancestor_map_c)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
-        Ok(count)
-    })
-    .await??;
-    drop(_write_guard);
+    // Phase C (batched write lock per ADR-0051): apply label mutations in batches.
+    let mut reclassified = 0usize;
+    for batch in updates.chunks(corrections::REPROCESS_BATCH_SIZE) {
+        let batch = batch.to_vec();
+        let db = load_db(&state)?;
+        let wal_writer_c = Arc::clone(&state.wal_writer);
+        let sink_c = Arc::clone(&state.sink);
+        let ancestor_map_c = ancestor_map.clone();
+        let _write_guard = state.write_lock.write().await;
+        let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
+            let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            let count =
+                corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
+            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            Ok(count)
+        })
+        .await??;
+        reclassified += count;
+        drop(_write_guard);
+    }
 
     // Phase D (write lock): re-stamp typed entities that are missing ancestor labels.
     // Skip if no ontology is loaded or no hierarchy is declared.
@@ -2014,10 +2112,7 @@ async fn handle_reprocess_entity_types(
                     .map(|l| l.as_str())
                     .collect();
                 // Find the leaf type: a declared type that is not an ancestor of any other
-                // specific label on this entity. This handles both the initial "from flat"
-                // case (["Entity", "Rfc"] → leaf=Rfc) and the "hierarchy changed" case
-                // (["Entity", "Document", "Rfc"] → leaf=Rfc, since Document is an ancestor).
-                // Minted types (not in ancestor_map_d) are excluded and left unchanged.
+                // specific label on this entity. Minted types (not in ancestor_map_d) are skipped.
                 let leaf_types: Vec<&str> = specific
                     .iter()
                     .copied()
@@ -2035,13 +2130,11 @@ async fn handle_reprocess_entity_types(
                     continue;
                 }
                 let entity_type = leaf_types[0];
-                // Compute expected labels
                 let mut expected = vec!["Entity".to_string()];
                 if let Some(ancestors) = ancestor_map_d.get(entity_type) {
                     expected.extend(ancestors.iter().cloned());
                 }
                 expected.push(entity_type.to_string());
-                // Re-stamp only if labels differ
                 let mut current = entity.labels.clone();
                 current.sort_unstable();
                 let mut exp_sorted = expected.clone();
@@ -2062,6 +2155,7 @@ async fn handle_reprocess_entity_types(
     Ok(json!({
         "success": true,
         "reclassified_count": reclassified,
+        "unchanged_count": unchanged_count,
         "restamped_count": restamped,
         "group_id": group_id,
     }))
