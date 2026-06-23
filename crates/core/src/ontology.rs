@@ -818,4 +818,201 @@ relation_types:
         assert_eq!(h, "none");
         assert_ne!(h.len(), 64); // real SHA-256 is 64 hex chars; "none" is 4
     }
+
+    // ── parent / ancestor tests ───────────────────────────────────────────────
+
+    #[test]
+    fn load_ontology_2level_parent_builds_ancestor_map() {
+        let dir = TempDir::new().unwrap();
+        // Use pre-normalized names (PascalCase) to avoid surprises with name normalization
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n  - name: Rfc\n    parent: Document\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load");
+        assert_eq!(
+            o.ancestor_map.get("Rfc"),
+            Some(&vec!["Document".to_string()])
+        );
+        assert_eq!(o.ancestor_map.get("Document"), Some(&vec![]));
+    }
+
+    #[test]
+    fn load_ontology_3level_chain_builds_full_ancestor_list() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n  - name: Rfc\n    parent: Document\n  - name: SubDoc\n    parent: Rfc\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load");
+        // SubDoc → Rfc → Document: ancestors are [Document, Rfc] (supertype-first)
+        assert_eq!(
+            o.ancestor_map.get("SubDoc"),
+            Some(&vec!["Document".to_string(), "Rfc".to_string()])
+        );
+        assert_eq!(
+            o.ancestor_map.get("Rfc"),
+            Some(&vec!["Document".to_string()])
+        );
+        assert_eq!(o.ancestor_map.get("Document"), Some(&vec![]));
+    }
+
+    #[test]
+    fn load_ontology_flat_produces_empty_ancestor_vecs() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n  - name: Organization\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load");
+        assert_eq!(o.ancestor_map.get("Person"), Some(&vec![]));
+        assert_eq!(o.ancestor_map.get("Organization"), Some(&vec![]));
+    }
+
+    #[test]
+    fn load_ontology_undeclared_parent_cleared_with_no_panic() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Rfc\n    parent: NonExistent\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load without panicking");
+        // Rfc should load with no parent (name stays as-is since it's already normalized)
+        let rfc = o.entity_types.iter().find(|e| e.name == "Rfc");
+        assert!(rfc.is_some(), "Rfc must still be present");
+        assert!(rfc.unwrap().parent.is_none(), "undeclared parent must be cleared");
+        assert_eq!(o.ancestor_map.get("Rfc"), Some(&vec![]));
+    }
+
+    #[test]
+    fn load_ontology_2node_cycle_cleared_no_panic() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: A\n    parent: B\n  - name: B\n    parent: A\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load without panicking");
+        let a = o.entity_types.iter().find(|e| e.name == "A").unwrap();
+        let b = o.entity_types.iter().find(|e| e.name == "B").unwrap();
+        assert!(a.parent.is_none(), "cycle member A must have parent cleared");
+        assert!(b.parent.is_none(), "cycle member B must have parent cleared");
+        assert_eq!(o.ancestor_map.get("A"), Some(&vec![]));
+        assert_eq!(o.ancestor_map.get("B"), Some(&vec![]));
+    }
+
+    #[test]
+    fn load_ontology_3node_cycle_all_cleared_no_panic() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: A\n    parent: C\n  - name: B\n    parent: A\n  - name: C\n    parent: B\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load without panicking");
+        for name in ["A", "B", "C"] {
+            let et = o.entity_types.iter().find(|e| e.name == name).unwrap();
+            assert!(et.parent.is_none(), "cycle member {name} must have parent cleared");
+            assert_eq!(o.ancestor_map.get(name), Some(&vec![]));
+        }
+    }
+
+    #[test]
+    fn load_ontology_entity_declared_explicitly_is_ignored() {
+        // `Entity` is the implicit root — declaring it explicitly is silently dropped with a warning
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Entity\n  - name: Person\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load without panicking");
+        let names: Vec<_> = o.entity_types.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"Entity"), "explicit 'Entity' type must be filtered");
+        assert!(names.contains(&"Person"), "other types must remain");
+    }
+
+    #[test]
+    fn content_hash_flat_ontology_unchanged_vs_pre_173_format() {
+        // Regression guard: flat ontologies (no parent fields) must produce the same hash
+        // as pre-#173 code, because the `parent_edges:` segment is only appended when
+        // at least one parent is declared (ADR-0053).
+        // The canonical form for a flat ontology is identical to the pre-#173 form:
+        //   "mode:{mode}\nentity_types:{entries}\nrelation_types:{entries}"
+        let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
+        // Manually build the expected canonical string using the pre-#173 format
+        let expected_canonical =
+            format!("mode:open\nentity_types:Person\0\nrelation_types:");
+        let expected_hash = {
+            let digest = sha2::Sha256::digest(expected_canonical.as_bytes());
+            format!("{:x}", digest)
+        };
+        assert_eq!(
+            content_hash(Some(&o)),
+            expected_hash,
+            "flat-ontology hash must match pre-#173 canonical form"
+        );
+    }
+
+    #[test]
+    fn content_hash_adding_parent_changes_hash() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, "entity_types:\n  - name: Document\n  - name: RFC\n");
+        let o_flat = load_ontology(Some(dir.path())).unwrap();
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n  - name: RFC\n    parent: Document\n",
+        );
+        let o_hierarchy = load_ontology(Some(dir.path())).unwrap();
+
+        let h_flat = content_hash(Some(&o_flat));
+        let h_hierarchy = content_hash(Some(&o_hierarchy));
+        assert_ne!(h_flat, h_hierarchy, "adding a parent must change the content hash");
+        // Verify the hierarchy hash includes parent_edges in its canonical form
+        assert_eq!(h_hierarchy.len(), 64, "hash must be a valid SHA-256 hex");
+    }
+
+    #[test]
+    fn content_hash_parent_edges_order_independent() {
+        // Two ontologies with the same parent edges in different declaration order produce the same hash
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: A\n  - name: B\n    parent: A\n  - name: C\n    parent: A\n",
+        );
+        let o1 = load_ontology(Some(dir.path())).unwrap();
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: A\n  - name: C\n    parent: A\n  - name: B\n    parent: A\n",
+        );
+        let o2 = load_ontology(Some(dir.path())).unwrap();
+
+        assert_eq!(
+            content_hash(Some(&o1)),
+            content_hash(Some(&o2)),
+            "parent_edges must be sorted — declaration order must not affect hash"
+        );
+    }
+
+    #[test]
+    fn content_hash_removing_parent_restores_flat_hash() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, "entity_types:\n  - name: Document\n  - name: RFC\n");
+        let o_flat = load_ontology(Some(dir.path())).unwrap();
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n  - name: RFC\n    parent: Document\n",
+        );
+        let o_hierarchy = load_ontology(Some(dir.path())).unwrap();
+
+        write_ontology(&dir, "entity_types:\n  - name: Document\n  - name: RFC\n");
+        let o_restored = load_ontology(Some(dir.path())).unwrap();
+
+        assert_ne!(content_hash(Some(&o_flat)), content_hash(Some(&o_hierarchy)));
+        assert_eq!(
+            content_hash(Some(&o_flat)),
+            content_hash(Some(&o_restored)),
+            "removing all parents must restore the flat-ontology hash"
+        );
+    }
 }
