@@ -719,9 +719,10 @@ pub enum ReprocessScope {
 
 /// Finds the leaf (most-derived) specific entity type from a label set.
 ///
-/// Uses `ancestor_map` to identify a declared type that is not an ancestor of any other
-/// specific label on the same entity. Returns `None` if no unambiguous leaf is found (e.g.,
-/// the type is not declared in `ancestor_map`, or there are multiple independent leaf types).
+/// A leaf is a non-`Entity` label that is not an ancestor of any other non-`Entity` label on
+/// the same entity (as determined by `ancestor_map`). Returns `Some(leaf)` only when exactly
+/// one unambiguous leaf exists. Returns `None` when the entity is untyped, has multiple
+/// independent leaves (ambiguous), or has an undeclared ancestor chain.
 pub(crate) fn find_leaf_type(
     labels: &[String],
     ancestor_map: &HashMap<String, Vec<String>>,
@@ -735,13 +736,12 @@ pub(crate) fn find_leaf_type(
         .iter()
         .copied()
         .filter(|&t| {
-            ancestor_map.contains_key(t)
-                && !specific.iter().any(|&other| {
-                    t != other
-                        && ancestor_map
-                            .get(other)
-                            .is_some_and(|anc| anc.iter().any(|a| a.as_str() == t))
-                })
+            !specific.iter().any(|&other| {
+                t != other
+                    && ancestor_map
+                        .get(other)
+                        .is_some_and(|anc| anc.iter().any(|a| a.as_str() == t))
+            })
         })
         .collect();
     if leaf_types.len() == 1 {
@@ -751,21 +751,12 @@ pub(crate) fn find_leaf_type(
     }
 }
 
-/// Returns `true` if an entity's specific type is absent from the declared ontology.
+/// Returns `true` if any non-`Entity` label on the entity is absent from the declared ontology.
 ///
-/// For hierarchical ontologies (`ancestor_map` non-empty), uses `find_leaf_type` to determine
-/// the most-derived specific type, then checks it against `type_names`.
-/// For flat ontologies (types not declared in `ancestor_map`), falls back to checking whether
-/// any non-`Entity` label is absent from `type_names`.
-fn is_off_ontology(
-    labels: &[String],
-    type_names: &std::collections::HashSet<String>,
-    ancestor_map: &HashMap<String, Vec<String>>,
-) -> bool {
-    if let Some(leaf) = find_leaf_type(labels, ancestor_map) {
-        return !type_names.contains(&leaf);
-    }
-    // Flat ontology or undeclared types: off-ontology if any non-Entity label is absent.
+/// An entity is off-ontology if even one of its specific labels (including ancestor labels
+/// stamped by #173) is not a declared entity type. This handles flat ontologies, hierarchical
+/// ontologies, and entities with partially-undeclared label sets uniformly.
+fn is_off_ontology(labels: &[String], type_names: &std::collections::HashSet<String>) -> bool {
     labels
         .iter()
         .filter(|l| l.as_str() != "Entity")
@@ -775,7 +766,7 @@ fn is_off_ontology(
 /// Collects candidate entities for `reprocess_entity_types` based on `scope`.
 ///
 /// - `Untyped`: entities with no specific type (preserves pre-#177 behavior).
-/// - `OffOntology`: untyped entities plus typed entities whose leaf type is absent from
+/// - `OffOntology`: untyped entities plus typed entities that have any label absent from
 ///   `ontology_type_names`. `ontology_type_names` must be `Some`.
 /// - `All`: every entity in the group. `ontology_type_names` must be `Some`.
 pub(crate) fn list_entities_for_scope(
@@ -783,16 +774,16 @@ pub(crate) fn list_entities_for_scope(
     group_id: &str,
     scope: ReprocessScope,
     ontology_type_names: Option<&std::collections::HashSet<String>>,
-    ancestor_map: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<EntityRow>, Error> {
     match scope {
         ReprocessScope::Untyped => list_all_generic_entities(conn, group_id),
         ReprocessScope::OffOntology => {
-            let type_names =
-                ontology_type_names.expect("caller must supply type_names for OffOntology scope");
+            let type_names = ontology_type_names.ok_or_else(|| {
+                Error::Ipc("ontology type names required for OffOntology scope".to_string())
+            })?;
             let mut candidates = list_all_generic_entities(conn, group_id)?;
             for entity in list_all_typed_entities(conn, group_id)? {
-                if is_off_ontology(&entity.labels, type_names, ancestor_map) {
+                if is_off_ontology(&entity.labels, type_names) {
                     candidates.push(entity);
                 }
             }
@@ -1336,9 +1327,24 @@ mod tests {
     }
 
     #[test]
-    fn find_leaf_type_undeclared_type_returns_none() {
-        // Council is not in the ancestor_map (flat ontology with no declarations)
+    fn find_leaf_type_undeclared_sole_type_returns_leaf() {
+        // Council is not in the ancestor_map, but it is the only non-Entity label —
+        // it cannot be an ancestor of anything, so it is the unambiguous leaf.
         let map = HashMap::new();
-        assert_eq!(find_leaf_type(&labels(&["Entity", "Council"]), &map), None);
+        assert_eq!(
+            find_leaf_type(&labels(&["Entity", "Council"]), &map),
+            Some("Council".to_string())
+        );
+    }
+
+    #[test]
+    fn find_leaf_type_off_ontology_leaf_with_on_ontology_ancestor_returns_none() {
+        // Document is declared; Rfc is NOT. find_leaf_type must return None (two leaves)
+        // rather than Some("Document"), which would cause is_off_ontology to miss "Rfc".
+        let map = make_ancestor_map(&[("Document", &[])]);
+        assert_eq!(
+            find_leaf_type(&labels(&["Entity", "Document", "Rfc"]), &map),
+            None
+        );
     }
 }
