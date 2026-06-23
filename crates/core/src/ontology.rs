@@ -362,7 +362,7 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
 /// Phase 1: any `parent` that names a type not in the declared set is cleared with a warning.
 /// Phase 2: cycles (A → B → A, A → B → C → A, etc.) are detected by path-following; all
 /// members of a cycle have their `parent` cleared and a single warning is logged.
-pub fn validate_and_clean_parents(entity_types: &mut Vec<EntityTypeDef>) {
+pub fn validate_and_clean_parents(entity_types: &mut [EntityTypeDef]) {
     let declared: HashSet<String> = entity_types.iter().map(|e| e.name.clone()).collect();
 
     // Phase 1: clear undeclared parents
@@ -880,7 +880,10 @@ relation_types:
         // Rfc should load with no parent (name stays as-is since it's already normalized)
         let rfc = o.entity_types.iter().find(|e| e.name == "Rfc");
         assert!(rfc.is_some(), "Rfc must still be present");
-        assert!(rfc.unwrap().parent.is_none(), "undeclared parent must be cleared");
+        assert!(
+            rfc.unwrap().parent.is_none(),
+            "undeclared parent must be cleared"
+        );
         assert_eq!(o.ancestor_map.get("Rfc"), Some(&vec![]));
     }
 
@@ -894,8 +897,14 @@ relation_types:
         let o = load_ontology(Some(dir.path())).expect("should load without panicking");
         let a = o.entity_types.iter().find(|e| e.name == "A").unwrap();
         let b = o.entity_types.iter().find(|e| e.name == "B").unwrap();
-        assert!(a.parent.is_none(), "cycle member A must have parent cleared");
-        assert!(b.parent.is_none(), "cycle member B must have parent cleared");
+        assert!(
+            a.parent.is_none(),
+            "cycle member A must have parent cleared"
+        );
+        assert!(
+            b.parent.is_none(),
+            "cycle member B must have parent cleared"
+        );
         assert_eq!(o.ancestor_map.get("A"), Some(&vec![]));
         assert_eq!(o.ancestor_map.get("B"), Some(&vec![]));
     }
@@ -910,7 +919,10 @@ relation_types:
         let o = load_ontology(Some(dir.path())).expect("should load without panicking");
         for name in ["A", "B", "C"] {
             let et = o.entity_types.iter().find(|e| e.name == name).unwrap();
-            assert!(et.parent.is_none(), "cycle member {name} must have parent cleared");
+            assert!(
+                et.parent.is_none(),
+                "cycle member {name} must have parent cleared"
+            );
             assert_eq!(o.ancestor_map.get(name), Some(&vec![]));
         }
     }
@@ -919,13 +931,13 @@ relation_types:
     fn load_ontology_entity_declared_explicitly_is_ignored() {
         // `Entity` is the implicit root — declaring it explicitly is silently dropped with a warning
         let dir = TempDir::new().unwrap();
-        write_ontology(
-            &dir,
-            "entity_types:\n  - name: Entity\n  - name: Person\n",
-        );
+        write_ontology(&dir, "entity_types:\n  - name: Entity\n  - name: Person\n");
         let o = load_ontology(Some(dir.path())).expect("should load without panicking");
         let names: Vec<_> = o.entity_types.iter().map(|e| e.name.as_str()).collect();
-        assert!(!names.contains(&"Entity"), "explicit 'Entity' type must be filtered");
+        assert!(
+            !names.contains(&"Entity"),
+            "explicit 'Entity' type must be filtered"
+        );
         assert!(names.contains(&"Person"), "other types must remain");
     }
 
@@ -938,8 +950,7 @@ relation_types:
         //   "mode:{mode}\nentity_types:{entries}\nrelation_types:{entries}"
         let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
         // Manually build the expected canonical string using the pre-#173 format
-        let expected_canonical =
-            format!("mode:open\nentity_types:Person\0\nrelation_types:");
+        let expected_canonical = "mode:open\nentity_types:Person\0\nrelation_types:";
         let expected_hash = {
             let digest = sha2::Sha256::digest(expected_canonical.as_bytes());
             format!("{:x}", digest)
@@ -965,7 +976,10 @@ relation_types:
 
         let h_flat = content_hash(Some(&o_flat));
         let h_hierarchy = content_hash(Some(&o_hierarchy));
-        assert_ne!(h_flat, h_hierarchy, "adding a parent must change the content hash");
+        assert_ne!(
+            h_flat, h_hierarchy,
+            "adding a parent must change the content hash"
+        );
         // Verify the hierarchy hash includes parent_edges in its canonical form
         assert_eq!(h_hierarchy.len(), 64, "hash must be a valid SHA-256 hex");
     }
@@ -1008,7 +1022,10 @@ relation_types:
         write_ontology(&dir, "entity_types:\n  - name: Document\n  - name: RFC\n");
         let o_restored = load_ontology(Some(dir.path())).unwrap();
 
-        assert_ne!(content_hash(Some(&o_flat)), content_hash(Some(&o_hierarchy)));
+        assert_ne!(
+            content_hash(Some(&o_flat)),
+            content_hash(Some(&o_hierarchy))
+        );
         assert_eq!(
             content_hash(Some(&o_flat)),
             content_hash(Some(&o_restored)),
