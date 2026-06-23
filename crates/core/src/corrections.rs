@@ -788,8 +788,8 @@ pub(crate) fn list_entities_for_scope(
     match scope {
         ReprocessScope::Untyped => list_all_generic_entities(conn, group_id),
         ReprocessScope::OffOntology => {
-            let type_names = ontology_type_names
-                .expect("caller must supply type_names for OffOntology scope");
+            let type_names =
+                ontology_type_names.expect("caller must supply type_names for OffOntology scope");
             let mut candidates = list_all_generic_entities(conn, group_id)?;
             for entity in list_all_typed_entities(conn, group_id)? {
                 if is_off_ontology(&entity.labels, type_names, ancestor_map) {
@@ -1339,9 +1339,6 @@ mod tests {
     fn find_leaf_type_undeclared_type_returns_none() {
         // Council is not in the ancestor_map (flat ontology with no declarations)
         let map = HashMap::new();
-        assert_eq!(
-            find_leaf_type(&labels(&["Entity", "Council"]), &map),
-            None
-        );
+        assert_eq!(find_leaf_type(&labels(&["Entity", "Council"]), &map), None);
     }
 }

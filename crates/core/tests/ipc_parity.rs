@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
 
-use futures::future::BoxFuture;
 use arc_swap::ArcSwapOption;
+use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
@@ -2521,7 +2521,11 @@ async fn test_reprocess_dry_run_returns_plan() {
         "dry_run must report 2 planned reclassifications: {v}"
     );
     assert!(r["plan"].is_array(), "plan must be an array: {v}");
-    assert_eq!(r["plan"].as_array().unwrap().len(), 2, "plan must have 2 entries: {v}");
+    assert_eq!(
+        r["plan"].as_array().unwrap().len(),
+        2,
+        "plan must have 2 entries: {v}"
+    );
 
     // Verify labels are unchanged after dry_run.
     let conn = db.connect().unwrap();
