@@ -95,7 +95,11 @@ impl LlmRouter {
             .primary_failed
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            match self.primary.classify_entities(entities, allowed_types).await {
+            match self
+                .primary
+                .classify_entities(entities, allowed_types)
+                .await
+            {
                 Ok(result) => return Ok(result),
                 Err(err) => {
                     if let Some(fb) = &self.fallback {

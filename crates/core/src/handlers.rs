@@ -2078,8 +2078,7 @@ async fn handle_reprocess_entity_types(
         let _write_guard = state.write_lock.write().await;
         let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-            let count =
-                corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
+            let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
             wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
             Ok(count)
         })
