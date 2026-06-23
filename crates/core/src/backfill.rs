@@ -181,7 +181,7 @@ pub async fn backfill_relation_types(
         let _write_guard = state.write_lock.write().await;
 
         let processed = batch_idx * WRITE_BATCH_SIZE;
-        if processed > 0 && processed % PROGRESS_EVERY == 0 {
+        if processed > 0 && processed.is_multiple_of(PROGRESS_EVERY) {
             if let Some(ref tx) = progress_tx {
                 let _ = tx.send(json!({
                     "type": "progress",
