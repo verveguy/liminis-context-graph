@@ -1,8 +1,9 @@
 # ADR-0052: Orphaned Direct RELATES_TO Rels After Noise Edge Deletion
 
-**Status**: Accepted  
+**Status**: Superseded by ADR-0054  
 **Date**: 2026-06-22  
-**Context**: Issue #163 — Relation canonicalization noise deletion
+**Context**: Issue #163 — Relation canonicalization noise deletion  
+**Superseded by**: ADR-0054 (noise edges are reclassified, not deleted — no orphaning occurs)
 
 ## Context
 
