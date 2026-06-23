@@ -955,4 +955,30 @@ mod tests {
         let already_normalized = "WORKS_AT";
         assert_eq!(normalize_relation_type(already_normalized), "WORKS_AT");
     }
+
+    // FR-001 / FR-004: derive_relation_type_from_fact (used in the extractor fallback)
+    // must produce non-empty SCREAMING_SNAKE_CASE and never arrow-pattern strings.
+
+    #[test]
+    fn extractor_fallback_derives_non_empty_relation_type() {
+        let rt = derive_relation_type_from_fact("Brett Adam lives in Seattle");
+        assert!(!rt.is_empty(), "fallback must produce non-empty relation_type");
+        assert!(
+            !rt.contains('→') && !rt.contains("->"),
+            "fallback must not produce an arrow-pattern: {rt}"
+        );
+        assert!(
+            rt.chars().all(|c| c.is_uppercase() || c == '_'),
+            "fallback must be SCREAMING_SNAKE_CASE: {rt}"
+        );
+    }
+
+    #[test]
+    fn extractor_fallback_empty_fact_yields_unclassified() {
+        assert_eq!(
+            derive_relation_type_from_fact(""),
+            "UNCLASSIFIED",
+            "empty fact must yield UNCLASSIFIED sentinel"
+        );
+    }
 }
