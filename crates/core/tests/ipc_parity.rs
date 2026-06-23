@@ -2140,14 +2140,21 @@ async fn parity_backfill_live_fills_empty() {
 
     // All 5 edges must still exist (FR-010, SC-004)
     let edge_count = db.connect().unwrap().count_relates_to_edges().unwrap();
-    assert_eq!(edge_count, 5, "no edges may be deleted by backfill: {edge_count}");
+    assert_eq!(
+        edge_count, 5,
+        "no edges may be deleted by backfill: {edge_count}"
+    );
 
     // The 3 empty edges now have a non-empty relation_type (FR-007)
     let conn = db.connect().unwrap();
     let empty_rows = conn
         .cypher_query("MATCH (n:RelatesToNode_) WHERE n.uuid STARTS WITH 'bflv-empty-' RETURN n.relation_type ORDER BY n.uuid")
         .unwrap();
-    assert_eq!(empty_rows.len(), 3, "must query back 3 formerly-empty edges");
+    assert_eq!(
+        empty_rows.len(),
+        3,
+        "must query back 3 formerly-empty edges"
+    );
     for row in &empty_rows {
         assert!(
             !row[0].is_empty(),
@@ -2231,7 +2238,10 @@ async fn parity_backfill_idempotent() {
     )
     .await;
     assert_ok_resp(&v1, 83);
-    assert_eq!(v1["result"]["backfilled"], 3, "first run must backfill 3: {v1}");
+    assert_eq!(
+        v1["result"]["backfilled"], 3,
+        "first run must backfill 3: {v1}"
+    );
 
     // Second run — must find zero empty edges and produce no new WAL mutations
     let state2 = make_state(db.clone());
@@ -2247,5 +2257,8 @@ async fn parity_backfill_idempotent() {
         v2["result"]["backfilled"], 0,
         "second run on already-backfilled graph must report backfilled=0 (FR-013): {v2}"
     );
-    assert_eq!(v2["result"]["total_edges"], 3, "total_edges unchanged: {v2}");
+    assert_eq!(
+        v2["result"]["total_edges"], 3,
+        "total_edges unchanged: {v2}"
+    );
 }
