@@ -167,6 +167,11 @@ entity_types:
   - name: Person           # normalized to PascalCase
     description: A human individual, not a role or title.
   - name: Organization
+  - name: Document
+  - name: Rfc
+    parent: Document       # optional: Rfc is a subtype of Document
+  - name: Adr
+    parent: Document       # optional: Adr is also a subtype of Document
   - name: Paper
 
 relation_types:
@@ -178,6 +183,16 @@ relation_types:
     source_type: Person
     target_type: Organization
 ```
+
+#### Entity type hierarchy
+
+The optional `parent: <TypeName>` field on an entity type declares a single-parent (tree) subtype relationship. A node typed `Rfc` will carry labels `["Entity", "Document", "Rfc"]` — enabling both specific queries (`WHERE 'Rfc' IN e.labels`) and rollup queries (`WHERE 'Document' IN e.labels`).
+
+- **Additive**: the specific type is never replaced by its parent; ancestor labels are added alongside it.
+- **Transitive**: a 3-level chain `SubDoc → Rfc → Document` stamps all four labels.
+- **Safe degrades**: an undeclared parent is cleared with a warning; cycles are detected and broken at startup (no crash).
+- **Flat ontologies unaffected**: types without `parent` fields behave exactly as before — `["Entity", <SpecificType>]`.
+- **Drift detection**: adding, removing, or changing a `parent` changes the ontology content hash, which triggers a `drifted: true` status in `knowledge_status`. Run `knowledge_reprocess_entity_types` to propagate new hierarchy to existing nodes.
 
 See [`docs/examples/ontology.example.yaml`](docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 

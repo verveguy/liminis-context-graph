@@ -14,8 +14,14 @@
 mode: strict
 
 # entity_types: the node labels the LLM should assign.
-# Each entry: name (required) + description (optional).
+# Each entry: name (required) + description (optional) + parent (optional).
 # Names are normalized to PascalCase at load time.
+#
+# parent: <TypeName>  — optional single-parent subtype relationship.
+# A node typed 'Rfc' with 'parent: Document' carries labels ["Entity", "Document", "Rfc"],
+# enabling rollup queries (WHERE 'Document' IN e.labels) alongside specific queries.
+# Hierarchy is additive: the specific type is never replaced by its ancestor.
+# Undeclared parents and cycles are handled gracefully (warning + degrade).
 entity_types:
   - name: Person
     description: >
@@ -27,10 +33,20 @@ entity_types:
       A company, university, research lab, or other institution.
       Use for named bodies, not for teams or roles.
 
+  - name: Publication
+    description: >
+      Any written work intended for distribution or citation.
+
   - name: Paper
+    parent: Publication   # Paper is a subtype of Publication
     description: >
       A peer-reviewed scientific publication, proceedings paper, or technical report.
       Not a blog post, preprint, or informal writeup.
+
+  - name: Preprint
+    parent: Publication   # Preprint is also a subtype of Publication
+    description: >
+      A non-peer-reviewed draft posted to arXiv, bioRxiv, or similar.
 
   - name: Experiment
     description: >
