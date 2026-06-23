@@ -386,11 +386,12 @@ async fn test_lexical_mapping_sets_relation_type() {
     let _ = edge_uuids; // used above
 }
 
-// ── Test 3: noise edges are deleted ──────────────────────────────────────────
+// ── Test 3: noise edges reclassified to UNCLASSIFIED (ADR-0054) ──────────────
 
-/// SC-002: co-occurrence noise edges (X → Y pattern) are deleted.
+/// ADR-0054: co-occurrence noise edges (X → Y pattern) are reclassified to UNCLASSIFIED,
+/// not deleted. 94% of such edges carry rich relation_type values; deletion is unsafe.
 #[tokio::test]
-async fn test_noise_edges_deleted() {
+async fn test_noise_edges_reclassified_not_deleted() {
     let dir = TempDir::new().unwrap();
     let wal_dir = TempDir::new().unwrap();
     let db = open_db(&dir);
@@ -413,7 +414,7 @@ async fn test_noise_edges_deleted() {
         for e in &noise {
             conn.insert_relates_to_edge(e).unwrap();
         }
-        // Add one non-noise edge that should survive
+        // Add one non-noise edge that should survive and be mapped
         conn.insert_relates_to_edge(&make_edge(&src.uuid, &dst.uuid, "WROTE"))
             .unwrap();
     }
@@ -429,25 +430,36 @@ async fn test_noise_edges_deleted() {
     assert_eq!(result["noise_count"], json!(3));
     assert_eq!(result["mapped_count"], json!(1)); // WROTE → AUTHORED
 
-    // Noise edges no longer exist
+    // All 4 edges must survive — noise edges are reclassified, not deleted (ADR-0054)
     let conn = db.connect().unwrap();
     let remaining = conn.list_relationships(None, 100).unwrap();
-    assert_eq!(remaining.len(), 1, "only the non-noise edge should remain");
+    assert_eq!(
+        remaining.len(),
+        4,
+        "all edges must survive: canonicalize must not delete noise edges (ADR-0054)"
+    );
 
-    // Check that noise UUIDs don't appear in surviving edges
-    let surviving_uuids: Vec<&str> = remaining.iter().map(|e| e.uuid.as_str()).collect();
+    // Noise edges now have relation_type = "UNCLASSIFIED"
+    let surviving_by_uuid: std::collections::HashMap<String, Option<String>> = remaining
+        .into_iter()
+        .map(|e| (e.uuid, e.relation_type))
+        .collect();
     for noise_uuid in &noise_uuids {
-        assert!(
-            !surviving_uuids.contains(&noise_uuid.as_str()),
-            "noise edge {noise_uuid} should have been deleted"
+        let rt = surviving_by_uuid
+            .get(noise_uuid)
+            .and_then(|rt| rt.as_deref());
+        assert_eq!(
+            rt,
+            Some("UNCLASSIFIED"),
+            "noise edge {noise_uuid} must be reclassified to UNCLASSIFIED, not deleted"
         );
     }
 
-    // WAL has delete mutations for the noise edges
+    // WAL has SET mutations (not DELETE) for the noise edges
     let wal_lines = count_wal_lines(wal_dir.path());
     assert!(
         wal_lines >= 3,
-        "WAL should have at least 3 delete mutations for noise edges"
+        "WAL should have at least 3 SET mutations for reclassified noise edges"
     );
 }
 
