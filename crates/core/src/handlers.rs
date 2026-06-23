@@ -2003,18 +2003,35 @@ async fn handle_reprocess_entity_types(
             let typed = corrections::list_all_typed_entities(&conn, &group_id_d)?;
             let mut restamped_count = 0usize;
             for entity in &typed {
-                // Find the specific type (labels minus "Entity")
+                // Collect non-Entity labels ("specific" labels).
                 let specific: Vec<&str> = entity
                     .labels
                     .iter()
                     .filter(|l| l.as_str() != "Entity")
                     .map(|l| l.as_str())
                     .collect();
-                // Only re-stamp entities with exactly one specific type (skip multi-labeled)
-                if specific.len() != 1 {
+                // Find the leaf type: a declared type that is not an ancestor of any other
+                // specific label on this entity. This handles both the initial "from flat"
+                // case (["Entity", "Rfc"] → leaf=Rfc) and the "hierarchy changed" case
+                // (["Entity", "Document", "Rfc"] → leaf=Rfc, since Document is an ancestor).
+                // Minted types (not in ancestor_map_d) are excluded and left unchanged.
+                let leaf_types: Vec<&str> = specific
+                    .iter()
+                    .copied()
+                    .filter(|&t| {
+                        ancestor_map_d.contains_key(t)
+                            && !specific.iter().any(|&other| {
+                                t != other
+                                    && ancestor_map_d
+                                        .get(other)
+                                        .is_some_and(|anc| anc.iter().any(|a| a.as_str() == t))
+                            })
+                    })
+                    .collect();
+                if leaf_types.len() != 1 {
                     continue;
                 }
-                let entity_type = specific[0];
+                let entity_type = leaf_types[0];
                 // Compute expected labels
                 let mut expected = vec!["Entity".to_string()];
                 if let Some(ancestors) = ancestor_map_d.get(entity_type) {
