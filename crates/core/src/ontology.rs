@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -28,6 +28,8 @@ struct EntityTypeRaw {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +70,7 @@ impl std::fmt::Display for OntologyMode {
 pub struct EntityTypeDef {
     pub name: String,
     pub description: Option<String>,
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +90,10 @@ pub struct Ontology {
     pub mode: OntologyMode,
     pub entity_types: Vec<EntityTypeDef>,
     pub relation_types: Vec<RelationTypeDef>,
+    /// Maps each entity type name to its ordered ancestor list (supertype-first, excluding
+    /// the implicit `Entity` root). Types with no declared parent map to an empty vec.
+    /// Precomputed at load time for O(1) lookup during bulk label stamping.
+    pub ancestor_map: HashMap<String, Vec<String>>,
 }
 
 impl Ontology {
@@ -250,7 +257,7 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         _ => OntologyMode::Open,
     };
 
-    let entity_types: Vec<EntityTypeDef> = file
+    let mut entity_types: Vec<EntityTypeDef> = file
         .entity_types
         .into_iter()
         .filter_map(|raw| {
@@ -259,18 +266,29 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
                 eprintln!("liminis-context-graph: ontology: skipping entity type with blank name");
                 return None;
             }
+            if normalized == "Entity" {
+                eprintln!(
+                    "liminis-context-graph: ontology: 'Entity' is the implicit root type and should not be declared in entity_types — ignoring"
+                );
+                return None;
+            }
             if normalized != raw.name {
                 eprintln!(
                     "liminis-context-graph: ontology: entity type '{}' normalized to '{}'",
                     raw.name, normalized
                 );
             }
+            let parent = raw.parent.map(|p| normalize_entity_type(&p));
             Some(EntityTypeDef {
                 name: normalized,
                 description: raw.description,
+                parent,
             })
         })
         .collect();
+
+    validate_and_clean_parents(&mut entity_types);
+    let ancestor_map = compute_ancestor_map(&entity_types);
 
     let relation_types: Vec<RelationTypeDef> = file
         .relation_types
@@ -333,7 +351,127 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         mode,
         entity_types,
         relation_types,
+        ancestor_map,
     })
+}
+
+// ── Parent validation and ancestor map ───────────────────────────────────────
+
+/// Validates and cleans parent relationships in the entity type list in place.
+///
+/// Phase 1: any `parent` that names a type not in the declared set is cleared with a warning.
+/// Phase 2: cycles (A → B → A, A → B → C → A, etc.) are detected by path-following; all
+/// members of a cycle have their `parent` cleared and a single warning is logged.
+pub fn validate_and_clean_parents(entity_types: &mut Vec<EntityTypeDef>) {
+    let declared: HashSet<String> = entity_types.iter().map(|e| e.name.clone()).collect();
+
+    // Phase 1: clear undeclared parents
+    for et in entity_types.iter_mut() {
+        if let Some(ref p) = et.parent {
+            if !declared.contains(p.as_str()) {
+                eprintln!(
+                    "liminis-context-graph: ontology: entity type '{}' declares parent '{}' \
+                     which is not in the declared type set — treating as no parent",
+                    et.name, p
+                );
+                et.parent = None;
+            }
+        }
+    }
+
+    // Phase 2: detect cycles by following each node's parent chain.
+    // Use String keys so the map does not borrow from entity_types, allowing mutation below.
+    let index_of: HashMap<String, usize> = entity_types
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.name.clone(), i))
+        .collect();
+
+    // Track which nodes we've already processed (no cycle reachable from them)
+    let mut safe: HashSet<usize> = HashSet::new();
+
+    for start in 0..entity_types.len() {
+        if safe.contains(&start) {
+            continue;
+        }
+
+        // Walk the parent chain from `start`, collecting the path
+        let mut path: Vec<usize> = Vec::new();
+        let mut visited_in_path: HashMap<usize, usize> = HashMap::new(); // index → position in path
+
+        let mut cur = start;
+        loop {
+            if safe.contains(&cur) {
+                // Entire path is cycle-free
+                safe.extend(path.iter().copied());
+                break;
+            }
+            if let Some(&cycle_start_pos) = visited_in_path.get(&cur) {
+                // Found a cycle: path[cycle_start_pos..] forms the cycle
+                let cycle: Vec<usize> = path[cycle_start_pos..].to_vec();
+                // Collect names as owned Strings before mutating the vec
+                let names: Vec<String> = cycle
+                    .iter()
+                    .map(|&i| entity_types[i].name.clone())
+                    .collect();
+                eprintln!(
+                    "liminis-context-graph: ontology: cycle detected in entity type parent graph: {} — \
+                     clearing parents for all cycle members",
+                    names.join(" → ")
+                );
+                for &i in &cycle {
+                    entity_types[i].parent = None;
+                }
+                // Nodes before the cycle entry are safe (they lead into the cycle, which is now broken)
+                for &i in &path[..cycle_start_pos] {
+                    safe.insert(i);
+                }
+                break;
+            }
+
+            visited_in_path.insert(cur, path.len());
+            path.push(cur);
+
+            // Advance to parent; read parent as an owned String to avoid holding a borrow across mutation
+            let next_idx = entity_types[cur]
+                .parent
+                .as_deref()
+                .and_then(|p| index_of.get(p))
+                .copied();
+            match next_idx {
+                Some(next) => cur = next,
+                None => {
+                    // Reached a root (no parent or parent already cleared)
+                    safe.extend(path.iter().copied());
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Precomputes the ancestor map for the given (validated, cycle-free) entity type list.
+///
+/// Returns a `HashMap` from type name to ordered ancestor list (supertype-first, excluding
+/// the implicit `Entity` root). Types with no parent map to an empty vec.
+pub fn compute_ancestor_map(entity_types: &[EntityTypeDef]) -> HashMap<String, Vec<String>> {
+    let parent_of: HashMap<&str, &str> = entity_types
+        .iter()
+        .filter_map(|e| e.parent.as_deref().map(|p| (e.name.as_str(), p)))
+        .collect();
+
+    let mut map = HashMap::new();
+    for et in entity_types {
+        let mut ancestors = Vec::new();
+        let mut cur = et.name.as_str();
+        while let Some(&p) = parent_of.get(cur) {
+            ancestors.push(p.to_string());
+            cur = p;
+        }
+        ancestors.reverse(); // supertype-first (root at index 0)
+        map.insert(et.name.clone(), ancestors);
+    }
+    map
 }
 
 // ── Content hash ─────────────────────────────────────────────────────────────
@@ -379,12 +517,32 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
         .collect();
     relation_entries.sort_unstable();
 
-    let canonical = format!(
-        "mode:{}\nentity_types:{}\nrelation_types:{}",
-        o.mode,
-        entity_entries.join("\0\0"),
-        relation_entries.join("\0\0"),
-    );
+    // Collect parent edges and append them only when at least one parent is declared.
+    // This preserves hash backward compatibility for flat ontologies (no spurious drift
+    // on upgrade from pre-#173 versions). See ADR-0053.
+    let mut parent_entries: Vec<String> = o
+        .entity_types
+        .iter()
+        .filter_map(|e| e.parent.as_deref().map(|p| format!("{}\0{}", e.name, p)))
+        .collect();
+    parent_entries.sort_unstable();
+
+    let canonical = if parent_entries.is_empty() {
+        format!(
+            "mode:{}\nentity_types:{}\nrelation_types:{}",
+            o.mode,
+            entity_entries.join("\0\0"),
+            relation_entries.join("\0\0"),
+        )
+    } else {
+        format!(
+            "mode:{}\nentity_types:{}\nrelation_types:{}\nparent_edges:{}",
+            o.mode,
+            entity_entries.join("\0\0"),
+            relation_entries.join("\0\0"),
+            parent_entries.join("\0\0"),
+        )
+    };
 
     let digest = Sha256::digest(canonical.as_bytes());
     format!("{:x}", digest)
@@ -554,15 +712,19 @@ relation_types:
         entities: &[(&str, Option<&str>)],
         relations: &[(&str, Option<&str>, Option<&str>, Option<&str>)],
     ) -> Ontology {
+        let entity_types: Vec<EntityTypeDef> = entities
+            .iter()
+            .map(|(name, desc)| EntityTypeDef {
+                name: name.to_string(),
+                description: desc.map(|s| s.to_string()),
+                parent: None,
+            })
+            .collect();
+        let ancestor_map = compute_ancestor_map(&entity_types);
         Ontology {
             mode,
-            entity_types: entities
-                .iter()
-                .map(|(name, desc)| EntityTypeDef {
-                    name: name.to_string(),
-                    description: desc.map(|s| s.to_string()),
-                })
-                .collect(),
+            entity_types,
+            ancestor_map,
             relation_types: relations
                 .iter()
                 .map(|(name, src, tgt, desc)| crate::ontology::RelationTypeDef {

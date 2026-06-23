@@ -1482,6 +1482,36 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
+    /// Returns a paged list of Entity nodes that have a specific type label (size >= 2 labels).
+    /// These are candidates for Phase D re-stamping when the ontology hierarchy changes.
+    pub fn list_typed_entities_page(
+        &self,
+        group_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) >= 2 AND 'Entity' IN e.labels \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+            serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
+        )?;
+        let mut rows = Vec::new();
+        for row in result {
+            rows.push(EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                ..Default::default()
+            });
+        }
+        Ok(rows)
+    }
+
     // ── dump/compaction query methods ─────────────────────────────────────────
     // Used exclusively by dump.rs for `knowledge_dump_wal`. Return raw column vectors so
     // dump.rs can access embedding values without extra allocations.

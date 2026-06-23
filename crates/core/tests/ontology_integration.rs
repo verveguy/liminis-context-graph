@@ -123,8 +123,10 @@ async fn strict_mode_entity_filtering_drops_out_of_vocab() {
         entity_types: vec![EntityTypeDef {
             name: "Person".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     };
     let state = make_state(db, Some(ontology));
 
@@ -158,8 +160,10 @@ async fn open_mode_no_filtering() {
         entity_types: vec![EntityTypeDef {
             name: "Person".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     };
     let state = make_state(db, Some(ontology));
 
@@ -221,13 +225,16 @@ async fn knowledge_status_ontology_field_populated() {
             EntityTypeDef {
                 name: "Person".to_string(),
                 description: None,
+                parent: None,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
+                parent: None,
             },
         ],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     };
     let state = make_state(db, Some(ontology));
 
@@ -285,10 +292,12 @@ async fn strict_mode_relation_type_drops_non_matching_edges() {
             EntityTypeDef {
                 name: "Person".to_string(),
                 description: None,
+                parent: None,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
+                parent: None,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -299,6 +308,7 @@ async fn strict_mode_relation_type_drops_non_matching_edges() {
             aliases: vec![],
             keywords: vec![],
         }],
+        ancestor_map: HashMap::new(),
     };
     let state = make_state(db, Some(ontology));
 
@@ -338,10 +348,12 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
             EntityTypeDef {
                 name: "Person".to_string(),
                 description: None,
+                parent: None,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
+                parent: None,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -352,6 +364,7 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
             aliases: vec![],
             keywords: vec![],
         }],
+        ancestor_map: HashMap::new(),
     };
     let state = make_state(db, Some(ontology));
 
@@ -383,15 +396,18 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
 // ── FR-008: drift detection regression tests ─────────────────────────────────
 
 fn make_ontology_with_entities(mode: OntologyMode, names: &[&str]) -> Ontology {
+    let entity_types: Vec<EntityTypeDef> = names
+        .iter()
+        .map(|n| EntityTypeDef {
+            name: n.to_string(),
+            description: None,
+            parent: None,
+        })
+        .collect();
     Ontology {
         mode,
-        entity_types: names
-            .iter()
-            .map(|n| EntityTypeDef {
-                name: n.to_string(),
-                description: None,
-            })
-            .collect(),
+        ancestor_map: HashMap::new(),
+        entity_types,
         relation_types: vec![],
     }
 }
@@ -414,6 +430,7 @@ fn drift_detected_after_relation_type_rename() {
         entity_types: vec![EntityTypeDef {
             name: "Person".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![RelationTypeDef {
             name: "AUTHORED".to_string(),
@@ -423,12 +440,14 @@ fn drift_detected_after_relation_type_rename() {
             aliases: vec![],
             keywords: vec![],
         }],
+        ancestor_map: HashMap::new(),
     };
     let o2 = Ontology {
         mode: OntologyMode::Open,
         entity_types: vec![EntityTypeDef {
             name: "Person".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![RelationTypeDef {
             name: "WROTE".to_string(),
@@ -438,6 +457,7 @@ fn drift_detected_after_relation_type_rename() {
             aliases: vec![],
             keywords: vec![],
         }],
+        ancestor_map: HashMap::new(),
     };
     assert_ne!(
         content_hash(Some(&o1)),

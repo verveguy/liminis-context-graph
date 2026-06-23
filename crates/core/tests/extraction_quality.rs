@@ -83,17 +83,21 @@ fn strict_person_ontology() -> Ontology {
             EntityTypeDef {
                 name: "Person".to_string(),
                 description: Some("A human individual".to_string()),
+                parent: None,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: Some("A company or institution".to_string()),
+                parent: None,
             },
             EntityTypeDef {
                 name: "Paper".to_string(),
                 description: None,
+                parent: None,
             },
         ],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     }
 }
 
@@ -145,8 +149,10 @@ fn open_mode_ontology_uses_prefer_sentence() {
         entity_types: vec![EntityTypeDef {
             name: "Concept".to_string(),
             description: None,
+            parent: None,
         }],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     };
     let prompt = prompts::entity_system_prompt(SourceType::Text, Some(&onto));
 
@@ -187,6 +193,7 @@ fn empty_ontology_produces_no_entity_types_section() {
         mode: OntologyMode::Strict,
         entity_types: vec![],
         relation_types: vec![],
+        ancestor_map: HashMap::new(),
     };
     let prompt = prompts::entity_system_prompt(SourceType::Text, Some(&onto));
 
@@ -271,6 +278,7 @@ fn edge_prompt_with_relation_types_injects_fact_types() {
             aliases: vec![],
             keywords: vec![],
         }],
+        ancestor_map: HashMap::new(),
     };
     let prompt = prompts::edge_system_prompt(Some(&onto));
     assert!(

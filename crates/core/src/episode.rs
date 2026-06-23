@@ -307,6 +307,11 @@ pub async fn add_episode(
                 labels: {
                     let mut labels = vec!["Entity".to_string()];
                     if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
+                        if let Some(ancestors) =
+                            ontology_ref.and_then(|o| o.ancestor_map.get(&extracted.entity_type))
+                        {
+                            labels.extend(ancestors.iter().cloned());
+                        }
                         labels.push(extracted.entity_type.clone());
                     }
                     labels
