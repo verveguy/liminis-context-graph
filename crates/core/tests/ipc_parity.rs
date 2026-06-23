@@ -1780,6 +1780,108 @@ async fn parity_canonicalize_no_ontology_error_shape() {
     );
 }
 
+/// Regression: canonicalize_relations MUST NOT delete arrow-named edges (FR-016–FR-019, SC-007).
+///
+/// Before ADR-0054, EdgeClass::Noise edges were DETACH DELETE'd. After the fix they are
+/// reclassified to UNCLASSIFIED. This test inserts 10 ALL-CAPS arrow-named edges with a
+/// populated relation_type and verifies all 10 survive a live canonicalize pass.
+#[tokio::test]
+async fn parity_canonicalize_no_deletion_of_arrow_edges() {
+    let (db, _dir) = make_db(4);
+
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "cnde-src-001".to_string(),
+            name: "BRETT".to_string(),
+            group_id: "cnde-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-05-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "source entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "cnde-dst-001".to_string(),
+            name: "RAJI".to_string(),
+            group_id: "cnde-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-05-01T00:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "target entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        // 10 ALL-CAPS arrow-named edges with populated relation_type.
+        // These match is_noise_edge() and would have been deleted before ADR-0054.
+        for i in 0..10usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("cnde-edge-{i:03}"),
+                name: "BRETT → RAJI".to_string(),
+                source_node_uuid: "cnde-src-001".to_string(),
+                target_node_uuid: "cnde-dst-001".to_string(),
+                group_id: "cnde-group".to_string(),
+                fact: format!("Brett knows Raji (fact {i})"),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-05-01T00:00:{:02}Z", i + 2),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: Some("KNOWS".to_string()),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+    }
+
+    // Ontology with no keywords that match "BRETT → RAJI" → all 10 edges go through Noise path.
+    let ontology = Arc::new(Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef {
+            name: "Entity".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "AFFILIATED_WITH".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec!["affiliat".to_string()],
+        }],
+        ancestor_map: std::collections::HashMap::new(),
+    });
+    let state = make_state_with_ontology(db.clone(), ontology);
+
+    let v = dispatch_val(
+        70,
+        "knowledge_canonicalize_relations",
+        json!({ "dry_run": false }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 70);
+
+    // All 10 edges must survive — canonicalize must not delete arrow-named edges (FR-016).
+    let edge_count = db.connect().unwrap().count_relates_to_edges().unwrap();
+    assert_eq!(
+        edge_count, 10,
+        "canonicalize must not delete arrow-named edges (ADR-0054): only {edge_count} of 10 remain"
+    );
+
+    // noise_count should be 10 (reclassified, not deleted)
+    let r = &v["result"];
+    assert_eq!(
+        r["noise_count"], 10,
+        "noise_count must reflect 10 reclassified edges: {v}"
+    );
+}
+
 /// With a valid ontology + empty DB + dry_run:true → result has expected shape.
 #[tokio::test]
 async fn parity_canonicalize_relations_shape() {
@@ -1828,4 +1930,322 @@ async fn parity_canonicalize_relations_shape() {
         r["residual_count"].is_number(),
         "residual_count must be numeric: {v}"
     );
+}
+
+// ── Backfill IPC parity tests (FR-005–FR-015) ─────────────────────────────────
+
+/// Empty DB + dry_run:true → response shape is correct (FR-006, SC-006).
+#[tokio::test]
+async fn parity_backfill_relation_types_shape() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        80,
+        "knowledge_backfill_relation_types",
+        json!({ "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 80);
+    let r = &v["result"];
+    assert_eq!(r["total_edges"], 0, "empty DB must have total_edges=0: {v}");
+    assert_eq!(r["backfilled"], 0, "empty DB must have backfilled=0: {v}");
+    assert_eq!(r["dry_run"], true, "dry_run flag must be reflected: {v}");
+}
+
+/// dry_run:true on a graph with 3 empty + 2 populated edges → backfilled=3, no mutations (FR-006, SC-006).
+#[tokio::test]
+async fn parity_backfill_dry_run_counts() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfdr-src-001".to_string(),
+            name: "Alice".to_string(),
+            group_id: "bfdr-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-06-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "source".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfdr-dst-001".to_string(),
+            name: "Bob".to_string(),
+            group_id: "bfdr-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-06-01T00:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "target".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        // 3 edges with empty relation_type
+        for i in 0..3usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("bfdr-empty-{i:03}"),
+                name: "Alice → Bob".to_string(),
+                source_node_uuid: "bfdr-src-001".to_string(),
+                target_node_uuid: "bfdr-dst-001".to_string(),
+                group_id: "bfdr-group".to_string(),
+                fact: "Alice knows Bob".to_string(),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-06-01T00:00:{:02}Z", i + 2),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: None,
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+        // 2 edges with populated relation_type
+        for i in 0..2usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("bfdr-pop-{i:03}"),
+                name: "Alice → Bob".to_string(),
+                source_node_uuid: "bfdr-src-001".to_string(),
+                target_node_uuid: "bfdr-dst-001".to_string(),
+                group_id: "bfdr-group".to_string(),
+                fact: "Alice knows Bob well".to_string(),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-06-01T00:00:{:02}Z", i + 5),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: Some("KNOWS".to_string()),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+    }
+
+    let state = make_state(db.clone());
+    let v = dispatch_val(
+        81,
+        "knowledge_backfill_relation_types",
+        json!({ "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 81);
+    let r = &v["result"];
+    assert_eq!(r["total_edges"], 5, "must count all 5 edges: {v}");
+    assert_eq!(r["backfilled"], 3, "dry_run must count 3 empty edges: {v}");
+    assert_eq!(r["dry_run"], true, "dry_run flag must be reflected: {v}");
+
+    // No mutations: all 5 edges should still have their original relation_type
+    let rows = db
+        .connect()
+        .unwrap()
+        .cypher_query("MATCH (n:RelatesToNode_) WHERE n.uuid STARTS WITH 'bfdr-empty-' RETURN n.relation_type ORDER BY n.uuid")
+        .unwrap();
+    assert_eq!(rows.len(), 3, "must have 3 empty edges");
+    for row in &rows {
+        assert!(
+            row[0].is_empty(),
+            "dry_run must not modify edges: relation_type should still be empty/null"
+        );
+    }
+}
+
+/// Live mode: 3 empty edges get relation_type, 2 populated are unchanged, no edge deleted (FR-007–FR-011, SC-002–SC-004).
+#[tokio::test]
+async fn parity_backfill_live_fills_empty() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bflv-src-001".to_string(),
+            name: "Alice".to_string(),
+            group_id: "bflv-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-07-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "source".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bflv-dst-001".to_string(),
+            name: "Bob".to_string(),
+            group_id: "bflv-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-07-01T00:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "target".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        for i in 0..3usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("bflv-empty-{i:03}"),
+                name: "Alice → Bob".to_string(),
+                source_node_uuid: "bflv-src-001".to_string(),
+                target_node_uuid: "bflv-dst-001".to_string(),
+                group_id: "bflv-group".to_string(),
+                fact: "Alice knows Bob".to_string(),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-07-01T00:00:{:02}Z", i + 2),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: None,
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+        for i in 0..2usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("bflv-pop-{i:03}"),
+                name: "Alice → Bob".to_string(),
+                source_node_uuid: "bflv-src-001".to_string(),
+                target_node_uuid: "bflv-dst-001".to_string(),
+                group_id: "bflv-group".to_string(),
+                fact: "Alice knows Bob well".to_string(),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-07-01T00:00:{:02}Z", i + 5),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: Some("KNOWS".to_string()),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+    }
+
+    let state = make_state(db.clone());
+    let v = dispatch_val(
+        82,
+        "knowledge_backfill_relation_types",
+        json!({ "dry_run": false }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 82);
+    let r = &v["result"];
+    assert_eq!(r["total_edges"], 5, "must count all 5 edges: {v}");
+    assert_eq!(r["backfilled"], 3, "must report 3 backfilled edges: {v}");
+    assert_eq!(r["dry_run"], false, "must report live mode: {v}");
+
+    // All 5 edges must still exist (FR-010, SC-004)
+    let edge_count = db.connect().unwrap().count_relates_to_edges().unwrap();
+    assert_eq!(edge_count, 5, "no edges may be deleted by backfill: {edge_count}");
+
+    // The 3 empty edges now have a non-empty relation_type (FR-007)
+    let conn = db.connect().unwrap();
+    let empty_rows = conn
+        .cypher_query("MATCH (n:RelatesToNode_) WHERE n.uuid STARTS WITH 'bflv-empty-' RETURN n.relation_type ORDER BY n.uuid")
+        .unwrap();
+    assert_eq!(empty_rows.len(), 3, "must query back 3 formerly-empty edges");
+    for row in &empty_rows {
+        assert!(
+            !row[0].is_empty(),
+            "formerly-empty edge must have non-empty relation_type after live backfill: {:?}",
+            row[0]
+        );
+    }
+
+    // The 2 populated edges are unchanged (FR-007: must NOT overwrite existing values)
+    let pop_rows = conn
+        .cypher_query("MATCH (n:RelatesToNode_) WHERE n.uuid STARTS WITH 'bflv-pop-' RETURN n.relation_type ORDER BY n.uuid")
+        .unwrap();
+    assert_eq!(pop_rows.len(), 2, "must query back 2 populated edges");
+    for row in &pop_rows {
+        assert_eq!(
+            row[0], "KNOWS",
+            "populated relation_type must be unchanged after backfill: {:?}",
+            row[0]
+        );
+    }
+}
+
+/// Idempotency: running live backfill twice produces zero new mutations on second run (FR-013, SC-006).
+#[tokio::test]
+async fn parity_backfill_idempotent() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfid-src-001".to_string(),
+            name: "Alice".to_string(),
+            group_id: "bfid-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-08-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "source".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfid-dst-001".to_string(),
+            name: "Bob".to_string(),
+            group_id: "bfid-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-08-01T00:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "target".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        for i in 0..3usize {
+            conn.insert_relates_to_edge(&RelatesToEdge {
+                uuid: format!("bfid-empty-{i:03}"),
+                name: "Alice → Bob".to_string(),
+                source_node_uuid: "bfid-src-001".to_string(),
+                target_node_uuid: "bfid-dst-001".to_string(),
+                group_id: "bfid-group".to_string(),
+                fact: "Alice knows Bob".to_string(),
+                fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+                created_at: format!("2024-08-01T00:00:{:02}Z", i + 2),
+                valid_at: None,
+                invalid_at: None,
+                attributes: "{}".to_string(),
+                relation_type: None,
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+            })
+            .unwrap();
+        }
+    }
+
+    // First run — fills 3 empty edges
+    let state1 = make_state(db.clone());
+    let v1 = dispatch_val(
+        83,
+        "knowledge_backfill_relation_types",
+        json!({ "dry_run": false }),
+        state1,
+    )
+    .await;
+    assert_ok_resp(&v1, 83);
+    assert_eq!(v1["result"]["backfilled"], 3, "first run must backfill 3: {v1}");
+
+    // Second run — must find zero empty edges and produce no new WAL mutations
+    let state2 = make_state(db.clone());
+    let v2 = dispatch_val(
+        84,
+        "knowledge_backfill_relation_types",
+        json!({ "dry_run": false }),
+        state2,
+    )
+    .await;
+    assert_ok_resp(&v2, 84);
+    assert_eq!(
+        v2["result"]["backfilled"], 0,
+        "second run on already-backfilled graph must report backfilled=0 (FR-013): {v2}"
+    );
+    assert_eq!(v2["result"]["total_edges"], 3, "total_edges unchanged: {v2}");
 }
