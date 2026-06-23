@@ -1989,7 +1989,9 @@ async fn handle_reprocess_entity_types(
 
     // Phase D (write lock): re-stamp typed entities that are missing ancestor labels.
     // Skip if no ontology is loaded or no hierarchy is declared.
-    let restamped = if !ancestor_map.is_empty() {
+    // `ancestor_map` has an entry per type (even with empty ancestor lists for flat types),
+    // so we check whether any type actually has declared ancestors rather than map emptiness.
+    let restamped = if ancestor_map.values().any(|v| !v.is_empty()) {
         let db = load_db(&state)?;
         let wal_writer_d = Arc::clone(&state.wal_writer);
         let sink_d = Arc::clone(&state.sink);
