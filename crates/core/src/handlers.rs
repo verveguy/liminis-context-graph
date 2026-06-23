@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{AppState, OntologyDriftState},
-    canonicalize, corrections,
+    backfill, canonicalize, corrections,
     db::Db,
     episode,
     error::Error,
@@ -170,6 +170,9 @@ async fn handle(
         "knowledge_reprocess_entity_types" => handle_reprocess_entity_types(req, state).await,
         "knowledge_canonicalize_relations" => {
             handle_canonicalize_relations(req, state, progress_tx).await
+        }
+        "knowledge_backfill_relation_types" => {
+            handle_backfill_relation_types(req, state, progress_tx).await
         }
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
@@ -2107,6 +2110,16 @@ async fn handle_canonicalize_relations(
     };
 
     canonicalize::canonicalize_relations(state, params, progress_tx, ontology).await
+}
+
+async fn handle_backfill_relation_types(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    let params = backfill::BackfillParams { dry_run };
+    backfill::backfill_relation_types(state, params, progress_tx).await
 }
 
 // ── Recovery handler ─────────────────────────────────────────────────────────
