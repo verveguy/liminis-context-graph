@@ -90,5 +90,5 @@ After 2–4 weeks of stable Rust-default operation:
 
 1. **Bundling layout.** Does the Rust binary live in `app.asar.unpacked/bin/liminis-graph` alongside the Swift sidecar, or does it have its own resource path? (Affects spawn-env construction.)
 2. **Graphiti fork future.** Freeze at HEAD, or actively maintain for upstream PRs we still want to land? (Recent caching work suggests we may still want changes.)
-3. **OSS launch interaction.** OSS launch is **confirmed**: Apache 2.0 + CLA, but deferred — not blocking on cutover. The `ideas/oss-launch-architecture.md` discussion of MCP-in-binary vs out-of-process should be revisited closer to launch, but doesn't drive Stage 4 sequencing.
+3. **OSS launch interaction.** OSS launch is **confirmed**: MIT, no CLA, but deferred — not blocking on cutover. The MCP-in-binary vs out-of-process question should be revisited closer to launch, but doesn't drive Stage 4 sequencing.
 4. **Naming.** Are we cutting over to "graphiti backend = liminis-graph" or to "Liminis Context Graph"? The rename and the cutover overlap; doing both at once is cleaner but bigger.

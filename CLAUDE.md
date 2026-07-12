@@ -45,7 +45,7 @@ The Spec Kit threshold and the worktree threshold are the same: features go thro
 
 ## Pre-spec ideas (`ideas/`)
 
-The `ideas/` directory holds pre-spec sketches and design notes that have not crossed the Spec Kit threshold (e.g. `cutover-plan.md`, `oss-launch-architecture.md`). **Do not implement directly from files there** — they are exploratory by definition and may be wrong, incomplete, or contradicted by later thinking. When an idea matures, file a Fabrik issue (with a Spec Kit–formatted body for features, or a focused bug body for fixes) and the resulting spec lives in `specs/<issue-number>-<short-name>/spec.md` per the convention above.
+The `ideas/` directory holds pre-spec sketches and design notes that have not crossed the Spec Kit threshold (e.g. `cutover-plan.md`). **Do not implement directly from files there** — they are exploratory by definition and may be wrong, incomplete, or contradicted by later thinking. When an idea matures, file a Fabrik issue (with a Spec Kit–formatted body for features, or a focused bug body for fixes) and the resulting spec lives in `specs/<issue-number>-<short-name>/spec.md` per the convention above.
 
 ## Rust pre-commit checks (MUST run before every commit)
 
