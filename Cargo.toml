@@ -29,7 +29,11 @@ targets = [
   "aarch64-unknown-linux-gnu",
 ]
 include = ["LICENSE", "README.md", "CHANGELOG.md"]
-github-build-setup = "build-setup.yml"
+# Lives at .github/build-setup.yml (one level up from .github/workflows/, where
+# cargo-dist resolves this path). Kept OUT of .github/workflows/ so GitHub does
+# not try to run the bare steps-fragment as a workflow and post an
+# "Invalid workflow file" failure on every push.
+github-build-setup = "../build-setup.yml"
 # allow-dirty suppresses "release.yml out of date" errors from dist plan/generate.
 # The cache/restore step in build-setup.yml was patched to use a YAML literal block
 # scalar (|) for the multi-line path — cargo-dist's YAML emitter writes continuation
