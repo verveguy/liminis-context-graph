@@ -21,10 +21,6 @@ Use GitHub's private vulnerability reporting to disclose findings confidentially
 
 This creates a private advisory visible only to the maintainer and any collaborators you add.
 
-### Fallback: email
-
-If the GitHub advisory form is unavailable or you prefer email, contact the maintainer directly at **bpjadam@gmail.com** with "[SECURITY] liminis-context-graph" in the subject line.
-
 ## Response time
 
 The maintainer will acknowledge receipt within **7 days**, best-effort. There is no formal SLA pre-1.0. Complex vulnerabilities may take longer to assess and patch.
