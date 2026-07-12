@@ -132,6 +132,6 @@ When a developer starts the sidecar they see clear log lines indicating (a) that
 ## Source References
 
 - `specs/39-need-embedder-sidecar-liminis/spec.md` — prior spec (produced by #39, defines requirements this issue implements)
-- `docs/adr/0044-embedder-http-contract.md` — HTTP wire contract between `HttpEmbedder` and the sidecar
+- `docs/adr/0006-embedder-http-contract.md` — HTTP wire contract between `HttpEmbedder` and the sidecar
 - `liminis-graph-core/src/embedder.rs` — `HttpEmbedder` Rust implementation (caller of this sidecar)
 - `liminis-framework/framework/src/skills/knowledge-graph/scripts/` — existing skill scripts; `embedder_server.py` ships alongside these

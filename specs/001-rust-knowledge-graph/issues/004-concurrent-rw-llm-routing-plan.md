@@ -229,7 +229,7 @@ Note: the bench proves the RwLock contention model — it does not simulate real
 
 ### AD-10: ADR-042 content
 
-`docs/adr/0042-reader-writer-split.md` documents:
+`docs/adr/0002-reader-writer-split.md` documents:
 - **Context**: lbug returns `Error::FailedQuery` on concurrent write connections; extraction (30s) must not block search (p95 ≤ 500 ms).
 - **Decision**: `tokio::sync::RwLock<()>` in `AppState`. Write guard acquired immediately before the DB commit `spawn_blocking`, after all async HTTP work completes. Read guard acquired before any read `spawn_blocking`. Both guards move into the closure and are dropped on completion.
 - **Consequences**: p95 search latency bounded by DB-commit duration (milliseconds), not LLM call duration (30s). Write throughput is single-writer; concurrent extractions queue on the write guard. Phase B (dedup HTTP) runs without a lock, so N concurrent extractions can overlap on dedup while serializing only on DB commit.
