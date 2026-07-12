@@ -161,6 +161,6 @@ The service should emit per-call timing, token usage by role, fallback events, a
 
 ## Source References
 
-- `/Users/bpja/dev/liminis-project/graphiti/graphiti_core/` — surface to preserve (especially `driver/ladybugdriver.py`, `nodes.py`, `edges.py`, `search/`).
-- `/Users/bpja/dev/liminis-project/liminis-framework/framework/src/skills/knowledge-graph/scripts/graphiti_service.py` — the call sites and IPC contract this service must serve.
+- `graphiti/graphiti_core/` — surface to preserve (especially `driver/ladybugdriver.py`, `nodes.py`, `edges.py`, `search/`).
+- `liminis-framework/framework/src/skills/knowledge-graph/scripts/graphiti_service.py` — the call sites and IPC contract this service must serve.
 - ADR-042 (concurrent read/write split), ADR-052 (LadybugDB migration), `project_context_graph_caching_2026_04_30.md`, `project_hnsw_migration.md`, `project_qr_leak_fix.md`.

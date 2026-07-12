@@ -11,7 +11,7 @@ The CoreML BGE-base embedder cutover shipped 2026-05-25 (liminis#794, #809, #810
 
 The Liminis app on macOS now routes all embedding traffic through that sidecar. End-to-end working in production today.
 
-**The OSS bundling question:** the user wants to ship `liminis-graph` + an embedder as a drop-in open-source context graph engine ([`liminis-graph/ideas/oss-launch-architecture.md`](../../ideas/oss-launch-architecture.md), Question 2). The Swift sidecar is **Mac-only** — bundling it as the embedder would make the OSS distribution Mac-only too, which contradicts "drop in to any project."
+**The OSS bundling question:** the user wants to ship `liminis-graph` + an embedder as a drop-in open-source context graph engine (OSS-launch planning, embedder question). The Swift sidecar is **Mac-only** — bundling it as the embedder would make the OSS distribution Mac-only too, which contradicts "drop in to any project."
 
 Three architectural alternatives surfaced during planning:
 
@@ -124,8 +124,8 @@ The spike answers the feasibility question only. It does not modify `liminis-gra
 
 ## Source References
 
-- `liminis-graph/ideas/oss-launch-architecture.md` — the planning doc this spike feeds; Question 2 is the embedder question.
-- `liminis-graph/ideas/cutover-plan.md` — context on why liminis-graph reached production.
+- OSS-launch planning notes (internal) — the planning this spike feeds; the embedder-bundling question.
+- `ideas/cutover-plan.md` — context on why the engine reached production.
 - `liminis/docs/project_notes/designs/coreml-bge-embedder-spike-2026-05.md` — the format model for the deliverable decision report.
 - `liminis-app/native/local-inference/benchmark/bench.py` — original CoreML benchmark; corpus source.
 - `liminis-app/native/local-inference/verify-embedding-parity.py` — original parity check; reusable methodology.
