@@ -1,6 +1,6 @@
 # Telemetry
 
-The `liminis-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
+The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
 
 ## Transport
 
@@ -15,7 +15,7 @@ The `liminis-graph` service emits structured JSON Lines (JSONL) telemetry events
 To capture events from the default transport:
 
 ```sh
-./liminis-graph 2> telemetry.jsonl
+./liminis-context-graph 2> telemetry.jsonl
 ```
 
 ## Event Types
@@ -176,7 +176,7 @@ A complete session ingesting one episode and running one search:
 Token cost estimates use the compiled-in pricing table at `assets/llm_pricing.json`. To override at runtime without recompiling:
 
 ```sh
-LIMINIS_LLM_COST_TABLE_PATH=/path/to/my_pricing.json ./liminis-graph
+LIMINIS_LLM_COST_TABLE_PATH=/path/to/my_pricing.json ./liminis-context-graph
 ```
 
 The JSON schema matches the built-in table:

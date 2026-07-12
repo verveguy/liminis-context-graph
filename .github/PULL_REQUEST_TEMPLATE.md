@@ -14,7 +14,7 @@
 | II — Library and Binary Are Peers | |
 | III — LadybugDB Only | |
 | IV — WAL Is Authoritative | |
-| V — No ML Runtimes | |
+| V — LLM and Embedding Adapters Stay Out-of-Process | |
 
 ## Testing
 

@@ -85,7 +85,7 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 
 ### Build from source
 
-Requires [Rust/Cargo](https://rustup.rs/) and `cmake` (for the lbug C++ build, ~20–30 min cold):
+Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
 
 ```bash
 # Build both crates
@@ -224,7 +224,7 @@ When no ontology is loaded, `present` is `false` and counts are `0`.
 
 | Crate | Version | Role |
 |-------|---------|------|
-| `lbug` | `=0.16.1` | LadybugDB Rust bindings (pinned) |
+| `lbug` | `=0.17.0` | LadybugDB Rust bindings (pinned) |
 | `thiserror` | `2` | Error type generation |
 
 No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.

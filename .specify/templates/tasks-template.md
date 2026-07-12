@@ -16,7 +16,7 @@ description: "Task list template for feature implementation"
 
 - **[P]**: Can run in parallel (different files, no dependencies)
 - **[Story]**: Which user story this task belongs to (e.g., US1, US2, US3)
-- **[Constitution-tag]** (per liminis-graph constitution v1.0.0):
+- **[Constitution-tag]** (per liminis-context-graph constitution v1.0.0):
   - `[IPC]` — touches the Unix-socket IPC surface; parity test against the recorded Python corpus REQUIRED in the same phase
   - `[WAL]` — touches WAL serialization or replay logic; TDD MANDATORY (test written and failing before implementation)
   - `[HOT]` — touches search, dedup, or replay hot paths; bench in `benches/` REQUIRED before merge
@@ -256,7 +256,7 @@ With multiple developers:
 - Stop at any checkpoint to validate story independently
 - Avoid: vague tasks, same file conflicts, cross-story dependencies that break independence
 
-### Constitution compliance (liminis-graph v1.0.0)
+### Constitution compliance (liminis-context-graph v1.0.0)
 
 Every task carrying a `[IPC]`, `[WAL]`, `[HOT]`, `[LDB]`, or `[ADAPTER]` tag MUST satisfy the corresponding gate before it can be marked complete:
 

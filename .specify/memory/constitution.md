@@ -15,7 +15,7 @@ Templates requiring updates:
 Follow-up TODOs: none
 Source: specs/001-rust-knowledge-graph/spec.md
 -->
-# Liminis Graph Constitution
+# Liminis Context Graph Constitution
 
 ## Core Principles
 
@@ -58,7 +58,7 @@ The following are constitution-level invariants, not aspirational targets. Regre
 - Steady-state memory on a 100k-node workspace ≤ 60% of the Python service's footprint
 - Cold-boot WAL replay throughput ≥ 3× the Python baseline
 
-Benchmarks for these budgets MUST live in `benches/` and run in CI.
+Benchmarks for these budgets MUST live in `crates/core/benches/` and run in CI.
 
 ## Development Workflow
 

@@ -1,8 +1,12 @@
 # Native Rust Embedder Spike: candle vs ort — Decision Report
 
+> **Historical record.** This is a point-in-time spike report from May 2026. Code paths,
+> issue links, and follow-up actions reflect the state at the time of writing; some may be
+> stale. Kept for the reasoning and benchmark data, not as current guidance.
+
 **Date**: 2026-05-26
 **Branch**: `fabrik/issue-107`
-**Issue**: [#107](https://github.com/verveguy/liminis-graph/issues/107)
+**Issue**: [#107](https://github.com/verveguy/liminis-context-graph/issues/107)
 **Spike harness**: `spikes/native-embedder/`
 **Verdict**: candle **NO-GO** · ort **GO-with-caveats**
 
@@ -10,9 +14,9 @@
 
 ## Background
 
-The liminis-graph OSS bundling question requires a cross-platform embedder. The
+The liminis-context-graph OSS bundling question requires a cross-platform embedder. The
 Swift CoreML sidecar (shipped 2026-05-25, liminis#794, #809, #810, #811,
-liminis-graph#81) is macOS-only. For a "drop-in to any project" OSS distribution
+liminis-context-graph#81) is macOS-only. For a "drop-in to any project" OSS distribution
 that works on Linux servers, we need either a native Rust embedder or a different
 bundling strategy.
 
@@ -25,7 +29,7 @@ This spike evaluates two Rust ML libraries against the BGE-base-en-v1.5 model:
 
 **Model**: BAAI/bge-base-en-v1.5 (110M parameters, 768-dim embeddings, 438 MB on disk)
 
-**This spike does NOT modify production code.** `liminis-graph-core/src/embedder.rs`
+**This spike does NOT modify production code.** `crates/core/src/embedder.rs`
 and the existing `OaiEmbedder` path are unchanged. See ADR-0044 and ADR-0048.
 
 **Principle V re-evaluation**: ADR-0044 established "no ML runtime in the Rust crate"
@@ -73,7 +77,7 @@ use only, and relaxed for the cross-platform OSS distribution.
 | SC-003 | p95 latency, Linux x86_64 | ≤50 ms |
 | SC-004 | Resident memory (steady state after warmup) | ≤500 MB |
 | SC-005 | Cold start to first embed | ≤2 s |
-| SC-006 | Binary size (proxy for `liminis-graph` growth) | ≤50 MB |
+| SC-006 | Binary size (proxy for `liminis-context-graph` growth) | ≤50 MB |
 
 ---
 
@@ -326,11 +330,12 @@ Verdict is **GO-with-caveats** for `ort`:
 2. Productionization issue scope:
    - Investigate and fix the 1/50 sentence tokenizer parity gap (SC-001).
    - Create ADR-0051 (amended Principle V, scoped to cross-platform OSS).
-   - Implement `NativeEmbedder` in `liminis-graph-core/src/embedder.rs` behind a feature
+   - Implement `NativeEmbedder` in `crates/core/src/embedder.rs` behind a feature
      flag, keeping `OaiEmbedder` as the default for existing macOS Liminis-app users.
    - Decide whether to ship pre-exported ONNX model or require export at setup time.
-3. Update `liminis-graph/ideas/oss-launch-architecture.md` to record this spike's
-   findings: candle is a dead end (latency), ort is the path forward for Option B.
+3. Record this spike's findings in a follow-up ADR if the work is pursued: candle is
+   a dead end (latency), ort is the path forward for Option B. (The internal OSS-launch
+   planning doc that originally tracked this has since been removed.)
 
 ---
 
