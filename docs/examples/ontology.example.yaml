@@ -1,7 +1,7 @@
 # Workspace ontology example — scientific paper domain
 #
 # Place this file at .lcg/ontology.yaml in your workspace root.
-# Restart the liminis-graph service to pick up changes.
+# Restart the liminis-context-graph service to pick up changes.
 #
 # Reference: docs/examples/ontology.example.yaml
 

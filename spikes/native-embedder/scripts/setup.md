@@ -169,7 +169,7 @@ Linux will exit with: `Error: CoreML EP is only available on macOS`.
 
 ## Measuring binary size delta
 
-The spike crate is not linked into `liminis-graph`. To estimate the binary
+The spike crate is not linked into `liminis-context-graph`. To estimate the binary
 growth if it were, compare the compiled binary sizes directly:
 
 ```bash
@@ -183,7 +183,7 @@ ls -lh target/release/candle-bench target/release/ort-bench
 
 The `common` crate is a library with no binary target; it has no entry in
 `target/release/`. The bench binary sizes are the best available proxy for
-the ML library overhead that would accrue to `liminis-graph` if the embedder
+the ML library overhead that would accrue to `liminis-context-graph` if the embedder
 were integrated. Note that `libonnxruntime` (~60 MB) is downloaded separately
 and not included in the `ort-bench` binary size reported above.
 

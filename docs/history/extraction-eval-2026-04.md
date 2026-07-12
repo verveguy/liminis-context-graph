@@ -1,16 +1,16 @@
 > ## Historical context — please read before relying on the numbers
 >
-> This document was written in April 2026 against an **earlier implementation** of Liminis's knowledge-graph pipeline — a Python service built on the [graphiti](https://github.com/getzep/graphiti) framework, which `liminis-graph` (this repository, Rust) was created to replace. The eval pre-dates `liminis-graph`'s existence.
+> This document was written in April 2026 against an **earlier implementation** of Liminis's knowledge-graph pipeline — a Python service built on the [graphiti](https://github.com/getzep/graphiti) framework, which `liminis-context-graph` (this repository, Rust) was created to replace. The eval pre-dates `liminis-context-graph`'s existence.
 >
 > **What likely still holds (qualitative findings):**
-> - Model-family rankings on entity/edge extraction at the prompt shapes graphiti uses (and which `liminis-graph` ports — see `specs/92-port-graphiti-s-extraction/spec.md`). `qwen3.6-27b` as the strongest fully-local option, MoE bandwidth advantage being real on Apple Silicon, reasoning models *hurting* enumeration tasks, distillation-from-Claude not delivering the expected gains.
+> - Model-family rankings on entity/edge extraction at the prompt shapes graphiti uses (and which `liminis-context-graph` ports — see `specs/92-port-graphiti-s-extraction/spec.md`). `qwen3.6-27b` as the strongest fully-local option, MoE bandwidth advantage being real on Apple Silicon, reasoning models *hurting* enumeration tasks, distillation-from-Claude not delivering the expected gains.
 > - The methodology — record-and-replay against a Sonnet reference run, paired with LLM-as-judge scoring — is reusable infrastructure regardless of which graph implementation sits underneath.
 >
 > **What needs re-baselining against the Rust pipeline:**
-> - Absolute F1 numbers. `liminis-graph` ports graphiti's prompts but with its own restructuring (issue #92, merged 2026-05-26). Re-running the same matrix against the current pipeline is a known follow-up, not yet done.
+> - Absolute F1 numbers. `liminis-context-graph` ports graphiti's prompts but with its own restructuring (issue #92, merged 2026-05-26). Re-running the same matrix against the current pipeline is a known follow-up, not yet done.
 > - Latency numbers. Different IPC layer, different concurrency model.
 >
-> **Internal references preserved as-is for fidelity:** mentions of "production routing," "demo-notebook," `graphiti_service.py`, `liminis-framework/`, and named project memories refer to Liminis-internal operations at the time of writing — not to defaults or paths in this open-source project. A future `liminis-graph`-targeted benchmark harness will replace the methodology described in the "eval harness as reusable infra" section below.
+> **Internal references preserved as-is for fidelity:** mentions of "production routing," "demo-notebook," `graphiti_service.py`, `liminis-framework/`, and named project memories refer to Liminis-internal operations at the time of writing — not to defaults or paths in this open-source project. A future `liminis-context-graph`-targeted benchmark harness will replace the methodology described in the "eval harness as reusable infra" section below.
 >
 > ---
 

@@ -24,7 +24,7 @@ Two rules govern how changes land in this repo:
 **How to work in a worktree:**
 
 ```bash
-# from the main checkout (~/dev/liminis-project/liminis-context-graph)
+# from the main checkout (the repo root)
 git worktree add ../liminis-context-graph-worktrees/<short-slug> -b feat/<short-slug> main
 cd ../liminis-context-graph-worktrees/<short-slug>
 # ... edit, test, commit ...
