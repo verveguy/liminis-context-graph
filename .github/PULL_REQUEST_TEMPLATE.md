@@ -10,7 +10,7 @@
 
 | Principle | Status |
 |-----------|--------|
-| I — IPC Parity | |
+| I — IPC Surface Is a Stable Contract | |
 | II — Library and Binary Are Peers | |
 | III — LadybugDB Only | |
 | IV — WAL Is Authoritative | |
