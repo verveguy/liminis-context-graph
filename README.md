@@ -2,26 +2,74 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A purpose-built Rust knowledge-graph service over [LadybugDB](https://github.com/lbugdb/lbug). Distinct product from the upstream Python graphiti-core library — different language, different DB engine, different concurrency model, different API surface, different LLM routing.
+**A local-first context graph engine.** One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes — combining property-graph storage, HNSW vector search, and full-text search in a single embedded service. No database server, no separate vector store, no search cluster: everything runs in one process, on your machine, against files in your workspace.
 
-## Goals
+Originally inspired by the knowledge-graph ideas in [graphiti](https://github.com/getzep/graphiti), then deliberately narrowed: instead of a general framework over pluggable backends, `liminis-context-graph` is a purpose-built engine with one storage layer, one wire protocol, and a local-first design from top to bottom.
 
-- Preserve the IPC surface liminis-framework consumes from the current Python service (drop-in replacement behind a feature flag).
-- Reuse existing on-disk artifacts (WAL JSONL, LadybugDB files) without migration.
-- Ship as both a library crate and a standalone IPC binary so non-Liminis projects can adopt it.
+## Why
 
-## Non-goals (v1)
+AI assistants and agents need durable, structured context: *who* was mentioned, *how* things relate, *what* happened when. Most solutions assemble that from a stack of services — a graph database here, a vector store there, an embedding API in the cloud. That stack is heavy to run, awkward to back up, and quietly moves your data off your machine.
 
-- Replacing the Node-side MCP servers or chat-agent retrieval glue.
-- Drivers other than LadybugDB.
-- In-process LLM / embedding models (kept as out-of-process adapters).
-- Hosted / multi-tenant deployment.
+`liminis-context-graph` takes the opposite bet:
+
+1. **One embedded engine.** [LadybugDB](https://github.com/lbugdb/lbug) (the community continuation of KuzuDB) provides the property graph, HNSW vector indices, and full-text search **in a single embedded database** — chosen deliberately for local-first performance: no server process, no network hop, data in ordinary files under your workspace.
+
+2. **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files in `.lcg/wal/` before it touches the database. The WAL is human-readable, append-only, and **git-friendly**: check it into the same repository as your notes or documents, diff it, and carry it across machines. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
+
+3. **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters — a Unix-socket or HTTP endpoint speaking the OpenAI `/v1/embeddings` shape, and a configurable extraction LLM. Run fully local models (the repo ships a macOS CoreML sidecar) or point at a hosted API; the engine itself contains no ML runtime.
+
+The result is a context graph you can treat like the rest of your local tooling: a single process, a directory of files, versionable with git, rebuildable from its own log.
+
+## How it works
+
+```
+                      ┌─────────────────────────────────────────────────┐
+   text chunks        │  liminis-context-graph (one process)            │
+  ──────────────────► │                                                 │
+   JSON-RPC 2.0       │  extraction LLM ──► entities + relations        │
+   over Unix socket   │  (out-of-process)   dedup + resolution          │
+                      │                          │                      │
+   search queries     │           1. append ┌────▼───────┐              │
+  ──────────────────► │           ────────► │ WAL (JSONL)│ .lcg/wal/    │
+   hybrid results     │                     └────┬───────┘ source of    │
+  ◄────────────────── │           2. apply       │         truth        │
+                      │           ────────► ┌────▼───────┐              │
+                      │                     │ LadybugDB  │ .lcg/db/     │
+                      │  embedder sidecar   │ graph+HNSW │ derived      │
+                      │  (out-of-process)   │ +FTS       │ index        │
+                      └─────────────────────┴────────────┴──────────────┘
+```
+
+**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](#ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced, so provenance is queryable.
+
+**Search** is hybrid by default: `knowledge_find_entities` and `knowledge_find_relationships` combine full-text and vector similarity over the same embedded store; `knowledge_search_passages` does semantic passage retrieval over episode content; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly.
+
+**Everything on disk lives under `.lcg/` in your workspace:**
+
+```
+.lcg/
+├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
+├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL
+├── ontology.yaml      # optional extraction vocabulary (yours to edit)
+└── service.sock       # JSON-RPC 2.0 endpoint while the service runs
+```
+
+## Features
+
+- **34 JSON-RPC methods** over a Unix domain socket, covering ingestion, hybrid search, graph reads, curation (`knowledge_merge_entities`, a corrections workflow, relation canonicalization), and administration.
+- **Hybrid retrieval** — full-text + HNSW vector similarity in one query path, plus raw Cypher (`knowledge_query_cypher`) for arbitrary graph queries.
+- **Optional ontology** — declare entity and relation types (with single-parent hierarchies) in YAML; `open` mode prefers your vocabulary, `strict` mode enforces it. Drift detection flags when the graph predates an ontology change.
+- **Episodes with provenance** — every ingested chunk is a time-stamped episode linked to the entities and relationships it produced.
+- **WAL administration** — rebuild the database from the log (`knowledge_rebuild_from_wal`), dump the database back to a compacted log (`knowledge_dump_wal`), checkpoint before backups (`knowledge_prepare_checkpoint`).
+- **Self-healing** — the service binds its socket *before* opening the database, so a corrupted store leaves it reachable in degraded mode rather than dead; autonomous startup recovery reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
+- **Streaming progress** — long operations accept a `_progress_token` and stream progress frames before the terminal result.
+- **Operational telemetry** — structured JSONL events on stderr with per-call timings and LLM token/cost accounting (see [`docs/telemetry.md`](docs/telemetry.md)).
 
 ## Quickstart
 
 ### Install prebuilt binary
 
-The fastest way to get `liminis-context-graph` — no Rust toolchain required:
+No Rust toolchain required:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/liminis-context-graph-installer.sh | sh
@@ -35,52 +83,43 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 > ```
 > Code signing will be added in a future release.
 
-> **Embedder required at runtime**: The binary connects to an out-of-process embedding service on startup. See the Configuration section for `LCG_EMBEDDING_URL`.
+> **Embedder required at runtime**: the binary connects to an out-of-process embedding service on startup. See [Embedder sidecar](#embedder-sidecar).
 
-### Bundling in downstream apps
-
-For consumers (e.g. Electron apps or CI pipelines) that need to download a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases.
-
-**Download a specific tagged version:**
+### Run it
 
 ```sh
-curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
-  -o liminis-context-graph-aarch64-apple-darwin.tar.gz
+# start your embedding service first — see "Embedder sidecar" below
+cd your-workspace/            # the directory whose content you're indexing
+liminis-context-graph         # creates .lcg/, binds .lcg/service.sock
 ```
 
-**Extract the archive:**
+### Talk to it
 
-```sh
-tar -xzf liminis-context-graph-aarch64-apple-darwin.tar.gz
-# binary is at: liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
-```
+The service speaks newline-delimited JSON-RPC 2.0 over the socket — from any language:
 
-The archive inner directory is `liminis-context-graph-aarch64-apple-darwin/` and the binary is `liminis-context-graph-aarch64-apple-darwin/liminis-context-graph`. This structure is set by cargo-dist 0.32.0; if cargo-dist is upgraded in the future, verify the archive layout before updating consumer scripts.
+```python
+import socket, json
 
-> **Checksum verification**: Each release includes a `.sha256` companion file. Download it and verify:
-> ```sh
-> curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256 \
->   -o liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256
-> shasum -a 256 -c liminis-context-graph-aarch64-apple-darwin.tar.gz.sha256
-> ```
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(".lcg/service.sock")
+f = s.makefile("r", encoding="utf-8")
 
-> **macOS Gatekeeper note**: The binary is not code-signed. Downloads via `curl` or a browser are quarantined by macOS and will fail silently in scripts. Clear the quarantine attribute before use:
-> ```sh
-> xattr -d com.apple.quarantine liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
-> ```
-> Code signing will be added in a future release.
+def call(method, params, id=1):
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}) + "\n").encode())
+    return json.loads(f.readline())["result"]
 
-**Discover the latest release tag programmatically** (requires `jq`; available by default on most CI images):
+# ingest a chunk of text
+call("knowledge_process_chunk", {
+    "chunk_text": "Ada Lovelace wrote the first program for Babbage's Analytical Engine.",
+    "chunk_id": "notes-0001",
+    "source_file": "notes.md",
+})
 
-```sh
-curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
-```
+# hybrid (full-text + vector) entity search
+print(call("knowledge_find_entities", {"query": "early computing pioneers", "num_results": 5}, id=2))
 
-If `jq` is not available, use `python3` instead:
-
-```sh
-curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['tag_name'])"
+# graph + WAL health at a glance
+print(call("knowledge_status", {}, id=3))
 ```
 
 ### Build from source
@@ -88,39 +127,48 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
 
 ```bash
-# Build both crates
-cargo build --release
+cargo build --release                         # build both crates
+cargo test -p lcg-core                        # integration tests (LadybugDB round-trip)
+cargo run --example basic_ingest -p lcg-core  # example: ingest 3 docs, search, print
+cargo run -p lcg-service                      # run the service binary
+```
 
-# Run the integration test (validates LadybugDB round-trip)
-cargo test -p lcg-core
+### Bundling in downstream apps
 
-# Run the example consumer (ingests 3 docs, searches, prints results)
-cargo run --example basic_ingest -p lcg-core
+For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
 
-# Run the service binary (liminis-context-graph)
-cargo run -p lcg-service
+```sh
+curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
+  -o liminis-context-graph-aarch64-apple-darwin.tar.gz
+tar -xzf liminis-context-graph-aarch64-apple-darwin.tar.gz
+# binary is at: liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
+```
+
+The archive layout is set by cargo-dist 0.32.0; if cargo-dist is upgraded, verify the layout before updating consumer scripts. Each release includes a `.sha256` companion file for verification (`shasum -a 256 -c <file>.sha256`). The macOS Gatekeeper note above applies to script-downloaded binaries too.
+
+Discover the latest release tag programmatically:
+
+```sh
+curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
 ```
 
 ### Release runbook (maintainers)
 
-To cut a release:
-
-1. Update `CHANGELOG.md`: rename `## [Unreleased]` to `## [x.y.z]` (e.g. `## [0.1.0]`).
+1. Update `CHANGELOG.md`: rename `## [Unreleased]` to `## [x.y.z]`.
 2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. The release workflow builds all three platforms and publishes the GitHub Release automatically (~30–45 min).
 
 If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue, then re-tag and re-push.
 
-## Workspace layout
+## Scope
 
-```
-crates/core/             # lcg-core: library crate — all DB interaction
-crates/core/benches/     # performance benchmarks (criterion)
-crates/core/examples/    # standalone consumers demonstrating the library API
-crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
-docs/adr/                # architecture decision records
-specs/                   # feature specifications
-```
+**In scope**: a single-workspace, single-user context graph engine, shipped as a library crate (`lcg-core`) and an IPC binary (`lcg-service`) that are peers — embed it in a Rust application, or drive it from any language over the socket.
+
+**Out of scope, by design:**
+
+- Storage engines other than LadybugDB — the single-engine bet is what keeps the service embedded, fast, and simple to operate.
+- In-process ML runtimes (`tch`, `candle`, `onnxruntime`) — embeddings and extraction stay behind out-of-process adapters.
+- Hosted or multi-tenant deployment — this is local-first infrastructure: one workspace, one process.
 
 ## Configuration (environment variables)
 
@@ -134,24 +182,20 @@ specs/                   # feature specifications
 | `LCG_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
 | `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
 | `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
-| `LCG_WAL_DIR` | No | Directory for write-ahead log JSONL files |
+| `LCG_WAL_DIR` | No | Directory for write-ahead log JSONL files (default `.lcg/wal`) |
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
-| `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. Grep: `grep '[WAL PROGRESS]' service.log` |
-| `ANTHROPIC_API_KEY` | No | API key for Anthropic extraction/classification LLM calls |
-| `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for all three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
-
-> **Phase A migration**: `GRAPHITI_*` env var names are still accepted as fallbacks with a deprecation warning. They will be removed in Phase B. Rename your `.env` entries to `LCG_*` at your convenience.
->
-> **Workspace directory**: Fresh installs create `.lcg/` in the working directory. Existing workspaces with `.graphiti/` are automatically renamed to `.lcg/` on first startup.
+| `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
+| `ANTHROPIC_API_KEY` | No | API key for Anthropic extraction/classification LLM calls (only needed if routing extraction to a hosted Anthropic model) |
+| `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 
 ## Ontology
 
-liminis-context-graph supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
+`liminis-context-graph` supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
 
 ### File location
 
-Place the ontology at `{LIMINIS_WORKSPACE_ROOT}/.lcg/ontology.yaml`. The older path `.graphiti/ontology.yaml` is also accepted as a fallback.
+Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 
 **Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
 
@@ -201,7 +245,7 @@ See [`docs/examples/ontology.example.yaml`](docs/examples/ontology.example.yaml)
 | Mode | Entity types | Relation types |
 |------|-------------|----------------|
 | `open` (default) | Preferred by the LLM; free-form fallback allowed | Same |
-| `strict` | Out-of-vocabulary entities dropped post-extraction | Out-of-vocabulary edges dropped (requires #82) |
+| `strict` | Out-of-vocabulary entities dropped post-extraction | Out-of-vocabulary edges dropped |
 
 ### `knowledge_status` summary
 
@@ -220,23 +264,14 @@ The `knowledge_status` IPC response always includes an `ontology` field:
 
 When no ontology is loaded, `present` is `false` and counts are `0`.
 
-## Dependencies
-
-| Crate | Version | Role |
-|-------|---------|------|
-| `lbug` | `=0.17.0` | LadybugDB Rust bindings (pinned) |
-| `thiserror` | `2` | Error type generation |
-
-No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.
-
-## Embedder Sidecar
+## Embedder sidecar
 
 `OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
 `POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
 
 ```
-liminis-context-graph --embedder-uds /tmp/liminis-inference.sock   # Unix domain socket (default on macOS)
-liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings  # HTTP
+liminis-context-graph --embedder-uds /tmp/liminis-inference.sock            # Unix domain socket (default on macOS)
+liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings   # HTTP
 ```
 
 **Default behaviour** (no flags): the binary looks for the Swift CoreML sidecar socket at
@@ -247,25 +282,20 @@ The binary probes the embedder at startup to confirm it is reachable and auto-de
 embedding dimension. If the probe fails and `LCG_EMBEDDING_DIM` is not set, the process
 exits with an error rather than failing silently on the first embed request.
 
-You must start the embedder sidecar **before** starting the liminis-context-graph binary.
-Without it, the following five IPC methods fail immediately with an embedding error:
-
-- `knowledge_find_entities`
-- `knowledge_find_relationships`
-- `knowledge_search_passages`
-- `knowledge_process_chunk`
-- `knowledge_reprocess_entity_types`
-
-Read-only methods that do not call the embedder (`health_check`, `knowledge_status`,
-`knowledge_list_entities`, `knowledge_get_episodes`) continue to work without the sidecar.
+Start the embedder sidecar **before** starting the `liminis-context-graph` binary.
+Without it, the five embedding-dependent IPC methods fail immediately with an embedding error:
+`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`,
+`knowledge_process_chunk`, and `knowledge_reprocess_entity_types`. Read-only methods that do
+not call the embedder (`health_check`, `knowledge_status`, `knowledge_list_entities`,
+`knowledge_get_episodes`) work without the sidecar.
 
 ### macOS: Swift CoreML sidecar (default)
 
 This repository ships a Swift CoreML sidecar at [`native/local-inference/`](native/local-inference/)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
-(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock`. macOS 26+ and Xcode
-command-line tools are required. See [`native/local-inference/README.md`](native/local-inference/README.md)
-for build and run instructions.
+(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference: no
+API key, no network. macOS 26+ and Xcode command-line tools are required. See
+[`native/local-inference/README.md`](native/local-inference/README.md) for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically — start the
 sidecar first, then start the binary.
@@ -283,9 +313,30 @@ See [ADR 0006](docs/adr/0006-embedder-http-contract.md) and
 [ADR 0016](docs/adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
 specification and transport decision record.
 
+## Repository layout
+
+```
+crates/core/             # lcg-core: library crate — all DB interaction
+crates/core/benches/     # performance benchmarks (criterion)
+crates/core/examples/    # standalone consumers demonstrating the library API
+crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
+native/local-inference/  # Swift CoreML embedding/LLM sidecar for macOS
+docs/adr/                # architecture decision records (index at docs/adr/index.md)
+specs/                   # feature specifications
+```
+
+## Dependencies
+
+| Crate | Version | Role |
+|-------|---------|------|
+| `lbug` | `=0.17.0` | LadybugDB Rust bindings (pinned) |
+| `thiserror` | `2` | Error type generation |
+
+No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.
+
 ## Architecture decisions
 
-See [`docs/adr/`](docs/adr/) for recorded architecture decisions. The project constitution lives at [`.specify/memory/constitution.md`](.specify/memory/constitution.md).
+See [`docs/adr/`](docs/adr/) for recorded architecture decisions ([index](docs/adr/index.md)). The project constitution lives at [`.specify/memory/constitution.md`](.specify/memory/constitution.md).
 
 ## Contributing
 
