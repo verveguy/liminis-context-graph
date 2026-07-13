@@ -1011,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "lcg-core"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "arc-swap",
  "chrono",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "lcg-service"
-version = "0.1.0"
+version = "0.9.0"
 dependencies = [
  "lcg-core",
  "serde_json",
