@@ -60,7 +60,7 @@ Worst case with both `indexing-write` and `agent-write` in Phase C simultaneousl
 ## `isRebuilding` Flag
 
 WAL rebuild (`knowledge_rebuild_from_wal`) runs on the `lifecycle` connection and streams progress
-lines per ADR-0003. During a rebuild, live `knowledge_status` calls on `renderer-read` would return
+lines per ADR-0005. During a rebuild, live `knowledge_status` calls on `renderer-read` would return
 stale data. `ContextGraphSocketClient` exposes `isRebuilding: boolean`, set synchronously on entry to
 `rebuildFromWal()` and cleared on exit. Callers check this to skip live status polls and return
 cached data with `rebuilding: true`.
