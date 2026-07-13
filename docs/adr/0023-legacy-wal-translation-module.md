@@ -6,7 +6,8 @@
 
 ## Context
 
-FalkorDB-era WAL files (written before the FalkorDB→Kuzu/lbug migration per ADR-035) contain
+FalkorDB-era WAL files (written under the original Graphiti+FalkorDB integration — the Liminis
+app's ADR-035 — before the FalkorDB→Kuzu/lbug migration, app ADR-052) contain
 dialect constructs that lbug cannot execute:
 
 - **`vecf32(...)`**: FalkorDB's float32-vector constructor. lbug stores embeddings in `FLOAT[N]`

@@ -32,7 +32,7 @@ pub struct AppState {
     /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
     /// under the write lock without holding an inner Mutex. `None` represents degraded state
     /// (DB unavailable). All handlers call `db.load_full()` to get a snapshot — a lock-free read.
-    /// See ADR-0043 and ADR-0046.
+    /// See ADR-0003 and ADR-0009.
     pub db: ArcSwapOption<Db>,
     /// Set at startup when DB open fails recoverably; cleared after successful recovery.
     pub degraded_reason: Arc<Mutex<Option<String>>>,

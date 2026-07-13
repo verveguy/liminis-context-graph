@@ -519,7 +519,7 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
 
     // Collect parent edges and append them only when at least one parent is declared.
     // This preserves hash backward compatibility for flat ontologies (no spurious drift
-    // on upgrade from pre-#173 versions). See ADR-0053.
+    // on upgrade from pre-#173 versions). See ADR-0032.
     let mut parent_entries: Vec<String> = o
         .entity_types
         .iter()
@@ -945,7 +945,7 @@ relation_types:
     fn content_hash_flat_ontology_unchanged_vs_pre_173_format() {
         // Regression guard: flat ontologies (no parent fields) must produce the same hash
         // as pre-#173 code, because the `parent_edges:` segment is only appended when
-        // at least one parent is declared (ADR-0053).
+        // at least one parent is declared (ADR-0032).
         // The canonical form for a flat ontology is identical to the pre-#173 form:
         //   "mode:{mode}\nentity_types:{entries}\nrelation_types:{entries}"
         let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);

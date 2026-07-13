@@ -160,7 +160,7 @@ pub async fn backfill_relation_types(
         .to_json());
     }
 
-    // ── Phase C: batched write lock (ADR-0051: 250-edge batches) ─────────────
+    // ── Phase C: batched write lock (ADR-0030: 250-edge batches) ─────────────
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(json!({
             "type": "progress",

@@ -1,4 +1,4 @@
-//! WAL-flush helpers for write handlers. See ADR-001 for the drain-and-flush pattern.
+//! WAL-flush helpers for write handlers. See ADR-0015 for the drain-and-flush pattern.
 //!
 //! Every write handler records Cypher via `Conn::raw_query` / `Conn::cypher_query`,
 //! then calls one of these helpers with `conn.drain_mutations()` after the writes succeed.

@@ -2,7 +2,7 @@
 
 **Status:** Accepted  
 **Date:** 2026-05-25  
-**Relates to:** ADR-0003 (ArcSwap DB hot-swap), ADR-0011 (auto-heal index build), issue #90
+**Relates to:** ADR-0003 (ArcSwap DB hot-swap), ADR-0011 (auto-heal write-lock acquisition), issue #90
 
 ## Context
 

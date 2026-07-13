@@ -386,9 +386,9 @@ async fn test_lexical_mapping_sets_relation_type() {
     let _ = edge_uuids; // used above
 }
 
-// ── Test 3: noise edges reclassified to UNCLASSIFIED (ADR-0054) ──────────────
+// ── Test 3: noise edges reclassified to UNCLASSIFIED (ADR-0033) ──────────────
 
-/// ADR-0054: co-occurrence noise edges (X → Y pattern) are reclassified to UNCLASSIFIED,
+/// ADR-0033: co-occurrence noise edges (X → Y pattern) are reclassified to UNCLASSIFIED,
 /// not deleted. 94% of such edges carry rich relation_type values; deletion is unsafe.
 #[tokio::test]
 async fn test_noise_edges_reclassified_not_deleted() {
@@ -430,13 +430,13 @@ async fn test_noise_edges_reclassified_not_deleted() {
     assert_eq!(result["noise_count"], json!(3));
     assert_eq!(result["mapped_count"], json!(1)); // WROTE → AUTHORED
 
-    // All 4 edges must survive — noise edges are reclassified, not deleted (ADR-0054)
+    // All 4 edges must survive — noise edges are reclassified, not deleted (ADR-0033)
     let conn = db.connect().unwrap();
     let remaining = conn.list_relationships(None, 100).unwrap();
     assert_eq!(
         remaining.len(),
         4,
-        "all edges must survive: canonicalize must not delete noise edges (ADR-0054)"
+        "all edges must survive: canonicalize must not delete noise edges (ADR-0033)"
     );
 
     // Noise edges now have relation_type = "UNCLASSIFIED"

@@ -37,3 +37,33 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0031](0031-orphaned-direct-rels-after-noise-deletion.md) | Orphaned Direct RELATES_TO Rels After Noise Edge Deletion _(superseded)_ | 2026-06-22 |
 | [0032](0032-ontology-parent-edges-conditional-hash-segment.md) | Ontology `parent_edges:` segment conditionally included in content hash | 2026-06-23 |
 | [0033](0033-noise-edges-reclassified-not-deleted.md) | Noise Edges Are Reclassified to UNCLASSIFIED, Not Deleted | 2026-06-23 |
+
+## Historical numbering
+
+Before 2026-07, ADRs lived in two directories (`docs/adr/` numbered `0042`+ and a top-level
+`adrs/` numbered from `0001`) with colliding, sometimes duplicated numbers. They were
+consolidated into this directory under the single sequence above. Historical documents —
+`specs/`, old issues/PRs, commit messages — may cite the old numbers; this table decodes them.
+References to `ADR-035`/`ADR-042` prefixed with "the Liminis app's" refer to the parent
+application's separate ADR index, not this one.
+
+| Old (in `docs/adr/`) | New | | Old (in `adrs/`) | New |
+|---|---|---|---|---|
+| 0001 (meta) | 0001 | | 001 (wal-drain) | 0015 |
+| 0042 | 0002 | | 0001 | 0012 |
+| 0043 (arcswap) | 0003 | | 0002 | 0013 |
+| 0043 (classify-entities) | 0004 | | 0003 | 0014 |
+| 0043 (streaming-progress) | 0005 | | 0004 | 0018 |
+| 0044 (embedder-http) | 0006 | | 0005 | 0019 |
+| 0044 (two-hop) | 0007 | | 0006 | 0021 |
+| 0045 | 0008 | | 0007 | 0022 |
+| 0046 (degraded-mode) | 0009 | | 0008 | 0023 |
+| 0046 (tool-use) | 0010 | | 0009 | 0024 |
+| 0047 | 0011 | | 0047 | 0025 |
+| 0048 | 0016 | | 0048 | 0027 |
+| 0049 | 0017 | | 0049 | 0028 |
+| 0050 | 0020 | | 0050 | 0029 |
+| 0051 | 0026 | | 0051 | 0030 |
+| | | | 0052 | 0031 |
+| | | | 0053 | 0032 |
+| | | | 0054 | 0033 |
