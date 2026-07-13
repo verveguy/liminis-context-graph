@@ -1,29 +1,30 @@
 <!--
 Sync Impact Report
-Version change: (initial) → 1.0.0
-Modified principles: N/A (initial ratification)
-Added sections:
-  - Core Principles (I–V)
-  - Performance & Resource Budgets
-  - Development Workflow
-  - Governance
-Removed sections: N/A
+Version change: 1.0.0 → 2.0.0
+Modified principles:
+  - I. "IPC Parity During Migration" → "IPC Surface Is a Stable Contract" (MAJOR: redefines a
+    NON-NEGOTIABLE principle). The migration the original principle governed is complete; the
+    engine now ships standalone as an open-source, local-first product. What survives is the
+    obligation the migration created: the wire protocol is a public contract, and the recorded
+    request/response corpus remains its executable regression gate.
+Added sections: none
+Removed sections: none
 Templates requiring updates:
-  - .specify/templates/plan-template.md ✓ updated 2026-05-18 — Constitution Check section now enumerates principle, performance, and workflow gates
-  - .specify/templates/spec-template.md ✓ no change required (spec stays HOW-free per Principle in Development Workflow)
-  - .specify/templates/tasks-template.md ✓ updated 2026-05-18 — task format now supports [IPC], [WAL], [HOT], [LDB], [ADAPTER] constitution tags with per-tag gates
+  - .specify/templates/plan-template.md ✓ updated 2026-07-13 — Constitution Check gate I reworded to contract-stability framing
+  - .github/PULL_REQUEST_TEMPLATE.md ✓ updated 2026-07-13 — principle row I relabeled
+  - .specify/templates/tasks-template.md ✓ no change required ([IPC] tag semantics unchanged)
 Follow-up TODOs: none
-Source: specs/001-rust-knowledge-graph/spec.md
+Source: specs/001-rust-knowledge-graph/spec.md (initial); amended 2026-07-13
 -->
 # Liminis Context Graph Constitution
 
 ## Core Principles
 
-### I. IPC Parity During Migration (NON-NEGOTIABLE)
+### I. IPC Surface Is a Stable Contract (NON-NEGOTIABLE)
 
-While the upstream Python graphiti-core service (`graphiti_service.py`) is still in production in any liminis-framework release, every change to the Unix-socket IPC surface MUST preserve byte-compatibility with the Python service's request/response shapes. Parity tests against a recorded request/response corpus gate merges. The "Python is the oracle" period ends only by explicit constitution amendment.
+The newline-delimited JSON-RPC 2.0 surface over the Unix socket is the engine's public API, consumed by downstream applications in any language. Changes MUST be backward compatible: adding methods and adding optional fields is fine; renaming a method, removing a field, or changing the shape of an existing request/response pair requires a MAJOR version bump and a documented migration. The recorded request/response corpus (`crates/core/tests/ipc_parity.rs` + `crates/core/tests/fixtures/ipc_corpus/`) is the executable definition of the wire contract and gates merges for any change touching the IPC surface.
 
-**Rationale**: The repo's reason to exist is a staged, reversible migration. Drifting the IPC surface mid-migration removes the ability to A/B against a live oracle and turns rollback into a data-migration problem.
+**Rationale**: Clients drive the engine over the socket from arbitrary languages and upgrade on their own cadence. Silent shape drift breaks all of them at once, and unlike a library API there is no compiler to catch it — only the corpus tests make the contract enforceable rather than aspirational.
 
 ### II. Library and Binary Are Peers
 
@@ -78,4 +79,4 @@ This constitution supersedes other conventions. Amendments require a documented 
 
 PRs touching IPC, WAL format, the LadybugDB driver layer, or any performance budget MUST link to the relevant constitution section and confirm compliance.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-18 | **Last Amended**: 2026-05-18
+**Version**: 2.0.0 | **Ratified**: 2026-05-18 | **Last Amended**: 2026-07-13

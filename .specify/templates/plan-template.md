@@ -31,11 +31,11 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-Reference: `.specify/memory/constitution.md` (v1.0.0). For each gate, mark PASS / FAIL / N/A and justify any FAIL in the Complexity Tracking section below.
+Reference: `.specify/memory/constitution.md` (v2.0.0). For each gate, mark PASS / FAIL / N/A and justify any FAIL in the Complexity Tracking section below.
 
 ### Principle gates
 
-- **I. IPC Parity During Migration** — Does this plan change the Unix-socket IPC surface? If yes, is byte-compatibility with the current Python service preserved, and are parity tests against the recorded request/response corpus included?
+- **I. IPC Surface Is a Stable Contract** — Does this plan change the Unix-socket IPC surface? If yes, are the changes backward compatible (additive only — no renames, removals, or shape changes to existing request/response pairs), and are parity tests against the recorded request/response corpus updated to cover them?
 - **II. Library and Binary Are Peers** — Is every IPC-exposed capability also reachable via the library API? Any binary-only behavior introduced?
 - **III. LadybugDB Only** — Does any artifact reintroduce a driver abstraction or non-LadybugDB store? (If yes, this requires a constitution amendment, not a plan.)
 - **IV. WAL Is Authoritative** — Does every mutation append to WAL before DB commit? Is the WAL format change (if any) backward/forward compatible at the patch level? Format breaks require MAJOR bump.
