@@ -21,7 +21,7 @@ use crate::wal::{strip_quoted_literals, WalLine};
 /// longer occur and a `Community` CREATE replays into the stub (see #144's
 /// `test_community_node_replays_into_stub_table`; #145 tracks the community/saga roadmap). Other
 /// former legacy constructs are handled at the source — `episodes`/`expired_at` columns
-/// (#133/#136) and `vecf32(...)` + bulk-`SET` translation (`legacy_wal`, ADR-0008).
+/// (#133/#136) and `vecf32(...)` + bulk-`SET` translation (`legacy_wal`, ADR-0023).
 ///
 /// The mechanism is retained (not removed) so a future legacy construct can be re-added as a
 /// one-line pattern without reintroducing the classification plumbing.

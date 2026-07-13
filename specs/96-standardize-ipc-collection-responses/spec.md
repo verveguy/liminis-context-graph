@@ -104,7 +104,7 @@ If a separate "total before limit" is useful (e.g. for pagination), it goes in a
 - **FR-003.** `knowledge_find_entities` MUST return `{nodes: [...], count: N}` instead of `[...]`. (The immediate-bug fix.)
 - **FR-004.** Any other audit-discovered method returning a bare array MUST be updated to match.
 - **FR-005.** All in-tree consumers of changed methods MUST be updated in the same PR — MCP semantic-search caller, any liminis-app handler, any test helper. No silent break.
-- **FR-006.** An ADR MUST be added at `docs/adr/0050-ipc-collection-envelope-contract.md` documenting the envelope convention as binding for all current and future collection methods, with a brief rationale.
+- **FR-006.** An ADR MUST be added at `docs/adr/0020-ipc-collection-envelope-contract.md` documenting the envelope convention as binding for all current and future collection methods, with a brief rationale.
 - **FR-007.** A schema-conformance test MUST be added (e.g. `liminis-graph-core/tests/ipc_response_shapes.rs`) that calls every collection-returning method against a small test fixture and asserts the response is an object with the expected collection-key and a `count` field. This catches regressions when new methods are added.
 - **FR-008.** `count` MUST equal the length of the returned collection array. Pre-filter / pre-limit totals, if added later, live in a separate field name (`total_before_limit` is the suggested convention; not required for this issue).
 
@@ -114,7 +114,7 @@ If a separate "total before limit" is useful (e.g. for pagination), it goes in a
 - **SC-002.** liminis-app's UI entity search returns matching entities for a query against a populated graph. Specifically: `graph:searchEntities` for "Adrian Tchaikovsky" in demo-notebook returns `resultCount > 0`. (This is the immediate-bug closing criterion.)
 - **SC-003.** Every method in the audit table (and any others discovered during FR-001) returns an envelope response. Verified by the new conformance test in FR-007 — it asserts `response.is_object() && "count".in(response.keys())` for each.
 - **SC-004.** No existing tests break. All in-tree consumers updated in the same PR.
-- **SC-005.** ADR exists at `docs/adr/0050-ipc-collection-envelope-contract.md` documenting the convention.
+- **SC-005.** ADR exists at `docs/adr/0020-ipc-collection-envelope-contract.md` documenting the convention.
 - **SC-006.** A grep for `Result<Value, Error>` returning bare-array `serde_json::Value::Array(...)` from any handler returns zero hits after this work lands.
 
 ## Edge Cases

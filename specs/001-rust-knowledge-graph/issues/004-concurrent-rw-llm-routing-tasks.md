@@ -23,7 +23,7 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 **Purpose**: Core refactors and new types that all user stories depend on. No story work can begin until this phase is complete.
 
-- [x] T001 Author `docs/adr/0042-reader-writer-split.md` documenting the `tokio::sync::RwLock` design (write guard only around DB commit spawn_blocking, not HTTP calls), SC-003 deferral rationale, and follow-up issue reference for the quantitative cache-hit baseline
+- [x] T001 Author `docs/adr/0002-reader-writer-split.md` documenting the `tokio::sync::RwLock` design (write guard only around DB commit spawn_blocking, not HTTP calls), SC-003 deferral rationale, and follow-up issue reference for the quantitative cache-hit baseline
 
 - [x] T002 [P] File a follow-up GitHub issue titled "Establish prompt-caching baseline measurement in-repo" referencing SC-003 deferral in ADR-042; note the issue number in the ADR
 
@@ -155,7 +155,7 @@ description: "Task list for Issue #4 — Concurrent reader/writer with per-role 
 
 - [x] T019 [P] Run `cargo bench --bench telemetry_overhead` — no regression vs. prior run; HOT-path compliance maintained
 
-- [x] T020 [P] Confirm ADR-042 follow-up issue number is recorded in `docs/adr/0042-reader-writer-split.md` (from T002)
+- [x] T020 [P] Confirm ADR-042 follow-up issue number is recorded in `docs/adr/0002-reader-writer-split.md` (from T002)
 
 ---
 

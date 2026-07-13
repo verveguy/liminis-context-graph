@@ -1883,7 +1883,7 @@ async fn parity_canonicalize_no_ontology_error_shape() {
 
 /// Regression: canonicalize_relations MUST NOT delete arrow-named edges (FR-016–FR-019, SC-007).
 ///
-/// Before ADR-0054, EdgeClass::Noise edges were DETACH DELETE'd. After the fix they are
+/// Before ADR-0033, EdgeClass::Noise edges were DETACH DELETE'd. After the fix they are
 /// reclassified to UNCLASSIFIED. This test inserts 10 ALL-CAPS arrow-named edges with a
 /// populated relation_type and verifies all 10 survive a live canonicalize pass.
 #[tokio::test]
@@ -1917,7 +1917,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
         })
         .unwrap();
         // 10 ALL-CAPS arrow-named edges with populated relation_type.
-        // These match is_noise_edge() and would have been deleted before ADR-0054.
+        // These match is_noise_edge() and would have been deleted before ADR-0033.
         for i in 0..10usize {
             conn.insert_relates_to_edge(&RelatesToEdge {
                 uuid: format!("cnde-edge-{i:03}"),
@@ -1972,7 +1972,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
     let edge_count = db.connect().unwrap().count_relates_to_edges().unwrap();
     assert_eq!(
         edge_count, 10,
-        "canonicalize must not delete arrow-named edges (ADR-0054): only {edge_count} of 10 remain"
+        "canonicalize must not delete arrow-named edges (ADR-0033): only {edge_count} of 10 remain"
     );
 
     // noise_count should be 10 (classified as noise, but not deleted)
@@ -1995,7 +1995,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
     for row in &rows {
         assert_eq!(
             row[0], "KNOWS",
-            "noise edge relation_type must not be overwritten by canonicalize (ADR-0054): {:?}",
+            "noise edge relation_type must not be overwritten by canonicalize (ADR-0033): {:?}",
             row[0]
         );
     }

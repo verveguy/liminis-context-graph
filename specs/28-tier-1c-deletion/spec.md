@@ -154,6 +154,6 @@ The corrections and rebuild flows occasionally need to nuke the graph and start 
 ## Source References
 
 - upstream graphiti-core `graphiti_service.py` lines 1872–1960 and 2517–2540 — Python reference implementations
-- `docs/adr/0042-reader-writer-split.md` — writer lock specification
+- `docs/adr/0002-reader-writer-split.md` — writer lock specification
 - Issue #26 (Tier 1a) — IPC handler-dispatch pattern and error-shape conventions (blocking dependency)
 - Constitution Principle I (IPC Parity) and Principle IV (WAL Is Authoritative)

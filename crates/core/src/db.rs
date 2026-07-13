@@ -24,7 +24,7 @@ pub struct Conn<'db> {
     /// `(sql, Value::Null)`; value-bearing writes via `exec_params` record
     /// `(template, params)`. Callers drain this after a write and pass the pairs to a
     /// WAL-flush helper. Order-preserving so bound-param and raw paths interleave
-    /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-001).
+    /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-0015).
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
 }
 
@@ -1131,7 +1131,7 @@ impl<'db> Conn<'db> {
     /// Sets `created_at` on the Entity with `uuid` to `created_at`.
     /// Must use `timestamp($new_created_at)` in Cypher because lbug requires the `timestamp()`
     /// function when assigning a string value to a TIMESTAMP column in a SET clause (bare
-    /// `SET col = $x` with a string binds fail; see ADR-0009).
+    /// `SET col = $x` with a string binds fail; see ADR-0024).
     /// The param is named `new_created_at` (not `created_at`) to bypass TIMESTAMP_PARAM_NAMES
     /// auto-coercion: the input is always a space-format string ("YYYY-MM-DD HH:MM:SS") from
     /// the DB, and we want `timestamp()` to receive it as a string — the natural, unambiguous

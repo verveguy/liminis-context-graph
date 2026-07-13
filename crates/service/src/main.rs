@@ -301,7 +301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(5_000);
 
     // Bind socket FIRST — this allows health_check and recovery IPC to work even
-    // when the DB is in a degraded state. See ADR-0046.
+    // when the DB is in a degraded state. See ADR-0009.
     let _ = std::fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     eprintln!("liminis-context-graph: listening on {socket_path}");
@@ -585,7 +585,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // R2: Drop AppState — drops Arc<Db>. If refcount reaches 0, the cxx::UniquePtr<ffi::Database>
     // destructor fires the LadybugDB WAL checkpoint. Connection tasks were awaited above.
     // spawn_blocking threads that hold Arc<Db> clones will release them when the tokio runtime
-    // drops at the end of main() — guaranteed before process exit (see ADR-0049).
+    // drops at the end of main() — guaranteed before process exit (see ADR-0017).
     drop(state);
 
     let cancelled = cancelled_chunks.load(std::sync::atomic::Ordering::Relaxed) as u64;

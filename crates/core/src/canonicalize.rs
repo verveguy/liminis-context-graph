@@ -6,7 +6,7 @@
 //!
 //! Co-occurrence noise edges (`ALICE → BOB` pattern) are reclassified to UNCLASSIFIED and
 //! WAL-recorded. They are NEVER deleted — 94% of arrow-named edges carry rich `relation_type`
-//! values that would be irreversibly lost. See ADR-0054.
+//! values that would be irreversibly lost. See ADR-0033.
 //! Unmatched residual edges are also marked `UNCLASSIFIED`.
 //!
 //! Crash mid-pass: only committed batches appear in the WAL. The pass is idempotent, so
@@ -68,7 +68,7 @@ impl CanonicalizeReport {
 pub enum EdgeClass {
     /// Edge maps to this canonical relation type.
     Mapped(String),
-    /// Co-occurrence noise edge — reclassified to UNCLASSIFIED (never deleted; see ADR-0054).
+    /// Co-occurrence noise edge — reclassified to UNCLASSIFIED (never deleted; see ADR-0033).
     Noise,
     /// No lexical or embedding rule matched — mark UNCLASSIFIED.
     Residual,
@@ -432,7 +432,7 @@ pub async fn canonicalize_relations(
                         }
                     }
                     EdgeClass::Noise => {
-                        // ADR-0054: never delete noise edges. Only set UNCLASSIFIED when the
+                        // ADR-0033: never delete noise edges. Only set UNCLASSIFIED when the
                         // edge has no relation_type. If a non-empty value already exists, preserve
                         // it — name-based noise classification bypasses relation_type mapping, so
                         // rich existing predicates on arrow-named edges must not be overwritten.

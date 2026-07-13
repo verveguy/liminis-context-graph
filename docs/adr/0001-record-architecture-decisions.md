@@ -1,11 +1,11 @@
-# ADR 0001: Record Architecture Decisions
+# ADR-0001: Record Architecture Decisions
 
 **Date**: 2026-05-19
 **Status**: Accepted
 
 ## Context
 
-As liminis-graph evolves, significant architectural choices will be made — database selection, serialization formats, IPC protocols, async strategy. Without a record of these decisions and their reasoning, future contributors (and future-us) will encounter constraints with no explanation, or worse, revisit settled debates.
+As liminis-context-graph evolves, significant architectural choices will be made — database selection, serialization formats, IPC protocols, async strategy. Without a record of these decisions and their reasoning, future contributors (and future-us) will encounter constraints with no explanation, or worse, revisit settled debates.
 
 ## Decision
 

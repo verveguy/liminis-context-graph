@@ -279,8 +279,8 @@ OpenAI-compatible embedding endpoint (local or remote):
 liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings
 ```
 
-See [ADR 0044](docs/adr/0044-embedder-http-contract.md) and
-[ADR 0048](docs/adr/0048-oai-embedding-contract-uds-transport.md) for the wire contract
+See [ADR 0006](docs/adr/0006-embedder-http-contract.md) and
+[ADR 0016](docs/adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
 specification and transport decision record.
 
 ## Architecture decisions

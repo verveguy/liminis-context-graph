@@ -3,7 +3,7 @@
 //
 // The bench uses MockExtractor (zero-latency) and MockEmbedder to isolate the
 // RwLock contention model without real LLM or HTTP latency. This proves the
-// write-guard-only-around-DB-commit design (ADR-042) does not block reads.
+// write-guard-only-around-DB-commit design (ADR-0002) does not block reads.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize};

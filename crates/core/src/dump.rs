@@ -5,7 +5,7 @@
 /// critical invariant: dump output is always isolated from the service's running WAL.
 ///
 /// Phase 1 (nodes) must complete before Phase 2 (edges) begins so that MATCH clauses in edge
-/// WAL lines can resolve their endpoint nodes during replay. See ADR-0049.
+/// WAL lines can resolve their endpoint nodes during replay. See ADR-0028.
 use crate::{
     db::{
         format_datetime_rfc3339_subsecond, normalize_ts_str_for_dump, value_as_float_array,

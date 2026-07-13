@@ -69,14 +69,14 @@ impl std::error::Error for MigrationError {
 /// - Both exist, `.lcg/db/liminis.db` present → partial-resume migration
 /// - Both exist, `.lcg/db/liminis.db` absent → `Schism` error (user must resolve)
 ///
-/// See ADR-0005 for the partial-migration-marker invariant.
+/// See ADR-0019 for the partial-migration-marker invariant.
 pub fn migrate_workspace(
     workspace: &Path,
     sink: &dyn TelemetrySink,
 ) -> Result<MigrationOutcome, MigrationError> {
     let legacy = workspace.join(".graphiti");
     let new_dir = workspace.join(".lcg");
-    // The DB file at this path is the partial-migration marker (ADR-0005).
+    // The DB file at this path is the partial-migration marker (ADR-0019).
     let partial_marker = new_dir.join("db").join("liminis.db");
 
     let legacy_exists = legacy.exists();

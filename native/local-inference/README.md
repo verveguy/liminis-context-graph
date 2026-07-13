@@ -9,7 +9,7 @@ A small HTTP service that runs on-device CoreML embeddings (BGE-base-en-v1.5) an
 - `POST /v1/embeddings` — CoreML BGE-base-en-v1.5, 768-dim, batched
 - `POST /v1/chat/completions` — Apple Foundation Models on-device LLM
 
-Both endpoints follow OpenAI's wire shapes. The embeddings contract is documented in [`docs/adr/0044-embedder-http-contract.md`](../../docs/adr/0044-embedder-http-contract.md) and the UDS transport in [`docs/adr/0048-oai-embedding-contract-uds-transport.md`](../../docs/adr/0048-oai-embedding-contract-uds-transport.md).
+Both endpoints follow OpenAI's wire shapes. The embeddings contract is documented in [`docs/adr/0006-embedder-http-contract.md`](../../docs/adr/0006-embedder-http-contract.md) and the UDS transport in [`docs/adr/0016-oai-embedding-contract-uds-transport.md`](../../docs/adr/0016-oai-embedding-contract-uds-transport.md).
 
 ## Requirements
 

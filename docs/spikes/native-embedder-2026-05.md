@@ -30,9 +30,9 @@ This spike evaluates two Rust ML libraries against the BGE-base-en-v1.5 model:
 **Model**: BAAI/bge-base-en-v1.5 (110M parameters, 768-dim embeddings, 438 MB on disk)
 
 **This spike does NOT modify production code.** `crates/core/src/embedder.rs`
-and the existing `OaiEmbedder` path are unchanged. See ADR-0044 and ADR-0048.
+and the existing `OaiEmbedder` path are unchanged. See ADR-0006 and ADR-0016.
 
-**Principle V re-evaluation**: ADR-0044 established "no ML runtime in the Rust crate"
+**Principle V re-evaluation**: ADR-0006 established "no ML runtime in the Rust crate"
 scoped to the Apple-Silicon/ANE out-of-process strategy. On Linux servers there is no
 ANE — out-of-process embedding yields pure IPC cost with no hardware gain. This spike
 is the evidence to evaluate whether Principle V should be scoped to macOS-production
@@ -305,14 +305,14 @@ OSS bundle) remains the correct recommendation.
 
 ---
 
-## Notes on ADR-0044 Principle V
+## Notes on ADR-0006 Principle V
 
-ADR-0044 established Principle V: "no ML runtime in the Rust crate," scoped to the
+ADR-0006 established Principle V: "no ML runtime in the Rust crate," scoped to the
 Apple-Silicon/ANE out-of-process strategy. The spike results support amending Principle V
 for the OSS bundle scope:
 
 - `ort` at GO-with-caveats means a productionization follow-up issue should be filed.
-  That follow-up should create **ADR-0051** recording the amended scope of Principle V:
+  That follow-up should create **a new ADR** recording the amended scope of Principle V:
   "retained for macOS production Liminis-app (CoreML/ANE sidecar); relaxed for the
   cross-platform OSS distribution where no ANE is available."
 - `candle` NO-GO means the pure-Rust no-runtime path is not viable at the required
@@ -329,7 +329,7 @@ Verdict is **GO-with-caveats** for `ort`:
    measurements as requirements baseline.
 2. Productionization issue scope:
    - Investigate and fix the 1/50 sentence tokenizer parity gap (SC-001).
-   - Create ADR-0051 (amended Principle V, scoped to cross-platform OSS).
+   - Create a new ADR (amended Principle V, scoped to cross-platform OSS).
    - Implement `NativeEmbedder` in `crates/core/src/embedder.rs` behind a feature
      flag, keeping `OaiEmbedder` as the default for existing macOS Liminis-app users.
    - Decide whether to ship pre-exported ONNX model or require export at setup time.

@@ -116,7 +116,7 @@ async fn handle(
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
     // Degraded-mode guard: reject all methods except the recovery-safe subset
-    // when the DB is unavailable. See ADR-0046.
+    // when the DB is unavailable. See ADR-0009.
     let exempt_in_degraded = matches!(
         req.method.as_str(),
         "health_check"
@@ -2073,7 +2073,7 @@ async fn handle_reprocess_entity_types(
         }));
     }
 
-    // Phase C (batched write lock per ADR-0051): apply label mutations in batches.
+    // Phase C (batched write lock per ADR-0030): apply label mutations in batches.
     let mut reclassified = 0usize;
     for batch in updates.chunks(corrections::REPROCESS_BATCH_SIZE) {
         let batch = batch.to_vec();
@@ -2260,7 +2260,7 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
     };
 
-    // Hold write guard through the db.store() call — see ADR-0042.
+    // Hold write guard through the db.store() call — see ADR-0002.
     // _write_guard drops at end of match arm (end of function scope).
     match result {
         Ok(RecoverOutcome {
@@ -2351,7 +2351,7 @@ async fn handle_knowledge_recover_full(
     })
     .await?;
 
-    // Hold write guard through db.store() — see ADR-0042.
+    // Hold write guard through db.store() — see ADR-0002.
     match result {
         Ok((new_db, report)) => {
             state.db.store(Some(Arc::new(new_db)));
