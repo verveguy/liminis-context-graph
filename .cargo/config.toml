@@ -17,5 +17,14 @@
 # The cmake source-build path now causes 7399 duplicate-symbol linker errors
 # because link_bundled_deps=true links both the fat archive and the individual
 # archives simultaneously. See LadybugDB/ladybug-rust#18 for the upstream bug.
+# LBUG_VERSION pins the prebuilt lbug native bundle to match the `lbug` crate
+# (=0.17.0). Without it, lbug's build.rs downloads the *floating* `latest`
+# ladybug release (currently v0.18.1), building the 0.17.0 crate FFI against a
+# newer, incompatible native bundle. That skew broke the v0.9.0 release: the
+# 0.18.1 bundle links httplib against OpenSSL (`ssl_st`) instead of the bundled
+# mbedtls the 0.17.0 self-contained fat archive ships — the macOS release build
+# failed with `ld: symbol(s) not found` for OpenSSL symbols. Pinning restores a
+# reproducible, self-contained bundle across dev, CI, and release.
 [env]
 RUST_TEST_THREADS = "4"
+LBUG_VERSION = "0.17.0"
