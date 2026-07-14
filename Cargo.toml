@@ -53,6 +53,7 @@ x86_64-unknown-linux-gnu = "ubuntu-24.04"
 cmake = "*"
 ninja-build = "*"
 libssl-dev = "*"
+pkg-config = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
