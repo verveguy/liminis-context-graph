@@ -72,7 +72,7 @@ The result is a context graph you can treat like the rest of your local tooling:
 No Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/liminis-context-graph-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
@@ -138,13 +138,13 @@ cargo run -p lcg-service                      # run the service binary
 For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
 
 ```sh
-curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/liminis-context-graph-aarch64-apple-darwin.tar.gz \
-  -o liminis-context-graph-aarch64-apple-darwin.tar.gz
-tar -xzf liminis-context-graph-aarch64-apple-darwin.tar.gz
-# binary is at: liminis-context-graph-aarch64-apple-darwin/liminis-context-graph
+curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
+  -o lcg-service-aarch64-apple-darwin.tar.xz
+tar -xJf lcg-service-aarch64-apple-darwin.tar.xz
+# binary is at: lcg-service-aarch64-apple-darwin/liminis-context-graph
 ```
 
-The archive layout is set by cargo-dist 0.32.0; if cargo-dist is upgraded, verify the layout before updating consumer scripts. Each release includes a `.sha256` companion file for verification (`shasum -a 256 -c <file>.sha256`). The macOS Gatekeeper note above applies to script-downloaded binaries too.
+Release artifacts are named after the `lcg-service` package (`lcg-service-<target>.tar.xz`); the binary *inside* is `liminis-context-graph`. Targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. The archive layout is set by cargo-dist 0.32.0; if cargo-dist is upgraded, verify the layout before updating consumer scripts. Each release includes a `.sha256` companion file for verification (`shasum -a 256 -c <file>.sha256`). The macOS Gatekeeper note above applies to script-downloaded binaries too.
 
 Discover the latest release tag programmatically:
 
