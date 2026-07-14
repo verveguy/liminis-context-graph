@@ -20,7 +20,7 @@ concurrency:
 env:
   # Bump this date to manually bust the lbug C++ build cache (e.g., if a cache entry is corrupted).
   # Incrementing this invalidates ALL existing lbug cache entries across all branches.
-  LBUG_CACHE_BUST: "2026-07-13"
+  LBUG_CACHE_BUST: "2026-07-14"
 
 jobs:
   build-lbug:

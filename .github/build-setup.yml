@@ -2,6 +2,18 @@
 # The 0.17.0+ prebuilt is a self-contained fat bundle; source builds cause
 # 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
 
+# lbug 0.18.1's build.rs unconditionally emits `-lssl -lcrypto` for the
+# prebuilt static-link path (httplib now links against OpenSSL instead of
+# 0.17.0's bundled mbedtls) and resolves the lib path via `pkg-config`. Linux
+# release runners ship `libssl-dev` preinstalled; macOS does not ship a
+# discoverable OpenSSL, so install Homebrew's keg-only openssl@3 here —
+# pkg-config finds it via the "-uninstalled.pc" symlink Homebrew places on
+# its default search path, no PKG_CONFIG_PATH export needed. See
+# docs/adr/0034-lbug-static-link-openssl-discovery.md.
+- name: Install OpenSSL (macOS)
+  if: runner.os == 'macOS'
+  run: brew install openssl@3
+
 - name: Get rustc version for lbug cache key
   id: rustc-ver
   run: echo "version=$(rustc --version | shasum -a 256 | cut -c1-8)" >> "$GITHUB_OUTPUT"
@@ -13,7 +25,7 @@
 - name: Restore lbug build artifacts from cache
   uses: actions/cache/restore@v4
   with:
-    key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-2026-05-29
+    key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-2026-07-14
     path: |
       target/release/build/lbug-*
       target/release/.fingerprint/lbug-*
