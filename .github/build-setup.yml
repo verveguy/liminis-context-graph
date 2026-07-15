@@ -4,17 +4,46 @@
 
 # lbug 0.18.1's build.rs unconditionally emits `-lssl -lcrypto` for the
 # prebuilt static-link path (httplib now links against OpenSSL instead of
-# 0.17.0's bundled mbedtls) and resolves the lib path via `pkg-config`. Linux
+# 0.17.0's bundled mbedtls) and resolves the lib dir via `pkg-config`. Linux
 # release runners ship `libssl-dev` and `pkg-config` preinstalled; macOS does
 # not ship a discoverable OpenSSL, so install Homebrew's keg-only openssl@3
 # (plus pkg-config, declared explicitly rather than relying on it being
-# preinstalled) here — pkg-config finds openssl@3 via the "-uninstalled.pc"
-# symlink Homebrew places on its default search path, no PKG_CONFIG_PATH
-# export needed. HOMEBREW_NO_AUTO_UPDATE avoids a slow/flaky `brew update`
+# preinstalled) here. HOMEBREW_NO_AUTO_UPDATE avoids a slow/flaky `brew update`
 # on every run. See docs/adr/0034-lbug-static-link-openssl-discovery.md.
 - name: Install OpenSSL (macOS)
   if: runner.os == 'macOS'
   run: HOMEBREW_NO_AUTO_UPDATE=1 brew install openssl@3 pkg-config
+
+# Force STATIC OpenSSL on macOS so the released binary is self-contained (like
+# the 0.17.0 mbedtls fat archive was). build.rs hard-codes `-lssl -lcrypto` and
+# feeds ld the dir from `pkg-config --variable=libdir openssl`. Homebrew's keg
+# ships both libssl.a and libssl.3.dylib in that dir, and ld prefers the dylib —
+# producing a binary with an absolute `/opt/homebrew/opt/openssl@3/...dylib`
+# dependency that does not exist on end-user Macs. We hand build.rs a libdir that
+# contains ONLY the static archives (via a custom openssl.pc on PKG_CONFIG_PATH),
+# so `-lssl` resolves to libssl.a and links statically — no runtime OpenSSL dep.
+# Verified locally: `otool -L` shows no ssl/crypto dylib; full core suite passes.
+- name: Force static OpenSSL link (macOS)
+  if: runner.os == 'macOS'
+  run: |
+    set -euo pipefail
+    ossl="$(brew --prefix openssl@3)"
+    static_dir="$RUNNER_TEMP/openssl-static"
+    mkdir -p "$static_dir/lib"
+    ln -sf "$ossl/lib/libssl.a" "$static_dir/lib/libssl.a"
+    ln -sf "$ossl/lib/libcrypto.a" "$static_dir/lib/libcrypto.a"
+    cat > "$static_dir/openssl.pc" <<EOF
+    libdir=$static_dir/lib
+    Name: OpenSSL
+    Description: static-only openssl for a self-contained binary
+    Version: $(pkg-config --modversion openssl)
+    Libs: -L\${libdir} -lssl -lcrypto
+    Cflags:
+    EOF
+    # Searched before the default path, so build.rs's pkg-config query for
+    # openssl's libdir returns the static-only dir. Other libs still resolve
+    # via the default search path.
+    echo "PKG_CONFIG_PATH=$static_dir" >> "$GITHUB_ENV"
 
 - name: Get rustc version for lbug cache key
   id: rustc-ver
