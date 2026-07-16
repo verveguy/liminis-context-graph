@@ -344,9 +344,9 @@ impl<'db> Conn<'db> {
 
     // ── HNSW / FTS indexes ────────────────────────────────────────────────────
 
-    /// Creates HNSW vector indexes on Entity and Episodic. Idempotent — an "already exists"
-    /// error (e.g. a repeat call, or one following `init_schema`) is swallowed; any other
-    /// error (missing table, malformed column, ...) propagates so callers can observe a
+    /// Creates HNSW vector indexes on Entity, Episodic, and RelatesToNode_. Idempotent — an
+    /// "already exists" error (e.g. a repeat call, or one following `init_schema`) is swallowed;
+    /// any other error (missing table, malformed column, ...) propagates so callers can observe a
     /// genuine index-build failure instead of silently treating it as success.
     pub fn create_vector_indexes(&self) -> Result<(), Error> {
         for sql in [

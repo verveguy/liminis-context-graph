@@ -681,6 +681,10 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
     let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
+    // Preset to false before attempting the build: if spawn_blocking's join itself fails (e.g. a
+    // panic), the early `?` return below must not leave a stale `true` from a prior successful
+    // build in place.
+    state.indices_built.store(false, Ordering::Release);
     let build_result = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         conn.build_indices_and_constraints()
@@ -692,7 +696,7 @@ async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
     // successful build's `true` must not survive this call's failure.
     state
         .indices_built
-        .store(build_result.is_ok(), std::sync::atomic::Ordering::Release);
+        .store(build_result.is_ok(), Ordering::Release);
     build_result?;
     Ok(json!({"status": "ok", "indices_built": true}))
 }
@@ -1387,6 +1391,13 @@ async fn handle_rebuild_from_wal(
             }
         }
         let bg_indices_built = Arc::clone(&state.indices_built);
+        // Preset to false before the indexes are actually dropped below: if replay fails, is
+        // cancelled, or the spawn_blocking join itself fails (panic), the early `?`/`??` returns
+        // downstream must not leave a stale `true` in place after the indexes have already been
+        // dropped — that would wrongly disable the search auto-heal path (FR-006).
+        if !dry_run {
+            bg_indices_built.store(false, Ordering::Release);
+        }
         let (stats, indices_built) = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
                 let conn = db.connect()?;
@@ -1632,6 +1643,13 @@ async fn handle_rebuild_from_wal(
         let jid = job_id_task.clone();
         let replay_started_at = std::time::Instant::now();
         let ib = Arc::clone(&bg_indices_built);
+        // Preset to false before the indexes are actually dropped below: if replay fails or the
+        // spawn_blocking join itself fails (panic), the flag must not be left at a stale `true`
+        // after the indexes have already been dropped — that would wrongly disable the search
+        // auto-heal path (FR-006).
+        if !dry_run {
+            ib.store(false, Ordering::Release);
+        }
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
@@ -1683,14 +1701,16 @@ async fn handle_rebuild_from_wal(
         )
         .await;
 
-        drop(_write_guard);
-
-        // Unconditional store of the real outcome (FR-006), mirroring the streaming path.
+        // Unconditional store of the real outcome (FR-006), mirroring the streaming path. Stored
+        // while the write lock is still held so a concurrent search never observes a stale value
+        // in the gap between the build outcome landing and the lock being released.
         if let Ok(Ok((_, build_ok))) = &result {
             if !dry_run {
                 ib.store(*build_ok, Ordering::Release);
             }
         }
+
+        drop(_write_guard);
 
         if let Ok(mut jobs) = rebuild_jobs.lock() {
             if let Some(job) = jobs.get_mut(&job_id_task) {
