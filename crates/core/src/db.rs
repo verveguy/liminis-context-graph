@@ -344,22 +344,40 @@ impl<'db> Conn<'db> {
 
     // ── HNSW / FTS indexes ────────────────────────────────────────────────────
 
-    /// Creates HNSW vector indexes on Entity and Episodic.
+    /// Creates HNSW vector indexes on Entity and Episodic. Idempotent — an "already exists"
+    /// error (e.g. a repeat call, or one following `init_schema`) is swallowed; any other
+    /// error (missing table, malformed column, ...) propagates so callers can observe a
+    /// genuine index-build failure instead of silently treating it as success.
     pub fn create_vector_indexes(&self) -> Result<(), Error> {
-        // Suppress errors for "already exists" — idempotent
-        let _ = self.raw_query(
+        for sql in [
             "CALL CREATE_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', \
              'name_embedding', metric := 'cosine')",
-        );
-        let _ = self.raw_query(
             "CALL CREATE_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', \
              'content_embedding', metric := 'cosine')",
-        );
-        let _ = self.raw_query(
             "CALL CREATE_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
              'fact_embedding', metric := 'cosine')",
-        );
+        ] {
+            if let Err(e) = self.raw_query(sql) {
+                if !crate::error::is_already_exists_error(&e) {
+                    return Err(e);
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Drops the 3 HNSW vector indexes. Idempotent — errors (including "no such index") are
+    /// suppressed so this is safe to call even when the indexes are already absent. Used by
+    /// `handle_rebuild_from_wal` to ensure a from-scratch rebuild doesn't leave a stale
+    /// pre-rebuild HNSW index in place after `CREATE_VECTOR_INDEX` stops treating every error
+    /// as "already exists, move on."
+    pub fn drop_vector_indexes(&self) {
+        let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_name_embedding_idx')");
+        let _ = self.raw_query(
+            "CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')",
+        );
+        let _ = self
+            .raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
     }
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
@@ -2266,6 +2284,46 @@ mod fts_missing_index_tests {
         assert!(
             msg.contains("Binder exception:") && msg.contains("doesn't have an index with name"),
             "FTS missing-index error must match the same pattern as HNSW — got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod create_vector_indexes_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Regression guard for issue #192: `create_vector_indexes` must stay idempotent — a second
+    /// back-to-back call (e.g. a repeat `knowledge_build_indices`, or the post-reload build
+    /// following `init_schema`'s own index creation) must swallow the "already exists" error
+    /// and return `Ok(())`, not propagate it as a genuine failure.
+    #[test]
+    fn double_create_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // init_schema already created the indexes once; call again explicitly twice more.
+        assert!(conn.create_vector_indexes().is_ok());
+        assert!(conn.create_vector_indexes().is_ok());
+    }
+
+    /// Regression guard for issue #192: a genuine failure (target table missing) must propagate
+    /// as `Err`, not be silently swallowed as "already exists". Before the fix,
+    /// `create_vector_indexes` blanket-suppressed every error and always returned `Ok(())`.
+    #[test]
+    fn missing_table_returns_genuine_error() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        // No init_schema() — Entity/Episodic/RelatesToNode_ tables don't exist.
+        let err = conn
+            .create_vector_indexes()
+            .expect_err("must fail when target tables don't exist");
+        assert!(
+            !crate::error::is_already_exists_error(&err),
+            "missing-table error must not be misclassified as already-exists: {err}"
         );
     }
 }

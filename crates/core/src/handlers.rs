@@ -12,7 +12,7 @@ use crate::{
     backfill, canonicalize, corrections,
     db::Db,
     episode,
-    error::Error,
+    error::{is_missing_index_error, Error},
     ipc::{IpcRequest, IpcResponse},
     ontology_sidecar,
     rebuild_job::{JobStatus, RebuildJob},
@@ -28,11 +28,6 @@ const DEFAULT_GROUP_ID: &str = "liminis";
 
 const MISSING_INDEX_USER_MSG: &str =
     "Knowledge graph indices not yet built. Call knowledge_build_indices to resolve.";
-
-fn is_missing_index_error(err: &Error) -> bool {
-    let s = err.to_string();
-    s.contains("Binder exception:") && s.contains("doesn't have an index with name")
-}
 
 /// Acquires the write lock and calls `build_indices_and_constraints`, then sets the
 /// `indices_built` flag so subsequent searches skip the auto-heal path (FR-003).
@@ -297,6 +292,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "initializing": false,
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
+            "indices_built": state.indices_built.load(Ordering::Acquire),
         }));
     }
     let db = db_opt.unwrap();
@@ -355,6 +351,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "file_count": wal_file_count,
             "byte_size": wal_byte_size,
         },
+        "indices_built": state.indices_built.load(Ordering::Acquire),
     });
     if let Some(t) = index_created_at {
         result["index_created_at"] = json!(t);
@@ -684,17 +681,20 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
 async fn handle_build_indices(state: Arc<AppState>) -> Result<Value, Error> {
     let db = load_db(&state)?;
     let _guard = state.write_lock.write().await;
-    tokio::task::spawn_blocking(move || {
+    let build_result = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         conn.build_indices_and_constraints()
     })
-    .await??;
+    .await?;
     drop(_guard);
 
+    // Unconditional store of the real outcome (FR-006), before propagating any error — a prior
+    // successful build's `true` must not survive this call's failure.
     state
         .indices_built
-        .store(true, std::sync::atomic::Ordering::Release);
-    Ok(json!({"status": "ok"}))
+        .store(build_result.is_ok(), std::sync::atomic::Ordering::Release);
+    build_result?;
+    Ok(json!({"status": "ok", "indices_built": true}))
 }
 
 // ── Tier 1b read handlers ─────────────────────────────────────────────────────
@@ -1387,13 +1387,16 @@ async fn handle_rebuild_from_wal(
             }
         }
         let bg_indices_built = Arc::clone(&state.indices_built);
-        let stats =
-            tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+        let (stats, indices_built) = tokio::task::spawn_blocking(
+            move || -> Result<(crate::replay::ReplayStats, bool), Error> {
                 let conn = db.connect()?;
-                // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
-                // bulk load. Errors suppressed — idempotent if already absent.
+                // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
+                // eliminated during bulk load, and so a stale pre-rebuild HNSW index (which
+                // create_vector_indexes' "already exists" swallow won't refresh) doesn't survive
+                // the rebuild. Errors suppressed — idempotent if already absent.
                 if !dry_run {
                     crate::schema::drop_fts_indexes(&conn);
+                    conn.drop_vector_indexes();
                 }
                 // Composite cancel: fire on client disconnect OR service shutdown (R9).
                 let cancel_fn: Option<crate::replay::CancelFn> = tx.as_ref().map(|t| {
@@ -1424,18 +1427,28 @@ async fn handle_rebuild_from_wal(
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
-                // Non-fatal: a build failure leaves the graph unindexed but the auto-heal path
-                // will recover on the first search.
+                // Non-fatal to the replay outcome: a build failure leaves the graph unindexed
+                // (the auto-heal path will recover on the first search per ADR-0025) but the
+                // real outcome is captured and returned so the caller can observe it (FR-004/006)
+                // rather than have it silently swallowed.
+                let mut build_ok = false;
                 if !dry_run {
-                    if let Err(e) = conn.build_indices_and_constraints() {
-                        eprintln!("liminis-context-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
-                    } else {
-                        bg_indices_built.store(true, Ordering::Release);
+                    match conn.build_indices_and_constraints() {
+                        Ok(()) => build_ok = true,
+                        Err(e) => {
+                            eprintln!("liminis-context-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
+                        }
                     }
                 }
-                Ok(stats)
-            })
-            .await??;
+                Ok((stats, build_ok))
+            },
+        )
+        .await??;
+        // Unconditional store of the real outcome (FR-006): a prior successful build's `true`
+        // must not survive this rebuild's failed index build, and vice versa.
+        if !dry_run {
+            bg_indices_built.store(indices_built, Ordering::Release);
+        }
         drop(_write_guard);
 
         state.sink.emit(TelemetryEvent::WalReplayComplete {
@@ -1502,7 +1515,12 @@ async fn handle_rebuild_from_wal(
             "fidelity_warning": stats.fidelity_warning,
         });
         if dry_run {
+            // Dry-run never touches indices (FR-007) — omit the field rather than report
+            // true/false, either of which would misleadingly imply indices were (or weren't)
+            // touched "as of this rebuild".
             result["dry_run"] = json!(true);
+        } else {
+            result["indices_built"] = json!(indices_built);
         }
         return Ok(result);
     }
@@ -1615,13 +1633,15 @@ async fn handle_rebuild_from_wal(
         let replay_started_at = std::time::Instant::now();
         let ib = Arc::clone(&bg_indices_built);
 
-        let result =
-            tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
+        let result = tokio::task::spawn_blocking(
+            move || -> Result<(crate::replay::ReplayStats, bool), Error> {
                 let conn = db.connect()?;
-                // Drop FTS indexes before replay so inline FTS maintenance is eliminated during
-                // bulk load. Errors suppressed — idempotent if already absent.
+                // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
+                // eliminated during bulk load, and so a stale pre-rebuild HNSW index doesn't
+                // survive the rebuild. Errors suppressed — idempotent if already absent.
                 if !dry_run {
                     crate::schema::drop_fts_indexes(&conn);
+                    conn.drop_vector_indexes();
                 }
                 let progress_fn: Box<dyn Fn(&ReplayProgress) -> bool + Send> = Box::new(move |p| {
                     if let Ok(mut guard) = jobs_ref.lock() {
@@ -1647,23 +1667,35 @@ async fn handle_rebuild_from_wal(
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
+                // Non-fatal to the replay outcome; the real outcome is captured and returned
+                // (FR-004/006) instead of being silently swallowed.
+                let mut build_ok = false;
                 if !dry_run {
-                    if let Err(e) = conn.build_indices_and_constraints() {
-                        eprintln!("liminis-context-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
-                    } else {
-                        ib.store(true, Ordering::Release);
+                    match conn.build_indices_and_constraints() {
+                        Ok(()) => build_ok = true,
+                        Err(e) => {
+                            eprintln!("liminis-context-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
+                        }
                     }
                 }
-                Ok(stats)
-            })
-            .await;
+                Ok((stats, build_ok))
+            },
+        )
+        .await;
 
         drop(_write_guard);
+
+        // Unconditional store of the real outcome (FR-006), mirroring the streaming path.
+        if let Ok(Ok((_, build_ok))) = &result {
+            if !dry_run {
+                ib.store(*build_ok, Ordering::Release);
+            }
+        }
 
         if let Ok(mut jobs) = rebuild_jobs.lock() {
             if let Some(job) = jobs.get_mut(&job_id_task) {
                 match result {
-                    Ok(Ok(stats)) => {
+                    Ok(Ok((stats, indices_built))) => {
                         job.status = JobStatus::Completed;
                         job.mutations_replayed = stats.lines_replayed;
                         job.wal_files_processed = stats.files_read;
@@ -1676,7 +1708,7 @@ async fn handle_rebuild_from_wal(
                             legacy_skipped_lines: stats.legacy_skipped_lines,
                             duration_ms: replay_started_at.elapsed().as_millis() as u64,
                         });
-                        job.result = Some(json!({
+                        let mut job_result = json!({
                             "mutations_replayed": stats.lines_replayed,
                             "match_prefixed_replayed": stats.match_prefixed_replayed,
                             "wal_files_processed": stats.files_read,
@@ -1689,7 +1721,12 @@ async fn handle_rebuild_from_wal(
                             "lines_skipped": stats.lines_skipped(),
                             "failed_samples": stats.failed_samples,
                             "fidelity_warning": stats.fidelity_warning,
-                        }));
+                        });
+                        // Dry-run never touches indices (FR-007) — omit the field.
+                        if !dry_run {
+                            job_result["indices_built"] = json!(indices_built);
+                        }
+                        job.result = Some(job_result);
                         // Update the sidecar so drift clears after a successful WAL rebuild.
                         if !dry_run {
                             if let Some(ref root) = bg_workspace_root {

@@ -214,18 +214,23 @@ pub fn migrate(conn: &Conn<'_>) {
     }
 }
 
+/// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other
+/// error (missing table, malformed column, ...) propagates so callers can observe a genuine
+/// index-build failure instead of silently treating it as success.
+/// Index names and covered columns match the upstream Python graphiti-core service (canonical source).
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
-    // Errors mean "already exists" — suppress them for idempotency.
-    // Index names and covered columns match the upstream Python graphiti-core service (canonical source).
-    let _ = conn
-        .raw_query("CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])");
-    let _ = conn.raw_query(
+    for sql in [
+        "CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])",
         "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
-    );
-    let _ = conn.raw_query(
         "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
          ['content', 'source', 'source_description'])",
-    );
+    ] {
+        if let Err(e) = conn.raw_query(sql) {
+            if !crate::error::is_already_exists_error(&e) {
+                return Err(e);
+            }
+        }
+    }
     Ok(())
 }
 
@@ -236,4 +241,43 @@ pub fn drop_fts_indexes(conn: &Conn<'_>) {
     let _ = conn.raw_query("CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')");
     let _ = conn.raw_query("CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')");
     let _ = conn.raw_query("CALL DROP_FTS_INDEX('Episodic', 'episode_content')");
+}
+
+#[cfg(test)]
+mod create_fts_indexes_tests {
+    use super::*;
+    use crate::db::Db;
+    use tempfile::TempDir;
+
+    /// Regression guard for issue #192: `create_fts_indexes` must stay idempotent — `init`
+    /// already builds these indexes once, so a subsequent explicit call (e.g. the post-reload
+    /// `build_indices_and_constraints`) must swallow the "already exists" error and return
+    /// `Ok(())`, not propagate it as a genuine failure.
+    #[test]
+    fn double_create_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // init_schema (via init()) already created the indexes once; call again explicitly twice more.
+        assert!(create_fts_indexes(&conn).is_ok());
+        assert!(create_fts_indexes(&conn).is_ok());
+    }
+
+    /// Regression guard for issue #192: a genuine failure (target table missing) must propagate
+    /// as `Err`, not be silently swallowed as "already exists". Before the fix,
+    /// `create_fts_indexes` blanket-suppressed every error and always returned `Ok(())`.
+    #[test]
+    fn missing_table_returns_genuine_error() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        // No init_schema() — Entity/Episodic/RelatesToNode_ tables don't exist.
+        let err = create_fts_indexes(&conn).expect_err("must fail when target tables don't exist");
+        assert!(
+            !crate::error::is_already_exists_error(&err),
+            "missing-table error must not be misclassified as already-exists: {err}"
+        );
+    }
 }
