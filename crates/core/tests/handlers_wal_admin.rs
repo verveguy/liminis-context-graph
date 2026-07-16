@@ -961,10 +961,7 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
         }
     };
 
-    assert_eq!(
-        status_v["result"]["mutations_replayed"], 360,
-        "{status_v}"
-    );
+    assert_eq!(status_v["result"]["mutations_replayed"], 360, "{status_v}");
     assert_eq!(
         status_v["result"]["result"]["indices_built"], true,
         "job result must report indices_built: true: {status_v}"
@@ -1012,7 +1009,9 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
         "knowledge_find_relationships must return results at production scale: {rv}"
     );
     assert!(
-        facts.iter().any(|f| f["uuid"].as_str() == Some("scale-rel-7")),
+        facts
+            .iter()
+            .any(|f| f["uuid"].as_str() == Some("scale-rel-7")),
         "expected scale-rel-7 in results: {rv}"
     );
 }
@@ -1051,11 +1050,7 @@ async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
     ]
     .join("\n")
         + "\n";
-    std::fs::write(
-        wal_dir.path().join("20260618_000000_sc003.jsonl"),
-        &content,
-    )
-    .unwrap();
+    std::fs::write(wal_dir.path().join("20260618_000000_sc003.jsonl"), &content).unwrap();
 
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 

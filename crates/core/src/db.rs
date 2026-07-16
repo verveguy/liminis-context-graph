@@ -373,11 +373,10 @@ impl<'db> Conn<'db> {
     /// as "already exists, move on."
     pub fn drop_vector_indexes(&self) {
         let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_name_embedding_idx')");
-        let _ = self.raw_query(
-            "CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')",
-        );
-        let _ = self
-            .raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
+        let _ =
+            self.raw_query("CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')");
+        let _ =
+            self.raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
     }
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
