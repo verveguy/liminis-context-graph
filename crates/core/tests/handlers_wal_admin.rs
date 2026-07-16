@@ -1016,3 +1016,83 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
         "expected scale-rel-7 in results: {rv}"
     );
 }
+
+/// SC-003/FR-004/FR-005/FR-006: when the post-replay index build genuinely fails (not merely
+/// "already exists"), the rebuild result and a subsequent `knowledge_status` call must both
+/// report `indices_built: false`, distinguishable from the all-succeeded case — while the
+/// replay itself (which never touched the affected column) still reports `success: true`
+/// (Assumption A3: a successful replay is not retroactively reported as failed just because
+/// index build failed).
+///
+/// Forces the failure by dropping the `fact_embedding` column from `RelatesToNode_` before the
+/// rebuild — `create_vector_indexes`'s 'RelatesToNode_' step then hits a genuine "column does
+/// not exist" error rather than "already exists". Unlike dropping the table itself, the table
+/// remains intact and queryable, so this doesn't collaterally break `knowledge_status`'s own
+/// node-count query (which reads `RelatesToNode_` unconditionally) — isolating the assertion to
+/// the index-build signal this test actually targets. The WAL only carries Entity mutations, so
+/// replay fidelity is unaffected (SC-004).
+#[tokio::test]
+async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
+    let (db, _db_dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // init_schema already built the FTS/HNSW indexes covering RelatesToNode_; both must be
+        // dropped first or the column drop fails with "column used by index ...".
+        conn.drop_vector_indexes();
+        schema::drop_fts_indexes(&conn);
+        conn.run_cypher("ALTER TABLE RelatesToNode_ DROP fact_embedding")
+            .expect("drop fact_embedding column");
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    let content = [
+        entity_wal_line(0, "sc003-entity-a"),
+        entity_wal_line(1, "sc003-entity-b"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260618_000000_sc003.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(70),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    // Replay itself succeeded and is unaffected — the WAL never referenced the dropped table.
+    assert_eq!(
+        v["result"]["success"], true,
+        "replay must still report success even though index build failed: {v}"
+    );
+    assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+
+    // FR-004/FR-006: index-build failure must be independently, explicitly observable.
+    assert_eq!(
+        v["result"]["indices_built"], false,
+        "rebuild result must report indices_built: false on genuine build failure: {v}"
+    );
+
+    // FR-005: knowledge_status must reflect the same non-ready state without a search attempt.
+    let status_v = dispatch(71, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_v["result"]["indices_built"], false,
+        "knowledge_status must report indices_built: false: {status_v}"
+    );
+
+    // The in-memory flag must also reflect the real (failed) outcome, not a stale prior success.
+    assert!(
+        !state.indices_built.load(Ordering::Acquire),
+        "indices_built flag must be false after a genuine build failure"
+    );
+}
