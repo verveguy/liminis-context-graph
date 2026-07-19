@@ -112,6 +112,36 @@ fn entity_wal_line(seq: u64, uuid: &str) -> String {
     )
 }
 
+/// A standalone `RelatesToNode_` WAL line (param-bound, mirroring the
+/// `timestamps_in_params.jsonl` fixture shape). Search queries these nodes directly by
+/// property (no two-hop `RELATES_TO` connectivity required), so this is sufficient to
+/// exercise `knowledge_find_relationships`.
+fn relates_to_wal_line(seq: u64, uuid: &str, name: &str, fact: &str) -> String {
+    let line = json!({
+        "seq": seq,
+        "ts": "2026-05-22T00:00:00.000000+00:00",
+        "db": "",
+        "cypher": "MERGE (r:RelatesToNode_ {uuid: $uuid}) ON CREATE SET r.name = $name, \
+             r.group_id = $group_id, r.created_at = $created_at, r.fact = $fact, \
+             r.fact_embedding = $fact_embedding, r.valid_at = $valid_at, \
+             r.invalid_at = $invalid_at, r.attributes = $attributes, \
+             r.relation_type = $relation_type",
+        "params": {
+            "uuid": uuid,
+            "name": name,
+            "group_id": "g",
+            "created_at": "2026-05-22T00:00:00.000000+00:00",
+            "fact": fact,
+            "fact_embedding": [1.0, 0.0, 0.0, 0.0],
+            "valid_at": "2026-05-22T00:00:00.000000+00:00",
+            "invalid_at": null,
+            "attributes": "{}",
+            "relation_type": "KNOWS",
+        },
+    });
+    line.to_string()
+}
+
 // ── prepare_checkpoint ────────────────────────────────────────────────────────
 
 /// prepare_checkpoint on a state with no WAL dir configured returns success with zeros.
@@ -690,11 +720,12 @@ async fn test_reload_builds_all_indexes() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
 
-    // Write 3 entity mutations to the WAL.
+    // Write 3 entity mutations and 1 relationship mutation to the WAL.
     let content = [
         entity_wal_line(0, "reload-idx-a"),
         entity_wal_line(1, "reload-idx-b"),
         entity_wal_line(2, "reload-idx-c"),
+        relates_to_wal_line(3, "reload-idx-rel", "ReloadRelation", "reload fact payload"),
     ]
     .join("\n")
         + "\n";
@@ -719,16 +750,22 @@ async fn test_reload_builds_all_indexes() {
     let v = serde_json::to_value(resp).unwrap();
 
     assert_eq!(v["result"]["success"], true, "reload must succeed: {v}");
-    assert_eq!(v["result"]["mutations_replayed"], 3, "{v}");
+    assert_eq!(v["result"]["mutations_replayed"], 4, "{v}");
 
-    // FR-002: indices_built flag must be set after a successful non-dry-run reload.
+    // FR-004: the rebuild result must explicitly report indices as built.
+    assert_eq!(
+        v["result"]["indices_built"], true,
+        "rebuild result must report indices_built: true: {v}"
+    );
+
+    // FR-002/FR-005: indices_built flag must be set after a successful non-dry-run reload.
     assert!(
         state.indices_built.load(Ordering::Acquire),
         "indices_built must be true after reload"
     );
 
-    // FR-003: knowledge_find_entities must succeed without triggering an on-demand build.
-    // The flag is already true, so no auto-heal fires — the search uses the rebuilt indexes.
+    // FR-001/A2: knowledge_find_entities must return the actual replayed entity, not just
+    // succeed without error — an empty result set must not be mistaken for success.
     let find_req = IpcRequest {
         jsonrpc: "2.0".to_string(),
         id: json!(51),
@@ -738,11 +775,45 @@ async fn test_reload_builds_all_indexes() {
     let find_resp = handlers::dispatch(find_req, Arc::clone(&state), None).await;
     let fv = serde_json::to_value(find_resp).unwrap();
 
-    assert!(
-        fv.get("result").is_some(),
-        "knowledge_find_entities must succeed after reload: {fv}"
-    );
     assert!(fv.get("error").is_none(), "no error after reload: {fv}");
+    let nodes = fv["result"]["nodes"]
+        .as_array()
+        .expect("nodes must be an array");
+    assert!(
+        !nodes.is_empty(),
+        "knowledge_find_entities must return non-empty results after reload: {fv}"
+    );
+    assert!(
+        nodes.iter().any(|n| n["name"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("reload-idx"))),
+        "expected a replayed entity in results: {fv}"
+    );
+
+    // FR-002/A2: knowledge_find_relationships must likewise return the actual replayed fact.
+    let find_rel_req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(52),
+        method: "knowledge_find_relationships".to_string(),
+        params: json!({"query": "reload fact payload", "group_ids": ["g"], "num_results": 5}),
+    };
+    let find_rel_resp = handlers::dispatch(find_rel_req, Arc::clone(&state), None).await;
+    let rv = serde_json::to_value(find_rel_resp).unwrap();
+
+    assert!(rv.get("error").is_none(), "no error after reload: {rv}");
+    let facts = rv["result"]["facts"]
+        .as_array()
+        .expect("facts must be an array");
+    assert!(
+        !facts.is_empty(),
+        "knowledge_find_relationships must return non-empty results after reload: {rv}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f["uuid"].as_str() == Some("reload-idx-rel")),
+        "expected the replayed relationship in results: {rv}"
+    );
 
     // Flag must still be true (search did not reset it).
     assert!(
@@ -806,5 +877,217 @@ async fn test_interrupted_reload_auto_heals() {
     assert!(
         state.indices_built.load(Ordering::Acquire),
         "indices_built must be true after auto-heal"
+    );
+}
+
+/// SC-001/SC-002/FR-003 (job-path coverage): a production-representative rebuild — multiple WAL
+/// files, hundreds of mutations spanning entities and relationships — run via the background-job
+/// path (`knowledge_rebuild_from_wal` → poll `knowledge_rebuild_status` to `Completed`) leaves
+/// `knowledge_find_entities`/`knowledge_find_relationships` immediately queryable with zero
+/// intervening `knowledge_build_indices` calls. Regression coverage for issue #192: at toy scale
+/// (3 mutations) the defect never reproduced because `create_vector_indexes`/`create_fts_indexes`
+/// blanket-suppressed every error, but the structural bug applies at any scale — this exercises
+/// the fix against a fixture credible for the production report (113 files / 5,565 events).
+#[tokio::test]
+async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    // Spread ~360 mutations (270 entities + 90 relationships) across 3 WAL files.
+    let mut seq = 0u64;
+    for file_idx in 0..3 {
+        let mut lines = Vec::new();
+        for i in 0..90 {
+            let n = file_idx * 90 + i;
+            lines.push(entity_wal_line(seq, &format!("scale-entity-{n}")));
+            seq += 1;
+        }
+        for i in 0..30 {
+            let n = file_idx * 30 + i;
+            lines.push(relates_to_wal_line(
+                seq,
+                &format!("scale-rel-{n}"),
+                &format!("ScaleRelation{n}"),
+                &format!("scale fact payload {n}"),
+            ));
+            seq += 1;
+        }
+        let content = lines.join("\n") + "\n";
+        std::fs::write(
+            wal_dir
+                .path()
+                .join(format!("2026061{file_idx}_000000_scale.jsonl")),
+            &content,
+        )
+        .unwrap();
+    }
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // Non-streaming, non-dry-run always routes through the background-job path.
+    let v = dispatch(
+        60,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["success"], true, "{v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    // Poll until completed (up to 30 seconds — 360 mutations at production scale is I/O-bound).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status_v = loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            61,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        match status_v["result"]["status"].as_str().unwrap_or("?") {
+            "completed" => break status_v,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 30s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    };
+
+    assert_eq!(status_v["result"]["mutations_replayed"], 360, "{status_v}");
+    assert_eq!(
+        status_v["result"]["result"]["indices_built"], true,
+        "job result must report indices_built: true: {status_v}"
+    );
+
+    // Zero intervening knowledge_build_indices calls — go straight to search.
+    let find_req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(62),
+        method: "knowledge_find_entities".to_string(),
+        // num_results=100 (the handler's max clamp) widens the RRF candidate pool
+        // (candidate_limit = num_results * 3) to cover all 270 planted entities — the mock
+        // embedder returns a constant zero vector for every text, so the vector-search half of
+        // the fusion carries no discriminating signal and a small candidate pool can miss the
+        // target; this isn't a ranking-quality test, just a findability one (SC-001).
+        params: json!({"query": "scale-entity-42", "group_ids": ["g"], "num_results": 100}),
+    };
+    let find_resp = handlers::dispatch(find_req, Arc::clone(&state), None).await;
+    let fv = serde_json::to_value(find_resp).unwrap();
+    assert!(fv.get("error").is_none(), "no error: {fv}");
+    let nodes = fv["result"]["nodes"].as_array().expect("nodes array");
+    assert!(
+        !nodes.is_empty(),
+        "knowledge_find_entities must return results at production scale: {fv}"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|n| n["uuid"].as_str() == Some("scale-entity-42")),
+        "expected scale-entity-42 in results: {fv}"
+    );
+
+    let find_rel_req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(63),
+        method: "knowledge_find_relationships".to_string(),
+        params: json!({"query": "scale fact payload 7", "group_ids": ["g"], "num_results": 90}),
+    };
+    let find_rel_resp = handlers::dispatch(find_rel_req, Arc::clone(&state), None).await;
+    let rv = serde_json::to_value(find_rel_resp).unwrap();
+    assert!(rv.get("error").is_none(), "no error: {rv}");
+    let facts = rv["result"]["facts"].as_array().expect("facts array");
+    assert!(
+        !facts.is_empty(),
+        "knowledge_find_relationships must return results at production scale: {rv}"
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f["uuid"].as_str() == Some("scale-rel-7")),
+        "expected scale-rel-7 in results: {rv}"
+    );
+}
+
+/// SC-003/FR-004/FR-005/FR-006: when the post-replay index build genuinely fails (not merely
+/// "already exists"), the rebuild result and a subsequent `knowledge_status` call must both
+/// report `indices_built: false`, distinguishable from the all-succeeded case — while the
+/// replay itself (which never touched the affected column) still reports `success: true`
+/// (Assumption A3: a successful replay is not retroactively reported as failed just because
+/// index build failed).
+///
+/// Forces the failure by dropping the `fact_embedding` column from `RelatesToNode_` before the
+/// rebuild — `create_vector_indexes`'s 'RelatesToNode_' step then hits a genuine "column does
+/// not exist" error rather than "already exists". Unlike dropping the table itself, the table
+/// remains intact and queryable, so this doesn't collaterally break `knowledge_status`'s own
+/// node-count query (which reads `RelatesToNode_` unconditionally) — isolating the assertion to
+/// the index-build signal this test actually targets. The WAL only carries Entity mutations, so
+/// replay fidelity is unaffected (SC-004).
+#[tokio::test]
+async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
+    let (db, _db_dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // init_schema already built the FTS/HNSW indexes covering RelatesToNode_; both must be
+        // dropped first or the column drop fails with "column used by index ...".
+        conn.drop_vector_indexes();
+        schema::drop_fts_indexes(&conn);
+        conn.run_cypher("ALTER TABLE RelatesToNode_ DROP fact_embedding")
+            .expect("drop fact_embedding column");
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    let content = [
+        entity_wal_line(0, "sc003-entity-a"),
+        entity_wal_line(1, "sc003-entity-b"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(wal_dir.path().join("20260618_000000_sc003.jsonl"), &content).unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(70),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    // Replay itself succeeded and is unaffected — the WAL never referenced the dropped table.
+    assert_eq!(
+        v["result"]["success"], true,
+        "replay must still report success even though index build failed: {v}"
+    );
+    assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+
+    // FR-004/FR-006: index-build failure must be independently, explicitly observable.
+    assert_eq!(
+        v["result"]["indices_built"], false,
+        "rebuild result must report indices_built: false on genuine build failure: {v}"
+    );
+
+    // FR-005: knowledge_status must reflect the same non-ready state without a search attempt.
+    let status_v = dispatch(71, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_v["result"]["indices_built"], false,
+        "knowledge_status must report indices_built: false: {status_v}"
+    );
+
+    // The in-memory flag must also reflect the real (failed) outcome, not a stale prior success.
+    assert!(
+        !state.indices_built.load(Ordering::Acquire),
+        "indices_built flag must be false after a genuine build failure"
     );
 }

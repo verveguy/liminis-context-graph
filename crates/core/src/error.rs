@@ -42,3 +42,21 @@ impl From<tokio::task::JoinError> for Error {
         Error::Join(e.to_string())
     }
 }
+
+/// True if `err` is lbug's "no index with this name" binder exception, raised when a search
+/// query targets an FTS/HNSW index that hasn't been (re)built yet. Used by the search handlers'
+/// auto-heal path (ADR-0025) to distinguish "indices missing" from any other query failure.
+pub fn is_missing_index_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("Binder exception:") && s.contains("doesn't have an index with name")
+}
+
+/// True if `err` is lbug's "index already exists" binder exception, raised by
+/// `CREATE_VECTOR_INDEX`/`CREATE_FTS_INDEX` when the target index was already built (e.g. by a
+/// prior `init_schema` or a previous `build_indices_and_constraints` call). This is the
+/// idempotent, expected case index-build callers must swallow — anything else (a missing table,
+/// a malformed column, resource exhaustion, ...) is a genuine failure and must propagate.
+pub fn is_already_exists_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("Binder exception:") && s.contains("already exists in table")
+}

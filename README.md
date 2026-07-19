@@ -60,7 +60,7 @@ The result is a context graph you can treat like the rest of your local tooling:
 - **Hybrid retrieval** — full-text + HNSW vector similarity in one query path, plus raw Cypher (`knowledge_query_cypher`) for arbitrary graph queries.
 - **Optional ontology** — declare entity and relation types (with single-parent hierarchies) in YAML; `open` mode prefers your vocabulary, `strict` mode enforces it. Drift detection flags when the graph predates an ontology change.
 - **Episodes with provenance** — every ingested chunk is a time-stamped episode linked to the entities and relationships it produced.
-- **WAL administration** — rebuild the database from the log (`knowledge_rebuild_from_wal`), dump the database back to a compacted log (`knowledge_dump_wal`), checkpoint before backups (`knowledge_prepare_checkpoint`).
+- **WAL administration** — rebuild the database from the log (`knowledge_rebuild_from_wal`), dump the database back to a compacted log (`knowledge_dump_wal`), checkpoint before backups (`knowledge_prepare_checkpoint`). A successful non-dry-run rebuild automatically rebuilds the entity/relationship search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable afterward — `knowledge_build_indices` is not normally required. Check the rebuild result's (or `knowledge_status`'s) `indices_built` field to confirm search-readiness rather than assuming it (see [`knowledge_status` summary](#knowledge_status-summary) below).
 - **Self-healing** — the service binds its socket *before* opening the database, so a corrupted store leaves it reachable in degraded mode rather than dead; autonomous startup recovery reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
 - **Streaming progress** — long operations accept a `_progress_token` and stream progress frames before the terminal result.
 - **Operational telemetry** — structured JSONL events on stderr with per-call timings and LLM token/cost accounting (see [`docs/telemetry.md`](docs/telemetry.md)).
@@ -263,6 +263,19 @@ The `knowledge_status` IPC response always includes an `ontology` field:
 ```
 
 When no ontology is loaded, `present` is `false` and counts are `0`.
+
+The response also includes an `indices_built` boolean, reporting whether the entity/relationship
+FTS + HNSW search indices are currently built and reflect the graph's current contents. This is
+normally `true` — a successful `knowledge_rebuild_from_wal` or `knowledge_build_indices` call sets
+it. It is `false` when the post-rebuild index build genuinely failed (as opposed to the common,
+harmless "already built" case) or before the first index build of a session. `false` does not
+mean search is broken: `knowledge_find_entities`/`knowledge_find_relationships` auto-heal by
+transparently rebuilding indices and retrying on their first call after a `false` state — the
+field exists so a caller can *observe* readiness proactively (e.g. before reporting a rebuild as
+fully complete) instead of discovering it only via a search attempt. The same field appears on
+`knowledge_rebuild_from_wal`'s result (and on `knowledge_rebuild_status`'s `result` for the
+background-job path) for the specific rebuild that produced it; it is omitted from dry-run
+rebuild results, since a dry run never touches indices.
 
 ## Embedder sidecar
 

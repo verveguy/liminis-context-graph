@@ -37,6 +37,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0031](0031-orphaned-direct-rels-after-noise-deletion.md) | Orphaned Direct RELATES_TO Rels After Noise Edge Deletion _(superseded)_ | 2026-06-22 |
 | [0032](0032-ontology-parent-edges-conditional-hash-segment.md) | Ontology `parent_edges:` segment conditionally included in content hash | 2026-06-23 |
 | [0033](0033-noise-edges-reclassified-not-deleted.md) | Noise Edges Are Reclassified to UNCLASSIFIED, Not Deleted | 2026-06-23 |
+| [0034](0034-observable-index-build-outcome.md) | Observable Index-Build Outcome — Fixing ADR-0025's Dead-Code Failure Path | 2026-07-16 |
 
 ## Historical numbering
 

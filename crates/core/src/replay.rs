@@ -48,7 +48,9 @@ pub struct ReplayStats {
     /// Sampled failure details for `failed_lines` (first N, capped by `ReplayOptions::failure_sample_cap`).
     pub failed_samples: Vec<FailureSample>,
     pub files_read: u64,
-    /// Always 0 — callers invoke `knowledge_build_indices` separately after rebuild.
+    /// Always 0 — `WalReplayer` itself never builds indexes; `handle_rebuild_from_wal` builds
+    /// FTS + HNSW indexes automatically once replay completes (see the `indices_built` field on
+    /// the rebuild result, not this one) and reports that outcome separately.
     pub indexes_created: u64,
     /// Mutations whose Cypher began with MATCH (e.g. MATCH … SET for embedding enrichment).
     pub match_prefixed_replayed: u64,
