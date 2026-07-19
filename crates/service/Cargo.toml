@@ -18,6 +18,12 @@ lcg-core = { path = "../core" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tokio-util = { workspace = true }
+# Diagnostic-only: capture the sender PID of a received SIGTERM (see the
+# signal-handler setup in main.rs). Both are already in the dependency tree
+# transitively (tokio's unix signal support uses signal-hook-registry).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook-registry = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

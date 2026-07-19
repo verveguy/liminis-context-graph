@@ -1040,7 +1040,9 @@ name = "lcg-service"
 version = "0.1.0"
 dependencies = [
  "lcg-core",
+ "libc",
  "serde_json",
+ "signal-hook-registry",
  "tempfile",
  "tokio",
  "tokio-util",
