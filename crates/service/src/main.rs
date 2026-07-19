@@ -25,6 +25,45 @@ use tokio::{
     task::JoinSet,
 };
 
+// ── SIGTERM sender diagnostic ────────────────────────────────────────────────
+// Records the PID that sent us SIGTERM so we can identify what tears the service
+// down during startup restart loops (symptom: knowledge-writer MCP "failed"
+// toasts in the app). POSIX only exposes the sender PID via SA_SIGINFO, which
+// tokio's signal stream does not surface — so we register an additional,
+// observe-only handler alongside tokio's. -1 means "not yet captured".
+#[cfg(unix)]
+static SIGTERM_SENDER_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// Extract the sending PID from a `siginfo_t`. Field access is platform-specific;
+/// only macOS is load-bearing for the diagnostic, but this must also compile on
+/// Linux (CI).
+#[cfg(target_os = "macos")]
+fn sigterm_sender_pid(info: &libc::siginfo_t) -> i32 {
+    info.si_pid
+}
+#[cfg(all(unix, not(target_os = "macos")))]
+fn sigterm_sender_pid(info: &libc::siginfo_t) -> i32 {
+    // SAFETY: si_pid() reads the kernel-populated sender field for a kill(2).
+    unsafe { info.si_pid() }
+}
+
+/// Install an SA_SIGINFO observer for SIGTERM. Async-signal-safe: the handler
+/// performs only a single atomic store. Best-effort — registration errors are
+/// ignored (the diagnostic simply reports pid=-1).
+#[cfg(unix)]
+fn install_sigterm_sender_probe() {
+    // SAFETY: the registered action does nothing that is not async-signal-safe.
+    unsafe {
+        let _ =
+            signal_hook_registry::register_sigaction(libc::SIGTERM, |info: &libc::siginfo_t| {
+                SIGTERM_SENDER_PID.store(
+                    sigterm_sender_pid(info),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            });
+    }
+}
+
 async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -486,11 +525,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(unix)]
     {
+        // Observe-only: capture the SIGTERM sender PID (see the diagnostic block
+        // near the top of this file). Registered before tokio's stream so the
+        // sender is recorded by the time the async task logs it.
+        install_sigterm_sender_probe();
         let mut sigterm_stream = signal(SignalKind::terminate())?;
         let notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
             sigterm_stream.recv().await;
-            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            let sender = SIGTERM_SENDER_PID.load(std::sync::atomic::Ordering::SeqCst);
+            eprintln!(
+                "liminis-context-graph: received SIGTERM (sender pid={sender}; -1 = unknown), shutting down"
+            );
             notify.notify_one();
         });
     }
