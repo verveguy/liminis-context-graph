@@ -11,8 +11,8 @@ use lcg_core::IpcResponse;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorCode, ErrorData as McpError, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProgressNotificationParam, RequestParamsMeta,
-        ServerCapabilities, ServerInfo, Tool,
+        ListToolsResult, PaginatedRequestParams, ProgressNotificationParam, ServerCapabilities,
+        ServerInfo, Tool,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ServerHandler,
@@ -151,7 +151,13 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
 
-        let progress_token = request.progress_token();
+        // NOTE: `request.progress_token()` (via `RequestParamsMeta`) is always `None` here —
+        // rmcp's `Request<M, R>` deserialization extracts the wire-level `_meta` object into
+        // the request's `extensions`/`context.meta` *before* handing `params` to `call_tool`,
+        // so `CallToolRequestParams::meta` never gets populated for an incoming request (only
+        // for one this server constructs itself). The progress token must be read off
+        // `context.meta`, which is what actually carries the client's `_meta.progressToken`.
+        let progress_token = context.meta.get_progress_token();
         let wants_progress = progress_token.is_some() && tools::is_streaming_method(spec.name);
 
         let response = if wants_progress {

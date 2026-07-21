@@ -4,7 +4,6 @@
 //! and attached mode.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -26,21 +25,15 @@ fn wait_for_socket(socket_path: &std::path::Path, timeout: Duration) -> bool {
     false
 }
 
-fn socket_request(
-    socket_path: &std::path::Path,
-    method: &str,
-    params: serde_json::Value,
-) -> serde_json::Value {
-    let mut stream = UnixStream::connect(socket_path).expect("connect to socket service");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .unwrap();
-    let req = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-    writeln!(stream, "{req}").expect("write request");
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read response");
-    serde_json::from_str(line.trim()).expect("parse response")
+/// Seeds the WAL directory with a single `.jsonl` file directly on disk, rather than via a
+/// real write call. `WalReplayer::replay_opts` fires its per-file progress event as soon as it
+/// starts reading a `.jsonl` file — before parsing any line inside it — so an empty file is
+/// enough to exercise progress bridging (FR-007) without depending on a live extraction LLM
+/// call (`knowledge_add_episode`/`knowledge_process_chunk` both call the real Anthropic API,
+/// with no test-side stub hook, unlike the embedder's `--embedder-http`).
+fn seed_wal_file(wal_dir: &std::path::Path) {
+    std::fs::create_dir_all(wal_dir).expect("create wal dir");
+    std::fs::write(wal_dir.join("0000000000000-seed.jsonl"), "").expect("write seed wal file");
 }
 
 #[test]
@@ -48,25 +41,17 @@ fn standalone_rebuild_surfaces_progress_before_terminal_result() {
     let dir = TempDir::new().unwrap();
     let port = spawn_stub_embedder();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let wal_dir = dir.path().join("wal");
+    seed_wal_file(&wal_dir);
 
     let mut client = McpClient::spawn({
         let mut cmd = Command::new(binary_path());
         cmd.env("LCG_DB_PATH", dir.path().join("test.db").to_str().unwrap())
-            .env("LCG_WAL_DIR", dir.path().join("wal").to_str().unwrap())
+            .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
             .args(["--mcp-stdio", "--embedder-http", &url]);
         cmd
     });
     client.initialize();
-
-    // Write an episode so the WAL has at least one file/mutation to replay.
-    let add = client.call_tool(
-        "knowledge_add_episode",
-        json!({"name": "ep1", "episode_body": "Alice met Bob at the cafe."}),
-    );
-    assert!(
-        add["result"]["isError"].as_bool() != Some(true),
-        "seed episode failed: {add:?}"
-    );
 
     let resp = client.call_tool_with_progress(
         "knowledge_rebuild_from_wal",
@@ -95,26 +80,20 @@ fn attached_rebuild_surfaces_bridged_progress() {
     let dir = TempDir::new().unwrap();
     let port = spawn_stub_embedder();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+    let wal_dir = dir.path().join("wal");
+    seed_wal_file(&wal_dir);
 
     let db_path = dir.path().join("test.db");
     let socket_path = dir.path().join("service.sock");
     let mut service: Child = Command::new(binary_path())
         .env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
-        .env("LCG_WAL_DIR", dir.path().join("wal").to_str().unwrap())
+        .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
         .args(["--embedder-http", &url])
         .spawn()
         .expect("failed to spawn socket service");
     assert!(wait_for_socket(&socket_path, Duration::from_secs(15)));
-
-    // Seed WAL content directly over the socket.
-    let add = socket_request(
-        &socket_path,
-        "knowledge_add_episode",
-        json!({"name": "ep1", "episode_body": "Alice met Bob at the cafe."}),
-    );
-    assert!(add.get("error").is_none(), "seed episode failed: {add:?}");
 
     let mut mcp = McpClient::spawn({
         let mut cmd = Command::new(binary_path());

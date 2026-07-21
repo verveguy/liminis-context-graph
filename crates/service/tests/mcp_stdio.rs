@@ -58,16 +58,17 @@ fn standalone_lists_and_calls_read_and_write_tools() {
         json!(true)
     );
 
-    // Write tool.
-    let add = client.call_tool(
-        "knowledge_add_episode",
-        json!({"name": "ep1", "episode_body": "Alice met Bob at the cafe."}),
-    );
+    // Write tool. `knowledge_clear_all` is used here rather than `knowledge_add_episode`
+    // because episode ingestion calls the real Anthropic extraction API with no test-side
+    // stub hook (unlike the embedder, which supports `--embedder-http` pointing at a stub) —
+    // it would make this test depend on network access and a valid ANTHROPIC_API_KEY.
+    // `knowledge_clear_all` is a genuine write-scope mutation with no such dependency.
+    let clear = client.call_tool("knowledge_clear_all", json!({"confirm": true}));
     assert!(
-        add["result"]["isError"].as_bool() != Some(true),
-        "knowledge_add_episode should not error: {add:?}"
+        clear["result"]["isError"].as_bool() != Some(true),
+        "knowledge_clear_all should not error: {clear:?}"
     );
-    assert!(add["result"]["structuredContent"]["episode_uuid"].is_string());
+    assert_eq!(clear["result"]["structuredContent"]["success"], json!(true));
 
     client.shutdown();
 }
