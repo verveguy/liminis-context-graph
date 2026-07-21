@@ -591,6 +591,25 @@ pub fn registry() -> Vec<ToolSpec> {
     ]
 }
 
+/// Returns the names from `schema`'s `"required"` array that are absent (or explicitly `null`)
+/// in `params`. `handlers.rs`'s own param extraction is untouched by this issue and some
+/// handlers silently fall back to an empty/default value instead of erroring when a field the
+/// schema advertises as required is missing (e.g. `knowledge_delete_episode` would report
+/// `"deleted"` without deleting anything) — this check makes the MCP layer honor its own
+/// advertised contract (FR-008's "missing required argument" edge case) without touching the
+/// out-of-scope core dispatch.
+pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
+    let Some(required) = schema.get("required").and_then(|r| r.as_array()) else {
+        return Vec::new();
+    };
+    required
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|name| matches!(params.get(*name), None | Some(Value::Null)))
+        .map(|s| s.to_string())
+        .collect()
+}
+
 /// Names of the three streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
@@ -651,6 +670,31 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn missing_required_reports_absent_and_null_fields_only() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"a": {}, "b": {}, "c": {}},
+            "required": ["a", "b"]
+        });
+        assert_eq!(
+            missing_required(&schema, &json!({"a": "x"})),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            missing_required(&schema, &json!({"a": "x", "b": null})),
+            vec!["b".to_string()]
+        );
+        assert!(missing_required(&schema, &json!({"a": "x", "b": "y"})).is_empty());
+        // "c" isn't required, so its absence doesn't matter.
+        assert!(missing_required(&schema, &json!({"a": "x", "b": "y"})).is_empty());
+    }
+
+    #[test]
+    fn missing_required_is_empty_when_schema_has_no_required_array() {
+        assert!(missing_required(&empty_schema(), &json!({})).is_empty());
     }
 
     #[test]

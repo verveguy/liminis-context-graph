@@ -151,6 +151,22 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
             .map(Value::Object)
             .unwrap_or_else(|| json!({}));
 
+        // FR-008 edge case: a `tools/call` with missing required arguments must be a clean tool
+        // error, not silently-wrong behavior. `handlers.rs` is out of scope for this issue and
+        // some handlers don't themselves validate presence (see `tools::missing_required`'s
+        // doc comment), so the MCP layer enforces its own advertised schema here.
+        let missing = tools::missing_required(&(spec.input_schema)(), &params);
+        if !missing.is_empty() {
+            return Ok(CallToolResult::structured_error(json!({
+                "code": -32602,
+                "message": format!(
+                    "Missing required argument(s) for '{}': {}",
+                    spec.name,
+                    missing.join(", ")
+                ),
+            })));
+        }
+
         // NOTE: `request.progress_token()` (via `RequestParamsMeta`) is always `None` here —
         // rmcp's `Request<M, R>` deserialization extracts the wire-level `_meta` object into
         // the request's `extensions`/`context.meta` *before* handing `params` to `call_tool`,

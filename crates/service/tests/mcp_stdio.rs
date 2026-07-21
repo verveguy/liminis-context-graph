@@ -96,6 +96,45 @@ fn call_tool_with_missing_required_argument_is_a_clean_tool_error() {
 }
 
 #[test]
+fn call_tool_with_missing_required_argument_never_reaches_the_handler() {
+    let dir = TempDir::new().unwrap();
+    let port = spawn_stub_embedder();
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+
+    let mut client = spawn_standalone(&dir, &url, &[]);
+    client.initialize();
+
+    // `knowledge_delete_episode`'s handler in handlers.rs (out of scope for this issue) does
+    // not itself validate `episode_uuid` — it falls back to an empty string and the underlying
+    // delete matches nothing, returning a misleading "deleted" success. The MCP layer's own
+    // required-argument check must catch this before it ever reaches the backend.
+    let resp = client.call_tool("knowledge_delete_episode", json!({}));
+    assert_eq!(
+        resp["result"]["isError"],
+        json!(true),
+        "expected a clean tool error for a missing required argument: {resp:?}"
+    );
+    let message = resp["result"]["structuredContent"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("episode_uuid"),
+        "expected the error to name the missing field: {resp:?}"
+    );
+
+    // `knowledge_query_cypher` similarly falls back to an empty query string rather than
+    // erroring in the handler.
+    let resp = client.call_tool("knowledge_query_cypher", json!({}));
+    assert_eq!(
+        resp["result"]["isError"],
+        json!(true),
+        "expected a clean tool error for a missing required argument: {resp:?}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
 fn scope_read_advertises_only_read_tools_and_rejects_write() {
     let dir = TempDir::new().unwrap();
     let port = spawn_stub_embedder();
