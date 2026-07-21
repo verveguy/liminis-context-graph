@@ -546,6 +546,29 @@ async fn run_mcp_standalone(
         Some(shutdown_ct.clone()),
     );
 
+    // SIGTERM/SIGINT parity with run_socket_service's signal handling (R1): without this, an
+    // external kill/supervisor stop would hit the default disposition and skip the WAL
+    // checkpoint below entirely, risking corruption on the next open. `stdin` EOF is already
+    // handled structurally — rmcp's serve loop treats it as QuitReason::Closed on its own.
+    #[cfg(unix)]
+    {
+        let mut sigterm_stream = signal(SignalKind::terminate())?;
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            sigterm_stream.recv().await;
+            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            ct.cancel();
+        });
+    }
+    {
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("liminis-context-graph: received SIGINT, shutting down");
+            ct.cancel();
+        });
+    }
+
     let running = server
         .serve_with_ct(rmcp::transport::stdio(), shutdown_ct)
         .await?;
@@ -589,6 +612,14 @@ async fn run_mcp_standalone(
     drop(telemetry_sink);
     sink_drain_handle.await.ok();
 
+    // Do NOT call `std::process::exit` here — see ADR-0017: doing so before the tokio runtime
+    // has drained its blocking pool can race ahead of a spawn_blocking task (e.g. an in-flight
+    // knowledge_build_indices call) that still holds an `Arc<Db>` clone, skipping the WAL
+    // checkpoint and corrupting the database. `main()` bounds the runtime's blocking-pool drain
+    // with `Runtime::shutdown_timeout` instead of an unconditional indefinite wait or an
+    // immediate `exit` — see ADR-0035 for why standalone MCP mode needs that bound at all
+    // (rmcp's stdio transport's stdin reader thread cannot be cancelled and only unblocks on
+    // EOF or process exit).
     Ok(())
 }
 
@@ -611,8 +642,11 @@ async fn run_mcp_attached(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// The real async entry point. Split out from `main()` (which is NOT `#[tokio::main]`, see
+/// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
+/// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
+/// drain bound after this function returns.
+async fn async_main(shutdown_timeout_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
     // Sink is created first so migration events are captured before any other work.
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
@@ -703,14 +737,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Inner shutdown timeout: caps in-flight task drain to leave headroom under the
-    // outer 60s budget (liminis-app SHUTDOWN_TIMEOUT_MS). Default: 5s — cancellation
-    // makes fast exit the common case; this is a fallback for misbehaving handlers.
-    let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5_000);
-
     match cli_mode {
         CliMode::Socket { embedder } => {
             // Bind socket FIRST — this allows health_check and recovery IPC to work even
@@ -760,4 +786,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             connect: Some(_), ..
         } => unreachable!("attached mode already returned earlier in main()"),
     }
+}
+
+/// Not `#[tokio::main]`: that macro's generated wrapper drops the `Runtime` via its default
+/// (unbounded) `Drop` impl, which waits indefinitely for every blocking-pool thread — including
+/// `rmcp`'s stdio transport's stdin reader, an uncancellable blocking `read()` that only
+/// unblocks on EOF or process exit (see ADR-0035). Owning the `Runtime` here lets us bound that
+/// wait with `shutdown_timeout` instead: long enough for any legitimate in-flight
+/// `spawn_blocking` work (e.g. an index-build call's `Arc<Db>` clone, per ADR-0017) to finish
+/// and fire its WAL checkpoint, but not indefinite.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Read once, before the runtime exists, so both the async body's internal task drain and
+    // the runtime's own post-`block_on` blocking-pool drain use the same bound.
+    let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async_main(shutdown_timeout_ms));
+    runtime.shutdown_timeout(Duration::from_millis(shutdown_timeout_ms));
+    result
 }

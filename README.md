@@ -326,6 +326,103 @@ See [ADR 0006](docs/adr/0006-embedder-http-contract.md) and
 [ADR 0016](docs/adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
 specification and transport decision record.
 
+## MCP-over-stdio transport
+
+`liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdin/stdout, using the official Rust SDK (`rmcp`). Any MCP client (Claude Code,
+Claude Desktop, other agents) can query and mutate the knowledge graph directly — no Electron
+app, no Node, no custom JSON-RPC client required. This is an *additional* external-facing
+surface; the Unix-socket JSON-RPC protocol above is unchanged, and the Liminis app's own MCP
+providers (which use a direct pooled socket for better concurrency) are unaffected.
+
+Every MCP tool is derived from the existing `knowledge_*` dispatch methods in
+`crates/core/src/handlers.rs` — tool names match the IPC method names verbatim, and each
+`tools/call` is translated into an `IpcRequest` and routed straight through the same core
+dispatch the socket service uses. No graph logic is duplicated in the MCP transport shell.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--mcp-stdio` | Starts the MCP server over stdin/stdout instead of binding the Unix socket. |
+| `--scope=<list>` | Comma-separated list of scopes to advertise in `tools/list` (default `all`). See below. |
+| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--allow-remote-close` | Attached mode only: advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode (no `--connect`). |
+
+### DB-access modes
+
+- **Standalone (default, no `--connect`)**: the MCP process opens the `.lcg` database directly,
+  reusing the same startup and self-recovery path as the socket service ([ADR 0009](docs/adr/0009-degraded-mode-startup-recovery.md)).
+  Zero-dependency — works with no other process running.
+- **Attached (`--connect <socket-path>`)**: the MCP process never opens the database; it
+  forwards each call over the given socket to a service that already has it open. Use this to
+  add MCP access to a workspace where the Liminis app (or another socket-service instance) is
+  already running, without contending for lbug's single-writer lock.
+
+### Scopes
+
+Scopes are additive and composable (e.g. `--scope=read,admin`). `tools/list` advertises the
+union of all active scopes.
+
+| Scope | Methods |
+|-------|---------|
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` |
+| `cypher` | `knowledge_query_cypher` |
+| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
+| `all` | every scope above (default) |
+
+**⚠️ `cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
+raw Cypher with no param interpolation or value coercion — despite being a "query" method, it can
+perform arbitrary mutations, and it bypasses the WAL-ordering and embedding invariants that the
+structured write tools maintain. It is never implicitly included in `read`, `write`, or `admin`;
+operators must opt in explicitly (or via `all`).
+
+**⚠️ `knowledge_close` in attached mode is a footgun without `--allow-remote-close`.** In
+**standalone** mode, `knowledge_close` is always advertised under `admin` scope and shuts down
+only this MCP process's own DB connection. In **attached** mode, calling it would shut down the
+*running remote service* — including the Liminis app's, if that's what you attached to. Without
+`--allow-remote-close`, `knowledge_close` is omitted from `tools/list` entirely in attached mode
+(not merely rejected when called). Pass `--allow-remote-close` only when you specifically intend
+this MCP connection to be able to stop the remote service.
+
+### Progress notifications
+
+The three long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+and `knowledge_backfill_relation_types` — bridge to MCP progress notifications when the client
+attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both standalone
+and attached mode. Without a progress token, these calls simply block until they complete, same
+as over the socket protocol.
+
+### Example MCP client config
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your/workspace"
+    }
+  }
+}
+```
+
+To attach to an already-running socket service instead of opening the DB directly:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--connect", "/path/to/your/workspace/.lcg/service.sock", "--scope=read"]
+    }
+  }
+}
+```
+
+See [ADR 0035](docs/adr/0035-mcp-stdio-transport.md) for the transport's internal architecture.
+
 ## Repository layout
 
 ```

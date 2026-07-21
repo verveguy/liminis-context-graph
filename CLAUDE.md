@@ -86,6 +86,10 @@ grep -rn "StructName {" --include="*.rs" .
 
 Tests live in `crates/core/tests/*.rs` AND inline `#[cfg(test)] mod tests { }` blocks within source files. Both compile separately from the library and will silently break if you only update the lib sites. This has burned us repeatedly (e.g. #46, #58 CI fix cycles).
 
+## When adding a new `knowledge_*` dispatch method
+
+Adding a new match arm to `handle()` in `crates/core/src/handlers.rs` also requires a new `ToolSpec` entry in `crates/service/src/mcp/tools.rs` (name, description, JSON input schema, scope bucket) — the MCP-over-stdio tool surface (`--mcp-stdio`, see [ADR-0035](docs/adr/0035-mcp-stdio-transport.md)) is a hand-maintained registry, not derived by reflection over the dispatch table. Pick the scope bucket per the table in the README's "MCP-over-stdio transport" section: `read` for queries, `write` for content mutations, `admin` for WAL/lifecycle/index-maintenance operations, or the dedicated `cypher` scope only for a genuine arbitrary-query/mutation escape hatch. `crates/service/src/mcp/tools.rs`'s own tests assert the registry's total count and per-scope bucket sizes — update those counts alongside the new entry.
+
 ## Toolchain
 
 - Install via `rustup`. Ensure `cargo` and `rustc` are on `PATH` — typically `~/.cargo/bin`, or `/opt/homebrew/opt/rustup/bin` on Apple Silicon with Homebrew-managed rustup.
