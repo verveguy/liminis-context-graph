@@ -6,7 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use tempfile::TempDir;
 mod common;
 use common::{binary_path, spawn_stub_embedder, McpClient};
 
-fn wait_for_socket(socket_path: &PathBuf, timeout: Duration) -> bool {
+fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if socket_path.exists() && UnixStream::connect(socket_path).is_ok() {
@@ -61,7 +61,7 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
 }
 
 fn socket_request(
-    socket_path: &PathBuf,
+    socket_path: &Path,
     method: &str,
     params: serde_json::Value,
 ) -> serde_json::Value {
@@ -77,7 +77,7 @@ fn socket_request(
     serde_json::from_str(line.trim()).expect("parse response")
 }
 
-fn spawn_attached(socket_path: &PathBuf, extra_args: &[&str]) -> McpClient {
+fn spawn_attached(socket_path: &Path, extra_args: &[&str]) -> McpClient {
     let mut cmd = Command::new(binary_path());
     cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
     cmd.args(extra_args);
