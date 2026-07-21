@@ -187,11 +187,9 @@ impl McpClient {
     pub fn wait_for_progress_notification(&mut self, timeout: Duration) -> Value {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if let Some(pos) = self
-                .stashed_notifications
-                .iter()
-                .position(|v| v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress"))
-            {
+            if let Some(pos) = self.stashed_notifications.iter().position(|v| {
+                v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress")
+            }) {
                 return self.stashed_notifications.remove(pos);
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());

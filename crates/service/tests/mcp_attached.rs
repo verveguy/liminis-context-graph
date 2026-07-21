@@ -60,7 +60,11 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
     (child, socket_path)
 }
 
-fn socket_request(socket_path: &PathBuf, method: &str, params: serde_json::Value) -> serde_json::Value {
+fn socket_request(
+    socket_path: &PathBuf,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
     let mut stream = UnixStream::connect(socket_path).expect("connect to socket service");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))

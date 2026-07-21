@@ -241,11 +241,7 @@ fn connect_to_nonexistent_socket_fails_fast_not_hang() {
     let missing_socket = dir.path().join("does-not-exist.sock");
 
     let mut cmd = Command::new(binary_path());
-    cmd.args([
-        "--mcp-stdio",
-        "--connect",
-        missing_socket.to_str().unwrap(),
-    ]);
+    cmd.args(["--mcp-stdio", "--connect", missing_socket.to_str().unwrap()]);
     let start = std::time::Instant::now();
     let output = cmd.output().expect("failed to run binary");
     let elapsed = start.elapsed();

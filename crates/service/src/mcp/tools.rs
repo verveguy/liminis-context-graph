@@ -595,7 +595,9 @@ pub fn registry() -> Vec<ToolSpec> {
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
-        "knowledge_rebuild_from_wal" | "knowledge_canonicalize_relations" | "knowledge_backfill_relation_types"
+        "knowledge_rebuild_from_wal"
+            | "knowledge_canonicalize_relations"
+            | "knowledge_backfill_relation_types"
     )
 }
 

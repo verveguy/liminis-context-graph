@@ -10,9 +10,9 @@ use std::sync::Arc;
 use lcg_core::IpcResponse;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorCode, ErrorData as McpError,
-        Implementation, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
-        RequestParamsMeta, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, ErrorCode, ErrorData as McpError, Implementation,
+        ListToolsResult, PaginatedRequestParams, ProgressNotificationParam, RequestParamsMeta,
+        ServerCapabilities, ServerInfo, Tool,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ServerHandler,

@@ -18,6 +18,7 @@ use lcg_core::{
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
     IpcResponse,
 };
+use rmcp::ServiceExt;
 use serde_json::Value;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -27,7 +28,6 @@ use tokio::{
     sync::Notify,
     task::JoinSet,
 };
-use rmcp::ServiceExt;
 use tokio_util::sync::CancellationToken;
 
 async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
@@ -779,8 +779,14 @@ async fn async_main(shutdown_timeout_ms: u64) -> Result<(), Box<dyn std::error::
             )
             .await?;
 
-            run_mcp_standalone(telemetry_sink, sink_drain_handle, state, scopes, allow_remote_close)
-                .await
+            run_mcp_standalone(
+                telemetry_sink,
+                sink_drain_handle,
+                state,
+                scopes,
+                allow_remote_close,
+            )
+            .await
         }
         CliMode::Mcp {
             connect: Some(_), ..
