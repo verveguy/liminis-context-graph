@@ -54,9 +54,12 @@ The result is a context graph you can treat like the rest of your local tooling:
 └── service.sock       # JSON-RPC 2.0 endpoint while the service runs
 ```
 
+**Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client — Claude Code, Claude Desktop, other agents — straight at the graph with no app or custom client in between. Either surface routes through the same core dispatch; see [MCP-over-stdio transport](#mcp-over-stdio-transport) below.
+
 ## Features
 
 - **34 JSON-RPC methods** over a Unix domain socket, covering ingestion, hybrid search, graph reads, curation (`knowledge_merge_entities`, a corrections workflow, relation canonicalization), and administration.
+- **Native MCP server** — the same graph is exposed to any [Model Context Protocol](https://modelcontextprotocol.io) client over stdin/stdout via `--mcp-stdio`, with per-scope tool gating (`read` / `write` / `cypher` / `admin`). Point Claude Code, Claude Desktop, or any agent straight at your workspace — no app, no custom client. See [MCP-over-stdio transport](#mcp-over-stdio-transport).
 - **Hybrid retrieval** — full-text + HNSW vector similarity in one query path, plus raw Cypher (`knowledge_query_cypher`) for arbitrary graph queries.
 - **Optional ontology** — declare entity and relation types (with single-parent hierarchies) in YAML; `open` mode prefers your vocabulary, `strict` mode enforces it. Drift detection flags when the graph predates an ontology change.
 - **Episodes with provenance** — every ingested chunk is a time-stamped episode linked to the entities and relationships it produced.
