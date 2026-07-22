@@ -9,7 +9,7 @@
 # not ship a discoverable OpenSSL, so install Homebrew's keg-only openssl@3
 # (plus pkg-config, declared explicitly rather than relying on it being
 # preinstalled) here. HOMEBREW_NO_AUTO_UPDATE avoids a slow/flaky `brew update`
-# on every run. See docs/adr/0034-lbug-static-link-openssl-discovery.md.
+# on every run. See docs/adr/0036-lbug-static-link-openssl-discovery.md.
 - name: Install OpenSSL (macOS)
   if: runner.os == 'macOS'
   run: HOMEBREW_NO_AUTO_UPDATE=1 brew install openssl@3 pkg-config
