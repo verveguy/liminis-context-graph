@@ -177,6 +177,16 @@ impl McpBackend for AttachedBackend {
                         }
                         continue;
                     }
+                    // A terminal response whose id doesn't match this call's request id is a
+                    // stale reply to an earlier (likely timed-out) call that only now made it
+                    // off the wire — the timeout above already returned an error for that call
+                    // and released the mutex, so this line must not be misdelivered as *this*
+                    // call's result (Copilot review finding on PR #196). Discard and keep
+                    // reading; the loop's per-read timeout re-arms each iteration, so a
+                    // straggling stale reply doesn't erode this call's own timeout budget.
+                    if value.get("id").and_then(Value::as_u64) != Some(id) {
+                        continue;
+                    }
                     return parse_ipc_response(&value);
                 }
                 Err(e) => {

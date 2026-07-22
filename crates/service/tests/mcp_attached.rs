@@ -204,6 +204,76 @@ fn attached_mode_with_allow_remote_close_forwards_shutdown() {
     mcp.shutdown();
 }
 
+/// Spawns a stub Unix socket "remote service" that reads one request, waits past the client's
+/// call timeout before replying to it (a stale reply for an already-abandoned call), then reads
+/// a second request and replies to it correctly and promptly — for the stale-response
+/// misdelivery regression test.
+fn spawn_stale_response_remote(dir: &TempDir, reply_delay: Duration) -> PathBuf {
+    let socket_path = dir.path().join("stale.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind stale-response stub socket");
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+
+            let mut line1 = String::new();
+            reader.read_line(&mut line1).expect("read first request");
+            let req1: serde_json::Value = serde_json::from_str(line1.trim()).unwrap();
+            let id1 = req1["id"].clone();
+
+            std::thread::sleep(reply_delay);
+            let stale = json!({"jsonrpc": "2.0", "id": id1, "result": {"marker": "STALE-SHOULD-NOT-BE-SEEN"}});
+            writeln!(writer, "{stale}").expect("write stale response");
+
+            let mut line2 = String::new();
+            reader.read_line(&mut line2).expect("read second request");
+            let req2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
+            let id2 = req2["id"].clone();
+            let correct =
+                json!({"jsonrpc": "2.0", "id": id2, "result": {"marker": "CALL-2-CORRECT"}});
+            writeln!(writer, "{correct}").expect("write correct response");
+        }
+    });
+    socket_path
+}
+
+#[test]
+fn attached_mode_stale_response_after_timeout_is_not_misdelivered_to_next_call() {
+    let dir = TempDir::new().unwrap();
+    // The stub's reply to call 1 lands after the 600ms call timeout (so call 1 genuinely times
+    // out and releases the mutex) but before call 2's own 600ms read window closes (so call 2's
+    // read loop is the one that observes the stale line and must discard it).
+    let socket_path = spawn_stale_response_remote(&dir, Duration::from_millis(850));
+
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_ATTACHED_CALL_TIMEOUT_MS", "600");
+    cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
+    let mut mcp = McpClient::spawn(cmd);
+    mcp.initialize();
+
+    let resp1 = mcp.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        resp1["result"]["isError"],
+        json!(true),
+        "expected call 1 to time out before the stub replies: {resp1:?}"
+    );
+
+    let resp2 = mcp.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        resp2["result"]["isError"].as_bool(),
+        Some(false),
+        "expected call 2 to succeed with its own response: {resp2:?}"
+    );
+    assert_eq!(
+        resp2["result"]["structuredContent"]["marker"],
+        json!("CALL-2-CORRECT"),
+        "call 2 must receive its own response, not call 1's stale reply arriving late \
+         on the same connection: {resp2:?}"
+    );
+
+    mcp.shutdown();
+}
+
 #[test]
 fn attached_mode_call_times_out_on_hung_remote_instead_of_blocking_forever() {
     let dir = TempDir::new().unwrap();
