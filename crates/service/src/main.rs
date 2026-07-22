@@ -1,3 +1,5 @@
+mod cli;
+mod mcp;
 mod migration;
 mod sink;
 
@@ -5,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cli::{CliMode, EmbedderFlag};
 use lcg_core::{
     app_state::AppState,
     db::Db,
@@ -12,9 +15,10 @@ use lcg_core::{
     env::lcg_env_var,
     handlers,
     ipc::IpcRequest,
-    telemetry::{now_ms, TelemetryEvent},
+    telemetry::{now_ms, TelemetryEvent, TelemetrySink},
     IpcResponse,
 };
+use rmcp::ServiceExt;
 use serde_json::Value;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
@@ -24,6 +28,7 @@ use tokio::{
     sync::Notify,
     task::JoinSet,
 };
+use tokio_util::sync::CancellationToken;
 
 async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
     let (reader, mut writer) = stream.into_split();
@@ -116,81 +121,22 @@ async fn handle_streaming_request(
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Sink is created first so migration events are captured before any other work.
-    // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
-    let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
-    let telemetry_sink: Arc<dyn lcg_core::TelemetrySink> = stderr_sink;
-
-    // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
-    // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
-    // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
-    let (pre_migration_degraded, did_migrate) =
-        match migration::migrate_workspace(Path::new("."), &*telemetry_sink) {
-            Ok(migration::MigrationOutcome::Migrated) => (None, true),
-            Ok(migration::MigrationOutcome::AlreadyMigrated) => (None, true),
-            Ok(migration::MigrationOutcome::NothingToMigrate) => (None, false),
-            Err(migration::MigrationError::Schism { guidance }) => {
-                eprintln!("liminis-context-graph: FATAL workspace schism: {guidance}");
-                drop(telemetry_sink);
-                sink_drain_handle.await.ok();
-                return Err(guidance.into());
-            }
-            Err(e) => {
-                eprintln!("liminis-context-graph: migration failed, entering degraded mode: {e}");
-                telemetry_sink.emit(TelemetryEvent::ServiceState {
-                    ts_ms: now_ms(),
-                    state: "degraded".to_string(),
-                    reason: Some("migration_failed".to_string()),
-                    detail: Some(serde_json::Value::String(e.to_string())),
-                });
-                (Some("migration_failed".to_string()), false)
-            }
-        };
-
-    // deprecated: remove in Phase B (see #59)
-    let socket_path = lcg_env_var("LCG_SOCKET_PATH", "GRAPHITI_SOCKET_PATH")
-        .unwrap_or_else(|_| ".lcg/service.sock".to_string());
-    // deprecated: remove in Phase B (see #59)
-    let db_path = lcg_env_var("LCG_DB_PATH", "GRAPHITI_DB_PATH")
-        .unwrap_or_else(|_| ".lcg/db/liminis.db".to_string());
-
-    // ── CLI arg parsing: --embedder-uds <path> | --embedder-http <url> ───────────
-    // Manual scan — only two mutually exclusive flags; clap would be overkill.
-    let mut cli_uds: Option<String> = None;
-    let mut cli_http: Option<String> = None;
-    {
-        let args: Vec<String> = std::env::args().collect();
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--embedder-uds" => {
-                    i += 1;
-                    cli_uds = Some(
-                        args.get(i)
-                            .cloned()
-                            .ok_or("--embedder-uds requires a socket path argument")?,
-                    );
-                }
-                "--embedder-http" => {
-                    i += 1;
-                    cli_http = Some(
-                        args.get(i)
-                            .cloned()
-                            .ok_or("--embedder-http requires a URL argument")?,
-                    );
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-    }
-    if cli_uds.is_some() && cli_http.is_some() {
-        return Err(
-            "--embedder-uds and --embedder-http are mutually exclusive; specify only one".into(),
-        );
-    }
+/// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
+/// ADR-0009), and builds `AppState`. Shared by the socket service and standalone MCP mode
+/// (`--mcp-stdio` without `--connect`) so both reuse byte-for-byte the same bootstrap path —
+/// attached MCP mode (`--mcp-stdio --connect <path>`) never calls this at all, since it forwards
+/// every call to an already-running service instead of opening the DB itself (FR-006).
+async fn bootstrap_app_state(
+    telemetry_sink: Arc<dyn TelemetrySink>,
+    pre_migration_degraded: Option<String>,
+    db_path: String,
+    embedder_flag: Option<EmbedderFlag>,
+) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+    let (cli_uds, cli_http) = match embedder_flag {
+        Some(EmbedderFlag::Uds(p)) => (Some(p), None),
+        Some(EmbedderFlag::Http(u)) => (None, Some(u)),
+        None => (None, None),
+    };
 
     // ── Transport resolution (FR-003/FR-004/FR-007) ───────────────────────────────
     // Priority: CLI flag > default UDS path (if socket exists) > LCG_EMBEDDING_URL env > error
@@ -265,46 +211,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
-
-    // After migration, rewrite deprecated GRAPHITI_* env-var paths to the new layout.
-    // Use specific mappings rather than a generic prefix-swap: the legacy db path maps to
-    // a different filename (.graphiti/db → .lcg/db/liminis.db), not just a new prefix.
-    let socket_path = if did_migrate && socket_path == ".graphiti/service.sock" {
-        ".lcg/service.sock".to_string()
-    } else if did_migrate && socket_path.starts_with(".graphiti/") {
-        format!(".lcg/{}", &socket_path[".graphiti/".len()..])
-    } else {
-        socket_path
-    };
-    let db_path = if did_migrate && db_path == ".graphiti/db" {
-        ".lcg/db/liminis.db".to_string()
-    } else if did_migrate && db_path.starts_with(".graphiti/") {
-        format!(".lcg/{}", &db_path[".graphiti/".len()..])
-    } else {
-        db_path
-    };
-
-    // Ensure parent directories exist
-    if let Some(parent) = std::path::Path::new(&socket_path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if let Some(parent) = std::path::Path::new(&db_path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    // Inner shutdown timeout: caps in-flight task drain to leave headroom under the
-    // outer 60s budget (liminis-app SHUTDOWN_TIMEOUT_MS). Default: 5s — cancellation
-    // makes fast exit the common case; this is a fallback for misbehaving handlers.
-    let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5_000);
-
-    // Bind socket FIRST — this allows health_check and recovery IPC to work even
-    // when the DB is in a degraded state. See ADR-0009.
-    let _ = std::fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
-    eprintln!("liminis-context-graph: listening on {socket_path}");
 
     // ── Build probe embedder, then final embedder with discovered dim ─────────
     // The probe runs before DB open so that a misconfigured embedder fails fast
@@ -470,15 +376,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // migration_failed takes precedence over db-open degraded reason.
     let degraded_reason = pre_migration_degraded.or(degraded_reason);
 
-    let state = Arc::new(AppState::from_env(
+    Ok(Arc::new(AppState::from_env(
         Arc::clone(&telemetry_sink),
         maybe_db,
         degraded_reason,
         db_path.clone(),
         embedder,
         embedding_model_probed,
-    ));
+    )))
+}
 
+/// Runs the Unix-socket JSON-RPC service (the pre-existing, default behavior). `listener` is
+/// already bound by the caller — binding happens before DB open so `health_check`/recovery IPC
+/// work even in degraded mode (ADR-0009).
+async fn run_socket_service(
+    telemetry_sink: Arc<dyn TelemetrySink>,
+    sink_drain_handle: tokio::task::JoinHandle<()>,
+    state: Arc<AppState>,
+    listener: UnixListener,
+    shutdown_timeout_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     // ── Signal handler setup (R1: installed BEFORE the accept loop) ───────────
     // SIGTERM: captured via tokio's unix signal infrastructure. The OS-level handler
     // is registered synchronously when signal() is called — the async task just drains it.
@@ -603,4 +520,299 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sink_drain_handle.await.ok();
 
     Ok(())
+}
+
+/// Runs standalone MCP-over-stdio mode (FR-001/FR-006): this process opened the DB itself via
+/// `bootstrap_app_state`, exactly like the socket service. `tools/call` is routed in-process
+/// through `handlers::dispatch` — no socket is bound.
+async fn run_mcp_standalone(
+    telemetry_sink: Arc<dyn TelemetrySink>,
+    sink_drain_handle: tokio::task::JoinHandle<()>,
+    state: Arc<AppState>,
+    scopes: Vec<mcp::scope::Scope>,
+    allow_remote_close: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("liminis-context-graph: MCP-over-stdio (standalone), scope={scopes:?}");
+
+    // Cancelled after a successful knowledge_close call so the serve loop unwinds and this
+    // function can run the same cancel/drain/drop sequence the socket service's tail uses
+    // (R2/R4/R5/R6), rather than std::process::exit.
+    let shutdown_ct = CancellationToken::new();
+    let backend = mcp::backend::StandaloneBackend::new(Arc::clone(&state));
+    let server = mcp::server::LcgMcpServer::new(
+        backend,
+        scopes,
+        allow_remote_close,
+        Some(shutdown_ct.clone()),
+    );
+
+    // SIGTERM/SIGINT parity with run_socket_service's signal handling (R1): without this, an
+    // external kill/supervisor stop would hit the default disposition and skip the WAL
+    // checkpoint below entirely, risking corruption on the next open. `stdin` EOF is already
+    // handled structurally — rmcp's serve loop treats it as QuitReason::Closed on its own.
+    #[cfg(unix)]
+    {
+        let mut sigterm_stream = signal(SignalKind::terminate())?;
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            sigterm_stream.recv().await;
+            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            ct.cancel();
+        });
+    }
+    {
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            eprintln!("liminis-context-graph: received SIGINT, shutting down");
+            ct.cancel();
+        });
+    }
+
+    let running = server
+        .serve_with_ct(rmcp::transport::stdio(), shutdown_ct)
+        .await?;
+    running.waiting().await?;
+
+    // ── Graceful shutdown (mirrors run_socket_service's tail, minus the connection JoinSet —
+    // rmcp's serve loop above is already fully stopped by the time waiting() returns) ────────
+    state.cancel_token.cancel();
+    telemetry_sink.emit(TelemetryEvent::ServiceState {
+        ts_ms: now_ms(),
+        state: "shutting_down".to_string(),
+        reason: None,
+        detail: None,
+    });
+
+    {
+        let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        if let Ok(mut jobs) = state.rebuild_jobs.lock() {
+            for job in jobs.values_mut() {
+                if let Some(handle) = job.spawn_handle.take() {
+                    handles.push(handle);
+                }
+            }
+        }
+        for handle in handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+
+    let cancelled_chunks = Arc::clone(&state.cancelled_chunks);
+    drop(state);
+    let cancelled = cancelled_chunks.load(std::sync::atomic::Ordering::Relaxed) as u64;
+    telemetry_sink.emit(TelemetryEvent::ServiceState {
+        ts_ms: now_ms(),
+        state: "stopped".to_string(),
+        reason: None,
+        detail: Some(serde_json::json!({"drained": 0, "cancelled": cancelled})),
+    });
+
+    drop(telemetry_sink);
+    sink_drain_handle.await.ok();
+
+    // Do NOT call `std::process::exit` here — see ADR-0017: doing so before the tokio runtime
+    // has drained its blocking pool can race ahead of a spawn_blocking task (e.g. an in-flight
+    // knowledge_build_indices call) that still holds an `Arc<Db>` clone, skipping the WAL
+    // checkpoint and corrupting the database. `main()` bounds the runtime's blocking-pool drain
+    // with `Runtime::shutdown_timeout` instead of an unconditional indefinite wait or an
+    // immediate `exit` — see ADR-0035 for why standalone MCP mode needs that bound at all
+    // (rmcp's stdio transport's stdin reader thread cannot be cancelled and only unblocks on
+    // EOF or process exit).
+    Ok(())
+}
+
+/// Runs attached MCP-over-stdio mode (FR-006): this process never touches the workspace
+/// filesystem or opens the DB. Every `tools/call` is forwarded as JSON-RPC over `socket_path`
+/// to an already-running service, so it never contends for lbug's single-writer lock (SC-002).
+async fn run_mcp_attached(
+    socket_path: String,
+    scopes: Vec<mcp::scope::Scope>,
+    allow_remote_close: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!(
+        "liminis-context-graph: MCP-over-stdio (attached to {socket_path}), scope={scopes:?}"
+    );
+    let backend = mcp::attached::AttachedBackend::connect(&socket_path).await?;
+    let server = mcp::server::LcgMcpServer::new(backend, scopes, allow_remote_close, None);
+
+    let running = server.serve(rmcp::transport::stdio()).await?;
+    running.waiting().await?;
+    Ok(())
+}
+
+/// The real async entry point. Split out from `main()` (which is NOT `#[tokio::main]`, see
+/// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
+/// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
+/// drain bound after this function returns.
+async fn async_main(shutdown_timeout_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+    // Sink is created first so migration events are captured before any other work.
+    // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
+    let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
+    let telemetry_sink: Arc<dyn lcg_core::TelemetrySink> = stderr_sink;
+
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let cli_mode = match cli::parse_args(&raw_args) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("liminis-context-graph: {e}");
+            drop(telemetry_sink);
+            sink_drain_handle.await.ok();
+            return Err(e.into());
+        }
+    };
+
+    // Attached MCP mode never touches the workspace filesystem or migration state: it only
+    // forwards calls over the given socket to a service that already owns the DB (FR-006).
+    // Matches against `&cli_mode` (not by value) so Socket/standalone-Mcp can still move
+    // `cli_mode` into the final `match` below when this arm doesn't apply.
+    if let CliMode::Mcp {
+        connect: Some(socket_path),
+        scopes,
+        allow_remote_close,
+        ..
+    } = &cli_mode
+    {
+        let socket_path = socket_path.clone();
+        let scopes = scopes.clone();
+        let allow_remote_close = *allow_remote_close;
+        drop(sink_drain_handle); // attached mode emits no telemetry events; nothing to drain
+        return run_mcp_attached(socket_path, scopes, allow_remote_close).await;
+    }
+
+    // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
+    // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
+    // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
+    let (pre_migration_degraded, did_migrate) =
+        match migration::migrate_workspace(Path::new("."), &*telemetry_sink) {
+            Ok(migration::MigrationOutcome::Migrated) => (None, true),
+            Ok(migration::MigrationOutcome::AlreadyMigrated) => (None, true),
+            Ok(migration::MigrationOutcome::NothingToMigrate) => (None, false),
+            Err(migration::MigrationError::Schism { guidance }) => {
+                eprintln!("liminis-context-graph: FATAL workspace schism: {guidance}");
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Err(guidance.into());
+            }
+            Err(e) => {
+                eprintln!("liminis-context-graph: migration failed, entering degraded mode: {e}");
+                telemetry_sink.emit(TelemetryEvent::ServiceState {
+                    ts_ms: now_ms(),
+                    state: "degraded".to_string(),
+                    reason: Some("migration_failed".to_string()),
+                    detail: Some(serde_json::Value::String(e.to_string())),
+                });
+                (Some("migration_failed".to_string()), false)
+            }
+        };
+
+    // deprecated: remove in Phase B (see #59)
+    let socket_path = lcg_env_var("LCG_SOCKET_PATH", "GRAPHITI_SOCKET_PATH")
+        .unwrap_or_else(|_| ".lcg/service.sock".to_string());
+    // deprecated: remove in Phase B (see #59)
+    let db_path = lcg_env_var("LCG_DB_PATH", "GRAPHITI_DB_PATH")
+        .unwrap_or_else(|_| ".lcg/db/liminis.db".to_string());
+
+    // After migration, rewrite deprecated GRAPHITI_* env-var paths to the new layout.
+    // Use specific mappings rather than a generic prefix-swap: the legacy db path maps to
+    // a different filename (.graphiti/db → .lcg/db/liminis.db), not just a new prefix.
+    let socket_path = if did_migrate && socket_path == ".graphiti/service.sock" {
+        ".lcg/service.sock".to_string()
+    } else if did_migrate && socket_path.starts_with(".graphiti/") {
+        format!(".lcg/{}", &socket_path[".graphiti/".len()..])
+    } else {
+        socket_path
+    };
+    let db_path = if did_migrate && db_path == ".graphiti/db" {
+        ".lcg/db/liminis.db".to_string()
+    } else if did_migrate && db_path.starts_with(".graphiti/") {
+        format!(".lcg/{}", &db_path[".graphiti/".len()..])
+    } else {
+        db_path
+    };
+
+    // Ensure DB parent directory exists (socket parent is created only in socket mode, below).
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    match cli_mode {
+        CliMode::Socket { embedder } => {
+            // Bind socket FIRST — this allows health_check and recovery IPC to work even
+            // when the DB is in a degraded state. See ADR-0009.
+            if let Some(parent) = std::path::Path::new(&socket_path).parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let _ = std::fs::remove_file(&socket_path);
+            let listener = UnixListener::bind(&socket_path)?;
+            eprintln!("liminis-context-graph: listening on {socket_path}");
+
+            let state = bootstrap_app_state(
+                Arc::clone(&telemetry_sink),
+                pre_migration_degraded,
+                db_path,
+                embedder,
+            )
+            .await?;
+
+            run_socket_service(
+                telemetry_sink,
+                sink_drain_handle,
+                state,
+                listener,
+                shutdown_timeout_ms,
+            )
+            .await
+        }
+        CliMode::Mcp {
+            embedder,
+            connect: None,
+            scopes,
+            allow_remote_close,
+        } => {
+            let state = bootstrap_app_state(
+                Arc::clone(&telemetry_sink),
+                pre_migration_degraded,
+                db_path,
+                embedder,
+            )
+            .await?;
+
+            run_mcp_standalone(
+                telemetry_sink,
+                sink_drain_handle,
+                state,
+                scopes,
+                allow_remote_close,
+            )
+            .await
+        }
+        CliMode::Mcp {
+            connect: Some(_), ..
+        } => unreachable!("attached mode already returned earlier in main()"),
+    }
+}
+
+/// Not `#[tokio::main]`: that macro's generated wrapper drops the `Runtime` via its default
+/// (unbounded) `Drop` impl, which waits indefinitely for every blocking-pool thread — including
+/// `rmcp`'s stdio transport's stdin reader, an uncancellable blocking `read()` that only
+/// unblocks on EOF or process exit (see ADR-0035). Owning the `Runtime` here lets us bound that
+/// wait with `shutdown_timeout` instead: long enough for any legitimate in-flight
+/// `spawn_blocking` work (e.g. an index-build call's `Arc<Db>` clone, per ADR-0017) to finish
+/// and fire its WAL checkpoint, but not indefinite.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Read once, before the runtime exists, so both the async body's internal task drain and
+    // the runtime's own post-`block_on` blocking-pool drain use the same bound.
+    let shutdown_timeout_ms: u64 = std::env::var("LCG_SHUTDOWN_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async_main(shutdown_timeout_ms));
+    runtime.shutdown_timeout(Duration::from_millis(shutdown_timeout_ms));
+    result
 }

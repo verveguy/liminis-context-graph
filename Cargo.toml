@@ -74,3 +74,4 @@ futures = "0.3"
 serde_yaml = "0.9"
 sha2 = "0.10"
 tokio-util = "0.7"
+rmcp = { version = "2.2.0", default-features = false, features = ["server", "transport-io"] }
