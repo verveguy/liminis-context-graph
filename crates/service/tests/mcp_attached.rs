@@ -5,7 +5,7 @@
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -82,6 +82,24 @@ fn spawn_attached(socket_path: &Path, extra_args: &[&str]) -> McpClient {
     cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
     cmd.args(extra_args);
     McpClient::spawn(cmd)
+}
+
+/// Spawns a stub Unix socket "remote service" that accepts one connection, reads (and discards)
+/// the request line, then hangs forever without responding — simulating a remote service that
+/// crashed or hung mid-call, for the attached-mode read-timeout regression test.
+fn spawn_hanging_remote(dir: &TempDir) -> PathBuf {
+    let socket_path = dir.path().join("hanging.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind hanging-remote stub socket");
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            // Never respond — the client's read loop should time out rather than block forever.
+            std::thread::park();
+        }
+    });
+    socket_path
 }
 
 #[test]
@@ -183,5 +201,40 @@ fn attached_mode_with_allow_remote_close_forwards_shutdown() {
 
     // The MCP process itself is unaffected — per the issue's Assumptions, a further call
     // simply surfaces a normal connection-failure tool error, not a crash.
+    mcp.shutdown();
+}
+
+#[test]
+fn attached_mode_call_times_out_on_hung_remote_instead_of_blocking_forever() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = spawn_hanging_remote(&dir);
+
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_ATTACHED_CALL_TIMEOUT_MS", "500");
+    cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
+    let mut mcp = McpClient::spawn(cmd);
+    mcp.initialize();
+
+    let start = Instant::now();
+    let resp = mcp.call_tool("knowledge_status", json!({}));
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        resp["result"]["isError"],
+        json!(true),
+        "expected a clean tool error when the attached call times out: {resp:?}"
+    );
+    let message = resp["result"]["structuredContent"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("timed out"),
+        "expected a timeout-specific error message: {resp:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "expected the call to fail quickly via timeout rather than block, took {elapsed:?}"
+    );
+
     mcp.shutdown();
 }

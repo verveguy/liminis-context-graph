@@ -10,6 +10,7 @@
 //! interleaved `{"type":"progress"}` line unambiguously belongs to the current call.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use lcg_core::IpcResponse;
 use serde_json::{json, Value};
@@ -21,9 +22,18 @@ use tokio::{
 
 use crate::mcp::backend::McpBackend;
 
+/// Default idle-read timeout for a single line off the attached socket (Copilot review finding
+/// on PR #196): if the remote service hangs mid-call (e.g. crashes partway through a streaming
+/// `knowledge_rebuild_from_wal`), the previous unbounded `read_line` loop would hold the
+/// connection `Mutex` forever, permanently blocking every subsequent MCP call on this process.
+/// Applied per-`read_line` (not to the call as a whole) so a legitimately long-running streaming
+/// call that keeps emitting progress lines never trips it — only genuine silence does.
+const DEFAULT_ATTACHED_CALL_TIMEOUT_MS: u64 = 30_000;
+
 pub struct AttachedBackend {
     stream: Mutex<BufReader<UnixStream>>,
     next_id: AtomicU64,
+    call_timeout: Duration,
 }
 
 impl AttachedBackend {
@@ -36,9 +46,14 @@ impl AttachedBackend {
                  Ensure a liminis-context-graph socket service is running at this path."
             )
         })?;
+        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
         Ok(Self {
             stream: Mutex::new(BufReader::new(stream)),
             next_id: AtomicU64::new(1),
+            call_timeout: Duration::from_millis(call_timeout_ms),
         })
     }
 }
@@ -117,7 +132,23 @@ impl McpBackend for AttachedBackend {
 
         loop {
             let mut buf = String::new();
-            match guard.read_line(&mut buf).await {
+            let read_result =
+                match tokio::time::timeout(self.call_timeout, guard.read_line(&mut buf)).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        return IpcResponse::err(
+                            Value::Null,
+                            -32000,
+                            format!(
+                                "attached service call timed out after {}ms with no response \
+                                 (no data received — the remote service may have crashed or \
+                                 hung mid-call)",
+                                self.call_timeout.as_millis()
+                            ),
+                        );
+                    }
+                };
+            match read_result {
                 Ok(0) => {
                     return IpcResponse::err(
                         Value::Null,

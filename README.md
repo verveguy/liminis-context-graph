@@ -357,7 +357,10 @@ dispatch the socket service uses. No graph logic is duplicated in the MCP transp
 - **Attached (`--connect <socket-path>`)**: the MCP process never opens the database; it
   forwards each call over the given socket to a service that already has it open. Use this to
   add MCP access to a workspace where the Liminis app (or another socket-service instance) is
-  already running, without contending for lbug's single-writer lock.
+  already running, without contending for lbug's single-writer lock. If the remote service
+  stops responding mid-call (e.g. it crashes), the attached client fails that call with a clean
+  timeout error rather than blocking forever — tune the idle-read timeout (default 30s) via
+  `LCG_ATTACHED_CALL_TIMEOUT_MS`.
 
 ### Scopes
 
