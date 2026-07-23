@@ -646,22 +646,14 @@ async fn run_mcp_attached(
 /// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
 /// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
 /// drain bound after this function returns.
-async fn async_main(shutdown_timeout_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
+async fn async_main(
+    shutdown_timeout_ms: u64,
+    cli_mode: CliMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Sink is created first so migration events are captured before any other work.
     // TODO: LIMINIS_TELEMETRY_SOCKET — wire SocketSink here if env var is set
     let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
     let telemetry_sink: Arc<dyn lcg_core::TelemetrySink> = stderr_sink;
-
-    let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    let cli_mode = match cli::parse_args(&raw_args) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("liminis-context-graph: {e}");
-            drop(telemetry_sink);
-            sink_drain_handle.await.ok();
-            return Err(e.into());
-        }
-    };
 
     // Attached MCP mode never touches the workspace filesystem or migration state: it only
     // forwards calls over the given socket to a service that already owns the DB (FR-006).
@@ -791,6 +783,9 @@ async fn async_main(shutdown_timeout_ms: u64) -> Result<(), Box<dyn std::error::
         CliMode::Mcp {
             connect: Some(_), ..
         } => unreachable!("attached mode already returned earlier in main()"),
+        CliMode::Help | CliMode::Version => {
+            unreachable!("--help/--version handled in main() before the runtime is built")
+        }
     }
 }
 
@@ -809,10 +804,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(5_000);
 
+    // Parse argv before building the runtime so --help/--version (and argument errors) exit
+    // immediately without spinning up tokio or touching the workspace.
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let cli_mode = match cli::parse_args(&raw_args) {
+        Ok(CliMode::Help) => {
+            print!("{}", cli::usage());
+            return Ok(());
+        }
+        Ok(CliMode::Version) => {
+            println!("liminis-context-graph {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Ok(m) => m,
+        Err(e) => {
+            // Print the friendly message + usage ourselves and exit non-zero. Returning `Err`
+            // here would make the default handler *also* Debug-print the string with escaped
+            // newlines — an ugly second copy. exit(2) is the conventional usage-error code.
+            eprintln!("liminis-context-graph: {e}");
+            std::process::exit(2);
+        }
+    };
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let result = runtime.block_on(async_main(shutdown_timeout_ms));
+    let result = runtime.block_on(async_main(shutdown_timeout_ms, cli_mode));
     runtime.shutdown_timeout(Duration::from_millis(shutdown_timeout_ms));
     result
 }
