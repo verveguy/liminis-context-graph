@@ -175,11 +175,23 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 
 ### Release runbook (maintainers)
 
-1. Update `CHANGELOG.md`: rename `## [Unreleased]` to `## [x.y.z]`.
-2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. The release workflow builds all three platforms and publishes the GitHub Release automatically (~30–45 min).
+The release version lives in `[workspace.package]` in `Cargo.toml`; cargo-dist derives the
+release from it and **requires the pushed tag to match that version**, so the bump and the tag
+must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
+never commit release prep directly to `main` — then tag the merge commit.
 
-If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue, then re-tag and re-push.
+1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
+   `Cargo.toml` to `x.y.z` (both crates inherit it via `version.workspace = true`), then run
+   `cargo update -p lcg-core -p lcg-service` to sync the two workspace entries in `Cargo.lock`.
+2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`.
+3. **Open a PR and merge it** to `main` once CI is green.
+4. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+   The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
+5. The release workflow builds all three platforms and publishes the GitHub Release
+   automatically (~30–45 min).
+
+If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue on a
+branch, merge it, then re-tag the corrected commit and re-push.
 
 ## Scope
 
