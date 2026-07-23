@@ -125,6 +125,24 @@ print(call("knowledge_find_entities", {"query": "early computing pioneers", "num
 print(call("knowledge_status", {}, id=3))
 ```
 
+### Talk to it over MCP
+
+Or skip the socket entirely and run the graph as a native [MCP](https://modelcontextprotocol.io) server for Claude Code, Claude Desktop, or any MCP client — add it to your client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your-workspace"
+    }
+  }
+}
+```
+
+The client then sees the `knowledge_*` tools directly — no socket client to write. See [MCP-over-stdio transport](#mcp-over-stdio-transport) for scopes, attached mode, and the full flag reference.
+
 ### Build from source
 
 Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
