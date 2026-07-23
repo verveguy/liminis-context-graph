@@ -13,6 +13,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 - **Native MCP-over-stdio transport** (`--mcp-stdio`): the binary can now run as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout (via `rmcp`), exposing the `knowledge_*` methods as MCP tools to any client — Claude Code, Claude Desktop, other agents — with no Electron/Node dependency. Per-scope tool gating via `--scope` (`read` / `write` / `cypher` / `admin` / `all`); standalone mode opens the database directly, `--connect <sock>` attaches to an already-running service instead. Long operations bridge to MCP progress notifications. See the README's "MCP-over-stdio transport" section and [ADR-0035](docs/adr/0035-mcp-stdio-transport.md). (#195)
 
+### Changed
+
+- Bump lbug pin from 0.17.0 to 0.18.1 to pick up lbug 18's stability fixes. The Rust wrapper API (`SystemConfig`, `Database`, `Connection`, `Value`, error types, etc.) is unchanged between these versions, so this is a build-plumbing change, not a code change: `[workspace.metadata.dist.dependencies.apt]` now declares `libssl-dev` (already preinstalled on both Linux release runner images), and `.github/build-setup.yml` installs Homebrew's `openssl@3` on macOS release builds — 0.18.1's prebuilt static-link path links httplib against OpenSSL instead of 0.17.0's bundled mbedtls. See `docs/adr/0036-lbug-static-link-openssl-discovery.md`. No WAL or on-disk format changes; existing `.lcg/` workspaces continue to work unmodified.
+
 ### Fixed
 
 - Attached-mode MCP calls (`--connect`) now fail with a clean timeout error instead of blocking forever if the remote service stalls mid-call, and the JSON-RPC response id is validated so a late/stale reply can't be misdelivered to the next call (idle-read timeout `LCG_ATTACHED_CALL_TIMEOUT_MS`, default 30s). (#196)
