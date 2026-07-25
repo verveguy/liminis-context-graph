@@ -226,6 +226,20 @@ pub async fn add_episode(
     // empty-name extraction as a failure and do not create a node for it).
     extraction.entities.retain(|e| !e.name.trim().is_empty());
 
+    // Load the DB handle here (rather than at Phase B, below) so edge validation can fall back
+    // to a persisted-entity lookup for endpoints created in an earlier ingest batch (#209) —
+    // entities themselves already resolve globally via `get_entity_by_name_ci`, but until now
+    // edge endpoint validation only ever consulted the current batch's extraction result.
+    let db_shared = state.db.load_full().ok_or_else(|| {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        Error::DbUnavailable(reason)
+    })?;
+
     // Post-extraction edge validation: drop self-referential and unresolvable edges.
     {
         let entity_name_set: std::collections::HashSet<String> = extraction
@@ -233,6 +247,47 @@ pub async fn add_episode(
             .iter()
             .map(|e| e.name.trim().to_lowercase())
             .collect();
+
+        // Endpoint names referenced by edges but absent from this batch may still resolve
+        // against the persisted Entity table (e.g. a recurring hub entity created earlier).
+        // Collect the unique set of such names first so a batch with many edges to the same
+        // absent entity costs one lookup, not one per edge (FR-001, FR-003, FR-005).
+        let mut missing_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for edge in &extraction.edges {
+            let src_lower = edge.source_name.trim().to_lowercase();
+            let dst_lower = edge.target_name.trim().to_lowercase();
+            if src_lower == dst_lower {
+                continue; // self-referential; dropped below regardless of resolution.
+            }
+            if !entity_name_set.contains(&src_lower) {
+                missing_names.insert(src_lower);
+            }
+            if !entity_name_set.contains(&dst_lower) {
+                missing_names.insert(dst_lower);
+            }
+        }
+
+        let globally_resolved: std::collections::HashSet<String> = if missing_names.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            let gid_owned = group_id.to_string();
+            let names: Vec<String> = missing_names.into_iter().collect();
+            let db_v = Arc::clone(&db_shared);
+            tokio::task::spawn_blocking(
+                move || -> Result<std::collections::HashSet<String>, Error> {
+                    let conn = db_v.connect()?;
+                    let mut resolved = std::collections::HashSet::new();
+                    for name in names {
+                        if conn.get_entity_by_name_ci(&name, &gid_owned)?.is_some() {
+                            resolved.insert(name);
+                        }
+                    }
+                    Ok(resolved)
+                },
+            )
+            .await??
+        };
+
         extraction.edges.retain(|edge| {
             if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
                 eprintln!(
@@ -241,11 +296,15 @@ pub async fn add_episode(
                 );
                 return false;
             }
-            let src_ok = entity_name_set.contains(&edge.source_name.trim().to_lowercase());
-            let dst_ok = entity_name_set.contains(&edge.target_name.trim().to_lowercase());
+            let src_lower = edge.source_name.trim().to_lowercase();
+            let dst_lower = edge.target_name.trim().to_lowercase();
+            let src_ok =
+                entity_name_set.contains(&src_lower) || globally_resolved.contains(&src_lower);
+            let dst_ok =
+                entity_name_set.contains(&dst_lower) || globally_resolved.contains(&dst_lower);
             if !src_ok || !dst_ok {
                 eprintln!(
-                    "liminis-context-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_in_list={}, dst_in_list={})",
+                    "liminis-context-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
                     edge.source_name, edge.target_name, src_ok, dst_ok
                 );
                 return false;
@@ -284,15 +343,7 @@ pub async fn add_episode(
         return Err(Error::Cancelled);
     }
     // Fetch cosine candidates in a blocking pass, then verify each with DedupAdapter.
-    let db_shared = state.db.load_full().ok_or_else(|| {
-        let reason = state
-            .degraded_reason
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        Error::DbUnavailable(reason)
-    })?;
+    // `db_shared` was already loaded above, before edge validation (#209).
     let gid_b = group_id.to_string();
     let db_b = Arc::clone(&db_shared);
     let entity_count = tokio::task::spawn_blocking(move || {
@@ -483,23 +534,42 @@ pub async fn add_episode(
             }
         }
 
-        // name→uuid map for edge endpoint resolution
+        // name→uuid map for edge endpoint resolution. Keys are lowercase-normalized so a
+        // batch-internal case mismatch between an entity's extracted name and an edge's
+        // endpoint name doesn't fall through to the global fallback unnecessarily (#209).
         let name_to_uuid: std::collections::HashMap<String, String> = extraction
             .entities
             .iter()
             .enumerate()
-            .map(|(i, e)| (e.name.clone(), entity_uuids[i].clone()))
+            .map(|(i, e)| (e.name.trim().to_lowercase(), entity_uuids[i].clone()))
             .collect();
 
         // Insert relationship edges
         for (i, edge) in extraction.edges.iter().enumerate() {
-            let src_uuid = match name_to_uuid.get(&edge.source_name) {
-                Some(u) => u.clone(),
-                None => continue,
+            // An endpoint absent from this batch's name→uuid map may still resolve against the
+            // persisted Entity table (e.g. a recurring hub entity created in an earlier ingest
+            // batch that survived Site 1's validation via the same fallback) (FR-002, FR-003).
+            let src_uuid = match name_to_uuid.get(&edge.source_name.trim().to_lowercase()) {
+                Some(u) => Some(u.clone()),
+                None => conn
+                    .get_entity_by_name_ci(&edge.source_name, &gid_owned)?
+                    .map(|existing| existing.uuid),
             };
-            let dst_uuid = match name_to_uuid.get(&edge.target_name) {
-                Some(u) => u.clone(),
-                None => continue,
+            let dst_uuid = match name_to_uuid.get(&edge.target_name.trim().to_lowercase()) {
+                Some(u) => Some(u.clone()),
+                None => conn
+                    .get_entity_by_name_ci(&edge.target_name, &gid_owned)?
+                    .map(|existing| existing.uuid),
+            };
+            let (src_uuid, dst_uuid) = match (src_uuid, dst_uuid) {
+                (Some(s), Some(d)) => (s, d),
+                (src, dst) => {
+                    eprintln!(
+                        "liminis-context-graph: dropping edge at commit, unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
+                        edge.source_name, edge.target_name, src.is_some(), dst.is_some()
+                    );
+                    continue;
+                }
             };
             conn.insert_relates_to_edge(&RelatesToEdge {
                 uuid: uuid::Uuid::new_v4().to_string(),

@@ -91,3 +91,23 @@ fallback for near-matches.
   with the extracted type, per the spec edge case.
 - `count_entities_by_name_ci` was added to `Conn` for test assertions only; it is not called
   from production code paths.
+
+## Amendment (2026-07-24, issue #209)
+
+`get_entity_by_name_ci` is now also called from two edge-endpoint resolution sites in
+`episode.rs`, not just Phase B's entity dedup: the post-extraction edge validation predicate
+(falls back per unique missing endpoint name) and the Phase C commit-time name→uuid mapping
+(falls back per unresolved edge, inside the existing write-locked `spawn_blocking` closure).
+Previously, an edge referencing an entity created in an earlier ingest batch was silently
+dropped even though the entity already existed in the graph, because both sites only consulted
+the current batch's extraction result (#202).
+
+Both new call sites reuse this ADR's primitive as-is — same group scoping, same
+case-insensitive exact-match semantics, same earliest-created-wins determinism on duplicate
+names — and inherit its documented residual risks without modification:
+
+- **Full-table scan cost** applies per unique unresolved endpoint name, in addition to the
+  existing per-entity cost during Phase B dedup.
+- **TOCTOU race**: an entity resolved during (lock-free) edge validation could in principle be
+  removed before Phase C's commit; not mitigated further, consistent with this ADR's existing
+  position on concurrent-ingest races.
