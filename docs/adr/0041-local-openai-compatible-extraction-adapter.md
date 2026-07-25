@@ -56,12 +56,11 @@ performs no blocking call at startup. Foundation Models' first real generation c
 worse latency regression than the embedder's cheap embed-probe, for no benefit — the pre-existing
 Anthropic path (`AnthropicExtractor::from_env`) also performs zero startup verification.
 
-Tier-3 auto-detection ("is the sidecar up") is a cheap `Path::exists()` check on the default UDS
-socket path — identical in cost to the embedder's own tier-3 ladder branch — not a live RPC.
 Genuine unreachability surfaces at call time through the normal `Extractor` error path (FR-010),
 distinct from "no provider configured at all" (FR-011), which is a startup-time fatal error.
 
-### 3. Endpoint/provider selection precedence (FR-006), resolved once in `main.rs`
+### 3. Endpoint/provider selection precedence (FR-006), resolved once in `main.rs` — no socket
+   auto-detection tier
 
 `bootstrap_app_state` resolves one of three outcomes, highest priority first:
 
@@ -73,10 +72,21 @@ distinct from "no provider configured at all" (FR-011), which is a startup-time 
    pre-existing Anthropic path), byte-for-byte unchanged. This is the load-bearing
    backward-compatibility guarantee (FR-007): a reachable local sidecar never silently steals
    traffic from an already-configured hosted key.
-3. Neither of the above — auto-detect: default UDS socket (`/tmp/liminis-inference.sock`, the
-   same path family and process the embedder already defaults to) if present, else
-   `LCG_EXTRACTION_URL` env override, else a fatal, actionable startup error identifying the
-   missing configuration (FR-011).
+3. Neither of the above — `LCG_EXTRACTION_URL` env override if set, else a fatal, actionable
+   startup error identifying the missing configuration (FR-011).
+
+Deliberately **not** mirrored from the embedder: there is no "does the default UDS socket exist"
+auto-detection tier. The embedder's tier-3 ladder auto-selects `/tmp/liminis-inference.sock`
+whenever it's present, on the theory that a live sidecar is unambiguously good news for embedding
+quality. That reasoning does not transfer to extraction — the same sidecar's
+`/v1/chat/completions` route (Apple Foundation Models) was evaluated in prior work and found
+inadequate for entity/relationship extraction (see Consequences). A bare socket-existence check
+would silently select that specific backend the moment no `ANTHROPIC_API_KEY` is set, for every
+user who happens to have the sidecar running for embeddings — trading the "requires a hosted key"
+problem this issue set out to fix for an equally misleading "works with no setup" one. Selecting
+that same sidecar for extraction remains fully possible — pass `--extractor-uds
+/tmp/liminis-inference.sock` explicitly, or set `LCG_EXTRACTION_URL` — the change is only that
+tier 3 requires an explicit signal from the operator rather than inferring one from process state.
 
 A `extractor: provider=..., transport=..., endpoint=...` startup log line reports the resolved
 choice, mirroring the embedder's existing `embedder: transport=..., endpoint=..., dim=...` line.
@@ -127,20 +137,23 @@ possible for future work, but wiring them up is explicitly out of scope here.
   cannot be exercised against the real sidecar today — it exists for real OpenAI-compatible
   servers (vLLM, Ollama, LM Studio, ...) reached via `--extractor-http`, which do honor
   `max_tokens` and do emit `"length"`.
-- **Known limitation: the tier-3 auto-detected default (Apple Foundation Models via the bundled
-  sidecar) has prior evidence of inadequate extraction quality.** Private-repo evaluation
-  predating this issue (ported into this repo by #227/#228) assessed Apple Foundation Models for
-  entity/relationship extraction and found it unsuitable — insufficient context window and
-  capability for the task's quality bar — with a standing recommendation against wiring the
-  local-inference socket for extraction until a fresh capability pass. This ADR's `Extractor`
-  trait implementation and CLI/precedence-selection mechanism are unaffected by that finding (the
-  same `OaiExtractor` adapter works against any OpenAI-compatible endpoint, including
-  quality-verified local models per #227's rankings, via `--extractor-http`); what changes is that
-  tier-3 auto-detection — reached only when no `ANTHROPIC_API_KEY` and no explicit
-  `--extractor-uds`/`--extractor-http` flag are given — now logs an explicit startup warning
-  identifying this limitation, rather than silently selecting a backend with known-poor quality.
-  Resolving the quality gap itself (a stronger bundled default, or swapping in a
-  higher-quality local model) is tracked by #227/#228, not this ADR.
+- **Known limitation, and the reason Decision 3 has no socket-auto-detection tier: the bundled
+  sidecar's backend (Apple Foundation Models) has prior evidence of inadequate extraction
+  quality.** Private-repo evaluation predating this issue (ported into this repo by #227/#228)
+  assessed Apple Foundation Models for entity/relationship extraction and found it unsuitable —
+  insufficient context window and capability for the task's quality bar — with a standing
+  recommendation against wiring the local-inference socket for extraction until a fresh capability
+  pass. The same evaluation identified `qwen3.6-27b`, served via any OpenAI-compatible endpoint
+  (e.g. `mlx_lm.server`), as a local model that does clear the quality bar (judged F1
+  0.894/0.852/0.900 against a 0.990/0.978 hosted noise floor). This ADR's `Extractor` trait
+  implementation and CLI/precedence-selection mechanism are unaffected by that finding — the same
+  `OaiExtractor` adapter works against any OpenAI-compatible endpoint, including
+  quality-verified local models, via `--extractor-http`/`--extractor-uds`. What the finding changed
+  in this design is Decision 3: an operator can still point `--extractor-uds` at the bundled
+  sidecar and get exactly the behavior a bare auto-detection tier would have produced, but the
+  engine never makes that specific choice on the operator's behalf. Resolving the quality gap
+  itself (a stronger bundled default, or swapping in a higher-quality local model) is tracked by
+  #227/#228, not this ADR.
 
 ## Related
 

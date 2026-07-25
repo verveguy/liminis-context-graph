@@ -279,12 +279,20 @@ async fn bootstrap_app_state(
     // ── Extractor resolution (FR-006/FR-007) ───────────────────────────────────────
     // Priority: explicit CLI flag (always selects the local adapter, regardless of
     // ANTHROPIC_API_KEY) > ANTHROPIC_API_KEY set (Anthropic path, byte-for-byte unchanged,
-    // FR-015) > default UDS socket exists (sidecar auto-detected) > LCG_EXTRACTION_URL env >
-    // fatal error (FR-011). Unlike the embedder, there is no live probe here — extraction has
-    // no response shape to auto-detect, and a blocking Foundation-Models warm-up call would
-    // regress startup latency for no benefit. Reachability failures at call time surface
-    // through the normal `Extractor` error path (FR-010), not here.
-    const DEFAULT_EXTRACTOR_UDS_PATH: &str = "/tmp/liminis-inference.sock";
+    // FR-015) > LCG_EXTRACTION_URL env > fatal error (FR-011). Unlike the embedder, there is no
+    // live probe here — extraction has no response shape to auto-detect, and a blocking
+    // Foundation-Models warm-up call would regress startup latency for no benefit. Reachability
+    // failures at call time surface through the normal `Extractor` error path (FR-010), not here.
+    //
+    // Deliberately NOT mirrored from the embedder: no default-UDS-socket auto-detection tier.
+    // The bundled macOS sidecar's /v1/chat/completions route (Apple Foundation Models) was
+    // evaluated in prior work and found inadequate for entity/relationship extraction —
+    // insufficient context window and capability (see #227/#228). Silently selecting it just
+    // because the socket exists and no ANTHROPIC_API_KEY is set would trade a false "requires a
+    // hosted key" claim for an equally misleading "fully local extraction just works" one.
+    // Selecting that same sidecar remains possible — via explicit `--extractor-uds` or
+    // `LCG_EXTRACTION_URL` — it is simply never the silent default (see PR #223 review
+    // discussion).
     let extractor_model =
         std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
 
@@ -293,13 +301,6 @@ async fn bootstrap_app_state(
         Http(String),
         #[cfg(unix)]
         Uds(String),
-        // Same transport as `Uds`, but reached via tier-3 auto-detection (no explicit
-        // --extractor-uds/--extractor-http and no ANTHROPIC_API_KEY) rather than an operator's
-        // explicit choice. Kept distinct so the silent-default warning below (see #212 review
-        // discussion referencing #227/#228) only fires when the operator didn't ask for this
-        // endpoint by name.
-        #[cfg(unix)]
-        AutoDetectedUds(String),
     }
 
     let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
@@ -345,37 +346,18 @@ async fn bootstrap_app_state(
         // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
         // reachable local sidecar when no explicit local-endpoint flag was given.
         ResolvedExtractor::Anthropic
+    } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
+        ResolvedExtractor::Http(url)
     } else {
-        #[cfg(unix)]
-        {
-            if std::path::Path::new(DEFAULT_EXTRACTOR_UDS_PATH).exists() {
-                ResolvedExtractor::AutoDetectedUds(DEFAULT_EXTRACTOR_UDS_PATH.to_string())
-            } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
-                ResolvedExtractor::Http(url)
-            } else {
-                return Err(format!(
-                    "No extraction provider configured: ANTHROPIC_API_KEY is not set, the \
-                     default UDS socket {DEFAULT_EXTRACTOR_UDS_PATH} was not found, and \
-                     LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, pass \
-                     --extractor-uds or --extractor-http, or start the liminis-inference \
-                     sidecar."
-                )
-                .into());
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
-                ResolvedExtractor::Http(url)
-            } else {
-                return Err(format!(
-                    "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
-                     LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY or pass \
-                     --extractor-http."
-                )
-                .into());
-            }
-        }
+        return Err(
+            "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
+             LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into local \
+             extraction with --extractor-uds <path>, --extractor-http <url>, or \
+             LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
+             bundled macOS sidecar — note its Foundation Models backend is not recommended for \
+             extraction quality; see docs/adr/0038-local-openai-compatible-extraction-adapter.md)."
+                .into(),
+        );
     };
 
     let extractor: Arc<dyn Extractor> = match resolved_extractor {
@@ -399,24 +381,6 @@ async fn bootstrap_app_state(
             let (transport_label, endpoint) = ext.transport_info();
             eprintln!(
                 "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
-            );
-            Arc::new(ext)
-        }
-        #[cfg(unix)]
-        ResolvedExtractor::AutoDetectedUds(path) => {
-            let ext = OaiExtractor::new_uds(path, extractor_model, Arc::clone(&telemetry_sink));
-            let (transport_label, endpoint) = ext.transport_info();
-            eprintln!(
-                "extractor: provider=local, transport={transport_label}, endpoint={endpoint} \
-                 (auto-detected — no ANTHROPIC_API_KEY set)"
-            );
-            eprintln!(
-                "extractor: WARNING: extraction quality via the bundled macOS sidecar (Apple \
-                 Foundation Models) has not been independently verified for entity/relationship \
-                 extraction and is known to be limited (small context window, insufficient \
-                 capability for this task in prior evaluation). For production-quality \
-                 extraction, set ANTHROPIC_API_KEY or point --extractor-http/--extractor-uds at \
-                 a stronger OpenAI-compatible local model. See docs/adr/0038-local-openai-compatible-extraction-adapter.md."
             );
             Arc::new(ext)
         }
