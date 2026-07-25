@@ -782,7 +782,7 @@ enum ExtractTransport {
 
 /// Explicit JSON-shape instructions appended to the (reused, provider-agnostic) system prompts.
 /// The bundled macOS sidecar — and OpenAI-compatible servers generally — cannot be relied on
-/// for function-calling / tool-use (see ADR-0038), so structured output is coerced via
+/// for function-calling / tool-use (see ADR-0040), so structured output is coerced via
 /// `response_format: {"type": "json_object"}` plus a literal shape instruction rather than the
 /// Anthropic path's schema-enforced tool use.
 const ENTITY_JSON_INSTRUCTION: &str = "\n\nRespond with ONLY a single JSON object of the form \
