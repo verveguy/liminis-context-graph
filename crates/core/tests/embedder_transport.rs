@@ -126,6 +126,145 @@ async fn spawn_stub_uds_server(path: &std::path::Path, dim: usize) -> JoinHandle
     })
 }
 
+/// Like `write_http_response`, but omits `Connection: close` so the client can
+/// reuse the connection for a subsequent request (HTTP/1.1 keep-alive default).
+#[cfg(unix)]
+async fn write_http_response_keepalive(
+    writer: &mut (impl tokio::io::AsyncWriteExt + Unpin),
+    body: &str,
+) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    writer.write_all(response.as_bytes()).await.ok();
+}
+
+/// Like `read_http_request_body`, but distinguishes "client closed the
+/// connection before sending another request" (`None`) from a request with an
+/// empty body (`Some(vec![])`), so a keep-alive server can tell when to stop
+/// reading from a connection instead of busy-looping on repeated EOF reads.
+#[cfg(unix)]
+async fn read_http_request_body_keepalive(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> Option<Vec<u8>> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut content_length: usize = 0;
+    let mut saw_any_bytes = false;
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await.unwrap_or(0);
+        if n == 0 {
+            if !saw_any_bytes {
+                return None;
+            }
+            break;
+        }
+        saw_any_bytes = true;
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("content-length:") {
+            if let Some(v) = lower.split(':').nth(1) {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    if content_length > 0 {
+        use tokio::io::AsyncReadExt;
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body).await.ok();
+        Some(body)
+    } else {
+        Some(Vec::new())
+    }
+}
+
+/// A stub UDS server whose accepted connections stay alive across multiple
+/// requests. `shutdown()` tears down both the accept loop and every
+/// already-accepted connection, simulating the sidecar process dying.
+#[cfg(unix)]
+struct StubUdsKeepAliveServer {
+    accept_task: JoinHandle<()>,
+    conn_tasks: std::sync::Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+}
+
+#[cfg(unix)]
+impl StubUdsKeepAliveServer {
+    fn shutdown(&self) {
+        self.accept_task.abort();
+        for task in self.conn_tasks.lock().unwrap().drain(..) {
+            task.abort();
+        }
+    }
+}
+
+/// Spawns a keep-alive stub UDS server at `path`. Each accepted connection is
+/// read in a loop and reused for subsequent requests, rather than closed
+/// after one response — required to exercise connection pooling, since a
+/// `Connection: close` stub (see `spawn_stub_uds_server`) would force a
+/// re-dial on every call and hide pooling entirely. Returns the server handle
+/// and a shared counter of accepted connections.
+#[cfg(unix)]
+async fn spawn_stub_uds_keepalive_server(
+    path: &std::path::Path,
+    dim: usize,
+    per_request_delay: std::time::Duration,
+) -> (
+    StubUdsKeepAliveServer,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use tokio::io::BufReader;
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(path).unwrap();
+    let body = oai_response_json(dim);
+    let accept_count = Arc::new(AtomicUsize::new(0));
+    let accept_count_task = accept_count.clone();
+    let conn_tasks: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let conn_tasks_accept = conn_tasks.clone();
+
+    let accept_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accept_count_task.fetch_add(1, Ordering::SeqCst);
+            let response_body = body.clone();
+            let delay = per_request_delay;
+            let handle = tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                loop {
+                    let Some(request_body) = read_http_request_body_keepalive(&mut reader).await
+                    else {
+                        break;
+                    };
+                    assert_oai_request_body(&request_body);
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    write_http_response_keepalive(&mut write_half, &response_body).await;
+                }
+            });
+            conn_tasks_accept.lock().unwrap().push(handle);
+        }
+    });
+
+    (
+        StubUdsKeepAliveServer {
+            accept_task,
+            conn_tasks,
+        },
+        accept_count,
+    )
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -172,4 +311,98 @@ async fn uds_transport_probe_returns_dim_and_model() {
     let (probed_dim, probed_model) = embedder.probe().await.unwrap();
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
+}
+
+/// SC-001: an ingest producing many embeddings opens O(1) (pool-bounded, not
+/// O(N)) UDS connections. Against a keep-alive stub, 20 sequential embed()
+/// calls should reuse the pool's held connections rather than dialing fresh
+/// each time — accepted-connection count should stay at or below the pool
+/// size (4), not grow to 20.
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_connection_count_bounded() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("pool_bound_test.sock");
+    let dim = 16;
+    let (_server, accept_count) =
+        spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+
+    for _ in 0..20 {
+        embedder.embed("hello world").await.unwrap();
+    }
+
+    let accepted = accept_count.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        accepted <= 4,
+        "expected UDS connection count bounded by pool size, got {accepted} \
+         accepted connections for 20 sequential embed() calls"
+    );
+}
+
+/// SC-002: killing and restarting the sidecar mid-run causes at most one
+/// failed embed call internally, with the *caller-visible* call still
+/// succeeding transparently once the pool re-dials.
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_reconnects_after_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("restart_test.sock");
+    let dim = 16;
+    let (server1, _accept_count1) =
+        spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+
+    // Establish a pooled connection.
+    let first = embedder.embed("hello world").await.unwrap();
+    assert_eq!(first.len(), dim);
+
+    // Simulate the sidecar process dying and restarting: tear down the old
+    // server (accept loop + already-accepted connections) and remove its
+    // socket file so a fresh listener can bind at the same path.
+    server1.shutdown();
+    std::fs::remove_file(&sock_path).ok();
+    let (_server2, _accept_count2) =
+        spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
+
+    // The next embed call transparently re-dials once and succeeds — no
+    // manual retry needed by the caller.
+    let second = embedder.embed("hello again").await.unwrap();
+    assert_eq!(second.len(), dim);
+}
+
+/// SC-003: parallel embedding throughput must be no worse than the
+/// per-request-dial implementation. HTTP/1.1 serializes one in-flight request
+/// per connection, so a single held connection would fully serialize
+/// concurrent calls; the pool must let them proceed in parallel instead. This
+/// asserts wall-clock for N concurrent calls is well under N * per-call-delay
+/// (full serialization), with a generous margin to avoid CI flakiness.
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_concurrent_calls_not_fully_serialized() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("concurrent_test.sock");
+    let dim = 16;
+    let per_request_delay = std::time::Duration::from_millis(50);
+    let (_server, _accept_count) =
+        spawn_stub_uds_keepalive_server(&sock_path, dim, per_request_delay).await;
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+
+    let concurrent_calls = 8; // 2x pool size, so pool reuse is also exercised
+    let start = std::time::Instant::now();
+    let results =
+        futures::future::join_all((0..concurrent_calls).map(|_| embedder.embed("hello world")))
+            .await;
+    let elapsed = start.elapsed();
+
+    for result in results {
+        assert_eq!(result.unwrap().len(), dim);
+    }
+
+    let fully_serial = per_request_delay * concurrent_calls;
+    assert!(
+        elapsed < fully_serial / 2,
+        "expected concurrent calls to parallelize across the pool \
+         (elapsed {elapsed:?} should be well under fully-serial {fully_serial:?})"
+    );
 }
