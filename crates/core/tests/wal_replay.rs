@@ -433,6 +433,207 @@ fn test_match_set_on_nonexistent_node_counts_as_no_op() {
     );
 }
 
+/// Review finding: a `MATCH ... DETACH DELETE` targeting a nonexistent node must land in the
+/// distinct `match_delete_no_op` counter, not `match_prefixed_no_op` — DELETE-form zero-row
+/// matches are routinely legitimate (already-deleted target, or ADR-0026's intentional
+/// WAL-tail-resume overlap), unlike SET-form no-ops which always indicate an out-of-order write.
+#[test]
+fn test_match_delete_on_nonexistent_node_counts_as_delete_no_op() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"MATCH (ep:Episodic {uuid: 'never-created'}) DETACH DELETE ep","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.match_delete_no_op, 1,
+        "a MATCH-DETACH-DELETE targeting a nonexistent node must be counted as a delete no-op"
+    );
+    assert_eq!(
+        stats.match_prefixed_no_op, 0,
+        "a delete no-op must not be counted in the SET-form no-op counter"
+    );
+    assert_eq!(
+        stats.lines_replayed, 0,
+        "a no-op DETACH DELETE must not inflate lines_replayed"
+    );
+}
+
+/// Review finding: routine DETACH-DELETE no-ops (e.g. re-deleting an already-deleted target,
+/// as ADR-0026's WAL-tail-resume overlap intentionally does on every startup recovery) must NOT
+/// trip the fidelity-warning ratio the way SET-form no-ops do — otherwise a normal, healthy
+/// recovery would report "rebuilt graph may be incomplete".
+#[test]
+fn test_match_delete_no_op_does_not_feed_fidelity_warning() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // 11 no-op DETACH-DELETEs (target never existed) + 1 successful MERGE — the same ratio
+    // that trips fidelity_warning for SET-form no-ops in
+    // `test_match_prefixed_no_op_feeds_fidelity_warning` below.
+    let no_op_line = |seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MATCH (ep:Episodic {{uuid: 'missing-{seq}'}}) DETACH DELETE ep","params":{{}}}}"#
+        )
+    };
+    let good_line = make_entity_line(11, "delete-no-op-fidelity-ok");
+    let content: String = (0..11u64)
+        .map(no_op_line)
+        .chain(std::iter::once(good_line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_delnoop_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(stats.match_delete_no_op, 11);
+    assert_eq!(stats.lines_replayed, 1);
+    assert!(
+        stats.fidelity_warning.is_none(),
+        "routine delete no-ops must not trip fidelity_warning: {:?}",
+        stats.fidelity_warning
+    );
+}
+
+/// Review finding: a `MATCH`-prefixed WAL line that already ends in its own `RETURN` clause —
+/// reachable via `knowledge_query_cypher`'s arbitrary-Cypher WAL logging, not just this
+/// codebase's own hand-written templates — must not lose its write when replay's `RETURN
+/// count(*)` no-op probe can't be appended to it. `flush_batch` must fall back to the unmodified
+/// template and pre-FR-005 accounting rather than misclassifying it as `failed_lines`.
+#[test]
+fn test_match_set_with_existing_return_clause_falls_back_and_still_applies() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // First create the target, then a MATCH...SET...RETURN line — exactly the shape
+    // `knowledge_query_cypher` would WAL-log verbatim for arbitrary user Cypher that both
+    // mutates and returns a value.
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'return-clause-entity', name: 'N', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 'initial', attributes: '{}'})","params":{}}"#;
+    let set_with_return_line = r#"{"seq":1,"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'return-clause-entity'}) SET n.summary = 'updated-via-return' RETURN n.uuid","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{create_line}\n{set_with_return_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines,
+        0,
+        "the probe-prepare fallback must prevent a pre-existing RETURN clause from failing \
+         the whole batch: {:?}",
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both the CREATE and the SET-with-RETURN must have replayed successfully"
+    );
+
+    let entity = conn
+        .get_entity_by_uuid("return-clause-entity")
+        .expect("query ok")
+        .expect("entity must exist");
+    assert_eq!(
+        entity.summary, "updated-via-return",
+        "the SET must have actually applied despite its own RETURN clause blocking the no-op probe"
+    );
+}
+
+/// Review finding: `first_seq_in_file` must not abandon an entire file's ordering just because
+/// its first line is corrupt/unparseable — it should keep scanning for the first line that DOES
+/// parse, mirroring `wal::read_last_seq`'s tolerance. A file relegated to filename-order fallback
+/// over a single bad leading line could sort after files it should precede.
+#[test]
+fn test_replay_tolerates_corrupt_first_line_when_determining_file_order() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // File "aaa" (should sort first by seq): a garbled/truncated first line, then a valid
+    // seq=0 CREATE. Full-filename order would already place this first, so name the *other*
+    // file so that filename-fallback order would get it wrong if the corrupt line caused this
+    // file's key to be indeterminate.
+    let corrupt_first_line = "{not valid json at all";
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'corrupt-first-line-entity', name: 'N', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 'initial', attributes: '{}'})","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_030000_zzz999_0000.jsonl"),
+        format!("{corrupt_first_line}\n{create_line}\n"),
+    )
+    .unwrap();
+
+    // File "aaa111" (seq 1): sorts before "zzz999" by filename, but must replay AFTER it
+    // because its seq (1) is greater — same crash-restart scenario as
+    // `test_replay_reorders_files_by_seq_not_filename`, just with a corrupted leading line on
+    // the file that must sort first.
+    let set_line = r#"{"seq":1,"ts":"2026-05-19T03:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'corrupt-first-line-entity'}) SET n.summary = 'updated'","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_030000_aaa111_0000.jsonl"),
+        format!("{set_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.seq_regressions, 0,
+        "the corrupt leading line must not prevent correct seq-based ordering"
+    );
+    assert_eq!(
+        stats.match_prefixed_no_op, 0,
+        "the SET must find its target — the CREATE-bearing file must still sort first despite \
+         its corrupt leading line"
+    );
+
+    let entity = conn
+        .get_entity_by_uuid("corrupt-first-line-entity")
+        .expect("query ok")
+        .expect("entity must exist");
+    assert_eq!(entity.summary, "updated");
+}
+
 /// FR-006: a high match_prefixed_no_op rate is folded into the fidelity-warning ratio, just
 /// like failed_lines is.
 #[test]

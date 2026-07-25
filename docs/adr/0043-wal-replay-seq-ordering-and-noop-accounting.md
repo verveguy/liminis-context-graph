@@ -103,12 +103,24 @@ result shape isn't a recognized numeric type — failing toward *not* inflating 
 rather than toward silently losing writes, in case a future lbug version changes `count(*)`'s
 result shape.
 
-### Fidelity ratio: `match_prefixed_no_op` joins both sides
+**Probe-prepare fallback.** WAL lines are not limited to this codebase's own hand-written
+templates: `handlers.rs::handle_query_cypher` WAL-logs arbitrary user Cypher verbatim (any
+mutation reachable via `knowledge_query_cypher`), so a `MATCH`-prefixed line can already end in
+its own `RETURN` clause — appending a second `RETURN count(*)` to such a line makes it fail to
+`prepare()`. Found during review of the initial version of this fix, which appended the probe
+unconditionally and had no fallback: that variant would have turned a WAL line that replayed
+fine before this fix into a `failed_lines` count for every row sharing that template — new data
+loss introduced by the no-op-detection mechanism itself. `flush_batch` now tries `prepare()` on
+the probed template first; if that's rejected, it logs a `[WAL WARN]` line and retries
+`prepare()` on the unmodified template, falling back to pre-FR-005 accounting (the batch's rows
+are counted as plain successes, with no no-op distinction available) rather than losing them.
+
+### Fidelity ratio: `match_prefixed_no_op` joins both sides — `match_delete_no_op` does not
 
 `ReplayStats::fidelity_warning` already computed `failed_lines / (lines_replayed +
-failed_lines)`. Since the no-op fix above *removes* no-ops from `lines_replayed` (they used to be
-folded in), they must also join the denominator, or the ratio would never reflect them at all —
-defeating the purpose of surfacing them. The updated computation is:
+failed_lines)`. Since the no-op fix above *removes* SET-form no-ops from `lines_replayed` (they
+used to be folded in), they must also join the denominator, or the ratio would never reflect them
+at all — defeating the purpose of surfacing them. The updated computation is:
 
 ```text
 total       = lines_replayed + failed_lines + match_prefixed_no_op
@@ -118,16 +130,38 @@ ratio       = ineffective / total
 
 `legacy_skipped_lines` stays excluded from both sides, exactly as before this fix.
 
-### `match_prefixed_no_op` vs. ADR-0026's resume-overlap no-op — deliberately distinct
+Critically, only **SET-form** `MATCH`-prefixed no-ops (`match_prefixed_no_op`) join this ratio.
+**DELETE-form** `MATCH`-prefixed no-ops (`MATCH ... DETACH DELETE`, `MATCH ... DELETE`) are
+counted in a separate `match_delete_no_op` field that is deliberately excluded from the ratio —
+see the next section for why.
 
-`recovery.rs`'s WAL-tail-resume replay intentionally re-applies an overlapping `seq` range on
-every startup recovery (ADR-0026); it treats that overlap as idempotent because `MERGE`s are
-no-ops and `CREATE`-form statements collide harmlessly. Neither of those statement forms is
-`MATCH`-prefixed, so ADR-0026's expected, harmless overlap never touches
-`match_prefixed_no_op` — this counter is reserved for the data-loss scenario this issue targets
-(an out-of-order or otherwise unintended zero-row `MATCH`-write), not for the resume path's
-by-design idempotent replay. A future reader extending either mechanism should keep this
-distinction in test naming/comments rather than conflating the two kinds of "no-op."
+### `match_prefixed_no_op` (SET-form) vs. `match_delete_no_op` (DELETE-form) vs. ADR-0026's resume-overlap
+
+An earlier version of this ADR claimed `recovery.rs`'s WAL-tail-resume replay (ADR-0026) never
+affects the no-op counter, reasoning that its intentional overlap only re-runs `MERGE`s (which
+always produce a summary row) and `CREATE`-form statements, neither of which is `MATCH`-prefixed.
+**That claim was wrong** — `Db::remove_episode` and friends (`db.rs`) issue
+`MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep`-shaped mutations, which *are*
+`MATCH`-prefixed and *are* WAL-recorded. ADR-0026's overlap window re-applies whatever `seq`
+range wasn't yet checkpointed on every startup recovery, so a `DETACH DELETE` whose target was
+already removed earlier in that same overlap — or in a prior recovery — matches zero rows on
+every single healthy recovery, not just a rare crash-loop edge case.
+
+Found during review: folding that routine, correct-by-design zero-row match into the same ratio
+as a SET-form no-op (which has no legitimate cause other than an out-of-order write) would make
+a normal, successful recovery report `fidelity_warning: "rebuilt graph may be incomplete"` —
+exactly the kind of false alarm that erodes trust in the signal this issue exists to introduce.
+The fix splits the single no-op counter into two:
+
+- `match_prefixed_no_op` — SET-form zero-row matches. Always suspicious (no legitimate cause),
+  factored into `fidelity_warning`.
+- `match_delete_no_op` — DELETE-form zero-row matches. Routinely legitimate (already-deleted
+  target, or ADR-0026's by-design idempotent overlap), tracked but **excluded** from
+  `fidelity_warning`.
+
+A future reader extending either mechanism should keep this SET-vs-DELETE distinction — not just
+a MATCH-vs-non-MATCH one — in test naming/comments rather than conflating the two kinds of
+"no-op."
 
 ## Consequences
 
@@ -135,20 +169,21 @@ distinction in test naming/comments rather than conflating the two kinds of "no-
   `knowledge_rebuild_from_wal`, `recovery.rs`'s WAL-tail-resume, and `handlers.rs`'s
   `recover_rebuild_from_workspace_wal` — gets both fixes automatically at every call site; no
   call-site changes were needed beyond `open_or_rebuild`'s own stats-plumbing fix (FR-001/002).
-- `ReplayStats` gained two fields (`match_prefixed_no_op`, `seq_regressions`); existing callers
-  that construct or read this struct only additively are unaffected. Neither field is threaded
-  into `TelemetryEvent::WalReplayComplete` or the ad hoc JSON responses in `handlers.rs` — this
-  was a deliberate scoping decision (see the Plan stage discussion on issue #237); a future issue
-  can wire them through if an operator-facing need arises.
+- `ReplayStats` gained three fields (`match_prefixed_no_op`, `match_delete_no_op`,
+  `seq_regressions`); existing callers that construct or read this struct only additively are
+  unaffected. None of the three are threaded into `TelemetryEvent::WalReplayComplete` or the ad
+  hoc JSON responses in `handlers.rs` — this was a deliberate scoping decision (see the Plan
+  stage discussion on issue #237); a future issue can wire them through if an operator-facing
+  need arises.
 - Each file's first line is now read twice during replay (sort key + main pass) — negligible at
   realistic WAL-directory scale, but a future perf-sensitive change to replay's I/O pattern should
   account for this.
-- A future contributor adding a new `MATCH`-prefixed write template must not assume it already
-  ends in `RETURN` — `with_match_count_probe` appends `RETURN count(*)` unconditionally to every
-  `MATCH`-prefixed template's batch (checked against all current call sites at the time of this
-  fix: `db.rs`, `canonicalize.rs`, `episode.rs`, `reprocess_relations.rs`; none end in `RETURN`).
-  If one ever did, the worst case is a `prepare()` failure classified as `failed_lines` — an
-  existing, visible category, not a silent regression.
+- A `MATCH`-prefixed write template that already ends in its own `RETURN` clause — reachable via
+  `knowledge_query_cypher`'s arbitrary-Cypher WAL logging, not just this codebase's own
+  hand-written templates (`db.rs`, `canonicalize.rs`, `episode.rs`, `reprocess_relations.rs`,
+  none of which end in `RETURN`) — is handled by the probe-prepare fallback in `flush_batch`:
+  the batch replays with pre-FR-005 accounting (no no-op distinction, but no data loss) rather
+  than failing to prepare.
 
 ## Alternatives Considered
 
@@ -167,6 +202,15 @@ distinction in test naming/comments rather than conflating the two kinds of "no-
 - **Thread the new counters into `TelemetryEvent::WalReplayComplete` and the JSON IPC
   responses**: deferred as out of scope for this issue — nothing in the functional requirements
   required it, and it would have touched three additional call sites beyond what this fix needed.
+- **Fold DELETE-form zero-row matches into the same `match_prefixed_no_op` counter/ratio as
+  SET-form**: rejected after review found this makes routine ADR-0026 resume-overlap deletes and
+  already-deleted targets trip `fidelity_warning` on healthy recoveries. Split into
+  `match_delete_no_op` (tracked, excluded from the ratio) instead.
+- **Append the `RETURN count(*)` probe unconditionally with no fallback**: rejected after review
+  found `knowledge_query_cypher` can WAL-log a `MATCH`-prefixed line that already ends in its own
+  `RETURN`, which the unconditional append would turn into an unpreparable statement — new data
+  loss from the no-op-detection fix itself. `flush_batch` now retries with the unmodified
+  template when the probed one fails to prepare.
 
 ## References
 

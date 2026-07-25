@@ -67,18 +67,29 @@ pub struct ReplayStats {
     /// match_prefixed_no_op) > threshold` after replay completes. Threshold defaults to 10% and
     /// is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
     pub fidelity_warning: Option<String>,
-    /// `MATCH`-prefixed mutations (`MATCH ... SET`, `MATCH ... DETACH DELETE`, etc.) whose
-    /// execution affected zero rows — e.g. the target node hadn't been created yet (an
-    /// out-of-order write) or was legitimately deleted earlier. Counted separately from
-    /// `lines_replayed`/`match_prefixed_replayed` so a no-op is never reported as a successful
-    /// write (FR-005); factored into the `fidelity_warning` ratio (FR-006). Detected via a
-    /// `RETURN count(*)` probe appended to the template — see `with_match_count_probe`.
+    /// SET-form `MATCH`-prefixed mutations (`MATCH ... SET`, entity-type relabelling, edge
+    /// invalidation, etc. — anything MATCH-prefixed that is not a DELETE) whose execution
+    /// affected zero rows. A SET-form zero-row match has no legitimate cause other than an
+    /// out-of-order write targeting a node that doesn't exist yet, so this is the counter that
+    /// actually signals data loss. Counted separately from `lines_replayed`/
+    /// `match_prefixed_replayed` so a no-op is never reported as a successful write (FR-005);
+    /// factored into the `fidelity_warning` ratio (FR-006). Detected via a `RETURN count(*)`
+    /// probe appended to the template — see `with_match_count_probe`.
     ///
-    /// Note: this is distinct from the intentional, harmless re-application overlap at the head
-    /// of `recovery.rs`'s WAL-tail-resume replay (ADR-0026) — that overlap re-runs `MERGE`s
-    /// (which always produce a summary row) and `CREATE`-form statements, neither of which are
-    /// `MATCH`-prefixed, so it never inflates this counter.
+    /// DELETE-form `MATCH`-prefixed zero-row matches (`MATCH ... DETACH DELETE`) are counted in
+    /// [`Self::match_delete_no_op`] instead — see that field for why they're kept separate and
+    /// excluded from the fidelity ratio.
     pub match_prefixed_no_op: u64,
+    /// DELETE-form `MATCH`-prefixed mutations (`MATCH ... DETACH DELETE`, `MATCH ... DELETE`)
+    /// whose execution affected zero rows — e.g. the target was already deleted by an earlier
+    /// line. Counted separately from `lines_replayed`/`match_prefixed_replayed` (FR-005) but
+    /// **excluded** from the `fidelity_warning` ratio, unlike [`Self::match_prefixed_no_op`]:
+    /// `recovery.rs`'s WAL-tail-resume replay intentionally re-applies an overlapping `seq`
+    /// range on every startup recovery (ADR-0026), and re-running an already-applied
+    /// `DETACH DELETE` matches zero rows on every single healthy recovery — folding that into
+    /// the same ratio as SET-form no-ops would make a routine, correct recovery report
+    /// "rebuilt graph may be incomplete".
+    pub match_delete_no_op: u64,
     /// Count of WAL lines whose `seq` was not strictly greater than the maximum `seq` already
     /// seen in this `replay_opts` call, in processing order (FR-004). A regression means the
     /// file-ordering heuristic (see the file sort in `replay_opts`) placed a file out of true
@@ -205,6 +216,7 @@ impl WalReplayer {
             legacy_skipped_lines: 0,
             fidelity_warning: None,
             match_prefixed_no_op: 0,
+            match_delete_no_op: 0,
             seq_regressions: 0,
         };
 
@@ -577,22 +589,28 @@ impl ReplayBatch {
     }
 }
 
-/// Reads a WAL file's first non-empty line and returns its `seq` value — the ordering key used
-/// to sort files in `replay_opts` (FR-003). Returns `None` if the file can't be opened, has no
-/// non-empty lines, or that first line fails JSON parsing; callers fall back to filename order
-/// for such files (a rare, honestly-approximate placement — any resulting misordering is caught
-/// by the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
+/// Reads a WAL file and returns the `seq` value of its first line that parses successfully —
+/// the ordering key used to sort files in `replay_opts` (FR-003). Returns `None` only if the
+/// file can't be read at all or no line in it parses; callers fall back to filename order for
+/// such files (a rare, honestly-approximate placement — any resulting misordering is caught by
+/// the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
+///
+/// Tolerates a corrupt/truncated/non-UTF-8 leading line by skipping it and continuing, mirroring
+/// `wal::read_last_seq`'s tolerance — an early `.ok()?` bail on just the first line would
+/// relegate a file with thousands of good lines to the back of the replay order over a single
+/// crash-truncated line, exactly the kind of WAL corruption the main replay loop already
+/// tolerates line-by-line.
 fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line.ok()?;
-        let trimmed = line.trim();
+    let content = fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&content);
+    for raw in text.lines() {
+        let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let wal_line: WalLine = serde_json::from_str(trimmed).ok()?;
-        return Some(wal_line.seq);
+        if let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) {
+            return Some(wal_line.seq);
+        }
     }
     None
 }
@@ -606,6 +624,21 @@ fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
 fn with_match_count_probe(template: &str) -> String {
     let trimmed = template.trim().trim_end_matches(';').trim_end();
     format!("{trimmed} RETURN count(*)")
+}
+
+/// Returns true if a `MATCH`-prefixed `template` is DELETE-form (`MATCH ... DETACH DELETE` /
+/// `MATCH ... DELETE`) rather than SET-form. Delete-form zero-row matches are routinely
+/// legitimate — the target was already deleted by an earlier line, or `recovery.rs`'s
+/// WAL-tail-resume replay intentionally re-applies an overlapping `seq` range on every startup
+/// (ADR-0026) and re-running an already-applied delete matches nothing — whereas a SET-form
+/// zero-row match has no legitimate cause other than an out-of-order write targeting a node that
+/// doesn't exist yet. The two are tracked in separate counters (`match_delete_no_op` vs.
+/// `match_prefixed_no_op`) so routine delete replay never inflates the fidelity-warning ratio.
+fn is_delete_form(template: &str) -> bool {
+    let upper = template.to_uppercase();
+    strip_quoted_literals(&upper)
+        .split_whitespace()
+        .any(|t| t == "DELETE")
 }
 
 /// Executes accumulated batch mutations against `conn` via prepared-statement binding.
@@ -625,6 +658,15 @@ fn with_match_count_probe(template: &str) -> String {
 /// carries the same flag value, and checking the batch's shape once (via the first row) is
 /// sufficient to decide whether to apply the `RETURN count(*)` probe (FR-005), not an
 /// approximation.
+///
+/// For a `MATCH`-prefixed batch, the probe template is tried first; if `prepare()` rejects it,
+/// replay falls back to the unmodified template with pre-FR-005 accounting (no no-op
+/// distinction, but no data loss either). This matters because WAL lines are not limited to
+/// this codebase's own hand-written templates — `knowledge_query_cypher` WAL-logs arbitrary
+/// user Cypher verbatim (`handlers.rs::handle_query_cypher`), so a MATCH-prefixed line can
+/// already end in its own `RETURN` clause. Appending a second `RETURN count(*)` to such a line
+/// makes it fail to prepare; without this fallback every row sharing that template would be
+/// misclassified as `failed_lines` — new data loss introduced by the no-op-detection fix itself.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
@@ -638,40 +680,72 @@ fn flush_batch(
     let match_prefixed = std::mem::take(&mut batch.match_prefixed);
 
     let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
-    let prepare_template = if is_match_prefixed_batch {
-        with_match_count_probe(&batch.template)
-    } else {
-        batch.template.clone()
-    };
+    let is_delete_form_batch = is_match_prefixed_batch && is_delete_form(&batch.template);
 
-    let mut prepared = match conn.prepare(&prepare_template) {
-        Ok(p) => p,
-        Err(e) => {
-            let err_str = e.to_string();
-            for _ in &match_prefixed {
-                classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
+    let (mut prepared, use_probe) = if is_match_prefixed_batch {
+        let probed_template = with_match_count_probe(&batch.template);
+        match conn.prepare(&probed_template) {
+            Ok(p) => (p, true),
+            Err(probe_err) => {
+                eprintln!(
+                    "[WAL WARN] RETURN count(*) probe rejected by prepare() ({probe_err}); \
+                     falling back to unprobed replay for this batch (no-op detection \
+                     unavailable for these rows) — probed template: {probed_template:?}"
+                );
+                match conn.prepare(&batch.template) {
+                    Ok(p) => (p, false),
+                    Err(e) => {
+                        let err_str = e.to_string();
+                        for _ in &match_prefixed {
+                            classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
+                        }
+                        batch.clear();
+                        return;
+                    }
+                }
             }
-            batch.clear();
-            return;
+        }
+    } else {
+        match conn.prepare(&batch.template) {
+            Ok(p) => (p, false),
+            Err(e) => {
+                let err_str = e.to_string();
+                for _ in &match_prefixed {
+                    classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
+                }
+                batch.clear();
+                return;
+            }
         }
     };
 
     for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
         let params = serde_json::Value::Object(row);
-        if is_match_prefixed {
+        if is_match_prefixed && use_probe {
             match conn.execute_prepared_returning_count(&mut prepared, &params) {
                 Ok(count) if count > 0 => {
                     stats.lines_replayed += 1;
                     stats.match_prefixed_replayed += 1;
                 }
-                Ok(_) => stats.match_prefixed_no_op += 1,
+                Ok(_) => {
+                    if is_delete_form_batch {
+                        stats.match_delete_no_op += 1;
+                    } else {
+                        stats.match_prefixed_no_op += 1;
+                    }
+                }
                 Err(e) => {
                     classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
                 }
             }
         } else {
             match conn.execute_prepared(&mut prepared, &params) {
-                Ok(_) => stats.lines_replayed += 1,
+                Ok(_) => {
+                    stats.lines_replayed += 1;
+                    if is_match_prefixed {
+                        stats.match_prefixed_replayed += 1;
+                    }
+                }
                 Err(e) => {
                     classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
                 }
