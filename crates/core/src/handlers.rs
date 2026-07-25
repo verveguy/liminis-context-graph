@@ -17,7 +17,7 @@ use crate::{
     ontology_sidecar,
     rebuild_job::{JobStatus, RebuildJob},
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
-    search,
+    reprocess_relations, search,
     telemetry::{now_ms, TelemetryEvent},
     types::SourceType,
     wal::WalWriter,
@@ -132,6 +132,9 @@ async fn handle(
         }
         "knowledge_backfill_relation_types" => {
             handle_backfill_relation_types(req, state, progress_tx).await
+        }
+        "knowledge_reprocess_relation_types" => {
+            handle_reprocess_relation_types(req, state, progress_tx).await
         }
         _ => Err(Error::Ipc(format!("Method not found: {}", req.method))),
     }
@@ -2240,6 +2243,65 @@ async fn handle_backfill_relation_types(
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
     let params = backfill::BackfillParams { dry_run };
     backfill::backfill_relation_types(state, params, progress_tx).await
+}
+
+// ── Relation reprocessing handler (issue #210) ───────────────────────────────
+
+/// Fact-based LLM relation classification: the relation-side twin of
+/// `handle_reprocess_entity_types`. Unlike that handler, every scope value requires a declared
+/// ontology relation-type menu (FR-002/A1) — there is no open-ended fallback.
+async fn handle_reprocess_relation_types(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let group_id = req.params["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+
+    let scope = match req.params["scope"].as_str().unwrap_or("untyped") {
+        "untyped" => reprocess_relations::RelationReprocessScope::Untyped,
+        "off_ontology" => reprocess_relations::RelationReprocessScope::OffOntology,
+        "all" => reprocess_relations::RelationReprocessScope::All,
+        other => {
+            return Ok(json!({
+                "success": false,
+                "error": format!(
+                    "unknown scope '{other}'; valid values: untyped, off_ontology, all"
+                ),
+            }));
+        }
+    };
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+
+    // FR-002: every scope requires a declared ontology relation-type menu — relation
+    // classification has no open-ended/unconstrained mode (A1).
+    let ontology = match state.ontology.as_ref() {
+        Some(o) if o.has_relation_types() => Arc::clone(o),
+        Some(_) => {
+            return Ok(json!({
+                "success": false,
+                "error": "the configured ontology declares no relation types; \
+                          knowledge_reprocess_relation_types requires at least one",
+            }));
+        }
+        None => {
+            return Ok(json!({
+                "success": false,
+                "error": "knowledge_reprocess_relation_types requires a workspace ontology with \
+                          relation_types defined in .lcg/ontology.yaml",
+            }));
+        }
+    };
+
+    let params = reprocess_relations::ReprocessRelationsParams {
+        group_id,
+        scope,
+        dry_run,
+    };
+
+    reprocess_relations::reprocess_relation_types(state, params, progress_tx, ontology).await
 }
 
 // ── Recovery handler ─────────────────────────────────────────────────────────

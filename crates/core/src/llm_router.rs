@@ -136,6 +136,52 @@ impl LlmRouter {
         }
     }
 
+    async fn do_classify_relations(
+        &self,
+        edges: &[(&str, &str)],
+        allowed_types: &[(String, Option<String>)],
+    ) -> Result<Vec<String>, Error> {
+        if !self
+            .primary_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            match self.primary.classify_relations(edges, allowed_types).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    if let Some(fb) = &self.fallback {
+                        if self
+                            .primary_failed
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            self.sink.emit(TelemetryEvent::LlmFallback {
+                                ts_ms: now_ms(),
+                                role: "relation_classification".to_string(),
+                                primary_model: self.primary_model_name.clone(),
+                                fallback_model: self.fallback_model_name.clone(),
+                                error_reason: err.to_string(),
+                            });
+                        }
+                        return fb.classify_relations(edges, allowed_types).await;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        if let Some(fb) = &self.fallback {
+            fb.classify_relations(edges, allowed_types).await
+        } else {
+            Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            ))
+        }
+    }
+
     async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
         // primary_failed is only ever set to true when a fallback is configured, so if it is
         // true here there must be a fallback to try.
@@ -197,5 +243,13 @@ impl Extractor for LlmRouter {
         allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_entities(entities, allowed_types))
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(self.do_classify_relations(edges, allowed_types))
     }
 }

@@ -52,6 +52,18 @@ pub trait Extractor: Send + Sync {
         entities: &'a [(&'a str, &'a str)],
         allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
+
+    /// Classifies relation types for a batch of `(fact, current_type)` pairs.
+    ///
+    /// Returns a `Vec<String>` of the same length as `edges`. Each entry is either a name
+    /// from `allowed_types`, or an empty string if the LLM honestly cannot map the fact to any
+    /// declared type (abstention). Unlike [`Extractor::classify_entities`], `allowed_types` is
+    /// always required and non-empty — relation classification has no open-ended mode.
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
 }
 
 // ── AnthropicExtractor ────────────────────────────────────────────────────────
@@ -507,6 +519,114 @@ impl AnthropicExtractor {
         }
     }
 
+    async fn do_classify_relations(
+        &self,
+        edges: &[(&str, &str)],
+        allowed_types: &[(String, Option<String>)],
+    ) -> Result<Vec<String>, Error> {
+        if edges.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let type_list: String = allowed_types
+            .iter()
+            .map(|(name, desc)| match desc.as_deref() {
+                Some(d) if !d.is_empty() => format!("{name}: {d}"),
+                _ => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        let system_text = format!(
+            "You are a knowledge graph relation classifier. Given a list of edges (each with a \
+            'fact' sentence and its current 'current_type', if any), assign each edge exactly \
+            one relation type label from the following allowed types: {type_list}. Do not \
+            invent any type outside this list. If none of the allowed types honestly fits the \
+            fact, return an empty string for that edge — never guess the nearest type. Return \
+            ONLY valid JSON: an array of strings, one per input edge, in the same order as the \
+            input."
+        );
+
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+
+        let input: Vec<Value> = edges
+            .iter()
+            .map(|(fact, current_type)| json!({"fact": fact, "current_type": current_type}))
+            .collect();
+
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": 1024,
+            "system": system_value,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": format!(
+                        "Classify the relation types for:\n\n{}",
+                        serde_json::to_string(&input)
+                            .map_err(|e| Error::Ipc(format!("failed to serialize edges: {e}")))?
+                    )
+                }
+            ]
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+
+            if (status == 429 || status == 529) && attempt < 3 {
+                let delay = Duration::from_secs(1u64 << attempt);
+                sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| {
+                    Error::Ipc("classify_relations response missing content text".to_string())
+                })?;
+
+            let json_str = extract_json_block(content);
+            let types: Vec<String> = serde_json::from_str(json_str)?;
+            // Ensure length matches input; pad/truncate defensively.
+            let mut result = types;
+            result.resize(edges.len(), String::new());
+            // Server-side enforcement: convert out-of-set responses to empty string (FR-007).
+            // Guards against LLMs that ignore the constraint prompt.
+            let allowed_set: std::collections::HashSet<&str> = allowed_types
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect();
+            for entry in &mut result {
+                if !entry.is_empty() && !allowed_set.contains(entry.as_str()) {
+                    *entry = String::new();
+                }
+            }
+            return Ok(result);
+        }
+    }
+
     fn emit_token_usage(&self, resp: &Value) {
         let usage = &resp["usage"];
         if !usage.is_object() {
@@ -550,6 +670,14 @@ impl Extractor for AnthropicExtractor {
         allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_entities(entities, allowed_types))
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(self.do_classify_relations(edges, allowed_types))
     }
 }
 
@@ -685,6 +813,16 @@ impl Extractor for MockExtractor {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        // MockExtractor abstains for every edge — no reclassification.
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
 }
 
 // ── ConfigurableExtractor ─────────────────────────────────────────────────────
@@ -719,6 +857,15 @@ impl Extractor for ConfigurableExtractor {
         _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = edges.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
 }

@@ -332,6 +332,15 @@ impl Extractor for SelfRefExtractor {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
 }
 
 /// Extractor that returns an edge whose target is not in the entity list.
@@ -367,6 +376,15 @@ impl Extractor for BadEndpointExtractor {
         _allowed_types: Option<&'a [String]>,
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = edges.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
 }

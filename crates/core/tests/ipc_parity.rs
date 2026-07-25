@@ -424,6 +424,15 @@ impl Extractor for ClassifyingExtractor {
         let count = entities.len();
         Box::pin(async move { Ok(vec![label; count]) })
     }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
 }
 
 fn make_state_with_ontology_and_extractor(
@@ -487,6 +496,108 @@ fn insert_test_entity(db: &Arc<Db>, uuid: &str, name: &str, group: &str, labels:
         summary: format!("{name} summary"),
         attributes: "{}".to_string(),
         ..Default::default()
+    })
+    .unwrap();
+}
+
+// ── #210: reprocess_relation_types helpers ────────────────────────────────────
+
+/// Test extractor that classifies edges by looking up `fact` in a fixed verdict map. A fact
+/// with no entry abstains (returns an empty string). Drives `knowledge_reprocess_relation_types`
+/// scope/dry_run tests without a real LLM.
+struct RelationClassifyingExtractor {
+    verdicts: HashMap<String, String>,
+}
+
+impl RelationClassifyingExtractor {
+    fn new(verdicts: HashMap<String, String>) -> Self {
+        Self { verdicts }
+    }
+}
+
+impl Extractor for RelationClassifyingExtractor {
+    fn extract<'a>(
+        &'a self,
+        _opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
+        Box::pin(async { Ok(ExtractionResult::default()) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let result: Vec<String> = edges
+            .iter()
+            .map(|(fact, _current)| self.verdicts.get(*fact).cloned().unwrap_or_default())
+            .collect();
+        Box::pin(async move { Ok(result) })
+    }
+}
+
+/// Builds a minimal `Ontology` declaring two relation types (no entity types).
+fn make_relation_ontology() -> Arc<Ontology> {
+    Arc::new(Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![],
+        relation_types: vec![
+            RelationTypeDef {
+                name: "AUTHORED".to_string(),
+                description: Some("a person authored something".to_string()),
+                source_type: None,
+                target_type: None,
+                aliases: vec![],
+                keywords: vec![],
+            },
+            RelationTypeDef {
+                name: "AFFILIATED_WITH".to_string(),
+                description: Some("a person is affiliated with an organization".to_string()),
+                source_type: None,
+                target_type: None,
+                aliases: vec![],
+                keywords: vec![],
+            },
+        ],
+        ancestor_map: std::collections::HashMap::new(),
+    })
+}
+
+/// Inserts a RELATES_TO edge between `source`/`target` with the given `fact`/`relation_type`.
+fn insert_test_edge(
+    db: &Arc<Db>,
+    uuid: &str,
+    source: &str,
+    target: &str,
+    group: &str,
+    fact: &str,
+    relation_type: Option<&str>,
+) {
+    let conn = db.connect().unwrap();
+    conn.insert_relates_to_edge(&RelatesToEdge {
+        uuid: uuid.to_string(),
+        name: fact.to_string(),
+        source_node_uuid: source.to_string(),
+        target_node_uuid: target.to_string(),
+        group_id: group.to_string(),
+        fact: fact.to_string(),
+        fact_embedding: vec![0.5, 0.5, 0.0, 0.0],
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        valid_at: None,
+        invalid_at: None,
+        attributes: "{}".to_string(),
+        relation_type: relation_type.map(|s| s.to_string()),
+        episode_uuids: vec![],
+        source_descriptions: vec![],
     })
     .unwrap();
 }
@@ -2607,5 +2718,612 @@ async fn test_reprocess_scope_off_ontology_idempotency() {
     assert_eq!(
         v2["result"]["reclassified_count"], 0,
         "second run on corrected graph must report 0 (FR-016): {v2}"
+    );
+}
+
+// ── #210: reprocess_relation_types scope / dry_run ─────────────────────────────
+
+/// `scope=untyped` (default) on an empty DB → success, 0 reclassified.
+#[tokio::test]
+async fn test_reprocess_relation_scope_untyped_default() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let ontology = make_relation_ontology();
+    let extractor = Arc::new(RelationClassifyingExtractor::new(HashMap::new()));
+    let state = make_state_with_ontology_and_extractor(
+        db,
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+    let v = dispatch_val(
+        100,
+        "knowledge_reprocess_relation_types",
+        json!({"group_id": "liminis"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 100);
+    assert_eq!(v["result"]["success"], true, "no edges → success: {v}");
+    assert_eq!(
+        v["result"]["reclassified_count"], 0,
+        "no edges → 0 reclassified: {v}"
+    );
+}
+
+/// `scope=off_ontology` without an ontology loaded → structured error, not a crash (FR-002, SC-002).
+#[tokio::test]
+async fn test_reprocess_relation_scope_off_ontology_no_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        101,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 101);
+    assert_eq!(
+        v["result"]["success"], false,
+        "off_ontology without ontology must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// `scope=all` without an ontology loaded → structured error (FR-002, SC-002).
+#[tokio::test]
+async fn test_reprocess_relation_scope_all_requires_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        102,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "all"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 102);
+    assert_eq!(
+        v["result"]["success"], false,
+        "scope=all without ontology must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// `scope=untyped` without an ontology loaded → also a structured error (A1: unlike
+/// reprocess_entity_types, relation classification has no open-ended fallback for any scope).
+#[tokio::test]
+async fn test_reprocess_relation_scope_untyped_requires_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+    let v = dispatch_val(
+        103,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 103);
+    assert_eq!(
+        v["result"]["success"], false,
+        "scope=untyped without ontology must fail (A1): {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// Unknown scope value → structured error, not a crash.
+#[tokio::test]
+async fn test_reprocess_relation_scope_invalid() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let ontology = make_relation_ontology();
+    let extractor = Arc::new(RelationClassifyingExtractor::new(HashMap::new()));
+    let state = make_state_with_ontology_and_extractor(
+        db,
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+    let v = dispatch_val(
+        104,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "bad_value"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 104);
+    assert_eq!(
+        v["result"]["success"], false,
+        "invalid scope must fail: {v}"
+    );
+    assert!(
+        v["result"]["error"].is_string(),
+        "error field must be a string: {v}"
+    );
+}
+
+/// `dry_run: true` with `scope=off_ontology` returns a plan + breakdown, mutates nothing (FR-011, FR-012, SC-003).
+#[tokio::test]
+async fn test_reprocess_relation_dry_run_returns_plan_and_breakdown() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "rrdr-src",
+        "Alice",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "rrdr-dst",
+        "Report",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    // One edge classifies to AUTHORED, one abstains → UNCLASSIFIED.
+    insert_test_edge(
+        &db,
+        "rrdr-edge-1",
+        "rrdr-src",
+        "rrdr-dst",
+        "liminis",
+        "Alice authored the report",
+        None,
+    );
+    insert_test_edge(
+        &db,
+        "rrdr-edge-2",
+        "rrdr-src",
+        "rrdr-dst",
+        "liminis",
+        "Alice has an unrelated fact",
+        None,
+    );
+
+    let ontology = make_relation_ontology();
+    let mut verdicts = HashMap::new();
+    verdicts.insert(
+        "Alice authored the report".to_string(),
+        "AUTHORED".to_string(),
+    );
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        105,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped", "dry_run": true}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 105);
+    let r = &v["result"];
+    assert_eq!(
+        r["would_reclassify_count"], 2,
+        "dry_run must report 2 planned reclassifications: {v}"
+    );
+    assert_eq!(
+        r["plan"].as_array().unwrap().len(),
+        2,
+        "plan must have 2 entries: {v}"
+    );
+    assert_eq!(
+        r["breakdown"]["AUTHORED"], 1,
+        "breakdown must count 1 AUTHORED: {v}"
+    );
+    assert_eq!(
+        r["breakdown"]["UNCLASSIFIED"], 1,
+        "breakdown must count 1 UNCLASSIFIED (abstention): {v}"
+    );
+
+    // Verify relation_type is unchanged after dry_run.
+    let conn = db.connect().unwrap();
+    let e1 = conn.get_edge_by_uuid("rrdr-edge-1").unwrap().unwrap();
+    assert!(
+        e1.relation_type.unwrap_or_default().is_empty(),
+        "dry_run must not mutate relation_type"
+    );
+}
+
+/// A whitespace-only `relation_type` is a candidate under `scope=untyped` (matching
+/// `is_untyped`'s `trim().is_empty()` predicate), and its `old_type` in the dry_run plan must be
+/// `null`, not the literal whitespace string — the candidate's recorded `current_type` must use
+/// the same untyped predicate as the scope filter (Copilot review finding on PR #222).
+#[tokio::test]
+async fn test_reprocess_relation_whitespace_only_type_reports_null_old_type() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "rrws-src",
+        "Alice",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "rrws-dst",
+        "Report",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_edge(
+        &db,
+        "rrws-edge-1",
+        "rrws-src",
+        "rrws-dst",
+        "liminis",
+        "Alice authored the report",
+        Some("   "),
+    );
+
+    let ontology = make_relation_ontology();
+    let mut verdicts = HashMap::new();
+    verdicts.insert(
+        "Alice authored the report".to_string(),
+        "AUTHORED".to_string(),
+    );
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        110,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped", "dry_run": true}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 110);
+    let r = &v["result"];
+    assert_eq!(
+        r["would_reclassify_count"], 1,
+        "whitespace-only relation_type must be a scope=untyped candidate: {v}"
+    );
+    assert_eq!(
+        r["plan"][0]["old_type"],
+        Value::Null,
+        "old_type must be null for a whitespace-only current relation_type, not the literal \
+         whitespace string: {v}"
+    );
+}
+
+/// Two consecutive `scope=off_ontology` runs: second run produces `reclassified_count: 0` (FR-009, SC-004).
+#[tokio::test]
+async fn test_reprocess_relation_scope_off_ontology_idempotency() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "rrid-src",
+        "Bob",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "rrid-dst",
+        "Acme",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_edge(
+        &db,
+        "rrid-edge-1",
+        "rrid-src",
+        "rrid-dst",
+        "liminis",
+        "Bob is affiliated with Acme",
+        Some("HOLDS"), // off-ontology predicate from a prior bad canonicalize pass
+    );
+
+    let ontology = make_relation_ontology();
+    let mut verdicts = HashMap::new();
+    verdicts.insert(
+        "Bob is affiliated with Acme".to_string(),
+        "AFFILIATED_WITH".to_string(),
+    );
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+
+    // First run: HOLDS → AFFILIATED_WITH.
+    let state1 = make_state_with_ontology_and_extractor(
+        db.clone(),
+        Arc::clone(&ontology),
+        Arc::clone(&extractor) as Arc<dyn Extractor>,
+        workspace.path().to_path_buf(),
+    );
+    let v1 = dispatch_val(
+        106,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "off_ontology"}),
+        state1,
+    )
+    .await;
+    assert_ok_resp(&v1, 106);
+    assert_eq!(
+        v1["result"]["reclassified_count"], 1,
+        "first run must reclassify 1 edge: {v1}"
+    );
+
+    let conn = db.connect().unwrap();
+    let edge = conn.get_edge_by_uuid("rrid-edge-1").unwrap().unwrap();
+    assert_eq!(edge.relation_type.as_deref(), Some("AFFILIATED_WITH"));
+
+    // Second run: edge is now ontology-aligned; nothing to reclassify.
+    let state2 = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+    let v2 = dispatch_val(
+        107,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "off_ontology"}),
+        state2,
+    )
+    .await;
+    assert_ok_resp(&v2, 107);
+    assert_eq!(
+        v2["result"]["reclassified_count"], 0,
+        "second run on corrected graph must report 0 (FR-009): {v2}"
+    );
+}
+
+/// US1: `scope=untyped` over a mix of edges that classify cleanly and edges that abstain —
+/// all abstained edges must land on UNCLASSIFIED, never left NULL/empty (FR-004, FR-008).
+#[tokio::test]
+async fn test_reprocess_relation_scope_untyped_mixed_classify_and_abstain() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "us1-src",
+        "Carol",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(&db, "us1-dst", "Org", "liminis", vec!["Entity".to_string()]);
+
+    let mut verdicts = HashMap::new();
+    // 4 edges classify to a declared type.
+    for i in 0..4 {
+        let fact = format!("Carol authored document {i}");
+        insert_test_edge(
+            &db,
+            &format!("us1-authored-{i}"),
+            "us1-src",
+            "us1-dst",
+            "liminis",
+            &fact,
+            None,
+        );
+        verdicts.insert(fact, "AUTHORED".to_string());
+    }
+    // 3 edges have facts the extractor cannot map — abstain.
+    for i in 0..3 {
+        let fact = format!("Carol has unrelated fact {i}");
+        insert_test_edge(
+            &db,
+            &format!("us1-unclassified-{i}"),
+            "us1-src",
+            "us1-dst",
+            "liminis",
+            &fact,
+            None,
+        );
+        // No verdict entry inserted → RelationClassifyingExtractor abstains.
+    }
+
+    let ontology = make_relation_ontology();
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        108,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 108);
+    assert_eq!(
+        v["result"]["reclassified_count"], 7,
+        "all 7 untyped edges must be reclassified: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    for i in 0..4 {
+        let edge = conn
+            .get_edge_by_uuid(&format!("us1-authored-{i}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edge.relation_type.as_deref(),
+            Some("AUTHORED"),
+            "edge {i} must classify to AUTHORED"
+        );
+    }
+    for i in 0..3 {
+        let edge = conn
+            .get_edge_by_uuid(&format!("us1-unclassified-{i}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edge.relation_type.as_deref(),
+            Some("UNCLASSIFIED"),
+            "abstained edge {i} must be UNCLASSIFIED, never NULL/empty"
+        );
+    }
+}
+
+/// US2: `scope=off_ontology` picks up untyped, fact-prefix-pseudo-typed, and prior-UNCLASSIFIED
+/// edges while leaving correctly-typed edges untouched (FR-005).
+#[tokio::test]
+async fn test_reprocess_relation_scope_off_ontology_mixed_candidates() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "us2-src",
+        "Dave",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "us2-dst",
+        "Acme",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+
+    let mut verdicts = HashMap::new();
+
+    // (a) untyped edge → classifies to AFFILIATED_WITH.
+    insert_test_edge(
+        &db,
+        "us2-untyped",
+        "us2-src",
+        "us2-dst",
+        "liminis",
+        "Dave is affiliated with Acme",
+        None,
+    );
+    verdicts.insert(
+        "Dave is affiliated with Acme".to_string(),
+        "AFFILIATED_WITH".to_string(),
+    );
+
+    // (b) fact-prefix pseudo-typed edge (from backfill) → reclassified to AUTHORED.
+    insert_test_edge(
+        &db,
+        "us2-pseudo",
+        "us2-src",
+        "us2-dst",
+        "liminis",
+        "Dave authored the spec",
+        Some("DAVE_AUTHORED_THE"),
+    );
+    verdicts.insert("Dave authored the spec".to_string(), "AUTHORED".to_string());
+
+    // (c) prior UNCLASSIFIED sentinel → still abstains (no verdict entry).
+    insert_test_edge(
+        &db,
+        "us2-prior-unclassified",
+        "us2-src",
+        "us2-dst",
+        "liminis",
+        "Dave has a vague fact",
+        Some("UNCLASSIFIED"),
+    );
+
+    // (d) already correctly-typed edge → must be untouched.
+    insert_test_edge(
+        &db,
+        "us2-correct",
+        "us2-src",
+        "us2-dst",
+        "liminis",
+        "Dave authored another document",
+        Some("AUTHORED"),
+    );
+    verdicts.insert(
+        "Dave authored another document".to_string(),
+        "AUTHORED".to_string(),
+    );
+
+    let ontology = make_relation_ontology();
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        109,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 109);
+    // Candidates are (a) untyped, (b) pseudo-typed, (c) prior-UNCLASSIFIED — (d) is already a
+    // declared type, so it is on-ontology and never becomes a candidate at all.
+    // (a) and (b) get a new type (reclassified); (c) abstains again → UNCLASSIFIED == UNCLASSIFIED,
+    // a no-op per FR-009 (idempotent abstention), so it counts as unchanged, not reclassified.
+    assert_eq!(
+        v["result"]["reclassified_count"], 2,
+        "(a) and (b) reclassify to a declared type: {v}"
+    );
+    assert_eq!(
+        v["result"]["unchanged_count"], 1,
+        "(c) re-abstaining to UNCLASSIFIED is a no-op (FR-009): {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.get_edge_by_uuid("us2-untyped")
+            .unwrap()
+            .unwrap()
+            .relation_type
+            .as_deref(),
+        Some("AFFILIATED_WITH")
+    );
+    assert_eq!(
+        conn.get_edge_by_uuid("us2-pseudo")
+            .unwrap()
+            .unwrap()
+            .relation_type
+            .as_deref(),
+        Some("AUTHORED")
+    );
+    assert_eq!(
+        conn.get_edge_by_uuid("us2-prior-unclassified")
+            .unwrap()
+            .unwrap()
+            .relation_type
+            .as_deref(),
+        Some("UNCLASSIFIED"),
+        "still-abstained edge must remain UNCLASSIFIED"
+    );
+    assert_eq!(
+        conn.get_edge_by_uuid("us2-correct")
+            .unwrap()
+            .unwrap()
+            .relation_type
+            .as_deref(),
+        Some("AUTHORED"),
+        "already-correct edge must be untouched"
     );
 }

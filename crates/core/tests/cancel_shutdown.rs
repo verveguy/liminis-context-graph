@@ -56,6 +56,15 @@ impl Extractor for SlowExtractor {
         let count = entities.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
