@@ -60,8 +60,14 @@ pub struct ReplayStats {
     /// ratio. Note: episodes mutations are NOT counted here — `episodes STRING[]` is a real
     /// schema column since #133 and those mutations succeed normally.
     ///
-    /// Note: this counter is **excluded** from [`lines_skipped()`] — callers that want a
-    /// total "mutations not applied" count must add `legacy_skipped_lines + lines_skipped()`.
+    /// Note: this counter is **excluded** from [`lines_skipped()`] — a direct Rust caller that
+    /// wants a total "mutations not applied" count must add `legacy_skipped_lines +
+    /// lines_skipped() + match_prefixed_no_op + match_delete_no_op` (the latter two were carved
+    /// out of `lines_replayed` by FR-005 and are likewise excluded from `lines_skipped()`).
+    /// `knowledge_rebuild_from_wal`'s JSON response reports `lines_skipped` but does not
+    /// (yet — a deliberate scoping decision, see ADR-0041) include `match_prefixed_no_op`/
+    /// `match_delete_no_op`, so a JSON/IPC caller cannot reconstruct this total from that
+    /// response alone; only a direct Rust caller holding the full `ReplayStats` can.
     pub legacy_skipped_lines: u64,
     /// Populated when `(failed_lines + match_prefixed_no_op) / (lines_replayed + failed_lines +
     /// match_prefixed_no_op) > threshold` after replay completes. Threshold defaults to 10% and
@@ -265,6 +271,13 @@ impl WalReplayer {
         let mut batch = ReplayBatch::new();
         // Running max `seq` across the whole call, for FR-004's monotonicity check.
         let mut max_seq_seen: Option<u64> = None;
+        // Caps individual `[WAL WARN] seq regression` lines — a WAL dir with two interleaved
+        // seq lineages (a restored backup, or two merged wal dirs) can regress on every line for
+        // the rest of the replay, which would otherwise emit one uncapped eprintln! per line.
+        // stats.seq_regressions still counts every occurrence; only the per-line detail log is
+        // capped. A single summary line reports the true total after replay completes.
+        const SEQ_REGRESSION_LOG_CAP: u64 = 10;
+        let mut seq_regressions_logged: u64 = 0;
 
         'files: for file_path in &files {
             stats.files_read += 1;
@@ -363,10 +376,17 @@ impl WalReplayer {
                 if let Some(max_seen) = max_seq_seen {
                     if wal_line.seq <= max_seen {
                         stats.seq_regressions += 1;
-                        eprintln!(
-                            "[WAL WARN] seq regression: line seq={} <= max seen so far={} in {:?}",
-                            wal_line.seq, max_seen, file_path
-                        );
+                        if seq_regressions_logged < SEQ_REGRESSION_LOG_CAP {
+                            let line = format!(
+                                "[WAL WARN] seq regression: line seq={} <= max seen so far={} in {:?}",
+                                wal_line.seq, max_seen, file_path
+                            );
+                            match opts.progress_log_fn {
+                                Some(ref log_fn) => log_fn(&line),
+                                None => eprintln!("{line}"),
+                            }
+                            seq_regressions_logged += 1;
+                        }
                     }
                 }
                 max_seq_seen = Some(max_seq_seen.map_or(wal_line.seq, |m| m.max(wal_line.seq)));
@@ -500,6 +520,20 @@ impl WalReplayer {
             flush_batch(&mut batch, conn, &mut stats, sample_cap);
         }
 
+        // Summary for the seq-regression detail logging capped above — the true total is
+        // always in `stats.seq_regressions` regardless of how many detail lines were logged.
+        if stats.seq_regressions > 0 {
+            let line = format!(
+                "[WAL WARN] {} seq regression(s) detected during replay (showing first {}); \
+                 replay order may not exactly match true write order",
+                stats.seq_regressions, seq_regressions_logged,
+            );
+            match opts.progress_log_fn {
+                Some(ref log_fn) => log_fn(&line),
+                None => eprintln!("{line}"),
+            }
+        }
+
         let threshold: f64 = std::env::var("LCG_REPLAY_FIDELITY_THRESHOLD")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -591,19 +625,31 @@ impl ReplayBatch {
 
 /// Reads a WAL file and returns the `seq` value of its first line that parses successfully —
 /// the ordering key used to sort files in `replay_opts` (FR-003). Returns `None` only if the
-/// file can't be read at all or no line in it parses; callers fall back to filename order for
-/// such files (a rare, honestly-approximate placement — any resulting misordering is caught by
-/// the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
+/// file can't be opened, or no line in it parses before EOF; callers fall back to filename order
+/// for such files (a rare, honestly-approximate placement — any resulting misordering is caught
+/// by the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
+///
+/// Reads incrementally via `BufReader::lines()` rather than loading the whole file into memory —
+/// this runs once per `.jsonl` file up front, before the first progress event, so a full-file
+/// read (as an earlier version of this function did, contradicting this fix's own ADR-0041 claim
+/// of "one line, not a full-file scan") turns a large WAL directory into an apparent startup hang.
+/// In the common case the first line parses immediately and only that one line is read; only a
+/// genuinely corrupt prefix costs more.
 ///
 /// Tolerates a corrupt/truncated/non-UTF-8 leading line by skipping it and continuing, mirroring
-/// `wal::read_last_seq`'s tolerance — an early `.ok()?` bail on just the first line would
-/// relegate a file with thousands of good lines to the back of the replay order over a single
-/// crash-truncated line, exactly the kind of WAL corruption the main replay loop already
-/// tolerates line-by-line.
+/// `wal::read_last_seq`'s tolerance: `io::Lines` reports an `Err` only for the one line that
+/// failed UTF-8 conversion, having already consumed those bytes, so the next line is unaffected
+/// and scanning can continue — an early bail on just the first line would relegate a file with
+/// thousands of good lines to the back of the replay order over a single crash-truncated line,
+/// exactly the kind of WAL corruption the main replay loop already tolerates line-by-line.
 fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
-    let content = fs::read(path).ok()?;
-    let text = String::from_utf8_lossy(&content);
-    for raw in text.lines() {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let raw = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
@@ -634,6 +680,14 @@ fn with_match_count_probe(template: &str) -> String {
 /// zero-row match has no legitimate cause other than an out-of-order write targeting a node that
 /// doesn't exist yet. The two are tracked in separate counters (`match_delete_no_op` vs.
 /// `match_prefixed_no_op`) so routine delete replay never inflates the fidelity-warning ratio.
+///
+/// This is a whole-template token scan, not a "does the statement's outermost clause delete"
+/// check — a single template containing BOTH a `SET` and a `DELETE` token (reachable via
+/// `knowledge_query_cypher`'s arbitrary-Cypher WAL logging, the same source the probe-prepare
+/// fallback above exists for) is classified DELETE-form, exempting a genuinely lost SET from the
+/// fidelity ratio. Judged low-likelihood (none of this codebase's own templates mix the two) and
+/// left as-is rather than hand-rolling a Cypher parser; a future contributor tightening this
+/// should keep the ADR-0041 discussion of this limitation in sync.
 fn is_delete_form(template: &str) -> bool {
     let upper = template.to_uppercase();
     strip_quoted_literals(&upper)
@@ -667,6 +721,13 @@ fn is_delete_form(template: &str) -> bool {
 /// already end in its own `RETURN` clause. Appending a second `RETURN count(*)` to such a line
 /// makes it fail to prepare; without this fallback every row sharing that template would be
 /// misclassified as `failed_lines` — new data loss introduced by the no-op-detection fix itself.
+///
+/// The same arbitrary-Cypher source means a probed statement can also fail at *execute* time
+/// (having prepared successfully) for a reason specific to the appended `RETURN` rather than the
+/// underlying write. On that error the loop falls back the same way — prepare the unmodified
+/// template once, retry the current row against it, and switch the rest of the batch to unprobed
+/// mode — instead of classifying the row as `failed_lines` and losing a write the no-op-detection
+/// mechanism itself is responsible for.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
@@ -682,7 +743,7 @@ fn flush_batch(
     let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
     let is_delete_form_batch = is_match_prefixed_batch && is_delete_form(&batch.template);
 
-    let (mut prepared, use_probe) = if is_match_prefixed_batch {
+    let (mut prepared, mut use_probe) = if is_match_prefixed_batch {
         let probed_template = with_match_count_probe(&batch.template);
         match conn.prepare(&probed_template) {
             Ok(p) => (p, true),
@@ -734,8 +795,38 @@ fn flush_batch(
                         stats.match_prefixed_no_op += 1;
                     }
                 }
-                Err(e) => {
-                    classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
+                Err(probe_exec_err) => {
+                    // The probed statement prepared fine but failed to execute — since the
+                    // probe rewrites arbitrary user Cypher, this can be caused by the appended
+                    // RETURN rather than the underlying write. Retry this row against the
+                    // unmodified template and, on success, switch the rest of the batch to
+                    // unprobed mode so remaining rows don't repeat the same failure.
+                    eprintln!(
+                        "[WAL WARN] RETURN count(*) probe failed to execute ({probe_exec_err}); \
+                         retrying this row against the unmodified template"
+                    );
+                    match conn.prepare(&batch.template) {
+                        Ok(mut fallback) => match conn.execute_prepared(&mut fallback, &params) {
+                            Ok(_) => {
+                                stats.lines_replayed += 1;
+                                stats.match_prefixed_replayed += 1;
+                                prepared = fallback;
+                                use_probe = false;
+                            }
+                            Err(e) => classify_replay_failure(
+                                &e.to_string(),
+                                &batch.template,
+                                stats,
+                                sample_cap,
+                            ),
+                        },
+                        Err(e) => classify_replay_failure(
+                            &e.to_string(),
+                            &batch.template,
+                            stats,
+                            sample_cap,
+                        ),
+                    }
                 }
             }
         } else {

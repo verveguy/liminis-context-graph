@@ -57,6 +57,15 @@ This does mean each file's first line is read twice (once to compute the sort ke
 the main replay pass) — a small, bounded I/O cost (one line, not a full-file scan) that is not a
 concern at realistic WAL-directory sizes.
 
+`first_seq_in_file` reads incrementally via `BufReader::lines()`, stopping at the first line that
+parses. An intermediate version of this fix instead did `fs::read` (whole file) +
+`from_utf8_lossy` (a second full copy) to get the corrupt-leading-line tolerance below — found
+during review to directly contradict this section's own "one line, not a full-file scan" claim:
+run once per `.jsonl` file, before the first progress event, that made a large WAL directory look
+like a startup hang. `io::Lines` reports an `Err` for exactly the one line that fails UTF-8
+conversion (having already consumed those bytes), so incremental reading keeps the same
+corrupt-line tolerance at the cost the ADR always claimed.
+
 ### Seq monotonicity check: belt-and-suspenders, not redundant
 
 Because the file-ordering fix above is a *heuristic* (first-line `seq`, with a filename fallback
@@ -70,6 +79,16 @@ is a single global monotonic counter, so a regression should only ever fire when
 heuristic guessed wrong (e.g. an indeterminate-file fallback) — the two mechanisms are
 complementary: the sort tries to get the order right, and the monotonicity check catches it
 when the sort's best-effort guess is wrong, rather than silently trusting it.
+
+**Log volume.** A WAL directory with two interleaved `seq` lineages (a restored backup, or two
+merged WAL dirs) can regress on every subsequent line, not just an isolated one — found during
+review to be an uncapped `eprintln!` per offending line in an earlier version of this fix. The
+per-line detail log is now capped at 10 occurrences; `stats.seq_regressions` still counts every
+occurrence regardless, and a single `[WAL WARN] N seq regression(s) detected ... (showing first
+10)` summary line reports the true total after replay completes. Both the capped detail lines and
+the summary route through `opts.progress_log_fn` (falling back to `eprintln!` when unset) instead
+of a bare `eprintln!`, matching the `[WAL PROGRESS]` convention so tests can capture and assert on
+them the same way.
 
 `max_seq_seen` is local to one `replay_opts` call, so it does not fire during `recovery.rs`'s
 intentional overlapping WAL-tail-resume replay (ADR-0026) — that resume starts a fresh call with
@@ -114,6 +133,24 @@ loss introduced by the no-op-detection mechanism itself. `flush_batch` now tries
 the probed template first; if that's rejected, it logs a `[WAL WARN]` line and retries
 `prepare()` on the unmodified template, falling back to pre-FR-005 accounting (the batch's rows
 are counted as plain successes, with no no-op distinction available) rather than losing them.
+
+**Probe-execute fallback.** The same arbitrary-Cypher source means a probed statement can
+*prepare* successfully and then fail at *execute* — found during a later review pass, since the
+prepare-only fallback above doesn't cover this case. On an execute error from the probed
+statement, `flush_batch` now prepares the unmodified template once, retries the current row
+against it, and — on success — swaps the batch's live `PreparedStatement` and downgrades
+`use_probe` to `false` so the rest of the batch skips straight to unprobed execution instead of
+repeating the same failure per row. If the unmodified template also fails, the row is classified
+via `classify_replay_failure` exactly as it always was — this fallback only prevents the probe
+itself from being the cause of a lost write, not from surfacing a genuine execution error.
+
+**`is_delete_form`'s DELETE-vs-SET classification is a whole-template token scan**, not a
+"does the statement's outermost clause delete" check. A template containing both a `SET` and a
+`DELETE` token — reachable via the same `knowledge_query_cypher` arbitrary-Cypher path — is
+classified DELETE-form, so a genuinely lost SET inside it would be exempted from the fidelity
+ratio rather than counted. Found during review and judged low-likelihood (no template in this
+codebase mixes the two); left as a documented limitation rather than hand-rolling a Cypher parser
+for it.
 
 ### Fidelity ratio: `match_prefixed_no_op` joins both sides — `match_delete_no_op` does not
 
@@ -174,7 +211,12 @@ a MATCH-vs-non-MATCH one — in test naming/comments rather than conflating the 
   unaffected. None of the three are threaded into `TelemetryEvent::WalReplayComplete` or the ad
   hoc JSON responses in `handlers.rs` — this was a deliberate scoping decision (see the Plan
   stage discussion on issue #237); a future issue can wire them through if an operator-facing
-  need arises.
+  need arises. One consequence, found during review: a direct Rust caller can compute a full
+  "mutations not applied" total as `legacy_skipped_lines + lines_skipped() +
+  match_prefixed_no_op + match_delete_no_op`, but a JSON/IPC caller of
+  `knowledge_rebuild_from_wal` cannot reconstruct that total from the response alone, since the
+  latter two fields aren't in it — `ReplayStats::legacy_skipped_lines`'s doc comment now says so
+  explicitly rather than implying the arithmetic works for every caller.
 - Each file's first line is now read twice during replay (sort key + main pass) — negligible at
   realistic WAL-directory scale, but a future perf-sensitive change to replay's I/O pattern should
   account for this.
@@ -183,7 +225,8 @@ a MATCH-vs-non-MATCH one — in test naming/comments rather than conflating the 
   hand-written templates (`db.rs`, `canonicalize.rs`, `episode.rs`, `reprocess_relations.rs`,
   none of which end in `RETURN`) — is handled by the probe-prepare fallback in `flush_batch`:
   the batch replays with pre-FR-005 accounting (no no-op distinction, but no data loss) rather
-  than failing to prepare.
+  than failing to prepare. A probed statement that prepares but fails to *execute* is covered by
+  a second, symmetric fallback (see Decision) rather than being classified as `failed_lines`.
 
 ## Alternatives Considered
 

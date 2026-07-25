@@ -519,6 +519,10 @@ fn test_match_detach_delete_applies_when_target_exists() {
         "both the CREATE and the effective DETACH DELETE must have replayed"
     );
     assert_eq!(
+        stats.match_prefixed_replayed, 1,
+        "the effective DETACH DELETE must be counted as a match_prefixed_replayed write"
+    );
+    assert_eq!(
         conn.count_nodes("Episodic").unwrap(),
         0,
         "the episode must have actually been deleted, not silently skipped by the probe rewrite"
@@ -735,6 +739,64 @@ fn test_match_set_with_existing_return_clause_falls_back_and_still_applies() {
     );
 }
 
+/// Review finding: the probe-prepare fallback only covers a probe that fails to *prepare*, not
+/// one that prepares fine but fails to *execute*. Exercises the execute-failure fallback branch
+/// in `flush_batch` with a genuine execute-time error (binding a plain string, under a param
+/// name outside `TIMESTAMP_PARAM_NAMES`, into a `TIMESTAMP` column via a bare `SET` — lbug does
+/// not implicitly cast `STRING`→`TIMESTAMP` there) that fails identically whether or not the
+/// probe's `RETURN count(*)` is appended, so the fallback's retry against the unmodified
+/// template must also fail and the row must land in `failed_lines` exactly once — not silently
+/// dropped, and not double-counted.
+#[test]
+fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'exec-fail-entity', name: 'N', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 'initial', attributes: '{}'})","params":{}}"#;
+    // "bad_val" is deliberately NOT in TIMESTAMP_PARAM_NAMES, so it binds as a plain
+    // Value::String; assigning that into the TIMESTAMP `created_at` column via a bare SET
+    // fails at execute() — a failure unrelated to (and unaffected by) the appended probe.
+    let set_bad_timestamp_line = r#"{"seq":1,"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: $uuid}) SET n.created_at = $bad_val","params":{"uuid":"exec-fail-entity","bad_val":"not-a-real-timestamp"}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{create_line}\n{set_bad_timestamp_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must not abort on an execute-time failure");
+
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "only the CREATE must have replayed"
+    );
+    assert_eq!(
+        stats.failed_lines,
+        1,
+        "the type-mismatched SET must be classified as failed exactly once, via the fallback \
+         retry against the unmodified template: {:?}",
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.match_prefixed_no_op, 0,
+        "an execute failure must not be miscounted as a no-op"
+    );
+    assert_eq!(
+        stats.match_delete_no_op, 0,
+        "an execute failure must not be miscounted as a delete no-op"
+    );
+}
+
 /// Review finding: `first_seq_in_file` must not abandon an entire file's ordering just because
 /// its first line is corrupt/unparseable — it should keep scanning for the first line that DOES
 /// parse, mirroring `wal::read_last_seq`'s tolerance. A file relegated to filename-order fallback
@@ -875,6 +937,81 @@ fn test_seq_regression_counted_and_still_applied() {
     assert_eq!(
         count, 2,
         "both entities were applied despite the regression"
+    );
+}
+
+/// Review finding: a WAL dir with many seq regressions (e.g. two interleaved seq lineages) must
+/// not emit one uncapped `[WAL WARN] seq regression` line per offending line — the per-line
+/// detail log is capped, `stats.seq_regressions` still counts every occurrence, and a single
+/// summary line reports the true total. All of it routes through `progress_log_fn` (not a bare
+/// `eprintln!`) so it's capturable/testable the same way `[WAL PROGRESS]` lines already are.
+#[test]
+fn test_seq_regression_logging_is_capped_with_summary() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // First line sets max_seen=100; the next 15 lines (seq 1..=15) are each individually a
+    // regression against that max — well above the 10-line cap.
+    let mut content = make_entity_line(100, "regress-anchor") + "\n";
+    for seq in 1..=15u64 {
+        content.push_str(&make_entity_line(seq, &format!("regress-{seq}")));
+        content.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260601_000000_aaa111_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = Arc::clone(&captured);
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                progress_log_fn: Some(Box::new(move |line: &str| {
+                    captured_clone.lock().unwrap().push(line.to_string());
+                })),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on seq regressions");
+
+    assert_eq!(
+        stats.seq_regressions, 15,
+        "every regressed line must still be counted, even beyond the log cap"
+    );
+
+    let lines = captured.lock().unwrap().clone();
+    let detail_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[WAL WARN] seq regression:"))
+        .collect();
+    assert_eq!(
+        detail_lines.len(),
+        10,
+        "per-line detail logging must be capped at 10 even though 15 regressions occurred: {lines:?}"
+    );
+
+    let summary_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[WAL WARN] 15 seq regression(s) detected"))
+        .collect();
+    assert_eq!(
+        summary_lines.len(),
+        1,
+        "exactly one summary line must report the true total of 15: {lines:?}"
+    );
+    assert!(
+        summary_lines[0].contains("showing first 10"),
+        "summary must state how many detail lines were shown: {}",
+        summary_lines[0]
     );
 }
 
