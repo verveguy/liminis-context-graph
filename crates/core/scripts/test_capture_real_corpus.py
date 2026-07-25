@@ -8,7 +8,6 @@ outside-CI tool — see its module docstring) — this is a standalone stdlib-on
 `unittest` file for a maintainer to run locally when touching the cleanup regexes.
 """
 
-import gzip
 import json
 import tempfile
 import unittest
@@ -16,11 +15,12 @@ from unittest import mock
 
 import capture_real_corpus
 from capture_real_corpus import (
-    build_corpus_prose,
+    read_corpus_prose,
+    stage_corpus,
     strip_file_links,
     strip_templates,
     wikitext_to_prose,
-    write_corpus_prose_gz,
+    write_corpus_prose,
 )
 
 # Simple English Wikipedia, "2026 New Glenn rocket explosion" (rev 10877681), fetched
@@ -185,14 +185,21 @@ class WikitextToProseTests(unittest.TestCase):
 
 
 class CorpusProseTests(unittest.TestCase):
-    """Covers the #217 follow-up: persisting the cleaned prose fed to the extractor
-    (`corpus_prose.jsonl.gz`), since neither the WAL (post-extraction) nor a future LLM
-    cassette (one model's exchange only) can serve as input for an extraction-model
-    comparison (#228) — see the module docstring's "four fixture artifacts" table.
+    """Covers the #217 follow-up: staging the cleaned prose fed to the extractor
+    (`corpus_prose.jsonl`) as its own free, no-service phase before any ingest happens, since
+    neither the WAL (post-extraction) nor a future LLM cassette (one model's exchange only)
+    can serve as input for an extraction-model comparison (#228) — see the module docstring's
+    "three fixture artifacts" table. Also covers the split of staging (Phase 1) from ingest
+    (Phase 2): two capture attempts previously died mid-run on infrastructure faults after
+    paying for real LLM extraction on 20-36 articles, discarding all of it — staging up front
+    means Phase 2 depends on nothing but the local service and cannot fail on a Wikipedia blip.
     """
 
-    def test_build_corpus_prose_refetches_and_cleans_each_consumed_article(self):
-        consumed = [
+    def test_stage_corpus_fetches_and_cleans_each_article(self):
+        # Aryabhata (satellite) is a genuine stub (<200 chars of real prose, see
+        # WikitextToProseTests above) so stage_corpus correctly skips it as a stub rather
+        # than staging it — this test exercises both outcomes over a two-article manifest.
+        articles = [
             {"title": "2026 New Glenn rocket explosion", "revision_id": 10877681},
             {"title": "Aryabhata (satellite)", "revision_id": 10314108},
         ]
@@ -200,29 +207,57 @@ class CorpusProseTests(unittest.TestCase):
         with mock.patch.object(
             capture_real_corpus, "fetch_wikitext", side_effect=lambda rev: wikitexts[rev]
         ):
-            records = build_corpus_prose(consumed, wiki_delay=0)
+            staged, skipped = stage_corpus(articles, wiki_delay=0)
 
-        self.assertEqual(len(records), 2)
-        self.assertEqual(records[0]["title"], "2026 New Glenn rocket explosion")
-        self.assertEqual(records[0]["revision_id"], 10877681)
-        self.assertIn("New Glenn rocket blew up during testing", records[0]["prose"])
-        self.assertEqual(records[1]["title"], "Aryabhata (satellite)")
-        self.assertIn("Aryabhata was India's first satellite", records[1]["prose"])
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0]["title"], "2026 New Glenn rocket explosion")
+        self.assertEqual(staged[0]["revision_id"], 10877681)
+        self.assertIn("New Glenn rocket blew up during testing", staged[0]["prose"])
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["title"], "Aryabhata (satellite)")
 
-    def test_write_corpus_prose_gz_round_trips_with_header(self):
-        records = [{"title": "Apollo 11", "revision_id": 42, "prose": "Apollo 11 landed."}]
-        with tempfile.NamedTemporaryFile(suffix=".jsonl.gz") as tmp:
-            write_corpus_prose_gz(records, tmp.name)
-            with gzip.open(tmp.name, "rt", encoding="utf-8") as f:
+    def test_stage_corpus_skips_short_prose_without_aborting(self):
+        articles = [
+            {"title": "2026 New Glenn rocket explosion", "revision_id": 10877681},
+            {"title": "A Stub", "revision_id": 1},
+        ]
+        wikitexts = {10877681: NEW_GLENN_WIKITEXT, 1: "Too short."}
+        with mock.patch.object(
+            capture_real_corpus, "fetch_wikitext", side_effect=lambda rev: wikitexts[rev]
+        ):
+            staged, skipped = stage_corpus(articles, wiki_delay=0)
+
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["title"], "A Stub")
+
+    def test_write_and_read_corpus_prose_round_trip(self):
+        staged = [{"title": "Apollo 11", "revision_id": 42, "prose": "Apollo 11 landed."}]
+        skipped = [{"title": "A Stub", "revision_id": 1, "prose_chars": 10}]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w") as tmp:
+            write_corpus_prose(staged, skipped, tmp.name)
+            with open(tmp.name, encoding="utf-8") as f:
                 lines = [json.loads(line) for line in f]
 
-        self.assertEqual(len(lines), 2)
-        header, record = lines
-        self.assertTrue(header["_header"])
-        self.assertEqual(header["cleanup_version"], capture_real_corpus.CLEANUP_VERSION)
-        self.assertEqual(header["record_count"], 1)
-        self.assertIn("script_git_sha", header)
-        self.assertEqual(record, records[0])
+            self.assertEqual(len(lines), 2)
+            header, record = lines
+            self.assertTrue(header["_header"])
+            self.assertEqual(header["cleanup_version"], capture_real_corpus.CLEANUP_VERSION)
+            self.assertEqual(header["record_count"], 1)
+            self.assertEqual(header["skipped_articles"], skipped)
+            self.assertIn("script_git_sha", header)
+            self.assertEqual(record, staged[0])
+
+            read_staged, read_skipped = read_corpus_prose(tmp.name)
+        self.assertEqual(read_staged, staged)
+        self.assertEqual(read_skipped, skipped)
+
+    def test_read_corpus_prose_rejects_missing_header(self):
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", mode="w") as tmp:
+            tmp.write(json.dumps({"title": "no header", "revision_id": 1, "prose": "x"}) + "\n")
+            tmp.flush()
+            with self.assertRaises(RuntimeError):
+                read_corpus_prose(tmp.name)
 
 
 if __name__ == "__main__":
