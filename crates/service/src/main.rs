@@ -295,6 +295,10 @@ async fn bootstrap_app_state(
                 // indices already exist (create_vector_indexes swallows "already exists");
                 // a genuine build failure propagates fatally via `?` (FR-004).
                 conn.build_indices_and_constraints()?;
+                // Populate the in-process name-lookup index (issue #219) from a full scan
+                // before the socket accepts requests — mirrors the eager index-build posture
+                // above; a genuine failure propagates fatally via `?`.
+                conn.rebuild_name_index()?;
             }
             Ok(db)
         })();

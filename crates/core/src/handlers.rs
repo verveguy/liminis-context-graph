@@ -1062,6 +1062,9 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Fresh empty table — a no-op today, kept for uniformity with every other
+            // Entity-population path (issue #219).
+            conn.rebuild_name_index()?;
         }
         Ok(db)
     })
@@ -1417,6 +1420,12 @@ async fn handle_rebuild_from_wal(
                             eprintln!("liminis-context-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
                         }
                     }
+                    // Replay bypassed insert_entity/update_entity_created_at (issue #219) —
+                    // rebuild the name index from the fully-loaded data, same non-fatal
+                    // posture as the index build above.
+                    if let Err(e) = conn.rebuild_name_index() {
+                        eprintln!("liminis-context-graph: reload: end-of-reload name index rebuild failed: {e} (non-fatal)");
+                    }
                 }
                 Ok((stats, build_ok))
             },
@@ -1661,6 +1670,12 @@ async fn handle_rebuild_from_wal(
                         Err(e) => {
                             eprintln!("liminis-context-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
                         }
+                    }
+                    // Replay bypassed insert_entity/update_entity_created_at (issue #219) —
+                    // rebuild the name index from the fully-loaded data, same non-fatal
+                    // posture as the index build above.
+                    if let Err(e) = conn.rebuild_name_index() {
+                        eprintln!("liminis-context-graph: reload(bg): end-of-reload name index rebuild failed: {e} (non-fatal)");
                     }
                 }
                 Ok((stats, build_ok))
@@ -2490,6 +2505,9 @@ async fn recover_drop_lbug_wal(
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // The reopened DB (checkpoint-only, WAL dropped) may already contain entities —
+            // rebuild the name index from it (issue #219).
+            conn.rebuild_name_index()?;
         }
         Ok(RecoverOutcome {
             db: Some(db),
@@ -2543,6 +2561,9 @@ async fn recover_rebuild_from_workspace_wal(
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
             conn.build_indices_and_constraints()?;
+            // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
+            // rebuild the name index from the fully-loaded data.
+            conn.rebuild_name_index()?;
         }
         Ok(RecoverOutcome {
             db: Some(db),
@@ -2597,6 +2618,9 @@ async fn recover_restore_from_backup(
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // The restored backup file may already contain entities — rebuild the name
+            // index from it (issue #219).
+            conn.rebuild_name_index()?;
         }
         Ok(RecoverOutcome {
             db: Some(db),
