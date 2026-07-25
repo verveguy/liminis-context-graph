@@ -16,7 +16,7 @@ AI assistants and agents need durable, structured context: *who* was mentioned, 
 
 2. **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files in `.lcg/wal/` before it touches the database. The WAL is human-readable, append-only, and **git-friendly**: check it into the same repository as your notes or documents, diff it, and carry it across machines. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
 
-3. **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters — a Unix-socket or HTTP endpoint speaking the OpenAI `/v1/embeddings` shape, and a configurable extraction LLM. Run fully local models (the repo ships a macOS CoreML sidecar) or point at a hosted API; the engine itself contains no ML runtime.
+3. **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters. **Embeddings run fully local today** — a Unix-socket or HTTP endpoint speaking the OpenAI `/v1/embeddings` shape (the repo ships a macOS CoreML sidecar). **Entity/relationship extraction currently requires a hosted Anthropic model** and `ANTHROPIC_API_KEY`; a local/OpenAI-compatible extraction adapter is planned. The engine itself contains no ML runtime.
 
 The result is a context graph you can treat like the rest of your local tooling: a single process, a directory of files, versionable with git, rebuildable from its own log.
 
@@ -219,7 +219,7 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
-| `ANTHROPIC_API_KEY` | No | API key for Anthropic extraction/classification LLM calls (only needed if routing extraction to a hosted Anthropic model) |
+| `ANTHROPIC_API_KEY` | Yes, for ingestion | API key for Anthropic entity/relationship extraction. **Required for any `knowledge_process_chunk` / `knowledge_add_episode` call** — extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only or embedding-only use. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 
 ## Ontology
@@ -343,6 +343,11 @@ that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/
 API key, no network. macOS 26+ and Xcode command-line tools are required. See
 [`native/local-inference/README.md`](native/local-inference/README.md) for build and run instructions.
 
+> **Note:** the engine currently uses only the sidecar's `/v1/embeddings` route. The
+> `/v1/chat/completions` route is served but **not yet wired for extraction** — extraction is
+> Anthropic-only today (see the `ANTHROPIC_API_KEY` row above). So embeddings are fully local now;
+> fully-local *extraction* is planned.
+
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically — start the
 sidecar first, then start the binary.
 
@@ -421,6 +426,36 @@ only this MCP process's own DB connection. In **attached** mode, calling it woul
 `--allow-remote-close`, `knowledge_close` is omitted from `tools/list` entirely in attached mode
 (not merely rejected when called). Pass `--allow-remote-close` only when you specifically intend
 this MCP connection to be able to stop the remote service.
+
+**Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild the graph from
+the WAL), `knowledge_dump_wal` (snapshot/export the graph into a fresh compacted WAL directory),
+and `knowledge_recover` / `knowledge_recover_full` are all `admin`-scope tools — an attached client
+only sees them when launched with `--scope=admin` (or `all`). If a mutation goes wrong, this is the
+recovery path. Note the WAL replays **forward-only**, so take periodic `knowledge_dump_wal` snapshots
+if you want restore points before large or destructive operations.
+
+### Relation typing (`canonicalize_relations`)
+
+`knowledge_canonicalize_relations` maps each edge's **existing raw predicate** onto your ontology's
+declared `relation_types`. Its behavior has three caveats worth knowing before you rely on it:
+
+- **The primary pass is lexical, over the predicate — not the `fact`.** It matches the edge's
+  predicate / current `relation_type` against ontology type names, aliases, and keywords. It does
+  **not** read the edge's `fact` sentence, so an edge whose `relation_type` was cleared cannot be
+  re-mapped from its fact by this pass.
+- **`embedding_threshold` tunes only the fallback promoter** (default `0.7`). The fallback embeds
+  each residual edge's `fact` against the ontology types' *descriptions* and force-assigns the single
+  nearest type at or above the threshold. Lowering it types more edges, but by nearest-neighbor
+  force-fit with **no abstention** — an idiosyncratic fact (e.g. "*X is affiliated with Y*") can land
+  on a wrong type (e.g. `HOLDS`).
+- **`UNCLASSIFIED` is terminal.** Edges it can't place are stamped `UNCLASSIFIED`, and re-runs skip
+  any non-null `relation_type` — so a bad result is only re-doable by re-nulling the field first.
+
+For building a typed taxonomy, avoid `knowledge_backfill_relation_types` — it mints uppercased
+fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) rather than classifying against
+the ontology. A fact-based relation classifier with honest abstention
+(`knowledge_reprocess_relation_types`, the relation-side twin of `knowledge_reprocess_entity_types`)
+is planned.
 
 ### Progress notifications
 
