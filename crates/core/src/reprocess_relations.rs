@@ -98,7 +98,7 @@ fn list_edges_for_scope(
                 all.push(EdgeCandidate {
                     uuid: value_as_string(&row[0]),
                     fact: value_as_string(&row[4]),
-                    current_type: if rt_str.is_empty() {
+                    current_type: if is_untyped(&rt_str) {
                         None
                     } else {
                         Some(rt_str)

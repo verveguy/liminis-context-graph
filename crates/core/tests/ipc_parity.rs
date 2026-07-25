@@ -2944,6 +2944,73 @@ async fn test_reprocess_relation_dry_run_returns_plan_and_breakdown() {
     );
 }
 
+/// A whitespace-only `relation_type` is a candidate under `scope=untyped` (matching
+/// `is_untyped`'s `trim().is_empty()` predicate), and its `old_type` in the dry_run plan must be
+/// `null`, not the literal whitespace string — the candidate's recorded `current_type` must use
+/// the same untyped predicate as the scope filter (Copilot review finding on PR #222).
+#[tokio::test]
+async fn test_reprocess_relation_whitespace_only_type_reports_null_old_type() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "rrws-src",
+        "Alice",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "rrws-dst",
+        "Report",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_edge(
+        &db,
+        "rrws-edge-1",
+        "rrws-src",
+        "rrws-dst",
+        "liminis",
+        "Alice authored the report",
+        Some("   "),
+    );
+
+    let ontology = make_relation_ontology();
+    let mut verdicts = HashMap::new();
+    verdicts.insert(
+        "Alice authored the report".to_string(),
+        "AUTHORED".to_string(),
+    );
+    let extractor = Arc::new(RelationClassifyingExtractor::new(verdicts));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        110,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped", "dry_run": true}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 110);
+    let r = &v["result"];
+    assert_eq!(
+        r["would_reclassify_count"], 1,
+        "whitespace-only relation_type must be a scope=untyped candidate: {v}"
+    );
+    assert_eq!(
+        r["plan"][0]["old_type"],
+        Value::Null,
+        "old_type must be null for a whitespace-only current relation_type, not the literal \
+         whitespace string: {v}"
+    );
+}
+
 /// Two consecutive `scope=off_ontology` runs: second run produces `reclassified_count: 0` (FR-009, SC-004).
 #[tokio::test]
 async fn test_reprocess_relation_scope_off_ontology_idempotency() {
