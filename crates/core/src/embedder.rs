@@ -109,13 +109,15 @@ enum UdsAttemptError {
 }
 
 /// Sends one embed request over `sender` and reads/parses the response.
+/// `body_bytes` is a cheaply-clonable `Bytes` so callers can retry a send
+/// against a freshly-dialed connection without re-copying the serialized
+/// request.
 #[cfg(unix)]
 async fn send_and_read_uds(
     sender: &mut UdsSender,
-    body_bytes: &[u8],
+    body_bytes: hyper::body::Bytes,
 ) -> Result<OaiEmbedResponse, UdsAttemptError> {
     use http_body_util::{BodyExt, Full};
-    use hyper::body::Bytes;
     use hyper::Request;
 
     let req = Request::builder()
@@ -123,7 +125,7 @@ async fn send_and_read_uds(
         .uri("/v1/embeddings")
         .header("content-type", "application/json")
         .header("host", "localhost")
-        .body(Full::new(Bytes::from(body_bytes.to_vec())))
+        .body(Full::new(body_bytes))
         .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("build UDS request: {e}"))))?;
 
     let resp = sender.send_request(req).await.map_err(|e| {
@@ -131,9 +133,13 @@ async fn send_and_read_uds(
     })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        // Drain the body before returning: with HTTP/1.1 keep-alive, leaving
+        // it unread would desync framing for the next request reusing this
+        // pooled connection.
+        let _ = resp.into_body().collect().await;
         return Err(UdsAttemptError::Other(Error::Ipc(format!(
-            "UDS embedder returned status {}",
-            resp.status()
+            "UDS embedder returned status {status}"
         ))));
     }
 
@@ -331,11 +337,13 @@ impl OaiEmbedder {
             % pool.slots.len();
         let mut slot = pool.slots[idx].lock().await;
 
-        let body_bytes = serde_json::to_vec(&OaiEmbedRequest {
-            input: text,
-            model: &self.model,
-        })
-        .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?;
+        let body_bytes = hyper::body::Bytes::from(
+            serde_json::to_vec(&OaiEmbedRequest {
+                input: text,
+                model: &self.model,
+            })
+            .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?,
+        );
 
         if slot.is_none() {
             *slot = Some(dial_uds(path).await?);
@@ -343,7 +351,7 @@ impl OaiEmbedder {
 
         let first = {
             let mut guard = PoisonGuard::new(&mut slot);
-            let result = send_and_read_uds(guard.sender_mut(), &body_bytes).await;
+            let result = send_and_read_uds(guard.sender_mut(), body_bytes.clone()).await;
             // The span completed (successfully or with a definite, fully-read
             // error) rather than being dropped mid-flight — safe to disarm
             // regardless of outcome; a ConnectionBroken outcome is handled
@@ -359,12 +367,19 @@ impl OaiEmbedder {
                 *slot = None;
                 *slot = Some(dial_uds(path).await?);
                 let mut guard = PoisonGuard::new(&mut slot);
-                let result = send_and_read_uds(guard.sender_mut(), &body_bytes).await;
+                let result = send_and_read_uds(guard.sender_mut(), body_bytes).await;
                 guard.disarm();
+                drop(guard);
                 match result {
                     Ok(resp) => Ok(resp),
                     Err(UdsAttemptError::Other(e)) => Err(e),
-                    Err(UdsAttemptError::ConnectionBroken(e)) => Err(e),
+                    Err(UdsAttemptError::ConnectionBroken(e)) => {
+                        // The redial-and-retry also failed against a fresh
+                        // connection — don't leave the known-bad sender in
+                        // the slot for the next unrelated call to trip over.
+                        *slot = None;
+                        Err(e)
+                    }
                 }
             }
         }
