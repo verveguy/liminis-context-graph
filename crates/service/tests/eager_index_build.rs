@@ -38,9 +38,15 @@ fn kill(child: &mut Child) {
 /// parsed response. Used to make `knowledge_status` the very first request the service ever
 /// sees, so a `true` result can only come from the eager startup build (FR-001/FR-002), not
 /// from some other test-harness request having triggered the lazy auto-heal path first.
-fn send_request(socket_path: &PathBuf, method: &str, params: serde_json::Value) -> serde_json::Value {
+fn send_request(
+    socket_path: &PathBuf,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
     let mut stream = UnixStream::connect(socket_path).expect("failed to connect to service socket");
-    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
 
     let request = serde_json::json!({
         "jsonrpc": "2.0",

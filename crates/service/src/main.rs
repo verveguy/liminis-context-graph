@@ -303,7 +303,14 @@ async fn bootstrap_app_state(
             Ok(db) => (Some(Arc::new(db)), None, true),
             Err(e) => {
                 let msg = e.to_string();
+                // lbug raises two distinct messages for a corrupted WAL depending on which
+                // check trips: an invalid record type ("Corrupted wal file. Read out invalid
+                // WAL record type.", wal_record.cpp) or a checksum mismatch ("Checksum
+                // verification failed, the WAL file is corrupted.", wal_replayer.cpp — the
+                // shape produced by a torn/garbage WAL tail, e.g. a crash mid-write). Both are
+                // the same recoverable condition ADR-0009's self-recovery sequence handles.
                 let is_recoverable = msg.contains("Corrupted wal file")
+                    || msg.contains("the WAL file is corrupted")
                     || msg.contains("Permission denied")
                     || msg.contains("No such file or directory");
 
