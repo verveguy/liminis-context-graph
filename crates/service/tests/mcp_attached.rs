@@ -52,6 +52,10 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
         .env("LCG_WAL_DIR", dir.path().join("wal").to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
         .args(["--embedder-http", embedder_url])
+        // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+        // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
+        // these tests (no extraction tool is called).
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
         .spawn()
         .expect("failed to spawn socket service");
 
@@ -74,6 +78,10 @@ fn spawn_socket_service_at(socket_path: &Path, db_dir: &TempDir, embedder_url: &
         .env("LCG_WAL_DIR", db_dir.path().join("wal").to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
         .args(["--embedder-http", embedder_url])
+        // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+        // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
+        // these tests (no extraction tool is called).
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
         .spawn()
         .expect("failed to spawn socket service");
     assert!(

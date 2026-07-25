@@ -238,6 +238,7 @@ mod tests {
             "unused".to_string(),
             StdArc::new(lcg_core::MockEmbedder::new(8)),
             "mock".to_string(),
+            StdArc::new(lcg_core::MockExtractor),
         ))
     }
 

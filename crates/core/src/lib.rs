@@ -36,6 +36,7 @@ pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;
 pub use extractor::{
     AnthropicExtractor, ConfigurableExtractor, ExtractOptions, Extractor, MockExtractor,
+    OaiExtractor,
 };
 pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;

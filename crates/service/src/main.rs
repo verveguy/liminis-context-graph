@@ -8,14 +8,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cli::{CliMode, EmbedderFlag};
+use cli::{CliMode, EmbedderFlag, ExtractorFlag};
 use lcg_core::{
     app_state::AppState,
     db::Db,
     embedder::{is_transport_error, Embedder, OaiEmbedder},
     env::lcg_env_var,
+    extractor::{Extractor, OaiExtractor, ANTHROPIC_API_URL},
     handlers,
     ipc::IpcRequest,
+    llm_router::LlmRouter,
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
     IpcResponse,
 };
@@ -132,6 +134,7 @@ async fn bootstrap_app_state(
     pre_migration_degraded: Option<String>,
     db_path: String,
     embedder_flag: Option<EmbedderFlag>,
+    extractor_flag: Option<ExtractorFlag>,
 ) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
     let (cli_uds, cli_http) = match embedder_flag {
         Some(EmbedderFlag::Uds(p)) => (Some(p), None),
@@ -273,6 +276,116 @@ async fn bootstrap_app_state(
         )),
     };
 
+    // ── Extractor resolution (FR-006/FR-007) ───────────────────────────────────────
+    // Priority: explicit CLI flag (always selects the local adapter, regardless of
+    // ANTHROPIC_API_KEY) > ANTHROPIC_API_KEY set (Anthropic path, byte-for-byte unchanged,
+    // FR-015) > LCG_EXTRACTION_URL env > fatal error (FR-011). Unlike the embedder, there is no
+    // live probe here — extraction has no response shape to auto-detect, and a blocking
+    // Foundation-Models warm-up call would regress startup latency for no benefit. Reachability
+    // failures at call time surface through the normal `Extractor` error path (FR-010), not here.
+    //
+    // Deliberately NOT mirrored from the embedder: no default-UDS-socket auto-detection tier.
+    // The bundled macOS sidecar's /v1/chat/completions route (Apple Foundation Models) was
+    // evaluated in prior work and found inadequate for entity/relationship extraction —
+    // insufficient context window and capability (see #227/#228). Silently selecting it just
+    // because the socket exists and no ANTHROPIC_API_KEY is set would trade a false "requires a
+    // hosted key" claim for an equally misleading "fully local extraction just works" one.
+    // Selecting that same sidecar remains possible — via explicit `--extractor-uds` or
+    // `LCG_EXTRACTION_URL` — it is simply never the silent default (see PR #223 review
+    // discussion).
+    let extractor_model =
+        std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
+
+    enum ResolvedExtractor {
+        Anthropic,
+        Http(String),
+        #[cfg(unix)]
+        Uds(String),
+    }
+
+    let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
+        Some(ExtractorFlag::Uds(p)) => (Some(p), None),
+        Some(ExtractorFlag::Http(u)) => (None, Some(u)),
+        None => (None, None),
+    };
+
+    let resolved_extractor = if let Some(uds_path) = extractor_cli_uds {
+        #[cfg(unix)]
+        {
+            if !std::path::Path::new(&uds_path).exists() {
+                return Err(format!(
+                    "extractor UDS socket not found at {uds_path}. \
+                     Ensure the liminis-inference sidecar is running."
+                )
+                .into());
+            }
+            ResolvedExtractor::Uds(uds_path)
+        }
+        #[cfg(not(unix))]
+        {
+            return Err("--extractor-uds is only supported on Unix platforms".into());
+        }
+    } else if let Some(http_url) = extractor_cli_http {
+        let host_part = http_url
+            .strip_prefix("https://")
+            .or_else(|| http_url.strip_prefix("http://"));
+        // A leading '/' right after the scheme (e.g. "http:///path") means the host segment
+        // is empty even though the raw suffix isn't — split off the host before checking.
+        let has_host = host_part
+            .map(|h| !h.split('/').next().unwrap_or("").is_empty())
+            .unwrap_or(false);
+        if !has_host {
+            return Err(format!(
+                "Invalid --extractor-http URL: {http_url:?}. \
+                 Must start with http:// or https:// and include a host."
+            )
+            .into());
+        }
+        ResolvedExtractor::Http(http_url)
+    } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
+        // reachable local sidecar when no explicit local-endpoint flag was given.
+        ResolvedExtractor::Anthropic
+    } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
+        ResolvedExtractor::Http(url)
+    } else {
+        return Err(
+            "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
+             LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into local \
+             extraction with --extractor-uds <path>, --extractor-http <url>, or \
+             LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
+             bundled macOS sidecar — note its Foundation Models backend is not recommended for \
+             extraction quality; see docs/adr/0041-local-openai-compatible-extraction-adapter.md)."
+                .into(),
+        );
+    };
+
+    let extractor: Arc<dyn Extractor> = match resolved_extractor {
+        ResolvedExtractor::Anthropic => {
+            eprintln!(
+                "extractor: provider=anthropic, transport=http, endpoint={ANTHROPIC_API_URL}"
+            );
+            Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink)))
+        }
+        ResolvedExtractor::Http(url) => {
+            let ext = OaiExtractor::new_http(url, extractor_model, Arc::clone(&telemetry_sink));
+            let (transport_label, endpoint) = ext.transport_info();
+            eprintln!(
+                "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+            );
+            Arc::new(ext)
+        }
+        #[cfg(unix)]
+        ResolvedExtractor::Uds(path) => {
+            let ext = OaiExtractor::new_uds(path, extractor_model, Arc::clone(&telemetry_sink));
+            let (transport_label, endpoint) = ext.transport_info();
+            eprintln!(
+                "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+            );
+            Arc::new(ext)
+        }
+    };
+
     // Derive wal_dir using the same env-var logic as AppState::from_env.
     // Available before DB open so startup recovery can use it without AppState.
     let startup_wal_dir = std::path::PathBuf::from(
@@ -405,6 +518,7 @@ async fn bootstrap_app_state(
         db_path.clone(),
         embedder,
         embedding_model_probed,
+        extractor,
     ));
     // FR-008: reflect the eager build performed above (direct-open or post-recovery) so
     // knowledge_status reports indices_built: true before the socket accepts any request,
@@ -757,7 +871,10 @@ async fn async_main(
     }
 
     match cli_mode {
-        CliMode::Socket { embedder } => {
+        CliMode::Socket {
+            embedder,
+            extractor,
+        } => {
             // Bind socket FIRST — this allows health_check and recovery IPC to work even
             // when the DB is in a degraded state. See ADR-0009.
             if let Some(parent) = std::path::Path::new(&socket_path).parent() {
@@ -772,6 +889,7 @@ async fn async_main(
                 pre_migration_degraded,
                 db_path,
                 embedder,
+                extractor,
             )
             .await?;
 
@@ -786,6 +904,7 @@ async fn async_main(
         }
         CliMode::Mcp {
             embedder,
+            extractor,
             connect: None,
             scopes,
             allow_remote_close,
@@ -795,6 +914,7 @@ async fn async_main(
                 pre_migration_degraded,
                 db_path,
                 embedder,
+                extractor,
             )
             .await?;
 

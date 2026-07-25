@@ -23,6 +23,10 @@ fn spawn_standalone(dir: &TempDir, embedder_url: &str, extra_args: &[&str]) -> M
             dir.path().join("unused.sock").to_str().unwrap(),
         )
         .args(["--mcp-stdio", "--embedder-http", embedder_url])
+        // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+        // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
+        // these tests (no extraction tool is called).
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
         .args(extra_args);
     McpClient::spawn(cmd)
 }

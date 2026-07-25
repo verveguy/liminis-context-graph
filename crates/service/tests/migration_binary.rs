@@ -124,6 +124,10 @@ mod migration_binary_tests {
             .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
             .args(["--embedder-http", &embedder_url])
+            // With no ANTHROPIC_API_KEY, no sidecar socket, and no LCG_EXTRACTION_URL in the
+            // CI environment, startup would otherwise fail fast per FR-011. This test never
+            // exercises extraction, so the URL need not be reachable.
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
             .spawn()
             .expect("failed to spawn liminis-context-graph");
 

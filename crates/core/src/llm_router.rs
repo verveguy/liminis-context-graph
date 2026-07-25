@@ -24,26 +24,27 @@ use crate::{
 /// without latching `primary_failed`, so transient failures do not permanently
 /// disable extraction.
 pub struct LlmRouter {
-    primary: AnthropicExtractor,
+    primary: Arc<dyn Extractor>,
     primary_model_name: String,
-    fallback: Option<AnthropicExtractor>,
+    fallback: Option<Arc<dyn Extractor>>,
     fallback_model_name: String,
     primary_failed: AtomicBool,
     sink: Arc<dyn TelemetrySink>,
 }
 
 impl LlmRouter {
-    /// Constructs directly from extractor instances — for tests.
+    /// Constructs directly from extractor instances and their model names — for tests and for
+    /// callers that already hold a concrete `Arc<dyn Extractor>` (e.g. `OaiExtractor` as
+    /// primary with no fallback). Model names are passed explicitly rather than derived via a
+    /// trait method, since callers already know the string at construction time and not every
+    /// `Extractor` impl (test doubles included) has a meaningful model name to report.
     pub fn new(
-        primary: AnthropicExtractor,
-        fallback: Option<AnthropicExtractor>,
+        primary: Arc<dyn Extractor>,
+        primary_model_name: String,
+        fallback: Option<Arc<dyn Extractor>>,
+        fallback_model_name: String,
         sink: Arc<dyn TelemetrySink>,
     ) -> Self {
-        let primary_model_name = primary.model_name().to_string();
-        let fallback_model_name = fallback
-            .as_ref()
-            .map(|f| f.model_name().to_string())
-            .unwrap_or_default();
         Self {
             primary,
             primary_model_name,
@@ -67,14 +68,19 @@ impl LlmRouter {
             .to_string();
         let fallback_model = parts.next().map(str::to_string);
 
-        let primary = AnthropicExtractor::with_model(
+        let primary: Arc<dyn Extractor> = Arc::new(AnthropicExtractor::with_model(
             primary_model.clone(),
             api_key.clone(),
             Arc::clone(&sink),
-        );
+        ));
         let fallback_model_name = fallback_model.clone().unwrap_or_default();
-        let fallback =
-            fallback_model.map(|m| AnthropicExtractor::with_model(m, api_key, Arc::clone(&sink)));
+        let fallback: Option<Arc<dyn Extractor>> = fallback_model.map(|m| {
+            Arc::new(AnthropicExtractor::with_model(
+                m,
+                api_key,
+                Arc::clone(&sink),
+            )) as Arc<dyn Extractor>
+        });
 
         Self {
             primary,
