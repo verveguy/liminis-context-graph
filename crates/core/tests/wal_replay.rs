@@ -472,6 +472,165 @@ fn test_match_delete_on_nonexistent_node_counts_as_delete_no_op() {
     );
 }
 
+/// Review finding: the DETACH-DELETE probe path was only tested against a no-op (zero-row)
+/// match. Complements `test_match_delete_on_nonexistent_node_counts_as_delete_no_op` by
+/// verifying the `RETURN count(*)` probe rewrite also works when the `MATCH` DOES find its
+/// target — production `remove_episode`/`remove_episodes_by_source`/`remove_episodes_by_chunk_id`
+/// (`db.rs`) all issue this exact `MATCH ... DETACH DELETE` shape, and every episode deletion
+/// would be silently undone on rebuild if lbug rejected `RETURN` after `DETACH DELETE`.
+#[test]
+fn test_match_detach_delete_applies_when_target_exists() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (ep:Episodic {uuid: 'to-be-deleted', name: 'chunk', group_id: 'g', source: 'text', source_description: 'src', content: 'body', created_at: timestamp('2026-05-19 00:00:00'), valid_at: timestamp('2026-05-19 00:00:00')})","params":{}}"#;
+    let delete_line = r#"{"seq":1,"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (ep:Episodic {uuid: 'to-be-deleted'}) DETACH DELETE ep","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{create_line}\n{delete_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines,
+        0,
+        "the RETURN count(*) probe must not break a DETACH DELETE whose target exists: {:?}",
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.match_delete_no_op, 0,
+        "a DETACH DELETE that actually matched its target must not be counted as a no-op"
+    );
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both the CREATE and the effective DETACH DELETE must have replayed"
+    );
+    assert_eq!(
+        conn.count_nodes("Episodic").unwrap(),
+        0,
+        "the episode must have actually been deleted, not silently skipped by the probe rewrite"
+    );
+}
+
+/// Review finding: the only WAL fixture line exercising the probe against a MATCH-multi-pattern
+/// `CREATE`-relationship template (`MATCH (src:Entity {...}), (dst:Entity {...}) CREATE
+/// (src)-[:RELATES_TO {...}]->(dst)`, the exact shape `insert_relates_to_edge`/`db.rs:385-401`
+/// issues and the dominant mutation shape in the real-corpus fixture) was gated behind the
+/// `#[ignore]`d `real_corpus_e2e` test. Verifies the probe rewrite doesn't break this shape and
+/// that the relationship is actually created when both endpoints exist.
+#[test]
+fn test_match_create_relationship_applies_when_targets_exist() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let entity_line = |uuid: &str, seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {{uuid: '{uuid}', name: '{uuid}', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{{}}'}})","params":{{}}}}"#
+        )
+    };
+    let rel_line = r#"{"seq":2,"ts":"2026-05-19T00:00:02.000000+00:00","db":"","cypher":"MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) CREATE (src)-[:RELATES_TO {uuid: $uuid, name: $name, group_id: $group_id, fact: $fact, valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes}]->(dst)","params":{"src":"rel-src","dst":"rel-dst","uuid":"rel-uuid","name":"knows","group_id":"g","fact":"f","valid_at":null,"invalid_at":null,"attributes":"{}"}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!(
+            "{}\n{}\n{}\n",
+            entity_line("rel-src", 0),
+            entity_line("rel-dst", 1),
+            rel_line
+        ),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.failed_lines,
+        0,
+        "the RETURN count(*) probe must not break a MATCH-multi-pattern CREATE-relationship \
+         template: {:?}",
+        stats
+            .failed_samples
+            .iter()
+            .map(|s| &s.error)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        stats.match_prefixed_no_op, 0,
+        "the relationship CREATE must not be counted as a no-op when both endpoints exist"
+    );
+    assert_eq!(stats.lines_replayed, 3);
+
+    let rows = conn
+        .cypher_query("MATCH (:Entity {uuid: 'rel-src'})-[r:RELATES_TO]->(:Entity {uuid: 'rel-dst'}) RETURN count(r)")
+        .expect("query ok");
+    assert_eq!(
+        rows[0][0], "1",
+        "the RELATES_TO edge must have actually been created"
+    );
+}
+
+/// Review finding companion: the same MATCH-multi-pattern CREATE-relationship template, but with
+/// one endpoint missing — this is the out-of-order-write scenario the whole no-op mechanism
+/// exists to catch (relationship creation racing ahead of entity creation), so it must land in
+/// `match_prefixed_no_op` (SET-form-like: no legitimate cause other than an ordering bug), not
+/// `match_delete_no_op`, and must feed the fidelity ratio like any other SET-form no-op.
+#[test]
+fn test_match_create_relationship_no_op_when_target_missing() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Only the source entity exists; the destination never gets created in this fixture.
+    let entity_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'rel-src-2', name: 'rel-src-2', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})","params":{}}"#;
+    let rel_line = r#"{"seq":1,"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) CREATE (src)-[:RELATES_TO {uuid: $uuid, name: $name, group_id: $group_id, fact: $fact, valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes}]->(dst)","params":{"src":"rel-src-2","dst":"rel-dst-missing","uuid":"rel-uuid-2","name":"knows","group_id":"g","fact":"f","valid_at":null,"invalid_at":null,"attributes":"{}"}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{entity_line}\n{rel_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.match_prefixed_no_op, 1,
+        "a relationship CREATE whose dst endpoint doesn't exist must be counted as a SET-form-\
+         like no-op, not silently dropped"
+    );
+    assert_eq!(
+        stats.match_delete_no_op, 0,
+        "a relationship-creation no-op is not a delete no-op"
+    );
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "only the CREATE (n:Entity) line replayed; the relationship CREATE must not count"
+    );
+}
+
 /// Review finding: routine DETACH-DELETE no-ops (e.g. re-deleting an already-deleted target,
 /// as ADR-0026's WAL-tail-resume overlap intentionally does on every startup recovery) must NOT
 /// trip the fidelity-warning ratio the way SET-form no-ops do — otherwise a normal, healthy
