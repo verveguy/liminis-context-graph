@@ -649,6 +649,7 @@ pub fn is_streaming_method(name: &str) -> bool {
             | "knowledge_canonicalize_relations"
             | "knowledge_backfill_relation_types"
             | "knowledge_reprocess_relation_types"
+            | "knowledge_reprocess_entity_types"
     )
 }
 
@@ -735,6 +736,7 @@ mod tests {
         assert!(is_streaming_method("knowledge_canonicalize_relations"));
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
+        assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
     }
 
