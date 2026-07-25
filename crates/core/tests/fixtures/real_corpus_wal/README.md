@@ -1,7 +1,12 @@
 # Golden Real-Corpus WAL Fixture
 
 This directory contains the real-data fixture consumed by
-`crates/core/tests/real_corpus_e2e.rs` (#217). Unlike `crates/core/tests/fixtures/wal/`
+`crates/core/tests/real_corpus_e2e.rs` (#217, direct in-process `handlers::dispatch`) and, as
+of #234, also by `crates/service/tests/mcp_real_corpus_e2e.rs` (MCP-over-stdio against the real
+compiled binary, via the seeding helper in `crates/service/tests/common/real_corpus.rs`) — the
+same fixture backs both a direct-dispatch harness and an MCP-transport harness, so a schema/WAL-
+format change affects the blast radius of both suites (see "Identifying a stale fixture" below).
+Unlike `crates/core/tests/fixtures/wal/`
 (small, hand-crafted `.jsonl` files exercising WAL *format* edge cases), this fixture is a
 **real ingest run** — real `AnthropicExtractor` + real `OaiEmbedder` — over a real public
 corpus, large enough to cross the `LIMINIS_DEDUP_HYBRID_THRESHOLD` (default 1,000) with
@@ -181,9 +186,11 @@ This makes zero LLM/embedding calls — verified in
 
 If a future schema or WAL-format change breaks compatibility with this fixture, either:
 
-- `cargo test --test real_corpus_e2e` fails outright during replay, or
-- replay succeeds but `rebuild_and_assert_all_non_determinism_expectations` fails on a
-  count/`indices_built` mismatch against `expected_results.json`.
+- `cargo test --test real_corpus_e2e` (or `--test mcp_real_corpus_e2e` in `crates/service/`)
+  fails outright during replay, or
+- replay succeeds but `rebuild_and_assert_all_non_determinism_expectations` (or
+  `mcp_read_path_over_real_corpus_fixture`) fails on a count/`indices_built` mismatch against
+  `expected_results.json`.
 
 Either signal means the fixture needs regenerating per the steps above (a schema change may
 also require the production schema/WAL-format fix to land first — see the repo's schema
