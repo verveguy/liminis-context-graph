@@ -110,11 +110,9 @@ connection could otherwise return a garbled response instead of a clean, retryab
   constant specifically so it can be tuned without further design work if real-corpus runs
   (#217, or its eventual replacement) show it under- or over-loads the sidecar.
 - The `Http` transport variant is unchanged (already pooled via `reqwest`). `OaiExtractor`'s UDS
-  path (`crates/core/src/extractor.rs`) has the identical pre-existing per-call dial pattern but
-  is out of scope here — tracked separately as issue #230, blocked on #212 which currently owns
-  that file. A shared UDS-client helper was considered but not built, since `extractor.rs` is
-  not part of this change; #230 can adopt this pool design's shape without needing this ADR to
-  produce a literal shared abstraction.
+  path (`crates/core/src/extractor.rs`) had the identical pre-existing per-call dial pattern; this
+  was out of scope here and has since been fixed by issue #230 / ADR-0042, which adopts this
+  pool design's shape as an independent copy rather than a shared abstraction.
 
 ## Alternatives Considered
 
@@ -148,5 +146,5 @@ connection could otherwise return a garbled response instead of a clean, retryab
 - Issue #217 — real-corpus capture reliability against the UDS sidecar; the release gate this
   issue is prioritized to help unblock, though the causal link to this specific defect is
   unconfirmed.
-- Issue #230 — follow-up to apply the identical fix shape to `OaiExtractor`'s UDS path in
-  `crates/core/src/extractor.rs`, blocked on #212.
+- Issue #230 / ADR-0042 — applies the identical fix shape to `OaiExtractor`'s UDS path in
+  `crates/core/src/extractor.rs`.
