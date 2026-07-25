@@ -5,7 +5,7 @@
 //!
 //! Schemas are plain `serde_json::Value` literals rather than per-tool `schemars`-derived
 //! structs: tool-call arguments pass straight through to `handlers::dispatch` as a raw
-//! `Value` (FR-003), so there is no typed deserialization step that would justify ~33 throwaway
+//! `Value` (FR-003), so there is no typed deserialization step that would justify ~34 throwaway
 //! structs. This is the single source of truth FR-002 requires; there is no second,
 //! hand-maintained schema anywhere else.
 //!
@@ -39,7 +39,7 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (33 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (34 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -274,7 +274,7 @@ pub fn registry() -> Vec<ToolSpec> {
             scope: Scope::Read,
             input_schema: empty_schema,
         },
-        // ── write (11) ────────────────────────────────────────────────────────────
+        // ── write (12) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -480,6 +480,28 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_reprocess_relation_types",
+            description: "Reclassify relation types via the configured extraction LLM, using \
+                           each edge's fact against the ontology's declared relation types. \
+                           Honestly abstains to UNCLASSIFIED rather than force-assigning the \
+                           nearest type. Supports MCP progress notifications when called with a \
+                           progress token.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "scope": {
+                            "type": "string", "enum": ["untyped", "off_ontology", "all"], "default": "untyped",
+                            "description": "Which edges to reclassify: only untyped ones, only those outside the ontology, or all."
+                        },
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview the reclassification plan without writing."}
+                    }
+                })
+            },
+        },
         // ── cypher (1) — arbitrary query/mutation power scope ────────────────────────
         ToolSpec {
             name: "knowledge_query_cypher",
@@ -610,13 +632,14 @@ pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Names of the three streaming methods that emit MCP progress notifications (FR-007).
+/// Names of the four streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
         "knowledge_rebuild_from_wal"
             | "knowledge_canonicalize_relations"
             | "knowledge_backfill_relation_types"
+            | "knowledge_reprocess_relation_types"
     )
 }
 
@@ -626,11 +649,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_33_unique_tools() {
+    fn registry_has_34_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 33);
+        assert_eq!(r.len(), 34);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 33, "tool names must be unique");
+        assert_eq!(names.len(), 34, "tool names must be unique");
     }
 
     #[test]
@@ -638,7 +661,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 14);
-        assert_eq!(count(Scope::Write), 11);
+        assert_eq!(count(Scope::Write), 12);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 7);
     }
@@ -702,6 +725,7 @@ mod tests {
         assert!(is_streaming_method("knowledge_rebuild_from_wal"));
         assert!(is_streaming_method("knowledge_canonicalize_relations"));
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
+        assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(!is_streaming_method("knowledge_status"));
     }
 }

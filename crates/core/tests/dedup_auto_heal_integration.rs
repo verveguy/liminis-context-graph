@@ -88,6 +88,14 @@ impl Extractor for UniqueEntityExtractor {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(async move { Ok(vec![String::new(); entities.len()]) })
     }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async move { Ok(vec![String::new(); edges.len()]) })
+    }
 }
 
 /// Deterministic, non-degenerate embedder: entity names of the form `Entity-{n}` map to a

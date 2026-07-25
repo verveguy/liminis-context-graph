@@ -20,6 +20,7 @@ pub mod prompts;
 pub mod rebuild_job;
 pub mod recovery;
 pub mod replay;
+pub mod reprocess_relations;
 pub mod schema;
 pub mod search;
 pub mod telemetry;

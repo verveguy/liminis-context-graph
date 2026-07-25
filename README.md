@@ -219,7 +219,7 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
-| `ANTHROPIC_API_KEY` | Yes, for LLM ops | API key for Anthropic entity/relationship extraction. **Required for any LLM-backed operation** — ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity re-classification (`knowledge_reprocess_entity_types`), which also call the configured extractor. Extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only, embedding-only, or non-LLM tools. |
+| `ANTHROPIC_API_KEY` | Yes, for LLM ops | API key for Anthropic entity/relationship extraction. **Required for any LLM-backed operation** — ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`), which also call the configured extractor. Extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only, embedding-only, or non-LLM tools. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 
 ## Ontology
@@ -415,7 +415,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
 | `all` | every scope above (default) |
@@ -441,10 +441,13 @@ only sees them when launched with `--scope=admin` (or `all`). If a mutation goes
 recovery path. Note the WAL replays **forward-only**, so take periodic `knowledge_dump_wal` snapshots
 if you want restore points before large or destructive operations.
 
-### Relation typing (`canonicalize_relations`)
+### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
-`knowledge_canonicalize_relations` maps each edge's **existing raw predicate** onto your ontology's
-declared `relation_types`. Its behavior has three caveats worth knowing before you rely on it:
+Three tools populate an edge's `relation_type`, with different tradeoffs:
+
+**`knowledge_canonicalize_relations`** maps each edge's **existing raw predicate** onto your
+ontology's declared `relation_types`. Its behavior has three caveats worth knowing before you
+rely on it:
 
 - **The primary pass is lexical, over the predicate — not the `fact`.** It matches the edge's
   predicate / current `relation_type` against ontology type names, aliases, and keywords. It does
@@ -464,19 +467,47 @@ declared `relation_types`. Its behavior has three caveats worth knowing before y
   canonicalize has nothing to map from and cannot rebuild it.** Snapshot with `knowledge_dump_wal`
   before such an operation.
 
-For building a typed taxonomy, avoid `knowledge_backfill_relation_types` — it mints uppercased
-fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) rather than classifying against
-the ontology. A fact-based relation classifier with honest abstention
-(`knowledge_reprocess_relation_types`, the relation-side twin of `knowledge_reprocess_entity_types`)
-is planned.
+**`knowledge_backfill_relation_types`** does not classify at all — it mints uppercased
+fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
+`relation_type`, rather than matching against the ontology. Avoid it for building a typed
+taxonomy; prefer `knowledge_reprocess_relation_types` below, which supersedes it for that purpose.
+
+**`knowledge_reprocess_relation_types`** is the relation-side twin of
+`knowledge_reprocess_entity_types`: for each in-scope edge, it sends the edge's `fact` and the
+ontology's declared relation types (name + description) to the configured extraction LLM and asks
+it to pick exactly one type, or honestly abstain. This is the tool to reach for when you want
+genuine fact-based classification instead of lexical matching or pseudo-typing:
+
+- **Always reads the `fact`, never the predicate.** Unlike `canonicalize_relations`, classification
+  is grounded in the edge's natural-language fact sentence against the ontology's declared menu —
+  not lexical/alias/keyword matching on the existing predicate string.
+- **A declared ontology relation-type menu is always required.** Unlike
+  `knowledge_reprocess_entity_types` (whose `untyped` scope works with no ontology via open-ended
+  classification), every scope value (`untyped`, `off_ontology`, `all`) fails with a structured
+  `{success: false, error: ...}` if the ontology declares no relation types — there is no
+  open-ended fallback (see [ADR-0037](docs/adr/0037-relation-classification-abstention-writes-unclassified.md)).
+- **Abstention is an honest, real write of `UNCLASSIFIED`.** If the LLM cannot map a fact to any
+  declared type, the edge's `relation_type` is set to the literal string `UNCLASSIFIED` — never a
+  force-assigned nearest match. This differs from `knowledge_reprocess_entity_types`, where an
+  unclassifiable entity is simply left unchanged (see ADR-0037).
+- **`scope`** controls candidates: `"untyped"` (default) — `relation_type` NULL/empty, the same
+  predicate `backfill_relation_types` uses; `"off_ontology"` — untyped edges plus edges whose
+  `relation_type` isn't a declared type (this naturally covers prior `UNCLASSIFIED` sentinels and
+  `backfill_relation_types`'s fact-prefix pseudo-types with no special-casing); `"all"` — every
+  edge in the group.
+- **Idempotent.** An edge whose computed verdict already matches its current `relation_type`
+  (including an edge already correctly `UNCLASSIFIED`) is left unchanged — no write, no WAL entry.
+- **`dry_run: true`** returns `would_reclassify_count`, a `plan` array of per-edge
+  `{edge_id, fact, old_type, new_type}` entries, and a `breakdown` object counting edges per
+  assigned `new_type` (including an `UNCLASSIFIED` count) — without mutating the graph.
 
 ### Progress notifications
 
-The three long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
-and `knowledge_backfill_relation_types` — bridge to MCP progress notifications when the client
-attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both standalone
-and attached mode. Without a progress token, these calls simply block until they complete, same
-as over the socket protocol.
+The four long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+`knowledge_backfill_relation_types`, and `knowledge_reprocess_relation_types` — bridge to MCP
+progress notifications when the client attaches a progress token to the `tools/call` request
+(`_meta.progressToken`), in both standalone and attached mode. Without a progress token, these
+calls simply block until they complete, same as over the socket protocol.
 
 ### Example MCP client config
 
