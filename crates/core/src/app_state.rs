@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
@@ -12,6 +12,7 @@ use crate::{
     dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter},
     embedder::Embedder,
     env::lcg_env_var,
+    error::Error,
     extractor::Extractor,
     llm_router::LlmRouter,
     ontology::{load_ontology, Ontology},
@@ -190,5 +191,55 @@ impl AppState {
             ontology,
             ontology_drift,
         }
+    }
+}
+
+/// Extract `Arc<Db>` from the `ArcSwapOption`, returning `Error::DbUnavailable` if `None`.
+///
+/// The degraded-mode guard in `handlers::handle()` prevents most handlers from reaching this
+/// point when the DB is unavailable, so this acts as a safety net for internal calls.
+pub fn load_db(state: &AppState) -> Result<Arc<Db>, Error> {
+    state.db.load_full().ok_or_else(|| {
+        let reason = state
+            .degraded_reason
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        Error::DbUnavailable(reason)
+    })
+}
+
+/// Acquires the write lock and calls `build_indices_and_constraints`, then sets the
+/// `indices_built` flag so subsequent callers skip the auto-heal path (FR-003).
+/// Called at most once per session per DB lifecycle event. Shared by the search handlers'
+/// and the ingest dedup path's auto-heal logic.
+pub async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
+    let _guard = state.write_lock.write().await;
+    // Double-check inside the lock: another task may have completed the build while we waited.
+    if state.indices_built.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // Load DB after acquiring the lock so we build on the current instance, not a stale
+    // snapshot that predates a concurrent clear_all swap.
+    let db = load_db(state)?;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        conn.build_indices_and_constraints()
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            // Set flag while still holding the write lock to eliminate the window between
+            // guard release and flag update that would allow redundant builds.
+            state.indices_built.store(true, Ordering::Release);
+            Ok(())
+        }
+        Ok(Err(e)) => Err(Error::Ipc(format!(
+            "Auto-build of knowledge graph indices failed: {e}"
+        ))),
+        Err(e) => Err(Error::Ipc(format!(
+            "Auto-build of knowledge graph indices failed: {e}"
+        ))),
     }
 }
