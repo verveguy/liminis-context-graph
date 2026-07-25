@@ -571,3 +571,53 @@ pub async fn add_episode(
         edges_extracted,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR-007: a genuine (non-missing-index) error from the hybrid dedup query must be
+    /// distinguishable from a missing-index error, since `add_episode`'s retry logic only
+    /// triggers `build_indices_once` when `is_missing_index_error` returns true — anything
+    /// else takes the `Err(e) => return Err(e)` arm and propagates immediately, un-retried.
+    ///
+    /// `resolve_phase_b` is private, so this is exercised directly here rather than through
+    /// the public `add_episode` API (there is no clean way to force a genuine DB error through
+    /// the full ingest pipeline without reaching into internals — see #208 Plan).
+    #[tokio::test]
+    async fn resolve_phase_b_genuine_error_is_not_classified_as_missing_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("phase_b_error_test.db");
+        let dim = 8;
+        let db = Arc::new(crate::db::Db::open(db_path.to_str().unwrap()).unwrap());
+        {
+            let conn = db.connect().unwrap();
+            conn.init_schema(dim).unwrap();
+            // Build indices for real, so a subsequent failure here cannot be a missing-index
+            // error — isolating the "genuine DB error" case FR-007 is about.
+            conn.build_indices_and_constraints().unwrap();
+        }
+
+        // A name_embedding of the wrong dimension (dim+1 instead of dim) against an
+        // already-indexed table is a genuine query failure, not a missing-index condition.
+        let wrong_dim_embedding = vec![0.0f32; dim + 1];
+        let result = resolve_phase_b(
+            db,
+            "test-group".to_string(),
+            vec!["Someone".to_string()],
+            vec![wrong_dim_embedding],
+            true, // use_hybrid
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("dimension-mismatched vector query should fail"),
+            Err(e) => e,
+        };
+        assert!(
+            !is_missing_index_error(&err),
+            "a dimension-mismatch error must not be classified as a missing-index error \
+             (FR-007: only missing-index errors trigger auto-heal), got: {err}"
+        );
+    }
+}
