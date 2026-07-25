@@ -44,12 +44,20 @@ touching the database, verified against the database on every hit before being t
 the full ordered set of matching entities' `(created_at, uuid)` pairs (`BTreeSet`, so the
 minimum element is always the current deterministic winner). A secondary `uuid -> (group_id,
 lower_name, created_at)` map lets a `created_at` change relocate an entry within its ordered set
-in O(log n) without a scan. String-tuple ordering is lexicographic, and `created_at` is always
-the canonical `"YYYY-MM-DD HH:MM:SS"` form used throughout `db.rs`, so this reproduces the
-database's `ORDER BY created_at ASC, uuid ASC LIMIT 1` winner-selection rule exactly, not just
-approximately — verify-on-hit alone (below) cannot catch a *valid-but-not-the-winner* entry
-(a real UUID that matches, but isn't the one the DB's `ORDER BY` would have picked), so the
-index has to reproduce the ordering rule itself, not merely track "a" candidate per key.
+in O(log n) without a scan. String-tuple ordering is lexicographic, and every `created_at` is
+normalized to the canonical `"YYYY-MM-DD HH:MM:SS"` form via `db::canonical_created_at_for_index`
+at every entry point (`insert`, `update_created_at`, `rebuild`) before it reaches the `BTreeSet`,
+so this reproduces the database's `ORDER BY created_at ASC, uuid ASC LIMIT 1` winner-selection
+rule exactly, not just approximately — verify-on-hit alone (below) cannot catch a
+*valid-but-not-the-winner* entry (a real UUID that matches, but isn't the one the DB's `ORDER BY`
+would have picked), so the index has to reproduce the ordering rule itself, not merely track "a"
+candidate per key. This normalization is load-bearing, not defensive: `insert_entity`'s callers
+(e.g. `episode.rs`) pass `created_at` as whatever the caller supplied — typically RFC-3339 — while
+`rebuild_name_index()` always produces the space form read back from the database, so without
+normalization the two formats would coexist in the same `BTreeSet` and the `'T'`/`' '` separator
+byte would dominate the comparison ahead of the actual time-of-day (caught in review by
+`@copilot-pull-request-reviewer`; regression-tested by
+`mixed_rfc3339_and_space_format_created_at_still_orders_correctly` in `name_index.rs`).
 
 The index lives on `Db` (`crates/core/src/db.rs`), not `Conn`: `Conn<'db>` is created fresh per
 request inside `spawn_blocking` and is too short-lived to own state that must survive across

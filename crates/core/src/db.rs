@@ -2190,6 +2190,30 @@ pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
     s.to_string()
 }
 
+/// Normalizes a `created_at` string (RFC-3339 or space-format) to the canonical
+/// `"YYYY-MM-DD HH:MM:SS"` space form used by `value_as_timestamp_str`/`format_datetime`.
+///
+/// `NameIndex` (issue #219) sorts entries lexicographically on this string to reproduce the
+/// database's `ORDER BY created_at ASC` winner-selection rule, which only holds if every entry
+/// sharing a key is in the same format — freshly-inserted rows arrive via `insert_entity` as
+/// whatever the caller passed (typically RFC-3339, e.g. episode.rs's `reference_time`), while
+/// `rebuild_name_index()` always produces the space form read back from the database. Without
+/// normalization the `'T'`/`' '` separator byte dominates the comparison ahead of the actual
+/// time-of-day, silently picking the wrong deterministic winner. Falls through verbatim if
+/// neither format parses (defensive; should not happen for a valid `created_at`).
+pub(crate) fn canonical_created_at_for_index(s: &str) -> String {
+    if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+    {
+        return format_datetime(odt);
+    }
+    const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
+        return format_datetime(pdt.assume_utc());
+    }
+    s.to_string()
+}
+
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {
     if labels.first().map(String::as_str) == Some("Entity") {
         return labels.to_vec();

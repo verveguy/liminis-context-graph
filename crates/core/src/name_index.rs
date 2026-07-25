@@ -8,8 +8,10 @@ use std::sync::RwLock;
 /// Keyed by `(group_id, lower(name))`, each key maps to the full set of matching
 /// entities' `(created_at, uuid)` pairs. `String` tuple ordering is lexicographic, so the
 /// set's minimum element reproduces the DB's `ORDER BY created_at ASC, uuid ASC LIMIT 1`
-/// winner-selection rule exactly (`created_at` is always the canonical
-/// "YYYY-MM-DD HH:MM:SS" form, which sorts lexicographically the same as chronologically).
+/// winner-selection rule exactly — every `created_at` is normalized to the canonical
+/// "YYYY-MM-DD HH:MM:SS" form via `db::canonical_created_at_for_index` before it reaches
+/// this struct, since callers pass mixed formats (RFC-3339 from freshly-extracted entities,
+/// space-format read back from the database) that would otherwise sort inconsistently.
 ///
 /// This structure is an accelerator only: a hit is always re-verified against the database
 /// (`Conn::get_entity_by_uuid`) before being trusted, so a stale or missing entry can only
@@ -29,15 +31,16 @@ impl NameIndex {
     /// Records a newly-inserted entity. Idempotent under retries with the same values.
     pub(crate) fn insert(&self, uuid: &str, name: &str, group_id: &str, created_at: &str) {
         let lower_name = name.trim().to_lowercase();
+        let created_at = crate::db::canonical_created_at_for_index(created_at);
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         state
             .by_key
             .entry((group_id.to_string(), lower_name.clone()))
             .or_default()
-            .insert((created_at.to_string(), uuid.to_string()));
+            .insert((created_at.clone(), uuid.to_string()));
         state.by_uuid.insert(
             uuid.to_string(),
-            (group_id.to_string(), lower_name, created_at.to_string()),
+            (group_id.to_string(), lower_name, created_at),
         );
     }
 
@@ -45,6 +48,7 @@ impl NameIndex {
     /// `created_at` changes (the one mutation `merge_entities` performs that reorders the
     /// winner without adding/removing a row). A no-op if `uuid` isn't tracked yet.
     pub(crate) fn update_created_at(&self, uuid: &str, created_at: &str) {
+        let created_at = crate::db::canonical_created_at_for_index(created_at);
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         let Some((group_id, lower_name, old_created_at)) = state.by_uuid.get(uuid).cloned() else {
             return;
@@ -54,12 +58,11 @@ impl NameIndex {
             .get_mut(&(group_id.clone(), lower_name.clone()))
         {
             set.remove(&(old_created_at, uuid.to_string()));
-            set.insert((created_at.to_string(), uuid.to_string()));
+            set.insert((created_at.clone(), uuid.to_string()));
         }
-        state.by_uuid.insert(
-            uuid.to_string(),
-            (group_id, lower_name, created_at.to_string()),
-        );
+        state
+            .by_uuid
+            .insert(uuid.to_string(), (group_id, lower_name, created_at));
     }
 
     /// Returns the UUID of the deterministic winner for `(name, group_id)`, if the index
@@ -84,6 +87,7 @@ impl NameIndex {
         let mut new_state = NameIndexState::default();
         for (uuid, name, group_id, created_at) in rows {
             let lower_name = name.trim().to_lowercase();
+            let created_at = crate::db::canonical_created_at_for_index(&created_at);
             new_state
                 .by_key
                 .entry((group_id.clone(), lower_name.clone()))
@@ -141,6 +145,26 @@ mod tests {
         let idx = NameIndex::default();
         idx.update_created_at("ghost", "2026-01-01 00:00:00");
         assert_eq!(idx.lookup("Alice", "g1"), None);
+    }
+
+    #[test]
+    fn mixed_rfc3339_and_space_format_created_at_still_orders_correctly() {
+        // Reproduces a real production mismatch: episode.rs's `insert_entity` call passes
+        // `created_at` as the raw RFC-3339 `reference_time` string, while `rebuild_name_index`
+        // (and `update_entity_created_at` callers, which read EntityRow back from the DB) use
+        // the space form. Without normalization, the 'T'/' ' separator byte would dominate the
+        // lexicographic comparison ahead of the actual time-of-day, picking the wrong winner.
+        let idx = NameIndex::default();
+        // Chronologically later (Feb) but RFC-3339-formatted — 'T' > ' ' would wrongly sort
+        // this ahead of everything if formats weren't normalized to the same form first.
+        idx.insert("later-rfc3339", "Alice", "g1", "2026-02-01T00:00:00Z");
+        // Chronologically earlier (Jan), space-formatted.
+        idx.insert("earlier-space", "Alice", "g1", "2026-01-01 00:00:00");
+        assert_eq!(
+            idx.lookup("Alice", "g1"),
+            Some("earlier-space".to_string()),
+            "the chronologically earliest entry must win regardless of its created_at string format"
+        );
     }
 
     #[test]
