@@ -777,7 +777,171 @@ enum ExtractTransport {
     #[cfg(unix)]
     Uds {
         path: String,
+        pool: UdsPool,
     },
+}
+
+// ── UDS connection pool ───────────────────────────────────────────────────────
+//
+// Each chat-completion call over UDS reuses a held HTTP/1.1 connection from a
+// small, lazily-populated, bounded pool instead of dialing a fresh UnixStream,
+// doing a full handshake, and spawning a detached driver task per call (same
+// defect as #229, see `embedder.rs`'s `UdsPool` — this is a deliberately
+// independent copy adapted for `serde_json::Value` request/response bodies
+// rather than typed embed request/response structs; see ADR-0042).
+
+#[cfg(unix)]
+type UdsSender = hyper::client::conn::http1::SendRequest<http_body_util::Full<hyper::body::Bytes>>;
+
+/// Number of held UDS connections. HTTP/1.1 without pipelining serializes one
+/// in-flight request per connection, so a small fixed pool (rather than a
+/// single connection) keeps concurrent extraction calls from bottlenecking
+/// behind each other. Matches the embedder's `UDS_POOL_SIZE` (see ADR-0042).
+#[cfg(unix)]
+const UDS_POOL_SIZE: usize = 4;
+
+#[cfg(unix)]
+struct UdsPool {
+    slots: Vec<tokio::sync::Mutex<Option<UdsSender>>>,
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl UdsPool {
+    /// Constructs a pool with all slots empty. No dialing happens here —
+    /// connections are established lazily on first use of each slot, so
+    /// constructing an `OaiExtractor` before the sidecar is listening still
+    /// succeeds (FR-002).
+    fn new() -> Self {
+        let slots = (0..UDS_POOL_SIZE)
+            .map(|_| tokio::sync::Mutex::new(None))
+            .collect();
+        Self {
+            slots,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Dials a fresh UnixStream, performs the HTTP/1.1 handshake, and spawns the
+/// connection driver task. Used to populate an empty pool slot, or to
+/// re-establish a slot whose held connection has broken.
+#[cfg(unix)]
+async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
+    use hyper_util::rt::TokioIo;
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(path)
+        .await
+        .map_err(|e| Error::Ipc(format!("UDS connect to {path}: {e}")))?;
+    let io = TokioIo::new(stream);
+    let (sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| Error::Ipc(format!("UDS HTTP/1.1 handshake: {e}")))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    Ok(sender)
+}
+
+/// Distinguishes a `send_request` failure (the held connection is dead — the
+/// sidecar restarted, idle-closed the socket, etc. — worth one re-dial) from
+/// an error that occurred after a request was successfully sent over a
+/// healthy connection (bad status, unreadable body, unparseable JSON — not
+/// worth re-dialing, since dialing again would return the same result).
+#[cfg(unix)]
+enum UdsAttemptError {
+    ConnectionBroken(Error),
+    Other(Error),
+}
+
+/// Sends one chat-completion request over `sender` and reads/parses the
+/// response. `body_bytes` is a cheaply-clonable `Bytes` so callers can retry a
+/// send against a freshly-dialed connection without re-copying the serialized
+/// request.
+#[cfg(unix)]
+async fn send_and_read_uds(
+    sender: &mut UdsSender,
+    body_bytes: hyper::body::Bytes,
+) -> Result<Value, UdsAttemptError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::Request;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("host", "localhost")
+        .body(Full::new(body_bytes))
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("build UDS request: {e}"))))?;
+
+    let resp = sender.send_request(req).await.map_err(|e| {
+        UdsAttemptError::ConnectionBroken(Error::Ipc(format!("UDS send request: {e}")))
+    })?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Drain the body before returning: with HTTP/1.1 keep-alive, leaving
+        // it unread would desync framing for the next request reusing this
+        // pooled connection.
+        let _ = resp.into_body().collect().await;
+        return Err(UdsAttemptError::Other(Error::Ipc(format!(
+            "UDS extractor returned status {status}"
+        ))));
+    }
+
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("UDS read response body: {e}"))))?
+        .to_bytes();
+
+    serde_json::from_slice(&bytes).map_err(|e| {
+        UdsAttemptError::Other(Error::Ipc(format!(
+            "parse UDS chat completion response: {e}"
+        )))
+    })
+}
+
+/// Guards a pool slot across one send/read span. If dropped while still
+/// armed — meaning the extraction future was cancelled mid-flight rather than
+/// running to completion (e.g. the `tokio::select!` cancellation race in
+/// `episode.rs`) — the slot is cleared so the next use re-dials instead of
+/// reusing a connection that may be left in an indeterminate state (partially
+/// written request, or an unread stale response).
+#[cfg(unix)]
+struct PoisonGuard<'a> {
+    slot: &'a mut Option<UdsSender>,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl<'a> PoisonGuard<'a> {
+    fn new(slot: &'a mut Option<UdsSender>) -> Self {
+        Self { slot, armed: true }
+    }
+
+    fn sender_mut(&mut self) -> &mut UdsSender {
+        self.slot
+            .as_mut()
+            .expect("PoisonGuard requires a populated slot")
+    }
+
+    /// Marks the send/read span as having completed (successfully or with a
+    /// definite, fully-read error) rather than having been dropped mid-flight.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PoisonGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.slot = None;
+        }
+    }
 }
 
 /// Explicit JSON-shape instructions appended to the (reused, provider-agnostic) system prompts.
@@ -829,7 +993,10 @@ impl OaiExtractor {
         sink: Arc<dyn TelemetrySink>,
     ) -> Self {
         Self {
-            transport: ExtractTransport::Uds { path: path.into() },
+            transport: ExtractTransport::Uds {
+                path: path.into(),
+                pool: UdsPool::new(),
+            },
             model: model.into(),
             sink,
         }
@@ -855,7 +1022,7 @@ impl OaiExtractor {
         match &self.transport {
             ExtractTransport::Http { url, .. } => ("http", url.clone()),
             #[cfg(unix)]
-            ExtractTransport::Uds { path } => ("uds", path.clone()),
+            ExtractTransport::Uds { path, .. } => ("uds", path.clone()),
         }
     }
 
@@ -887,61 +1054,71 @@ impl OaiExtractor {
                 Ok(resp)
             }
             #[cfg(unix)]
-            ExtractTransport::Uds { path } => self.send_chat_uds(path, &body).await,
+            ExtractTransport::Uds { path, pool } => self.send_chat_uds(path, pool, &body).await,
         }
     }
 
+    /// Sends one chat-completion request over a pooled UDS connection. Picks
+    /// a slot by round-robin, lazily dials it if empty, and on a
+    /// broken-connection failure (the sidecar restarted, idle-closed the
+    /// socket, etc.) clears the slot and retries exactly once against a
+    /// freshly-dialed connection.
     #[cfg(unix)]
-    async fn send_chat_uds(&self, path: &str, body: &Value) -> Result<Value, Error> {
-        use http_body_util::{BodyExt, Full};
-        use hyper::body::Bytes;
-        use hyper::Request;
-        use hyper_util::rt::TokioIo;
-        use tokio::net::UnixStream;
+    async fn send_chat_uds(
+        &self,
+        path: &str,
+        pool: &UdsPool,
+        body: &Value,
+    ) -> Result<Value, Error> {
+        let idx = pool
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % pool.slots.len();
+        let mut slot = pool.slots[idx].lock().await;
 
-        let stream = UnixStream::connect(path)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS connect to {path}: {e}")))?;
-        let io = TokioIo::new(stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS HTTP/1.1 handshake: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
+        let body_bytes = hyper::body::Bytes::from(
+            serde_json::to_vec(body)
+                .map_err(|e| Error::Ipc(format!("serialize chat completion request: {e}")))?,
+        );
 
-        let body_bytes = serde_json::to_vec(body)
-            .map_err(|e| Error::Ipc(format!("serialize chat completion request: {e}")))?;
-
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/chat/completions")
-            .header("content-type", "application/json")
-            .header("host", "localhost")
-            .body(Full::new(Bytes::from(body_bytes)))
-            .map_err(|e| Error::Ipc(format!("build UDS request: {e}")))?;
-
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS send request: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(Error::Ipc(format!(
-                "UDS extractor returned status {}",
-                resp.status()
-            )));
+        if slot.is_none() {
+            *slot = Some(dial_uds(path).await?);
         }
 
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS read response body: {e}")))?
-            .to_bytes();
+        let first = {
+            let mut guard = PoisonGuard::new(&mut slot);
+            let result = send_and_read_uds(guard.sender_mut(), body_bytes.clone()).await;
+            // The span completed (successfully or with a definite, fully-read
+            // error) rather than being dropped mid-flight — safe to disarm
+            // regardless of outcome; a ConnectionBroken outcome is handled
+            // explicitly below by clearing the slot before redialing.
+            guard.disarm();
+            result
+        };
 
-        serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Ipc(format!("parse UDS chat completion response: {e}")))
+        match first {
+            Ok(resp) => Ok(resp),
+            Err(UdsAttemptError::Other(e)) => Err(e),
+            Err(UdsAttemptError::ConnectionBroken(_)) => {
+                *slot = None;
+                *slot = Some(dial_uds(path).await?);
+                let mut guard = PoisonGuard::new(&mut slot);
+                let result = send_and_read_uds(guard.sender_mut(), body_bytes).await;
+                guard.disarm();
+                drop(guard);
+                match result {
+                    Ok(resp) => Ok(resp),
+                    Err(UdsAttemptError::Other(e)) => Err(e),
+                    Err(UdsAttemptError::ConnectionBroken(e)) => {
+                        // The redial-and-retry also failed against a fresh
+                        // connection — don't leave the known-bad sender in
+                        // the slot for the next unrelated call to trip over.
+                        *slot = None;
+                        Err(e)
+                    }
+                }
+            }
+        }
     }
 
     /// Maps the OpenAI-compatible `usage` object (`prompt_tokens`/`completion_tokens` — different
