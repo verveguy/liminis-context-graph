@@ -467,8 +467,8 @@ rely on it:
   canonicalize has nothing to map from and cannot rebuild it.** Snapshot with `knowledge_dump_wal`
   before such an operation.
 
-**`knowledge_backfill_relation_types`** does not classify at all — it mints uppercased
-fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
+**`knowledge_backfill_relation_types`** (DEPRECATED) does not classify at all — it mints
+uppercased fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
 `relation_type`, rather than matching against the ontology. Avoid it for building a typed
 taxonomy; prefer `knowledge_reprocess_relation_types` below, which supersedes it for that purpose.
 
