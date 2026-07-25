@@ -2721,6 +2721,99 @@ async fn test_reprocess_scope_off_ontology_idempotency() {
     );
 }
 
+/// #213 FR-002: a progress-tracked, non-dry-run reclassification emits at least one
+/// `{"type":"progress"}` event (the unconditional write-phase-entry send), proving
+/// `handle_reprocess_entity_types` actually threads `progress_tx` through rather than
+/// silently ignoring it when a caller supplies a progress token.
+#[tokio::test]
+async fn test_reprocess_entity_types_emits_progress_when_tracked() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "progress-001",
+        "Erin",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+
+    let ontology = make_person_ontology();
+    let extractor = Arc::new(ClassifyingExtractor::new("Person"));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db,
+        ontology,
+        extractor as Arc<dyn Extractor>,
+        workspace.path().to_path_buf(),
+    );
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let resp = handlers::dispatch(
+        req(
+            97,
+            "knowledge_reprocess_entity_types",
+            json!({"scope": "off_ontology"}),
+        ),
+        state,
+        Some(tx),
+    )
+    .await;
+    let v = serde_json::to_value(resp).unwrap();
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["reclassified_count"], 1, "{v}");
+
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+    assert!(
+        !events.is_empty(),
+        "expected at least one progress event when a progress_tx is supplied"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "progress" && e["phase"] == "writing"),
+        "expected a writing-phase progress event: {events:?}"
+    );
+}
+
+/// #213 FR-004: without a progress token (`progress_tx: None`), behavior is unchanged —
+/// no progress events, plain blocking call. `dispatch_val` always passes `None`, so this
+/// is exercised implicitly by every other `reprocess_entity_types` test above; this test
+/// makes the "no progress_tx → no progress channel touched" invariant explicit.
+#[tokio::test]
+async fn test_reprocess_entity_types_no_progress_tx_unchanged_behavior() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "progress-002",
+        "Frank",
+        "liminis",
+        vec!["Entity".to_string(), "Council".to_string()],
+    );
+
+    let ontology = make_person_ontology();
+    let extractor = Arc::new(ClassifyingExtractor::new("Person"));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db,
+        ontology,
+        extractor as Arc<dyn Extractor>,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        98,
+        "knowledge_reprocess_entity_types",
+        json!({"scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 98);
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["reclassified_count"], 1, "{v}");
+}
+
 // ── #210: reprocess_relation_types scope / dry_run ─────────────────────────────
 
 /// `scope=untyped` (default) on an empty DB → success, 0 reclassified.
