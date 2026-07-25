@@ -71,40 +71,49 @@ fn merge_entities_created_at_update_reorders_name_index_winner() {
     let db = open_db(&dir);
     let conn = db.connect().unwrap();
 
-    // Two same-named entities; "later" was created after "earlier", so "earlier" starts as
-    // the deterministic winner.
-    conn.insert_entity(&make_entity("earlier", "Brett", "2026-01-01 00:00:00"))
+    // Two same-named entities. "zzz-alias" is created first (earlier created_at), so it starts
+    // as the deterministic winner regardless of the uuid tiebreak. "aaa-canonical" is created
+    // later but has the lexicographically smaller uuid — chosen deliberately so that once
+    // merge_entities pulls its created_at back to match the alias's, the uuid ASC tiebreak
+    // resolves in its favor, isolating the assertion to "did update_entity_created_at's
+    // reorder land in the index" rather than "which uuid happens to sort first".
+    conn.insert_entity(&make_entity("zzz-alias", "Brett", "2026-01-01 00:00:00"))
         .unwrap();
-    conn.insert_entity(&make_entity("later", "Brett", "2026-06-01 00:00:00"))
-        .unwrap();
+    conn.insert_entity(&make_entity(
+        "aaa-canonical",
+        "Brett",
+        "2026-06-01 00:00:00",
+    ))
+    .unwrap();
     assert_eq!(
         conn.get_entity_by_name_ci("Brett", GROUP)
             .unwrap()
             .unwrap()
             .uuid,
-        "earlier"
+        "zzz-alias"
     );
 
-    // Merge "earlier" (the alias) into "later" (the canonical). merge_entities pulls the
-    // canonical's created_at back to the earliest across all merged entities, which changes
-    // the deterministic winner for the "brett"/GROUP key without any insert/delete.
+    // Merge "zzz-alias" into "aaa-canonical". merge_entities pulls the canonical's created_at
+    // back to the earliest across all merged entities, which changes the deterministic winner
+    // for the "brett"/GROUP key without any insert/delete.
     let params = MergeEntitiesParams {
-        canonical_uuid: Some("later".to_string()),
-        alias_uuids: vec!["earlier".to_string()],
+        canonical_uuid: Some("aaa-canonical".to_string()),
+        alias_uuids: vec!["zzz-alias".to_string()],
         group_id: GROUP.to_string(),
         ..Default::default()
     };
     let result = merge_entities(&conn, &params, TS);
     assert!(result.success, "merge should succeed: {:?}", result.errors);
 
-    // The alias is now labeled Merged, so the deterministic winner for a fresh "Brett" lookup
-    // must be the canonical, at its updated (earliest) created_at.
+    // Both entities now share the same created_at; the uuid ASC tiebreak must resolve to the
+    // canonical, proving the name index observed update_entity_created_at's reorder rather than
+    // still ranking by the pre-merge created_at values.
     let found = conn
         .get_entity_by_name_ci("Brett", GROUP)
         .unwrap()
         .expect("Brett must still resolve after merge");
     assert_eq!(
-        found.uuid, "later",
+        found.uuid, "aaa-canonical",
         "the name index must reflect update_entity_created_at, not the pre-merge winner"
     );
 }
@@ -137,7 +146,11 @@ corrections:
     .unwrap();
 
     let result = apply_corrections_file(&conn, dir.path(), false);
-    assert!(result.success, "apply_corrections should succeed: {:?}", result.errors);
+    assert!(
+        result.success,
+        "apply_corrections should succeed: {:?}",
+        result.errors
+    );
 
     // apply_same_as only calls update_entity_labels (adds "Merged") — it never touches
     // name/group_id/created_at, so both name keys must still resolve to their original UUIDs.
@@ -149,7 +162,10 @@ corrections:
         "canonical"
     );
     assert_eq!(
-        conn.get_entity_by_name_ci("Bob", GROUP).unwrap().unwrap().uuid,
+        conn.get_entity_by_name_ci("Bob", GROUP)
+            .unwrap()
+            .unwrap()
+            .uuid,
         "alias",
         "labeling an alias as Merged must not remove it from the name index"
     );
@@ -183,7 +199,10 @@ fn removing_episodes_leaves_orphaned_entity_name_lookup_unaffected() {
 
     // No code path deletes Entity nodes today (see remove_episode's doc comment) — the name
     // index has nothing to invalidate, and the entity must remain lookupable.
-    assert!(conn.get_entity_by_name_ci("Orphan", GROUP).unwrap().is_some());
+    assert!(conn
+        .get_entity_by_name_ci("Orphan", GROUP)
+        .unwrap()
+        .is_some());
 }
 
 // ── User Story 2 / SC-004: stale index entry degrades to a miss, never a wrong result ──
@@ -196,7 +215,10 @@ fn stale_index_entry_after_out_of_band_delete_degrades_to_miss() {
 
     conn.insert_entity(&make_entity("gone", "Ghost", "2026-01-01 00:00:00"))
         .unwrap();
-    assert!(conn.get_entity_by_name_ci("Ghost", GROUP).unwrap().is_some());
+    assert!(conn
+        .get_entity_by_name_ci("Ghost", GROUP)
+        .unwrap()
+        .is_some());
 
     // No production path ever deletes an Entity node, but this directly exercises the
     // verify-on-hit contract (FR-006): force a stale index entry via a raw DB bypass (which,
@@ -206,7 +228,9 @@ fn stale_index_entry_after_out_of_band_delete_degrades_to_miss() {
         .unwrap();
 
     assert!(
-        conn.get_entity_by_name_ci("Ghost", GROUP).unwrap().is_none(),
+        conn.get_entity_by_name_ci("Ghost", GROUP)
+            .unwrap()
+            .is_none(),
         "a stale index entry must never be returned as if it were a valid entity"
     );
 }
@@ -219,7 +243,10 @@ fn fresh_db_has_no_entities_lookupable() {
     let db = open_db(&dir);
     let conn = db.connect().unwrap();
 
-    assert!(conn.get_entity_by_name_ci("Anything", GROUP).unwrap().is_none());
+    assert!(conn
+        .get_entity_by_name_ci("Anything", GROUP)
+        .unwrap()
+        .is_none());
 }
 
 // ── FR-004/FR-005: WAL replay bypasses typed mutation hooks ─────────────────────
@@ -244,7 +271,9 @@ fn wal_replay_only_populates_name_index_after_explicit_rebuild() {
     // ...but the name index doesn't know about it yet, since replay executes raw Cypher
     // templates and never calls Conn::insert_entity.
     assert!(
-        conn.get_entity_by_name_ci("Replayed", GROUP).unwrap().is_none(),
+        conn.get_entity_by_name_ci("Replayed", GROUP)
+            .unwrap()
+            .is_none(),
         "replay must not silently populate the name index"
     );
 
@@ -273,8 +302,12 @@ fn open_or_rebuild_populates_name_index_from_replayed_wal() {
     .unwrap();
 
     let db_path = db_dir.path().join("test.db");
-    let db = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.path().to_str().unwrap(), DIM)
-        .unwrap();
+    let db = Db::open_or_rebuild(
+        db_path.to_str().unwrap(),
+        wal_dir.path().to_str().unwrap(),
+        DIM,
+    )
+    .unwrap();
     let conn = db.connect().unwrap();
 
     assert_eq!(
