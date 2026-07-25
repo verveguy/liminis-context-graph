@@ -14,7 +14,7 @@ use lcg_core::{
     db::Db,
     embedder::{is_transport_error, Embedder, OaiEmbedder},
     env::lcg_env_var,
-    extractor::{Extractor, OaiExtractor},
+    extractor::{Extractor, OaiExtractor, ANTHROPIC_API_URL},
     handlers,
     ipc::IpcRequest,
     llm_router::LlmRouter,
@@ -321,7 +321,12 @@ async fn bootstrap_app_state(
         let host_part = http_url
             .strip_prefix("https://")
             .or_else(|| http_url.strip_prefix("http://"));
-        if host_part.map(|h| h.is_empty()).unwrap_or(true) {
+        // A leading '/' right after the scheme (e.g. "http:///path") means the host segment
+        // is empty even though the raw suffix isn't — split off the host before checking.
+        let has_host = host_part
+            .map(|h| !h.split('/').next().unwrap_or("").is_empty())
+            .unwrap_or(false);
+        if !has_host {
             return Err(format!(
                 "Invalid --extractor-http URL: {http_url:?}. \
                  Must start with http:// or https:// and include a host."
@@ -368,7 +373,9 @@ async fn bootstrap_app_state(
 
     let extractor: Arc<dyn Extractor> = match resolved_extractor {
         ResolvedExtractor::Anthropic => {
-            eprintln!("extractor: provider=anthropic");
+            eprintln!(
+                "extractor: provider=anthropic, transport=http, endpoint={ANTHROPIC_API_URL}"
+            );
             Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink)))
         }
         ResolvedExtractor::Http(url) => {

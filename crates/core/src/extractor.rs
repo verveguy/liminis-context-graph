@@ -16,7 +16,7 @@ use crate::{
     types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
 };
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 // ── ExtractOptions ────────────────────────────────────────────────────────────
 

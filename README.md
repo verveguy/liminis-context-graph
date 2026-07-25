@@ -390,10 +390,9 @@ precedence (highest first):
    is running, else `LCG_EXTRACTION_URL` (HTTP), else the binary exits with a clear error
    identifying the missing configuration.
 
-The resolved choice is reported in a startup log line: `extractor: provider=anthropic` for the
-hosted path, or `extractor: provider=local, transport=..., endpoint=...` when a local endpoint is
-selected (explicitly or auto-detected). Unlike the embedder, extraction performs no live
-reachability probe at startup —
+The resolved choice is reported in a startup log line: `extractor: provider=...,
+transport=..., endpoint=...` — `provider` is `anthropic` or `local` depending on which path was
+selected. Unlike the embedder, extraction performs no live reachability probe at startup —
 Foundation Models' on-device warm-up can be slow, and there is no response shape to auto-detect —
 so an unreachable local endpoint surfaces as an error on the first extraction call rather than at
 startup. See [ADR 0041](docs/adr/0041-local-openai-compatible-extraction-adapter.md) for the full
