@@ -211,6 +211,68 @@ fn test_open_or_rebuild_from_wal() {
     );
 }
 
+/// SC-001: a WAL whose mutations entirely fail to `prepare()` against the schema must not
+/// leave `open_or_rebuild`'s caller with an outcome indistinguishable from a clean rebuild.
+/// The failure must be observable via the returned stats' `fidelity_warning`/`failed_lines`.
+#[test]
+fn test_open_or_rebuild_surfaces_fidelity_warning_on_schema_gap() {
+    let root = TempDir::new().unwrap();
+    let db_path = root.path().join("graph.db");
+    let wal_dir = root.path().join("wal");
+    fs::create_dir_all(&wal_dir).unwrap();
+
+    // Every line references a column that doesn't exist in the schema, so `prepare()` fails
+    // for 100% of the WAL's mutations.
+    let line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: $uuid}) SET n.nonexistent_column_xyz = $val","params":{"uuid":"x","val":"y"}}"#;
+    fs::write(
+        wal_dir.join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
+        .expect("open_or_rebuild must not error even when replay fails to prepare");
+
+    let stats = stats.expect("a rebuild ran, so stats must be Some (FR-001)");
+    assert!(
+        stats.fidelity_warning.is_some(),
+        "a WAL that entirely fails to prepare must surface a fidelity_warning"
+    );
+    assert!(
+        stats.failed_lines > 0,
+        "the failing line must be counted in failed_lines"
+    );
+
+    // The Db itself is still usable; the failed mutation just didn't apply.
+    let conn = db.connect().expect("connect");
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(
+        count, 0,
+        "the failed-to-prepare mutation must not have created any entity"
+    );
+}
+
+/// Acceptance scenario 2 (User Story 1): when the DB already exists, open_or_rebuild does not
+/// run a rebuild at all, so stats must be None rather than a fabricated empty struct.
+#[test]
+fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
+    let root = TempDir::new().unwrap();
+    let db_path = root.path().join("graph.db");
+    let wal_dir = root.path().join("wal");
+    fs::create_dir_all(&wal_dir).unwrap();
+
+    // Create the DB up front so open_or_rebuild sees it as already existing.
+    Db::open(db_path.to_str().unwrap()).expect("initial open");
+
+    let (_db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
+        .expect("open_or_rebuild");
+
+    assert!(
+        stats.is_none(),
+        "no rebuild ran (DB already existed), so stats must be None, not Some(default)"
+    );
+}
+
 /// MATCH-SET mutations in the fixture update field values; verify they landed (FR-006).
 #[test]
 fn test_replay_golden_fixture_field_updates() {
@@ -330,6 +392,188 @@ fn test_replay_match_prefixed_counter() {
     assert_eq!(
         stats.match_prefixed_replayed, 1,
         "only the MATCH-prefixed line counts as match_prefixed_replayed"
+    );
+}
+
+/// SC-004: a MATCH … SET targeting a uuid that was never created must be counted in the
+/// distinct `match_prefixed_no_op` counter, not in `lines_replayed`/`match_prefixed_replayed`
+/// (FR-005).
+#[test]
+fn test_match_set_on_nonexistent_node_counts_as_no_op() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'never-created'}) SET n.summary = 'updated'","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.match_prefixed_no_op, 1,
+        "a MATCH-SET targeting a nonexistent node must be counted as a no-op"
+    );
+    assert_eq!(
+        stats.lines_replayed, 0,
+        "a no-op MATCH-SET must not inflate lines_replayed"
+    );
+    assert_eq!(
+        stats.match_prefixed_replayed, 0,
+        "a no-op MATCH-SET must not inflate match_prefixed_replayed"
+    );
+}
+
+/// FR-006: a high match_prefixed_no_op rate is folded into the fidelity-warning ratio, just
+/// like failed_lines is.
+#[test]
+fn test_match_prefixed_no_op_feeds_fidelity_warning() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // 11 no-op MATCH-SETs (target never created) + 1 successful MERGE = 11/12 ineffective,
+    // well above the 10% default threshold.
+    let no_op_line = |seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {{uuid: 'missing-{seq}'}}) SET n.summary = 'x'","params":{{}}}}"#
+        )
+    };
+    let good_line = make_entity_line(11, "no-op-fidelity-ok");
+    let content: String = (0..11u64)
+        .map(no_op_line)
+        .chain(std::iter::once(good_line))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_noop_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must not abort");
+
+    assert_eq!(stats.match_prefixed_no_op, 11);
+    assert_eq!(stats.lines_replayed, 1);
+    assert!(
+        stats.fidelity_warning.is_some(),
+        "a high no-op rate must surface a fidelity_warning just like failed_lines does"
+    );
+}
+
+/// SC-003: a seq regression across lines is counted and logged, and the mutation still applies
+/// (FR-004) rather than being silently applied or silently dropped.
+#[test]
+fn test_seq_regression_counted_and_still_applied() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Single file, seq values out of order: 5 then 3 — a direct regression independent of
+    // file-ordering, isolating FR-004's monotonicity check from FR-003's file sort.
+    let line_a = make_entity_line(5, "regress-a");
+    let line_b = make_entity_line(3, "regress-b");
+    fs::write(
+        wal_dir.path().join("20260601_000000_aaa111_0000.jsonl"),
+        format!("{line_a}\n{line_b}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must not abort on a seq regression");
+
+    assert_eq!(
+        stats.seq_regressions, 1,
+        "the seq=3 line following seq=5 must be counted as a regression"
+    );
+    assert_eq!(
+        stats.lines_replayed, 2,
+        "both lines still replay despite the regression (counted, not rejected)"
+    );
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(
+        count, 2,
+        "both entities were applied despite the regression"
+    );
+}
+
+/// SC-002: two WAL files sharing one timestamp prefix, whose session ids sort opposite to their
+/// true seq order (simulating a crash-restart within the same wall-clock second), must replay
+/// in seq order — matching what replaying in true seq order would produce — not in full-filename
+/// lexicographic order (FR-003).
+#[test]
+fn test_replay_reorders_files_by_seq_not_filename() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // File "zzz999" (seq 0): CREATE the entity with its initial summary. Written by the older
+    // session.
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T03:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'order-entity', name: 'N', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 'initial', attributes: '{}'})","params":{}}"#;
+    // File "aaa111" (seq 1): MATCH ... SET the summary. Written by a newer session that crashed
+    // and restarted within the same wall-clock second as the first session.
+    let set_line = r#"{"seq":1,"ts":"2026-05-19T03:00:00.000000+00:00","db":"","cypher":"MATCH (n:Entity {uuid: 'order-entity'}) SET n.summary = 'updated'","params":{}}"#;
+
+    // Full-filename lexicographic order would sort "aaa111" (the SET, seq 1) BEFORE "zzz999"
+    // (the CREATE, seq 0) since both share the same timestamp prefix — reproducing the bug.
+    fs::write(
+        wal_dir.path().join("20260519_030000_zzz999_0000.jsonl"),
+        format!("{create_line}\n"),
+    )
+    .unwrap();
+    fs::write(
+        wal_dir.path().join("20260519_030000_aaa111_0000.jsonl"),
+        format!("{set_line}\n"),
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    // Correct seq order (CREATE seq=0, then SET seq=1) means the SET finds its target — no
+    // regression, no no-op, and the summary reflects the update.
+    assert_eq!(
+        stats.seq_regressions, 0,
+        "seq-ordered replay must not report a regression"
+    );
+    assert_eq!(
+        stats.match_prefixed_no_op, 0,
+        "the SET must find its target when replayed in true seq order"
+    );
+
+    let entity = conn
+        .get_entity_by_uuid("order-entity")
+        .expect("query ok")
+        .expect("order-entity must exist");
+    assert_eq!(
+        entity.summary, "updated",
+        "SET must apply after CREATE when files are ordered by seq, not by filename"
     );
 }
 
