@@ -468,8 +468,17 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_backfill_relation_types",
-            description: "Backfill missing relation_type values on existing edges. Supports \
-                           MCP progress notifications when called with a progress token.",
+            description: "DEPRECATED — does not classify against the ontology. For each edge \
+                           with a null/empty relation_type, this mints a pseudo-type by \
+                           uppercasing and underscore-joining the first few words of the edge's \
+                           fact sentence (e.g. THE_SPECIFICATION_DOCUMENT_DEFINES), producing \
+                           near-unique labels rather than a real taxonomy. Running it pollutes \
+                           the relation_type space and is only reversible by re-nulling the \
+                           field. Use knowledge_reprocess_relation_types with scope: \"untyped\" \
+                           instead — it performs genuine fact-based classification against the \
+                           ontology's declared relation types, with honest UNCLASSIFIED \
+                           abstention. Retained for backward compatibility; supports MCP \
+                           progress notifications when called with a progress token.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -727,5 +736,31 @@ mod tests {
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    #[test]
+    fn backfill_relation_types_description_warns_and_points_to_replacement() {
+        let r = registry();
+        let tool = r
+            .iter()
+            .find(|t| t.name == "knowledge_backfill_relation_types")
+            .expect("knowledge_backfill_relation_types must remain registered");
+        let desc = tool.description;
+        assert!(
+            desc.contains("DEPRECATED"),
+            "description must mark the tool deprecated"
+        );
+        assert!(
+            desc.contains("does not classify against the ontology"),
+            "description must plainly state it does not classify against the ontology"
+        );
+        assert!(
+            desc.contains("pollutes the relation_type space") && desc.contains("re-nulling"),
+            "description must warn about pollution and reversibility only via re-nulling"
+        );
+        assert!(
+            desc.contains("knowledge_reprocess_relation_types") && desc.contains("untyped"),
+            "description must point callers to knowledge_reprocess_relation_types {{scope: \"untyped\"}}"
+        );
     }
 }
