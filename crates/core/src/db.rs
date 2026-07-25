@@ -68,11 +68,19 @@ impl Db {
 
     /// If `db_path` is absent but `wal_dir` contains `.jsonl` files, creates a fresh DB and
     /// replays the WAL to rebuild it (R-06). Otherwise behaves like `Db::open`.
+    ///
+    /// Returns the `ReplayStats` from the rebuild alongside the `Db` (FR-001) — `Some` when a
+    /// rebuild ran, `None` when it didn't (the DB already existed, or no WAL was present). When
+    /// the rebuild's `fidelity_warning` is set, this also emits a `[WAL REBUILD WARNING]` line
+    /// (FR-002) so the outcome is observable even if the caller ignores the returned stats —
+    /// `open_or_rebuild` is pure `crates/core` library code with no `TelemetrySink`/logging
+    /// framework available, so a bracketed-tag `eprintln!` matches this codebase's existing
+    /// `[WAL WARN]`/`[WAL PROGRESS]` convention.
     pub fn open_or_rebuild(
         db_path: &str,
         wal_dir: &str,
         embedding_dim: usize,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, Option<crate::replay::ReplayStats>), Error> {
         let db_exists = Path::new(db_path).exists();
         let wal_dir_path = Path::new(wal_dir);
 
@@ -87,17 +95,23 @@ impl Db {
 
         let db = Self::open(db_path)?;
 
-        if !db_exists && has_wal {
+        let stats = if !db_exists && has_wal {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
-            crate::replay::WalReplayer::new(wal_dir).replay(&conn)?;
+            let stats = crate::replay::WalReplayer::new(wal_dir).replay(&conn)?;
+            if let Some(ref warning) = stats.fidelity_warning {
+                eprintln!("[WAL REBUILD WARNING] {warning}");
+            }
             // WAL replay executes raw recorded Cypher templates, bypassing the typed
             // insert_entity/update_entity_created_at hooks — a full rebuild is the only
             // way the name index observes replayed data (FR-004).
             conn.rebuild_name_index()?;
-        }
+            Some(stats)
+        } else {
+            None
+        };
 
-        Ok(db)
+        Ok((db, stats))
     }
 
     /// Opens a fresh connection against the already-set-up database.
@@ -169,6 +183,34 @@ impl<'db> Conn<'db> {
         let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
         self.inner.execute(prepared, bound)?;
         Ok(())
+    }
+
+    /// Like [`Conn::execute_prepared`], but returns the row count reported by the query instead
+    /// of discarding it. Used only by WAL replay's `MATCH`-prefixed no-op detection (FR-005):
+    /// the caller prepares the template with a `RETURN count(*)` probe appended (see
+    /// `replay::with_match_count_probe`) so a `MATCH ... SET`/`DETACH DELETE` that matched zero
+    /// rows is distinguishable from one that matched and applied. Not used by the live-write
+    /// path (`exec_params`), which is unaffected by this addition.
+    ///
+    /// Falls back to `1` (i.e. "treat as matched") when the result's first row/column isn't a
+    /// countable numeric type — this fails toward not inflating the no-op counter rather than
+    /// toward silently losing writes, in case a future lbug version changes `count(*)`'s result
+    /// shape.
+    pub(crate) fn execute_prepared_returning_count(
+        &self,
+        prepared: &mut lbug::PreparedStatement,
+        params: &serde_json::Value,
+    ) -> Result<i64, Error> {
+        let (keys, vals): (Vec<String>, Vec<Value>) =
+            json_params_to_values(params).into_iter().unzip();
+        let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
+        let result = self.inner.execute(prepared, bound)?;
+        let rows: Vec<Vec<Value>> = result.collect();
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .map(value_as_match_count)
+            .unwrap_or(1))
     }
 
     /// Runs a parameterized read query via prepared-statement binding and materializes the
@@ -2096,6 +2138,19 @@ fn value_as_usize(v: &lbug::Value) -> usize {
         lbug::Value::Int32(i) => *i as usize,
         lbug::Value::Double(f) => *f as usize,
         _ => 0,
+    }
+}
+
+/// Reads a `RETURN count(*)` probe result as `i64`. See
+/// `Conn::execute_prepared_returning_count` for the "unexpected shape ⇒ treat as matched"
+/// fallback rationale.
+fn value_as_match_count(v: &lbug::Value) -> i64 {
+    match v {
+        lbug::Value::Int64(i) => *i,
+        lbug::Value::UInt64(i) => *i as i64,
+        lbug::Value::Int32(i) => *i as i64,
+        lbug::Value::Double(f) => *f as i64,
+        _ => 1,
     }
 }
 

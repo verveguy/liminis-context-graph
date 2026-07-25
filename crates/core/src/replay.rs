@@ -63,10 +63,29 @@ pub struct ReplayStats {
     /// Note: this counter is **excluded** from [`lines_skipped()`] — callers that want a
     /// total "mutations not applied" count must add `legacy_skipped_lines + lines_skipped()`.
     pub legacy_skipped_lines: u64,
-    /// Populated when `failed_lines / (lines_replayed + failed_lines) > threshold` after
-    /// replay completes. Threshold defaults to 10% and is overridable via
-    /// `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
+    /// Populated when `(failed_lines + match_prefixed_no_op) / (lines_replayed + failed_lines +
+    /// match_prefixed_no_op) > threshold` after replay completes. Threshold defaults to 10% and
+    /// is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
     pub fidelity_warning: Option<String>,
+    /// `MATCH`-prefixed mutations (`MATCH ... SET`, `MATCH ... DETACH DELETE`, etc.) whose
+    /// execution affected zero rows — e.g. the target node hadn't been created yet (an
+    /// out-of-order write) or was legitimately deleted earlier. Counted separately from
+    /// `lines_replayed`/`match_prefixed_replayed` so a no-op is never reported as a successful
+    /// write (FR-005); factored into the `fidelity_warning` ratio (FR-006). Detected via a
+    /// `RETURN count(*)` probe appended to the template — see `with_match_count_probe`.
+    ///
+    /// Note: this is distinct from the intentional, harmless re-application overlap at the head
+    /// of `recovery.rs`'s WAL-tail-resume replay (ADR-0026) — that overlap re-runs `MERGE`s
+    /// (which always produce a summary row) and `CREATE`-form statements, neither of which are
+    /// `MATCH`-prefixed, so it never inflates this counter.
+    pub match_prefixed_no_op: u64,
+    /// Count of WAL lines whose `seq` was not strictly greater than the maximum `seq` already
+    /// seen in this `replay_opts` call, in processing order (FR-004). A regression means the
+    /// file-ordering heuristic (see the file sort in `replay_opts`) placed a file out of true
+    /// write order — the affected mutation is still applied (refusing it would convert a rare
+    /// ordering miss into new data loss) but the regression is counted and logged so it is never
+    /// silent.
+    pub seq_regressions: u64,
 }
 
 impl ReplayStats {
@@ -122,7 +141,10 @@ pub struct ReplayProgress {
     pub message: String,
 }
 
-/// Replays all `.jsonl` WAL files in lexicographic filename order against a LadybugDB connection.
+/// Replays all `.jsonl` WAL files against a LadybugDB connection, ordered by each file's
+/// first-line `seq` (see the file sort in `replay_opts`) — not by full-filename comparison,
+/// since the random per-session id embedded in the filename does not track write order across
+/// sessions (see ADR-0041).
 pub struct WalReplayer {
     wal_dir: PathBuf,
 }
@@ -182,23 +204,55 @@ impl WalReplayer {
             match_prefixed_replayed: 0,
             legacy_skipped_lines: 0,
             fidelity_warning: None,
+            match_prefixed_no_op: 0,
+            seq_regressions: 0,
         };
 
         if !self.wal_dir.exists() {
             return Ok(stats);
         }
 
-        let mut files: Vec<PathBuf> = fs::read_dir(&self.wal_dir)?
+        let files: Vec<PathBuf> = fs::read_dir(&self.wal_dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             .collect();
 
-        // Lexicographic order — ISO-8601 timestamp prefix ensures chronological order (R-07).
-        files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+        // Ordering key (FR-003): each file's first WAL line's `seq`, which is globally
+        // monotonic across sessions (`WalWriter::scan_max_seq` reseeds it at every restart).
+        // The filename's `file_seq` component is NOT used here — it resets to 0 on every new
+        // `WalWriter` session, so it cannot order files written by different sessions; using it
+        // would silently reintroduce this same ordering defect in a different column. Files
+        // whose first-line seq can't be determined (unreadable, empty, or an unparseable first
+        // line) sort after all determinate files, grouped by filename among themselves, with a
+        // `[WAL WARN]` log — any resulting misordering is then caught by the seq-monotonicity
+        // check below (FR-004), so the two mechanisms are complementary, not redundant.
+        let mut keyed_files: Vec<(Option<u64>, PathBuf)> = files
+            .into_iter()
+            .map(|p| (first_seq_in_file(&p), p))
+            .collect();
+        for (seq, path) in &keyed_files {
+            if seq.is_none() {
+                eprintln!(
+                    "[WAL WARN] could not determine first seq for {path:?}; \
+                     falling back to filename order for this file"
+                );
+            }
+        }
+        keyed_files.sort_by(|(seq_a, path_a), (seq_b, path_b)| match (seq_a, seq_b) {
+            (Some(a), Some(b)) => a
+                .cmp(b)
+                .then_with(|| path_a.file_name().cmp(&path_b.file_name())),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => path_a.file_name().cmp(&path_b.file_name()),
+        });
+        let files: Vec<PathBuf> = keyed_files.into_iter().map(|(_, p)| p).collect();
         let files_total = files.len() as u64;
 
         let mut batch = ReplayBatch::new();
+        // Running max `seq` across the whole call, for FR-004's monotonicity check.
+        let mut max_seq_seen: Option<u64> = None;
 
         'files: for file_path in &files {
             stats.files_read += 1;
@@ -288,6 +342,22 @@ impl WalReplayer {
                 if wal_line.seq < opts.from_seq {
                     continue;
                 }
+
+                // Monotonicity check (FR-004): a regression here means the file-ordering
+                // heuristic above placed a file out of true seq order. The mutation still
+                // proceeds into the normal path below — refusing it would convert a rare
+                // ordering-heuristic miss into new data loss, exactly what this issue exists to
+                // eliminate — but the regression is counted and logged so it is never silent.
+                if let Some(max_seen) = max_seq_seen {
+                    if wal_line.seq <= max_seen {
+                        stats.seq_regressions += 1;
+                        eprintln!(
+                            "[WAL WARN] seq regression: line seq={} <= max seen so far={} in {:?}",
+                            wal_line.seq, max_seen, file_path
+                        );
+                    }
+                }
+                max_seq_seen = Some(max_seq_seen.map_or(wal_line.seq, |m| m.max(wal_line.seq)));
 
                 // Mirror the writer's mutation detection: scan all tokens outside
                 // single-quoted literals so MATCH-prefixed writes (MATCH ... DETACH DELETE,
@@ -423,12 +493,17 @@ impl WalReplayer {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.10)
             .clamp(0.0, 1.0);
-        let total = stats.lines_replayed + stats.failed_lines;
+        // FR-006: match_prefixed_no_op joins both sides of the ratio, not just the numerator —
+        // FR-005 removes no-ops from lines_replayed, so they must also join the denominator or
+        // the ratio would never change. legacy_skipped_lines stays excluded from both, exactly
+        // as it was before this fix.
+        let total = stats.lines_replayed + stats.failed_lines + stats.match_prefixed_no_op;
         if total > 0 {
-            let ratio = stats.failed_lines as f64 / total as f64;
+            let ineffective = stats.failed_lines + stats.match_prefixed_no_op;
+            let ratio = ineffective as f64 / total as f64;
             if ratio > threshold {
                 stats.fidelity_warning = Some(format!(
-                    "{:.1}% of mutations failed (threshold: {:.1}%); rebuilt graph may be incomplete",
+                    "{:.1}% of mutations failed or had no effect (threshold: {:.1}%); rebuilt graph may be incomplete",
                     ratio * 100.0,
                     threshold * 100.0,
                 ));
@@ -502,6 +577,37 @@ impl ReplayBatch {
     }
 }
 
+/// Reads a WAL file's first non-empty line and returns its `seq` value — the ordering key used
+/// to sort files in `replay_opts` (FR-003). Returns `None` if the file can't be opened, has no
+/// non-empty lines, or that first line fails JSON parsing; callers fall back to filename order
+/// for such files (a rare, honestly-approximate placement — any resulting misordering is caught
+/// by the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
+fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let wal_line: WalLine = serde_json::from_str(trimmed).ok()?;
+        return Some(wal_line.seq);
+    }
+    None
+}
+
+/// Appends `RETURN count(*)` to a `MATCH`-prefixed template so its execution result reveals
+/// whether the `MATCH` clause found any rows (FR-005). A bare `MATCH ... SET`/`DETACH DELETE`
+/// with no `RETURN` clause always reports 0 tuples from `get_num_tuples()` regardless of whether
+/// the `MATCH` found anything — this rewrite is the only way to distinguish a real no-op from an
+/// effective write. Verified empirically against lbug 0.17: the mutation still applies when the
+/// `MATCH` finds rows, and `count(*)` reports the true matched-row count either way.
+fn with_match_count_probe(template: &str) -> String {
+    let trimmed = template.trim().trim_end_matches(';').trim_end();
+    format!("{trimmed} RETURN count(*)")
+}
+
 /// Executes accumulated batch mutations against `conn` via prepared-statement binding.
 ///
 /// Prepares the batch's shared (post-normalization) template ONCE, then binds and executes
@@ -513,6 +619,12 @@ impl ReplayBatch {
 /// normalization) makes the template unusable, so every row sharing it is classified from
 /// that single error. A per-row *execute* failure is classified for that row only, so one
 /// bad row cannot suppress its siblings.
+///
+/// A batch only ever contains rows sharing one post-normalization template, and
+/// `is_match_prefixed` is derived purely from that template's shape — so every row in a batch
+/// carries the same flag value, and checking the batch's shape once (via the first row) is
+/// sufficient to decide whether to apply the `RETURN count(*)` probe (FR-005), not an
+/// approximation.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
@@ -525,7 +637,14 @@ fn flush_batch(
     let rows = std::mem::take(&mut batch.rows);
     let match_prefixed = std::mem::take(&mut batch.match_prefixed);
 
-    let mut prepared = match conn.prepare(&batch.template) {
+    let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
+    let prepare_template = if is_match_prefixed_batch {
+        with_match_count_probe(&batch.template)
+    } else {
+        batch.template.clone()
+    };
+
+    let mut prepared = match conn.prepare(&prepare_template) {
         Ok(p) => p,
         Err(e) => {
             let err_str = e.to_string();
@@ -539,14 +658,24 @@ fn flush_batch(
 
     for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
         let params = serde_json::Value::Object(row);
-        match conn.execute_prepared(&mut prepared, &params) {
-            Ok(_) => {
-                stats.lines_replayed += 1;
-                if is_match_prefixed {
+        if is_match_prefixed {
+            match conn.execute_prepared_returning_count(&mut prepared, &params) {
+                Ok(count) if count > 0 => {
+                    stats.lines_replayed += 1;
                     stats.match_prefixed_replayed += 1;
                 }
+                Ok(_) => stats.match_prefixed_no_op += 1,
+                Err(e) => {
+                    classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
+                }
             }
-            Err(e) => classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap),
+        } else {
+            match conn.execute_prepared(&mut prepared, &params) {
+                Ok(_) => stats.lines_replayed += 1,
+                Err(e) => {
+                    classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
+                }
+            }
         }
     }
     batch.clear();

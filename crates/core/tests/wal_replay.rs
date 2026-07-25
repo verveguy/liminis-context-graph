@@ -10,10 +10,13 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
-/// Replay reads files in lexicographic filename order (R-07).
-/// Files are named with timestamps in non-creation order; entities must all be present.
+/// Replay reads files ordered by each file's first-line `seq`, not by full-filename
+/// lexicographic comparison (FR-003). Files are written to disk in non-filename order to stress
+/// the sort; their `seq` values already match ascending filename order here, so this test only
+/// verifies replay tolerates out-of-disk-order file discovery — the seq-vs-filename distinction
+/// this fix cares about is covered by `test_replay_reorders_files_by_seq_not_filename` below.
 #[test]
-fn test_replay_files_in_lexicographic_order() {
+fn test_replay_files_in_seq_order() {
     let wal_dir = TempDir::new().unwrap();
     let db_dir = TempDir::new().unwrap();
 
@@ -191,8 +194,12 @@ fn test_open_or_rebuild_from_wal() {
     .unwrap();
 
     // DB does not exist yet; open_or_rebuild should replay the WAL.
-    let db = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
+    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
         .expect("open_or_rebuild");
+    assert!(
+        stats.is_some(),
+        "a rebuild ran, so ReplayStats must be returned (FR-001)"
+    );
 
     let conn = db.connect().expect("connect");
     let entity_count = conn.count_nodes("Entity").unwrap();
