@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+pub mod real_corpus;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
