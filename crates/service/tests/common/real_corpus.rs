@@ -70,6 +70,11 @@ impl SeededWorkspace {
         cmd.env("LCG_DB_PATH", self.db_path.to_str().unwrap())
             .env("LCG_WAL_DIR", self.wal_dir.to_str().unwrap())
             .args(["--mcp-stdio", "--embedder-http", embedder_url])
+            // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: the
+            // binary refuses to start at all without an extraction provider configured
+            // (main.rs's FR-011 fatal-startup error), even though this suite never calls
+            // extraction — mirrors mcp_stdio.rs's precedent with a never-dialed stub URL.
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
             .args(extra_args);
         McpClient::spawn(cmd)
     }
@@ -135,6 +140,11 @@ pub fn seed_real_corpus_workspace(embedder_url: &str) -> SeededWorkspace {
                 "--embedder-http",
                 embedder_url,
                 "--scope=admin",
+                // Never dialed — WAL replay makes zero extraction calls; the binary just
+                // refuses to start at all without some extractor configured (see
+                // spawn_reader's doc comment above).
+                "--extractor-http",
+                "http://127.0.0.1:1/v1/chat/completions",
             ]);
         cmd
     });
