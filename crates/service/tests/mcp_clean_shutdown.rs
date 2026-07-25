@@ -24,6 +24,11 @@ fn spawn_standalone(dir: &TempDir, embedder_url: &str) -> McpClient {
             "--embedder-http",
             embedder_url,
             "--scope=admin",
+            // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+            // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed
+            // in this test (no extraction tool is called).
+            "--extractor-http",
+            "http://127.0.0.1:1/v1/chat/completions",
         ]);
     McpClient::spawn(cmd)
 }

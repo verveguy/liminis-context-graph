@@ -48,7 +48,11 @@ fn standalone_rebuild_surfaces_progress_before_terminal_result() {
         let mut cmd = Command::new(binary_path());
         cmd.env("LCG_DB_PATH", dir.path().join("test.db").to_str().unwrap())
             .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
-            .args(["--mcp-stdio", "--embedder-http", &url]);
+            .args(["--mcp-stdio", "--embedder-http", &url])
+            // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+            // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
+            // this test (no extraction tool is called).
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
         cmd
     });
     client.initialize();
@@ -91,6 +95,10 @@ fn attached_rebuild_surfaces_bridged_progress() {
         .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
         .args(["--embedder-http", &url])
+        // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
+        // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
+        // this test (no extraction tool is called).
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
         .spawn()
         .expect("failed to spawn socket service");
     assert!(wait_for_socket(&socket_path, Duration::from_secs(15)));

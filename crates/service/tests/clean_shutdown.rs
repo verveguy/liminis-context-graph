@@ -92,7 +92,12 @@ mod clean_shutdown_tests {
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
             // Provide a stub embedder so the startup probe succeeds on CI
             // (no Swift sidecar or LCG_EMBEDDING_URL available in the test environment).
+            // Also provide an explicit extractor endpoint: with no ANTHROPIC_API_KEY, no
+            // sidecar socket, and no LCG_EXTRACTION_URL in the CI environment, startup would
+            // otherwise fail fast per FR-011. The test never exercises extraction (only
+            // knowledge_build_indices), so this URL need not be reachable.
             .args(["--embedder-http", &embedder_url])
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
             .spawn()
             .expect("failed to spawn liminis-context-graph");
 
