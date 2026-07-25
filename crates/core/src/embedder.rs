@@ -34,7 +34,157 @@ enum EmbedTransport {
     #[cfg(unix)]
     Uds {
         path: String,
+        pool: UdsPool,
     },
+}
+
+// ── UDS connection pool ───────────────────────────────────────────────────────
+//
+// Each embed call over UDS reuses a held HTTP/1.1 connection from a small,
+// lazily-populated, bounded pool instead of dialing a fresh UnixStream, doing
+// a full handshake, and spawning a detached driver task per call (see #229).
+
+#[cfg(unix)]
+type UdsSender = hyper::client::conn::http1::SendRequest<http_body_util::Full<hyper::body::Bytes>>;
+
+/// Number of held UDS connections. HTTP/1.1 without pipelining serializes one
+/// in-flight request per connection, so a small fixed pool (rather than a
+/// single connection) keeps concurrent embed calls from bottlenecking behind
+/// each other. See ADR documenting this pooling design for the rationale.
+#[cfg(unix)]
+const UDS_POOL_SIZE: usize = 4;
+
+#[cfg(unix)]
+struct UdsPool {
+    slots: Vec<tokio::sync::Mutex<Option<UdsSender>>>,
+    cursor: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(unix)]
+impl UdsPool {
+    /// Constructs a pool with all slots empty. No dialing happens here —
+    /// connections are established lazily on first use of each slot, so
+    /// short-lived embedders (e.g. the startup probe) pay no extra cost.
+    fn new() -> Self {
+        let slots = (0..UDS_POOL_SIZE)
+            .map(|_| tokio::sync::Mutex::new(None))
+            .collect();
+        Self {
+            slots,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Dials a fresh UnixStream, performs the HTTP/1.1 handshake, and spawns the
+/// connection driver task. Used to populate an empty pool slot, or to
+/// re-establish a slot whose held connection has broken.
+#[cfg(unix)]
+async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
+    use hyper_util::rt::TokioIo;
+    use tokio::net::UnixStream;
+
+    let stream = UnixStream::connect(path)
+        .await
+        .map_err(|e| Error::Ipc(format!("UDS connect to {path}: {e}")))?;
+    let io = TokioIo::new(stream);
+    let (sender, conn) = hyper::client::conn::http1::handshake(io)
+        .await
+        .map_err(|e| Error::Ipc(format!("UDS HTTP/1.1 handshake: {e}")))?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    Ok(sender)
+}
+
+/// Distinguishes a `send_request` failure (the held connection is dead — the
+/// sidecar restarted, idle-closed the socket, etc. — worth one re-dial) from
+/// an error that occurred after a request was successfully sent over a
+/// healthy connection (bad status, unreadable body, unparseable JSON — not
+/// worth re-dialing, since dialing again would return the same result).
+#[cfg(unix)]
+enum UdsAttemptError {
+    ConnectionBroken(Error),
+    Other(Error),
+}
+
+/// Sends one embed request over `sender` and reads/parses the response.
+#[cfg(unix)]
+async fn send_and_read_uds(
+    sender: &mut UdsSender,
+    body_bytes: &[u8],
+) -> Result<OaiEmbedResponse, UdsAttemptError> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper::Request;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/embeddings")
+        .header("content-type", "application/json")
+        .header("host", "localhost")
+        .body(Full::new(Bytes::from(body_bytes.to_vec())))
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("build UDS request: {e}"))))?;
+
+    let resp = sender.send_request(req).await.map_err(|e| {
+        UdsAttemptError::ConnectionBroken(Error::Ipc(format!("UDS send request: {e}")))
+    })?;
+
+    if !resp.status().is_success() {
+        return Err(UdsAttemptError::Other(Error::Ipc(format!(
+            "UDS embedder returned status {}",
+            resp.status()
+        ))));
+    }
+
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("UDS read response body: {e}"))))?
+        .to_bytes();
+
+    serde_json::from_slice(&bytes)
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("parse UDS embed response: {e}"))))
+}
+
+/// Guards a pool slot across one send/read span. If dropped while still
+/// armed — meaning the embed future was cancelled mid-flight rather than
+/// running to completion — the slot is cleared so the next use re-dials
+/// instead of reusing a connection that may be left in an indeterminate
+/// state (partially written request, or an unread stale response).
+#[cfg(unix)]
+struct PoisonGuard<'a> {
+    slot: &'a mut Option<UdsSender>,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl<'a> PoisonGuard<'a> {
+    fn new(slot: &'a mut Option<UdsSender>) -> Self {
+        Self { slot, armed: true }
+    }
+
+    fn sender_mut(&mut self) -> &mut UdsSender {
+        self.slot
+            .as_mut()
+            .expect("PoisonGuard requires a populated slot")
+    }
+
+    /// Marks the send/read span as having completed (successfully or with a
+    /// definite, fully-read error) rather than having been dropped mid-flight.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PoisonGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            *self.slot = None;
+        }
+    }
 }
 
 // ── Embedder trait ────────────────────────────────────────────────────────────
@@ -77,7 +227,10 @@ impl OaiEmbedder {
     #[cfg(unix)]
     pub fn new_uds(path: impl Into<String>, model: impl Into<String>, dim: usize) -> Self {
         Self {
-            transport: EmbedTransport::Uds { path: path.into() },
+            transport: EmbedTransport::Uds {
+                path: path.into(),
+                pool: UdsPool::new(),
+            },
             model: model.into(),
             dim,
         }
@@ -105,7 +258,7 @@ impl OaiEmbedder {
         match &self.transport {
             EmbedTransport::Http { url, .. } => ("http", url.clone()),
             #[cfg(unix)]
-            EmbedTransport::Uds { path } => ("uds", path.clone()),
+            EmbedTransport::Uds { path, .. } => ("uds", path.clone()),
         }
     }
 
@@ -136,7 +289,7 @@ impl OaiEmbedder {
         match &self.transport {
             EmbedTransport::Http { client, url } => self.do_embed_http_raw(client, url, text).await,
             #[cfg(unix)]
-            EmbedTransport::Uds { path } => self.do_embed_uds_raw(path, text).await,
+            EmbedTransport::Uds { path, pool } => self.do_embed_uds_raw(path, pool, text).await,
         }
     }
 
@@ -161,24 +314,22 @@ impl OaiEmbedder {
         Ok(resp)
     }
 
+    /// Sends one embed request over a pooled UDS connection. Picks a slot by
+    /// round-robin, lazily dials it if empty, and on a broken-connection
+    /// failure (the sidecar restarted, idle-closed the socket, etc.) clears
+    /// the slot and retries exactly once against a freshly-dialed connection.
     #[cfg(unix)]
-    async fn do_embed_uds_raw(&self, path: &str, text: &str) -> Result<OaiEmbedResponse, Error> {
-        use http_body_util::{BodyExt, Full};
-        use hyper::body::Bytes;
-        use hyper::Request;
-        use hyper_util::rt::TokioIo;
-        use tokio::net::UnixStream;
-
-        let stream = UnixStream::connect(path)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS connect to {path}: {e}")))?;
-        let io = TokioIo::new(stream);
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS HTTP/1.1 handshake: {e}")))?;
-        tokio::spawn(async move {
-            let _ = conn.await;
-        });
+    async fn do_embed_uds_raw(
+        &self,
+        path: &str,
+        pool: &UdsPool,
+        text: &str,
+    ) -> Result<OaiEmbedResponse, Error> {
+        let idx = pool
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % pool.slots.len();
+        let mut slot = pool.slots[idx].lock().await;
 
         let body_bytes = serde_json::to_vec(&OaiEmbedRequest {
             input: text,
@@ -186,35 +337,37 @@ impl OaiEmbedder {
         })
         .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?;
 
-        let req = Request::builder()
-            .method("POST")
-            .uri("/v1/embeddings")
-            .header("content-type", "application/json")
-            .header("host", "localhost")
-            .body(Full::new(Bytes::from(body_bytes)))
-            .map_err(|e| Error::Ipc(format!("build UDS request: {e}")))?;
-
-        let resp = sender
-            .send_request(req)
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS send request: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Err(Error::Ipc(format!(
-                "UDS embedder returned status {}",
-                resp.status()
-            )));
+        if slot.is_none() {
+            *slot = Some(dial_uds(path).await?);
         }
 
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::Ipc(format!("UDS read response body: {e}")))?
-            .to_bytes();
+        let first = {
+            let mut guard = PoisonGuard::new(&mut slot);
+            let result = send_and_read_uds(guard.sender_mut(), &body_bytes).await;
+            // The span completed (successfully or with a definite, fully-read
+            // error) rather than being dropped mid-flight — safe to disarm
+            // regardless of outcome; a ConnectionBroken outcome is handled
+            // explicitly below by clearing the slot before redialing.
+            guard.disarm();
+            result
+        };
 
-        serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Ipc(format!("parse UDS embed response: {e}")))
+        match first {
+            Ok(resp) => Ok(resp),
+            Err(UdsAttemptError::Other(e)) => Err(e),
+            Err(UdsAttemptError::ConnectionBroken(_)) => {
+                *slot = None;
+                *slot = Some(dial_uds(path).await?);
+                let mut guard = PoisonGuard::new(&mut slot);
+                let result = send_and_read_uds(guard.sender_mut(), &body_bytes).await;
+                guard.disarm();
+                match result {
+                    Ok(resp) => Ok(resp),
+                    Err(UdsAttemptError::Other(e)) => Err(e),
+                    Err(UdsAttemptError::ConnectionBroken(e)) => Err(e),
+                }
+            }
+        }
     }
 }
 
@@ -314,5 +467,38 @@ impl Embedder for NameMapEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `main.rs`'s startup probe pattern-matches these exact string prefixes on
+    // `Error::Ipc` to distinguish "embedder unreachable" from other failures
+    // (see `is_transport_error`'s doc comment). The pooled UDS retry rewrite
+    // must preserve this contract verbatim (FR-006).
+    #[test]
+    fn is_transport_error_recognizes_uds_connect_prefix() {
+        let e = Error::Ipc("UDS connect to /tmp/foo.sock: connection refused".to_string());
+        assert!(is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_transport_error_recognizes_uds_handshake_prefix() {
+        let e = Error::Ipc("UDS HTTP/1.1 handshake: unexpected eof".to_string());
+        assert!(is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_transport_error_recognizes_uds_send_request_prefix() {
+        let e = Error::Ipc("UDS send request: connection closed".to_string());
+        assert!(is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_transport_error_rejects_other_ipc_errors() {
+        let e = Error::Ipc("UDS embedder returned status 500".to_string());
+        assert!(!is_transport_error(&e));
     }
 }
