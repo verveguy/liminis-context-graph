@@ -197,6 +197,9 @@ LLM, extractor, or embedder network call (FR-004, FR-011). This is asserted expl
 just assumed from the wiring: every test checks that the extractor/embedder call counts are
 still zero immediately after `knowledge_rebuild_from_wal` returns.
 
+**Both tests are `#[ignore]`d and excluded from the default `cargo test --release` run** —
+see "Running the tests" and "CI wiring" below for why and how they still run automatically.
+
 - `rebuild_and_assert_all_non_determinism_expectations`: one rebuild, covering Acceptance
   Scenarios 1–5 — counts (FR-004/005), `indices_built`/hybrid-dedup threshold (FR-006),
   golden entity + relationship queries (FR-007), 2-hop traversal (FR-008), and relation-type
@@ -220,12 +223,35 @@ assertions are exact-set equality.
 
 ### Measured runtime (SC-005)
 
-On the machine that captured this fixture, `cargo test --release --test real_corpus_e2e`
-(both tests, default parallelism) measured **~190–240s (roughly 3–4 minutes) wall-clock**
-across repeated runs — each full WAL replay + HNSW/FTS index build over the fixture's 1,506
-entities / 2,392 relationships / 228 episodes takes roughly 60–140s, and this file performs
-three such rebuilds total (one in `rebuild_and_assert_all_non_determinism_expectations`, two
+On the machine that captured this fixture, `cargo test --release --test real_corpus_e2e --
+--ignored` (both tests, default parallelism) measured **~190–344s (roughly 3–5.7 minutes)
+wall-clock** across repeated runs (344s measured against this PR's committed fixture) — each
+full WAL replay + HNSW/FTS index build over the fixture's 1,506 entities / 2,392
+relationships / 228 episodes takes roughly 60–140s, and this file performs three such
+rebuilds total (one in `rebuild_and_assert_all_non_determinism_expectations`, two
 independent ones in `replay_is_deterministic_across_independent_processes`). This is a real,
-non-trivial addition to the `cargo test --release` CI job — the spec does not mandate a
-ceiling (SC-005 only asks it be measured and documented), but if CI budget becomes a concern,
-the determinism test's second rebuild is the first thing to reconsider dropping.
+non-trivial cost — the spec does not mandate a ceiling (SC-005 only asks it be measured and
+documented) — which is exactly why it's excluded from the default `cargo test --release` PR
+gate rather than added to it (see "Running the tests" below); if the cost needs trimming
+further, the determinism test's second rebuild is the first thing to reconsider dropping.
+
+### Running the tests
+
+Both tests are marked `#[ignore]`, so the default `cargo test --release` (the per-PR CI gate,
+`.github/workflows/ci.yml`) does **not** run them — adding ~3–6 minutes to every PR on top of
+the existing ~16–17 minute job was judged not worth taxing the PR critical path for a fixture
+that only needs to be checked periodically, not on every commit (see "CI wiring" below for how
+it still runs automatically). To run them explicitly:
+
+```bash
+cargo test -p lcg-core --release --test real_corpus_e2e -- --ignored
+```
+
+### CI wiring
+
+An unrun test rots silently, so being excluded from the PR gate does not mean unattended:
+`.github/workflows/real-corpus-e2e.yml` runs the ignored tests automatically on every push to
+`main` (post-merge verification, before a regression reaches a release) and supports manual
+`workflow_dispatch` runs. This mirrors the existing `bench.yml` precedent in this repo of
+gating an expensive-but-important check out of the PR path while still running it
+automatically somewhere.

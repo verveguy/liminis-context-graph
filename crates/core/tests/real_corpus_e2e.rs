@@ -271,7 +271,15 @@ fn as_uuid_set(v: &Value, key: &str) -> std::collections::BTreeSet<String> {
 // consolidating these five scenarios into one rebuilt graph instead of five independent ones
 // cuts this file's CI contribution by roughly 5x with no loss of coverage (SC-005).
 
+// #[ignore]: this rebuild + HNSW/FTS index build over the fixture's 1,506 entities takes
+// roughly a minute, and this file runs three such rebuilds total — measured at 190-240s
+// (~3-4 min) for the whole file (see real_corpus_wal/README.md, SC-005). Running that on
+// every PR would add ~5.7 min to the existing ~16-17 min `cargo test --release` CI job,
+// so it's excluded from the default `cargo test --release` run and instead run explicitly:
+// on push to main (see .github/workflows/real-corpus-e2e.yml) and via
+// `cargo test -p lcg-core --test real_corpus_e2e --release -- --ignored` locally.
 #[tokio::test]
+#[ignore]
 async fn rebuild_and_assert_all_non_determinism_expectations() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
@@ -544,7 +552,10 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
 
 // ── Task 12: determinism (FR-010, Acceptance Scenario 6) ─────────────────────
 
+// #[ignore]: same rationale as the primary test above — two more full rebuilds, excluded
+// from the default `cargo test --release` run for the same CI-time reason.
 #[tokio::test]
+#[ignore]
 async fn replay_is_deterministic_across_independent_processes() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;

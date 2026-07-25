@@ -1,0 +1,60 @@
+name: Real-Corpus E2E
+
+# The real_corpus_e2e tests (crates/core/tests/real_corpus_e2e.rs, #217) are #[ignore]d out
+# of the default `cargo test --release` run: a full WAL replay + HNSW/FTS index build over
+# the golden fixture's 1,506 entities takes roughly a minute each, and this file runs three
+# of them (~190-240s / 3-4 min total, see crates/core/tests/fixtures/real_corpus_wal/README.md
+# for the measured figure) — adding that to every PR's ~16-17 min `cargo test --release` job
+# would be a material tax on a repo with several issues often in flight at once.
+#
+# But an un-run test rots, so per review discussion on #217 (matching the bench.yml
+# precedent of gating expensive-but-important checks out of the PR path while still running
+# them automatically somewhere): this workflow runs the ignored tests on every push to main
+# (post-merge verification, before a regression reaches a release) and supports
+# workflow_dispatch for manual runs during development.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: real-corpus-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LBUG_CACHE_BUST: "2026-07-13"
+
+jobs:
+  real-corpus-e2e:
+    name: real_corpus_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml's build-lbug/test jobs, so a push-to-main run (which follows
+      # a PR's ci.yml run against the same commit) gets a cache hit instead of rebuilding
+      # lbug's C++ core from source.
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: cargo test --release --test real_corpus_e2e -- --ignored
+        run: cargo test -p lcg-core --release --test real_corpus_e2e -- --ignored
