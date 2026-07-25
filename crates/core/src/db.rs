@@ -7,6 +7,7 @@ use lbug::{LogicalType, Value};
 
 use crate::{
     error::Error,
+    name_index::NameIndex,
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
@@ -15,6 +16,11 @@ type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
 
 pub struct Db {
     inner: lbug::Database,
+    /// In-process accelerator for `Conn::get_entity_by_name_ci` (issue #219). Lives on `Db`
+    /// (not `Conn`) because it must survive across requests; `AppState.db` is swapped
+    /// wholesale on `clear_all`/recovery, so a fresh `Db` naturally starts with an empty
+    /// index. See `name_index.rs` and the NameIndex ADR for the invalidation contract.
+    name_index: NameIndex,
 }
 
 pub struct Conn<'db> {
@@ -26,6 +32,7 @@ pub struct Conn<'db> {
     /// WAL-flush helper. Order-preserving so bound-param and raw paths interleave
     /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-0015).
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
+    name_index: &'db NameIndex,
 }
 
 /// Serializes `Db::open` across threads. `INSTALL`/`LOAD EXTENSION` mutate a
@@ -53,7 +60,10 @@ impl Db {
         let _ = setup_conn.query("INSTALL fts")?;
         let _ = setup_conn.query("LOAD EXTENSION fts")?;
         drop(setup_conn);
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            name_index: NameIndex::default(),
+        })
     }
 
     /// If `db_path` is absent but `wal_dir` contains `.jsonl` files, creates a fresh DB and
@@ -81,6 +91,10 @@ impl Db {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
             crate::replay::WalReplayer::new(wal_dir).replay(&conn)?;
+            // WAL replay executes raw recorded Cypher templates, bypassing the typed
+            // insert_entity/update_entity_created_at hooks — a full rebuild is the only
+            // way the name index observes replayed data (FR-004).
+            conn.rebuild_name_index()?;
         }
 
         Ok(db)
@@ -95,6 +109,7 @@ impl Db {
         Ok(Conn {
             inner: conn,
             executed_mutations: RefCell::new(Vec::new()),
+            name_index: &self.name_index,
         })
     }
 }
@@ -226,6 +241,32 @@ impl<'db> Conn<'db> {
         crate::schema::create_fts_indexes(self)
     }
 
+    /// Repopulates the in-process name-lookup index (issue #219) from a full `Entity` table
+    /// scan. This is the FR-004 single-scan mechanism, and the only way the index observes
+    /// `Entity` rows written by a path that bypasses the typed `insert_entity`/
+    /// `update_entity_created_at` methods — most importantly WAL replay, which executes raw
+    /// recorded Cypher templates. Call at startup, after any recovery strategy, and after
+    /// any non-dry-run WAL rebuild. Idempotent — always a full replace, never additive.
+    pub fn rebuild_name_index(&self) -> Result<(), Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) RETURN e.uuid, e.name, e.group_id, e.created_at",
+            serde_json::json!({}),
+        )?;
+        let entries = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    value_as_string(&row[0]),
+                    value_as_string(&row[1]),
+                    value_as_string(&row[2]),
+                    value_as_timestamp_str(&row[3]),
+                )
+            })
+            .collect();
+        self.name_index.rebuild(entries);
+        Ok(())
+    }
+
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
 
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
@@ -245,7 +286,10 @@ impl<'db> Conn<'db> {
                 "summary": row.summary,
                 "attributes": row.attributes,
             }),
-        )
+        )?;
+        self.name_index
+            .insert(&row.uuid, &row.name, &row.group_id, &row.created_at);
+        Ok(())
     }
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
@@ -413,6 +457,11 @@ impl<'db> Conn<'db> {
     }
 
     /// Deletes an Episodic node and all its connected edges.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0038). If a future change makes this
+    /// (or any path) delete `Entity` nodes, it must also invalidate the corresponding
+    /// `NameIndex` entries.
     pub fn remove_episode(&self, episode_uuid: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
@@ -424,6 +473,9 @@ impl<'db> Conn<'db> {
     /// source_file + ":". Returns the UUIDs of deleted episodes.
     ///
     /// When group_ids is Some, only episodes in those groups are considered.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
@@ -466,6 +518,9 @@ impl<'db> Conn<'db> {
     /// should be aware that entity nodes may become disconnected after this call.
     ///
     /// When group_ids is Some, only episodes in those groups are considered.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
@@ -1014,34 +1069,29 @@ impl<'db> Conn<'db> {
 
     /// Returns an EntityRow by case-insensitive, whitespace-normalised name match.
     ///
-    /// Input name is trimmed and lowercased in Rust before being passed as the `$lower_name`
-    /// parameter. The query also applies `lower()` to the stored name so that entities
-    /// inserted with mixed-case names are found. Returns the first match if multiple exist.
+    /// Resolved via the in-process `NameIndex` accelerator rather than a database query
+    /// (issue #219 — `lower(e.name) = $x` is a scalar-function predicate lbug cannot route
+    /// through any index, so this used to be a full `Entity` table scan on every call). A
+    /// hit is always re-verified against the database via `get_entity_by_uuid` before being
+    /// returned (FR-006): if the index is stale — the UUID no longer exists, or no longer
+    /// matches this `name`/`group_id` — this returns `Ok(None)` rather than a wrong result.
+    /// There is deliberately no scan fallback on a miss; see the NameIndex ADR.
     pub fn get_entity_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
     ) -> Result<Option<EntityRow>, Error> {
+        let Some(uuid) = self.name_index.lookup(name, group_id) else {
+            return Ok(None);
+        };
         let lower_name = name.trim().to_lowercase();
-        let rows = self.query_params(
-            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
-             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
-            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
-        )?;
-        if let Some(row) = rows.into_iter().next() {
-            Ok(Some(EntityRow {
-                uuid: value_as_string(&row[0]),
-                name: value_as_string(&row[1]),
-                group_id: value_as_string(&row[2]),
-                labels: value_as_str_list(&row[3]),
-                created_at: value_as_timestamp_str(&row[4]),
-                summary: value_as_string(&row[5]),
-                attributes: value_as_string(&row[6]),
-                ..Default::default()
-            }))
-        } else {
-            Ok(None)
+        match self.get_entity_by_uuid(&uuid)? {
+            Some(row)
+                if row.group_id == group_id && row.name.trim().to_lowercase() == lower_name =>
+            {
+                Ok(Some(row))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -1158,7 +1208,9 @@ impl<'db> Conn<'db> {
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($new_created_at)",
             serde_json::json!({ "uuid": uuid, "new_created_at": created_at }),
-        )
+        )?;
+        self.name_index.update_created_at(uuid, created_at);
+        Ok(())
     }
 
     /// Batch-fetches episode info for a set of entity UUIDs via the MENTIONS relationship.
@@ -2134,6 +2186,30 @@ pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
         time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
     if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
         return format_datetime_rfc3339_subsecond(pdt.assume_utc());
+    }
+    s.to_string()
+}
+
+/// Normalizes a `created_at` string (RFC-3339 or space-format) to the canonical
+/// `"YYYY-MM-DD HH:MM:SS"` space form used by `value_as_timestamp_str`/`format_datetime`.
+///
+/// `NameIndex` (issue #219) sorts entries lexicographically on this string to reproduce the
+/// database's `ORDER BY created_at ASC` winner-selection rule, which only holds if every entry
+/// sharing a key is in the same format — freshly-inserted rows arrive via `insert_entity` as
+/// whatever the caller passed (typically RFC-3339, e.g. episode.rs's `reference_time`), while
+/// `rebuild_name_index()` always produces the space form read back from the database. Without
+/// normalization the `'T'`/`' '` separator byte dominates the comparison ahead of the actual
+/// time-of-day, silently picking the wrong deterministic winner. Falls through verbatim if
+/// neither format parses (defensive; should not happen for a valid `created_at`).
+pub(crate) fn canonical_created_at_for_index(s: &str) -> String {
+    if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+    {
+        return format_datetime(odt);
+    }
+    const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
+        return format_datetime(pdt.assume_utc());
     }
     s.to_string()
 }

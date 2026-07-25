@@ -249,10 +249,13 @@ pub fn run_full_recovery_sequence(
         fallback_reason: fallback_reason.clone(),
     });
 
-    // ── Step 4: rebuild FTS + HNSW indexes ───────────────────────────────────
+    // ── Step 4: rebuild FTS + HNSW indexes, and the in-process name index ────
     {
         let conn = db.connect()?;
         conn.build_indices_and_constraints()?;
+        // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
+        // a full rebuild is the only way the name index observes the replayed data.
+        conn.rebuild_name_index()?;
     }
 
     sink.emit(TelemetryEvent::WalAutoRecovery {
