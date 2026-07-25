@@ -457,6 +457,11 @@ impl<'db> Conn<'db> {
     }
 
     /// Deletes an Episodic node and all its connected edges.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0037). If a future change makes this
+    /// (or any path) delete `Entity` nodes, it must also invalidate the corresponding
+    /// `NameIndex` entries.
     pub fn remove_episode(&self, episode_uuid: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
@@ -468,6 +473,9 @@ impl<'db> Conn<'db> {
     /// source_file + ":". Returns the UUIDs of deleted episodes.
     ///
     /// When group_ids is Some, only episodes in those groups are considered.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0037). See `remove_episode`.
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
@@ -510,6 +518,9 @@ impl<'db> Conn<'db> {
     /// should be aware that entity nodes may become disconnected after this call.
     ///
     /// When group_ids is Some, only episodes in those groups are considered.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0037). See `remove_episode`.
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
