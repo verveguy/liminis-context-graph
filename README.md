@@ -219,7 +219,7 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
-| `ANTHROPIC_API_KEY` | Yes, for ingestion | API key for Anthropic entity/relationship extraction. **Required for any `knowledge_process_chunk` / `knowledge_add_episode` call** — extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only or embedding-only use. |
+| `ANTHROPIC_API_KEY` | Yes, for LLM ops | API key for Anthropic entity/relationship extraction. **Required for any LLM-backed operation** — ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity re-classification (`knowledge_reprocess_entity_types`), which also call the configured extractor. Extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only, embedding-only, or non-LLM tools. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 
 ## Ontology
@@ -448,8 +448,14 @@ declared `relation_types`. Its behavior has three caveats worth knowing before y
   nearest type at or above the threshold. Lowering it types more edges, but by nearest-neighbor
   force-fit with **no abstention** — an idiosyncratic fact (e.g. "*X is affiliated with Y*") can land
   on a wrong type (e.g. `HOLDS`).
-- **`UNCLASSIFIED` is terminal.** Edges it can't place are stamped `UNCLASSIFIED`, and re-runs skip
-  any non-null `relation_type` — so a bad result is only re-doable by re-nulling the field first.
+- **Re-runs are only partly idempotent, and clearing `relation_type` can't be undone by
+  canonicalize.** A re-run skips an edge only when it's already at its target — a `Mapped` edge
+  already equal to the canonical type, or a residual edge already `UNCLASSIFIED`; an edge whose
+  classification *changes* is overwritten (including a previously-assigned type), while
+  arrow-named "noise" edges keep any existing predicate. Critically, canonicalize's only input is
+  the edge's existing predicate / `relation_type` — if you **null that field to "start clean,"
+  canonicalize has nothing to map from and cannot rebuild it.** Snapshot with `knowledge_dump_wal`
+  before such an operation.
 
 For building a typed taxonomy, avoid `knowledge_backfill_relation_types` — it mints uppercased
 fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) rather than classifying against
