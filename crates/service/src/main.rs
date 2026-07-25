@@ -355,7 +355,7 @@ async fn bootstrap_app_state(
              extraction with --extractor-uds <path>, --extractor-http <url>, or \
              LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
              bundled macOS sidecar — note its Foundation Models backend is not recommended for \
-             extraction quality; see docs/adr/0038-local-openai-compatible-extraction-adapter.md)."
+             extraction quality; see docs/adr/0041-local-openai-compatible-extraction-adapter.md)."
                 .into(),
         );
     };
