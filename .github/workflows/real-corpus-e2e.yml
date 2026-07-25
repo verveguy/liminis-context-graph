@@ -58,3 +58,41 @@ jobs:
 
       - name: cargo test --release --test real_corpus_e2e -- --ignored
         run: cargo test -p lcg-core --release --test real_corpus_e2e -- --ignored
+
+  mcp-real-corpus-e2e:
+    name: mcp_real_corpus_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml's build-lbug/test jobs, so a push-to-main run (which follows
+      # a PR's ci.yml run against the same commit) gets a cache hit instead of rebuilding
+      # lbug's C++ core from source.
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      # MCP read-path e2e suite (#234): seeds a workspace from the same golden real-corpus WAL
+      # fixture consumed by real_corpus_e2e above, then spawns the real compiled binary over
+      # MCP-over-stdio against it — one rebuild (FR-013), same #[ignore]-and-gate-out-of-the-PR-
+      # path posture as real_corpus_e2e (FR-015).
+      - name: cargo test --release --test mcp_real_corpus_e2e -- --ignored
+        run: cargo test -p lcg-service --release --test mcp_real_corpus_e2e -- --ignored
