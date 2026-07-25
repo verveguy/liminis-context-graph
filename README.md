@@ -298,14 +298,21 @@ The `knowledge_status` IPC response always includes an `ontology` field:
 When no ontology is loaded, `present` is `false` and counts are `0`.
 
 The response also includes an `indices_built` boolean, reporting whether the entity/relationship
-FTS + HNSW search indices are currently built and reflect the graph's current contents. This is
-normally `true` — a successful `knowledge_rebuild_from_wal` or `knowledge_build_indices` call sets
-it. It is `false` when the post-rebuild index build genuinely failed (as opposed to the common,
-harmless "already built" case) or before the first index build of a session. `false` does not
-mean search is broken: `knowledge_find_entities`/`knowledge_find_relationships` auto-heal by
-transparently rebuilding indices and retrying on their first call after a `false` state — the
-field exists so a caller can *observe* readiness proactively (e.g. before reporting a rebuild as
-fully complete) instead of discovering it only via a search attempt. The same field appears on
+FTS + HNSW search indices are currently built and reflect the graph's current contents. The
+service builds these indices **eagerly at startup** — immediately after schema init on a fresh
+DB, or as part of self-recovery after a WAL-corruption auto-heal (ADR-0009) — before the socket
+accepts any request, so `indices_built` is normally `true` from the very first `knowledge_status`
+call onward (see ADR-0036). A genuine build failure during that eager startup build fails startup
+outright rather than silently leaving indices unbuilt.
+
+`indices_built` still goes back to `false` in narrower, later situations: after
+`knowledge_clear_all`, or if a post-rebuild index build genuinely fails (as opposed to the common,
+harmless "already built" case). In those cases `false` does not mean search or ingest is broken —
+`knowledge_find_entities`/`knowledge_find_relationships`, and, since #208, the ingest hybrid-dedup
+path used once a `group_id` passes the dedup threshold, all auto-heal by transparently rebuilding
+indices and retrying on their first call after a `false` state. The field exists so a caller can
+*observe* readiness proactively (e.g. before reporting a rebuild as fully complete) instead of
+discovering it only via a search or ingest attempt. The same field appears on
 `knowledge_rebuild_from_wal`'s result (and on `knowledge_rebuild_status`'s `result` for the
 background-job path) for the specific rebuild that produced it; it is omitted from dry-run
 rebuild results, since a dry run never touches indices.

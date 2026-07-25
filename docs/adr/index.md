@@ -39,6 +39,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0033](0033-noise-edges-reclassified-not-deleted.md) | Noise Edges Are Reclassified to UNCLASSIFIED, Not Deleted | 2026-06-23 |
 | [0034](0034-observable-index-build-outcome.md) | Observable Index-Build Outcome — Fixing ADR-0025's Dead-Code Failure Path | 2026-07-16 |
 | [0035](0035-mcp-stdio-transport.md) | MCP-over-stdio Transport Architecture | 2026-07-21 |
+| [0036](0036-eager-index-build-at-startup.md) | Eager HNSW/FTS Index Build at Startup + Dedup-Path Auto-Heal | 2026-07-24 |
 
 ## Historical numbering
 
