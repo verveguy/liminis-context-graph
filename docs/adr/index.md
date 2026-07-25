@@ -43,6 +43,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0037](0037-relation-classification-abstention-writes-unclassified.md) | Relation Classification Has No Open-Ended Mode and Abstention Writes `UNCLASSIFIED` | 2026-07-25 |
 | [0038](0038-in-process-name-index.md) | In-Process NameIndex Accelerator for Entity Name Lookup | 2026-07-25 |
 | [0039](0039-uds-embedder-connection-pooling.md) | UDS Embedder Connection Pooling | 2026-07-25 |
+| [0040](0040-attached-mode-reconnect-retry-boundary.md) | Attached-Mode Reconnect — Retry Only Write-Time Failures | 2026-07-25 |
 
 ## Historical numbering
 

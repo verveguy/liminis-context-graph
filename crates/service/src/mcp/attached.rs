@@ -8,6 +8,23 @@
 //! for interleaved progress/response lines (see `crates/service/src/main.rs`'s
 //! `handle_connection`), so with only one call ever in flight on this connection, any
 //! interleaved `{"type":"progress"}` line unambiguously belongs to the current call.
+//!
+//! ## Reconnect and retry (issue #213)
+//!
+//! The connection can go dead at any time (remote restart, crash, deploy). Reconnect logic
+//! lives entirely inside the single held `Mutex` guard — it is never dropped and re-acquired
+//! mid-reconnect — so the "one call in flight at a time" invariant above holds by construction
+//! even across a redial (FR-012).
+//!
+//! The retry boundary is safety-driven (see ADR-0040): a failure while *writing* the request
+//! (`write_all`/`flush`) is treated as safe to retry — it's the best signal this process has
+//! that the request didn't reach the remote, even though `flush` failing after a successful
+//! `write_all` can't strictly prove no bytes arrived — so it redials and retries that write
+//! exactly once (FR-007/FR-008). A failure that surfaces only
+//! *after* the request was fully written — while waiting for or reading the response — means
+//! the remote's execution status is unknown, so that call is never retried; it fails with a
+//! descriptive error and the connection is invalidated so the *next* call redials fresh rather
+//! than reusing a stream in an unknown framing state (FR-010).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -31,7 +48,9 @@ use crate::mcp::backend::McpBackend;
 const DEFAULT_ATTACHED_CALL_TIMEOUT_MS: u64 = 30_000;
 
 pub struct AttachedBackend {
-    stream: Mutex<BufReader<UnixStream>>,
+    /// `None` means the connection is known-dead; the next call redials lazily before use.
+    stream: Mutex<Option<BufReader<UnixStream>>>,
+    socket_path: String,
     next_id: AtomicU64,
     call_timeout: Duration,
 }
@@ -40,21 +59,46 @@ impl AttachedBackend {
     /// Connects once at startup. Fails fast (not hang) if the socket is missing or has no
     /// listener — `UnixStream::connect` returns immediately in both cases (ENOENT/ECONNREFUSED).
     pub async fn connect(socket_path: &str) -> Result<Self, String> {
+        let stream = Self::dial(socket_path).await?;
+        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
+        Ok(Self {
+            stream: Mutex::new(Some(stream)),
+            socket_path: socket_path.to_string(),
+            next_id: AtomicU64::new(1),
+            call_timeout: Duration::from_millis(call_timeout_ms),
+        })
+    }
+
+    /// Dials a fresh connection to `socket_path`. Used both by `connect()` (startup) and by
+    /// `call()`'s reconnect paths (FR-008/FR-010).
+    async fn dial(socket_path: &str) -> Result<BufReader<UnixStream>, String> {
         let stream = UnixStream::connect(socket_path).await.map_err(|e| {
             format!(
                 "failed to connect to attached service at '{socket_path}': {e}. \
                  Ensure a liminis-context-graph socket service is running at this path."
             )
         })?;
-        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
-        Ok(Self {
-            stream: Mutex::new(BufReader::new(stream)),
-            next_id: AtomicU64::new(1),
-            call_timeout: Duration::from_millis(call_timeout_ms),
-        })
+        Ok(BufReader::new(stream))
+    }
+
+    /// Writes and flushes one request line. A failure here is treated as safe to retry
+    /// (FR-007) — the flush-failure case is deliberately not distinguished from write_all
+    /// failure, since a flush that fails after a successful write_all leaves genuine ambiguity
+    /// about how many bytes reached the kernel, and both are treated as "safe to retry" per
+    /// A1's conservative write-time boundary.
+    async fn write_request(stream: &mut BufReader<UnixStream>, line: &str) -> Result<(), String> {
+        stream
+            .write_all(format!("{line}\n").as_bytes())
+            .await
+            .map_err(|e| format!("attached socket write failed: {e}"))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("attached socket flush failed: {e}"))?;
+        Ok(())
     }
 }
 
@@ -113,43 +157,88 @@ impl McpBackend for AttachedBackend {
             }
         };
 
+        // Held for the entire call, including any reconnect — FR-012 forbids a race between a
+        // reconnecting call and a subsequent call, and never dropping this guard mid-reconnect
+        // satisfies that by construction.
         let mut guard = self.stream.lock().await;
 
-        if let Err(e) = guard.write_all(format!("{line}\n").as_bytes()).await {
-            return IpcResponse::err(
-                Value::Null,
-                -32000,
-                format!("attached socket write failed: {e}"),
-            );
-        }
-        if let Err(e) = guard.flush().await {
-            return IpcResponse::err(
-                Value::Null,
-                -32000,
-                format!("attached socket flush failed: {e}"),
-            );
+        // Lazy redial: a prior call may have invalidated the connection (FR-010) or this is
+        // the first use after a `None` left by a failed retry (FR-009).
+        if guard.is_none() {
+            match Self::dial(&self.socket_path).await {
+                Ok(stream) => *guard = Some(stream),
+                Err(e) => return IpcResponse::err(Value::Null, -32000, e),
+            }
         }
 
-        loop {
-            let mut buf = String::new();
-            let read_result =
-                match tokio::time::timeout(self.call_timeout, guard.read_line(&mut buf)).await {
-                    Ok(result) => result,
-                    Err(_) => {
+        // Write phase (FR-007): on failure, redial and retry the write exactly once (FR-008).
+        if let Err(write_err) =
+            Self::write_request(guard.as_mut().expect("just ensured Some"), &line).await
+        {
+            match Self::dial(&self.socket_path).await {
+                Ok(new_stream) => {
+                    *guard = Some(new_stream);
+                    if let Err(retry_err) =
+                        Self::write_request(guard.as_mut().expect("just dialed"), &line).await
+                    {
+                        *guard = None;
                         return IpcResponse::err(
                             Value::Null,
                             -32000,
                             format!(
-                                "attached service call timed out after {}ms with no response \
-                                 (no data received — the remote service may have crashed or \
-                                 hung mid-call)",
-                                self.call_timeout.as_millis()
+                                "attached socket write failed ({write_err}); reconnected but \
+                                 retry write also failed ({retry_err})"
                             ),
                         );
                     }
-                };
+                }
+                Err(dial_err) => {
+                    *guard = None;
+                    return IpcResponse::err(
+                        Value::Null,
+                        -32000,
+                        format!(
+                            "attached socket write failed ({write_err}); reconnect attempt \
+                             failed ({dial_err})"
+                        ),
+                    );
+                }
+            }
+        }
+
+        // Read phase: any failure from here on means the request may already have reached the
+        // remote, so this call is never retried (FR-010) — but the connection is always
+        // invalidated on failure so the *next* call redials fresh instead of reusing a stream
+        // whose byte-framing is now suspect.
+        loop {
+            let mut buf = String::new();
+            let read_result = match tokio::time::timeout(
+                self.call_timeout,
+                guard
+                    .as_mut()
+                    .expect("connection established above")
+                    .read_line(&mut buf),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    *guard = None;
+                    return IpcResponse::err(
+                        Value::Null,
+                        -32000,
+                        format!(
+                            "attached service call timed out after {}ms with no response \
+                             (no data received — the remote service may have crashed or \
+                             hung mid-call)",
+                            self.call_timeout.as_millis()
+                        ),
+                    );
+                }
+            };
             match read_result {
                 Ok(0) => {
+                    *guard = None;
                     return IpcResponse::err(
                         Value::Null,
                         -32000,
@@ -164,6 +253,7 @@ impl McpBackend for AttachedBackend {
                     let value: Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
                         Err(e) => {
+                            *guard = None;
                             return IpcResponse::err(
                                 Value::Null,
                                 -32000,
@@ -190,6 +280,7 @@ impl McpBackend for AttachedBackend {
                     return parse_ipc_response(&value);
                 }
                 Err(e) => {
+                    *guard = None;
                     return IpcResponse::err(
                         Value::Null,
                         -32000,

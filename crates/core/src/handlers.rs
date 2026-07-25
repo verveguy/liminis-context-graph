@@ -26,6 +26,10 @@ use crate::{
 
 const DEFAULT_GROUP_ID: &str = "liminis";
 
+/// Interval (in processed items) between periodic progress sends for long-running
+/// reprocess passes. Mirrors `reprocess_relations::PROGRESS_EVERY`.
+const REPROCESS_PROGRESS_EVERY: usize = 5000;
+
 /// Dispatches an IPC request to the appropriate library function. [IPC]
 ///
 /// `progress_tx` is `Some` when the caller detected `_progress_token` in the request params;
@@ -126,7 +130,9 @@ async fn handle(
         "knowledge_validate_corrections" => handle_validate_corrections(state).await,
         "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
         "knowledge_merge_entities" => handle_merge_entities(req, state).await,
-        "knowledge_reprocess_entity_types" => handle_reprocess_entity_types(req, state).await,
+        "knowledge_reprocess_entity_types" => {
+            handle_reprocess_entity_types(req, state, progress_tx).await
+        }
         "knowledge_canonicalize_relations" => {
             handle_canonicalize_relations(req, state, progress_tx).await
         }
@@ -1948,6 +1954,7 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
 async fn handle_reprocess_entity_types(
     req: &IpcRequest,
     state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
     state.workspace_root.as_ref().ok_or_else(|| {
         Error::Ipc("LIMINIS_WORKSPACE_ROOT not set; corrections unavailable".to_string())
@@ -2055,8 +2062,28 @@ async fn handle_reprocess_entity_types(
         .map(|e| (e.name.clone(), e.summary.clone()))
         .collect();
 
-    let mut types: Vec<String> = Vec::with_capacity(entities.len());
-    for chunk in pairs.chunks(corrections::REPROCESS_BATCH_SIZE) {
+    let total = entities.len();
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(json!({
+            "type": "progress",
+            "phase": "classifying",
+            "processed": 0,
+            "total": total,
+        }));
+    }
+    let mut types: Vec<String> = Vec::with_capacity(total);
+    for (i, chunk) in pairs.chunks(corrections::REPROCESS_BATCH_SIZE).enumerate() {
+        let processed = i * corrections::REPROCESS_BATCH_SIZE;
+        if processed > 0 && processed.is_multiple_of(REPROCESS_PROGRESS_EVERY) {
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(json!({
+                    "type": "progress",
+                    "processed": processed,
+                    "total": total,
+                    "phase": "classifying",
+                }));
+            }
+        }
         let refs: Vec<(&str, &str)> = chunk
             .iter()
             .map(|(n, s)| (n.as_str(), s.as_str()))
@@ -2113,14 +2140,38 @@ async fn handle_reprocess_entity_types(
     }
 
     // Phase C (batched write lock per ADR-0030): apply label mutations in batches.
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(json!({
+            "type": "progress",
+            "phase": "writing",
+            "total_mutations": updates.len(),
+        }));
+    }
+
     let mut reclassified = 0usize;
-    for batch in updates.chunks(corrections::REPROCESS_BATCH_SIZE) {
+    for (batch_idx, batch) in updates
+        .chunks(corrections::REPROCESS_BATCH_SIZE)
+        .enumerate()
+    {
         let batch = batch.to_vec();
         let db = load_db(&state)?;
         let wal_writer_c = Arc::clone(&state.wal_writer);
         let sink_c = Arc::clone(&state.sink);
         let ancestor_map_c = ancestor_map.clone();
         let _write_guard = state.write_lock.write().await;
+
+        let processed = batch_idx * corrections::REPROCESS_BATCH_SIZE;
+        if processed > 0 && processed.is_multiple_of(REPROCESS_PROGRESS_EVERY) {
+            if let Some(ref tx) = progress_tx {
+                let _ = tx.send(json!({
+                    "type": "progress",
+                    "processed": processed,
+                    "total": updates.len(),
+                    "phase": "writing",
+                }));
+            }
+        }
+
         let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
@@ -2137,17 +2188,36 @@ async fn handle_reprocess_entity_types(
     // `ancestor_map` has an entry per type (even with empty ancestor lists for flat types),
     // so we check whether any type actually has declared ancestors rather than map emptiness.
     let restamped = if ancestor_map.values().any(|v| !v.is_empty()) {
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(json!({
+                "type": "progress",
+                "phase": "restamping",
+            }));
+        }
+
         let db = load_db(&state)?;
         let wal_writer_d = Arc::clone(&state.wal_writer);
         let sink_d = Arc::clone(&state.sink);
         let group_id_d = group_id.clone();
         let ancestor_map_d = ancestor_map.clone();
+        let progress_tx_d = progress_tx.clone();
         let _write_guard_d = state.write_lock.write().await;
         tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let typed = corrections::list_all_typed_entities(&conn, &group_id_d)?;
+            let total_typed = typed.len();
             let mut restamped_count = 0usize;
-            for entity in &typed {
+            for (idx, entity) in typed.iter().enumerate() {
+                if idx > 0 && idx.is_multiple_of(REPROCESS_PROGRESS_EVERY) {
+                    if let Some(ref tx) = progress_tx_d {
+                        let _ = tx.send(json!({
+                            "type": "progress",
+                            "processed": idx,
+                            "total": total_typed,
+                            "phase": "restamping",
+                        }));
+                    }
+                }
                 // Collect non-Entity labels ("specific" labels).
                 let specific: Vec<&str> = entity
                     .labels

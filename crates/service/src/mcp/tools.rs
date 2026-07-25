@@ -641,7 +641,7 @@ pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Names of the four streaming methods that emit MCP progress notifications (FR-007).
+/// Names of the five streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
@@ -649,6 +649,7 @@ pub fn is_streaming_method(name: &str) -> bool {
             | "knowledge_canonicalize_relations"
             | "knowledge_backfill_relation_types"
             | "knowledge_reprocess_relation_types"
+            | "knowledge_reprocess_entity_types"
     )
 }
 
@@ -735,6 +736,7 @@ mod tests {
         assert!(is_streaming_method("knowledge_canonicalize_relations"));
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
+        assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
     }
 

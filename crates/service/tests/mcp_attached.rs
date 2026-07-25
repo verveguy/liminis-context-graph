@@ -8,6 +8,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -58,6 +60,27 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
         "socket service did not become ready"
     );
     (child, socket_path)
+}
+
+/// Like `spawn_socket_service`, but binds to a caller-chosen `socket_path` with its own
+/// db/WAL directory — used to simulate a remote restart (kill the old instance, start a fresh
+/// one bound to the *same* socket path from a separate, clean db directory) without reusing a
+/// db directory that a just-killed process may have left in a transient state (#213 SC-003).
+fn spawn_socket_service_at(socket_path: &Path, db_dir: &TempDir, embedder_url: &str) -> Child {
+    let db_path = db_dir.path().join("test.db");
+    let child = Command::new(binary_path())
+        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+        .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
+        .env("LCG_WAL_DIR", db_dir.path().join("wal").to_str().unwrap())
+        .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
+        .args(["--embedder-http", embedder_url])
+        .spawn()
+        .expect("failed to spawn socket service");
+    assert!(
+        wait_for_socket(socket_path, Duration::from_secs(15)),
+        "socket service did not become ready"
+    );
+    child
 }
 
 fn socket_request(
@@ -204,27 +227,39 @@ fn attached_mode_with_allow_remote_close_forwards_shutdown() {
     mcp.shutdown();
 }
 
-/// Spawns a stub Unix socket "remote service" that reads one request, waits past the client's
-/// call timeout before replying to it (a stale reply for an already-abandoned call), then reads
-/// a second request and replies to it correctly and promptly — for the stale-response
-/// misdelivery regression test.
+/// Spawns a stub Unix socket "remote service" that accepts a first connection, reads its
+/// request, waits past the client's call timeout before replying to it (a stale reply for an
+/// already-abandoned call — the write may itself fail with a broken pipe, since FR-010 has the
+/// client invalidate and close that connection on timeout; the stub ignores that write error),
+/// then accepts a *second* connection (the client's FR-010 lazy reconnect) and replies to it
+/// correctly and promptly.
 fn spawn_stale_response_remote(dir: &TempDir, reply_delay: Duration) -> PathBuf {
     let socket_path = dir.path().join("stale.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind stale-response stub socket");
     std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+                let mut writer = stream;
+                let mut line1 = String::new();
+                if reader.read_line(&mut line1).is_err() {
+                    return;
+                }
+                let Ok(req1) = serde_json::from_str::<serde_json::Value>(line1.trim()) else {
+                    return;
+                };
+                let id1 = req1["id"].clone();
+                std::thread::sleep(reply_delay);
+                let stale = json!({"jsonrpc": "2.0", "id": id1, "result": {"marker": "STALE-SHOULD-NOT-BE-SEEN"}});
+                // The client will have already closed this connection on timeout (FR-010), so
+                // this write commonly fails with a broken pipe — that's expected, not an error.
+                let _ = writeln!(writer, "{stale}");
+            });
+        }
+
+        if let Ok((stream, _)) = listener.accept() {
             let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
             let mut writer = stream;
-
-            let mut line1 = String::new();
-            reader.read_line(&mut line1).expect("read first request");
-            let req1: serde_json::Value = serde_json::from_str(line1.trim()).unwrap();
-            let id1 = req1["id"].clone();
-
-            std::thread::sleep(reply_delay);
-            let stale = json!({"jsonrpc": "2.0", "id": id1, "result": {"marker": "STALE-SHOULD-NOT-BE-SEEN"}});
-            writeln!(writer, "{stale}").expect("write stale response");
-
             let mut line2 = String::new();
             reader.read_line(&mut line2).expect("read second request");
             let req2: serde_json::Value = serde_json::from_str(line2.trim()).unwrap();
@@ -237,12 +272,15 @@ fn spawn_stale_response_remote(dir: &TempDir, reply_delay: Duration) -> PathBuf 
     socket_path
 }
 
+/// #213 FR-010: a call that times out (idle-read timeout, after the request was already fully
+/// written) must not be retried, and must invalidate the connection so the *next* call
+/// transparently reconnects rather than reusing the dead stream — even if the abandoned remote
+/// eventually tries to reply late on the now-closed connection.
 #[test]
-fn attached_mode_stale_response_after_timeout_is_not_misdelivered_to_next_call() {
+fn attached_mode_timeout_invalidates_connection_and_next_call_reconnects() {
     let dir = TempDir::new().unwrap();
     // The stub's reply to call 1 lands after the 600ms call timeout (so call 1 genuinely times
-    // out and releases the mutex) but before call 2's own 600ms read window closes (so call 2's
-    // read loop is the one that observes the stale line and must discard it).
+    // out), well after the client will have already closed and reconnected for call 2.
     let socket_path = spawn_stale_response_remote(&dir, Duration::from_millis(850));
 
     let mut cmd = Command::new(binary_path());
@@ -262,13 +300,13 @@ fn attached_mode_stale_response_after_timeout_is_not_misdelivered_to_next_call()
     assert_eq!(
         resp2["result"]["isError"].as_bool(),
         Some(false),
-        "expected call 2 to succeed with its own response: {resp2:?}"
+        "expected call 2 to succeed via a fresh reconnect: {resp2:?}"
     );
     assert_eq!(
         resp2["result"]["structuredContent"]["marker"],
         json!("CALL-2-CORRECT"),
-        "call 2 must receive its own response, not call 1's stale reply arriving late \
-         on the same connection: {resp2:?}"
+        "call 2 must receive its own response over the reconnected connection, unaffected by \
+         call 1's late stale reply on the now-closed original connection: {resp2:?}"
     );
 
     mcp.shutdown();
@@ -304,6 +342,293 @@ fn attached_mode_call_times_out_on_hung_remote_instead_of_blocking_forever() {
     assert!(
         elapsed < Duration::from_secs(5),
         "expected the call to fail quickly via timeout rather than block, took {elapsed:?}"
+    );
+
+    mcp.shutdown();
+}
+
+// ── #213: reconnect-after-remote-restart (SC-003) ──────────────────────────────
+
+/// SC-003: after the remote service process is killed and a fresh instance is started on the
+/// same socket path, the next call issued through the same, still-running attached MCP client
+/// process succeeds without that client process being restarted.
+#[test]
+fn attached_mode_reconnects_after_remote_service_restart() {
+    let socket_dir = TempDir::new().unwrap();
+    let socket_path = socket_dir.path().join("service.sock");
+    let port = spawn_stub_embedder();
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+
+    let db_dir1 = TempDir::new().unwrap();
+    let mut service = spawn_socket_service_at(&socket_path, &db_dir1, &url);
+
+    let mut mcp = spawn_attached(&socket_path, &[]);
+    mcp.initialize();
+
+    let resp1 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp1["result"]["isError"].as_bool() != Some(true),
+        "first call should succeed: {resp1:?}"
+    );
+
+    // Simulate a remote restart: kill the old instance, start a fresh one on the same socket
+    // path (main.rs removes any stale socket file before binding).
+    service.kill().ok();
+    service.wait().ok();
+
+    let db_dir2 = TempDir::new().unwrap();
+    let mut service2 = spawn_socket_service_at(&socket_path, &db_dir2, &url);
+
+    let resp2 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp2["result"]["isError"].as_bool() != Some(true),
+        "second call after remote restart should succeed via transparent reconnect, without \
+         restarting the attached MCP client process: {resp2:?}"
+    );
+
+    mcp.shutdown();
+    service2.kill().ok();
+    service2.wait().ok();
+}
+
+// ── #213: write-time failure auto-retry (SC-004) ────────────────────────────────
+
+/// Spawns a stub remote that accepts a first connection, serves exactly one request/response
+/// on it, then fully closes that connection — simulating the remote dying between calls (idle,
+/// not mid-call) — and then accepts a *second* connection for the client's write-time-failure
+/// auto-retry (FR-007/FR-008). Returns the total count of request lines the remote observed,
+/// so the test can assert no duplicate request reached it.
+fn spawn_write_failure_remote(dir: &TempDir) -> (PathBuf, Arc<AtomicUsize>) {
+    let socket_path = dir.path().join("writefail.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind write-failure stub socket");
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_thread = Arc::clone(&request_count);
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read call1 request");
+            request_count_thread.fetch_add(1, Ordering::SeqCst);
+            let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let id = req["id"].clone();
+            let resp = json!({"jsonrpc": "2.0", "id": id, "result": {"marker": "CALL-1-OK"}});
+            writeln!(writer, "{resp}").expect("write call1 response");
+            // `reader`/`writer` drop at end of scope, fully closing this connection.
+        }
+
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read call2 retried request");
+            request_count_thread.fetch_add(1, Ordering::SeqCst);
+            let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let id = req["id"].clone();
+            let resp =
+                json!({"jsonrpc": "2.0", "id": id, "result": {"marker": "CALL-2-VIA-RECONNECT"}});
+            writeln!(writer, "{resp}").expect("write call2 response");
+        }
+    });
+    (socket_path, request_count)
+}
+
+/// SC-004: a simulated write-time connection failure (the remote closed the connection between
+/// calls, so the request never reached it) is retried automatically and succeeds against the
+/// reconnected socket, with no duplicate request observed by the remote.
+#[test]
+fn attached_mode_write_time_failure_auto_retries_once_and_succeeds() {
+    let dir = TempDir::new().unwrap();
+    let (socket_path, request_count) = spawn_write_failure_remote(&dir);
+
+    let mut mcp = spawn_attached(&socket_path, &[]);
+    mcp.initialize();
+
+    let resp1 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp1["result"]["isError"].as_bool() != Some(true),
+        "call 1 should succeed: {resp1:?}"
+    );
+    assert_eq!(
+        resp1["result"]["structuredContent"]["marker"],
+        json!("CALL-1-OK")
+    );
+
+    // Give the OS a moment to fully tear down the first connection before call 2's write.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let resp2 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp2["result"]["isError"].as_bool() != Some(true),
+        "call 2 should auto-retry once over a reconnected connection and succeed: {resp2:?}"
+    );
+    assert_eq!(
+        resp2["result"]["structuredContent"]["marker"],
+        json!("CALL-2-VIA-RECONNECT")
+    );
+
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        2,
+        "expected exactly 2 requests observed by the remote (write-time failure means the \
+         first attempt never reached it, and only one retry is performed): {}",
+        request_count.load(Ordering::SeqCst)
+    );
+
+    mcp.shutdown();
+}
+
+// ── #213: post-write failure is not retried, next call reconnects (SC-005) ─────
+
+/// Spawns a stub remote that accepts a connection, reads the request, then closes without ever
+/// responding — simulating the remote exiting mid-call (FR-010's ambiguous, must-not-retry
+/// case) — and then accepts a *second* connection for the client's next (unrelated) call, which
+/// must succeed via a fresh reconnect.
+fn spawn_close_after_request_remote(dir: &TempDir) -> PathBuf {
+    let socket_path = dir.path().join("closeafterread.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind close-after-request stub socket");
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            let _ = reader.read_line(&mut line);
+            // Drop here: the connection closes without ever writing a response.
+        }
+
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read second call request");
+            let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let id = req["id"].clone();
+            let resp = json!({"jsonrpc": "2.0", "id": id, "result": {"marker": "CALL-2-FRESH"}});
+            writeln!(writer, "{resp}").expect("write second call response");
+        }
+    });
+    socket_path
+}
+
+/// SC-005: a simulated post-write connection failure (the remote closes after reading the
+/// request but before responding) fails that one call with a descriptive error — and does not
+/// retry it, since the request may already have reached the remote — while a subsequent call on
+/// the same attached client process succeeds via a fresh reconnect.
+#[test]
+fn attached_mode_post_write_failure_not_retried_but_next_call_reconnects() {
+    let dir = TempDir::new().unwrap();
+    let socket_path = spawn_close_after_request_remote(&dir);
+
+    let mut mcp = spawn_attached(&socket_path, &[]);
+    mcp.initialize();
+
+    let resp1 = mcp.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        resp1["result"]["isError"],
+        json!(true),
+        "call 1 should fail cleanly when the remote closes mid-call without responding: {resp1:?}"
+    );
+    let message1 = resp1["result"]["structuredContent"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message1.contains("closed"),
+        "expected a descriptive connection-lost error, got: {resp1:?}"
+    );
+
+    let resp2 = mcp.call_tool("knowledge_status", json!({}));
+    assert!(
+        resp2["result"]["isError"].as_bool() != Some(true),
+        "call 2 should succeed via a fresh reconnect, unaffected by call 1's ambiguous \
+         mid-call failure: {resp2:?}"
+    );
+    assert_eq!(
+        resp2["result"]["structuredContent"]["marker"],
+        json!("CALL-2-FRESH")
+    );
+
+    mcp.shutdown();
+}
+
+// ── #213: reprocess_entity_types progress re-arms the attached idle timeout (SC-001) ───
+
+/// Spawns a stub remote that, after reading the request, emits `count` `{"type":"progress"}`
+/// lines each `gap` apart before a terminal response. Each individual gap must be shorter than
+/// the client's idle timeout (so no single read ever legitimately times out), while the *total*
+/// span (`count * gap`) must exceed it — the call can only succeed end-to-end if every progress
+/// line re-arms the per-read timer rather than one window bounding the call as a whole.
+fn spawn_progress_remote(dir: &TempDir, gap: Duration, count: u32) -> PathBuf {
+    let socket_path = dir.path().join("progress.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind progress stub socket");
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read request");
+            let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            let id = req["id"].clone();
+
+            for i in 0..count {
+                std::thread::sleep(gap);
+                let p = json!({"type": "progress", "phase": "classifying", "processed": i});
+                writeln!(writer, "{p}").expect("write progress line");
+            }
+
+            let resp = json!({
+                "jsonrpc": "2.0", "id": id,
+                "result": {"success": true, "marker": "REPROCESS-DONE"}
+            });
+            writeln!(writer, "{resp}").expect("write terminal response");
+        }
+    });
+    socket_path
+}
+
+/// SC-001 (attached-mode transport half): `knowledge_reprocess_entity_types` is now registered
+/// in `is_streaming_method` (FR-003), so a progress-tracked call's per-read idle timer re-arms
+/// on each progress line — even though the idle timeout is far shorter than the total call
+/// duration, the call succeeds because it's never actually idle for that long at any single
+/// read.
+#[test]
+fn attached_mode_reprocess_entity_types_progress_rearms_idle_timeout() {
+    let dir = TempDir::new().unwrap();
+    // 4 progress lines, 300ms apart (each individually well under the 500ms idle timeout), for
+    // a total span of ~1200ms — comfortably longer than one 500ms window. The call can only
+    // succeed if every progress line re-arms the per-read timer instead of one window bounding
+    // the call as a whole.
+    let socket_path = spawn_progress_remote(&dir, Duration::from_millis(300), 4);
+
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_ATTACHED_CALL_TIMEOUT_MS", "500");
+    cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
+    let mut mcp = McpClient::spawn(cmd);
+    mcp.initialize();
+
+    let resp = mcp.call_tool_with_progress(
+        "knowledge_reprocess_entity_types",
+        json!({}),
+        "progress-tok-entity",
+        Duration::from_secs(10),
+    );
+    assert!(
+        resp["result"]["isError"].as_bool() != Some(true),
+        "expected the call to succeed, not false-timeout, since progress re-arms the idle \
+         timer: {resp:?}"
+    );
+    assert_eq!(
+        resp["result"]["structuredContent"]["marker"],
+        json!("REPROCESS-DONE")
+    );
+    assert!(
+        mcp.stashed_notifications
+            .iter()
+            .any(|n| n["method"] == "notifications/progress"),
+        "expected at least one bridged progress notification, got: {:?}",
+        mcp.stashed_notifications
     );
 
     mcp.shutdown();
