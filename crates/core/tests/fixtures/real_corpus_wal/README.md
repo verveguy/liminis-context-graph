@@ -191,8 +191,11 @@ parity discipline in `CLAUDE.md`).
 
 ## Test suite (`crates/core/tests/real_corpus_e2e.rs`)
 
-Two `#[tokio::test]` functions, both using `MockExtractor`/`MockEmbedder` so nothing in the
-test file can make an LLM, extractor, or embedder network call (FR-004, FR-011):
+Two `#[tokio::test]` functions, both using `MockExtractor`/`MockEmbedder` (wrapped with atomic
+call counters — `CountingExtractor`/`CountingEmbedder`) so nothing in the test file can make an
+LLM, extractor, or embedder network call (FR-004, FR-011). This is asserted explicitly, not
+just assumed from the wiring: every test checks that the extractor/embedder call counts are
+still zero immediately after `knowledge_rebuild_from_wal` returns.
 
 - `rebuild_and_assert_all_non_determinism_expectations`: one rebuild, covering Acceptance
   Scenarios 1–5 — counts (FR-004/005), `indices_built`/hybrid-dedup threshold (FR-006),
@@ -218,11 +221,11 @@ assertions are exact-set equality.
 ### Measured runtime (SC-005)
 
 On the machine that captured this fixture, `cargo test --release --test real_corpus_e2e`
-(both tests, default parallelism) measured **238s (~4 minutes) wall-clock** — each full WAL
-replay + HNSW/FTS index build over the fixture's 1,506 entities / 2,392 relationships / 228
-episodes takes roughly 60–140s, and this file performs three such rebuilds total (one in
-`rebuild_and_assert_all_non_determinism_expectations`, two independent ones in
-`replay_is_deterministic_across_independent_processes`). This is a real, non-trivial
-addition to the `cargo test --release` CI job — the spec does not mandate a ceiling (SC-005
-only asks it be measured and documented), but if CI budget becomes a concern, the
-determinism test's second rebuild is the first thing to reconsider dropping.
+(both tests, default parallelism) measured **~190–240s (roughly 3–4 minutes) wall-clock**
+across repeated runs — each full WAL replay + HNSW/FTS index build over the fixture's 1,506
+entities / 2,392 relationships / 228 episodes takes roughly 60–140s, and this file performs
+three such rebuilds total (one in `rebuild_and_assert_all_non_determinism_expectations`, two
+independent ones in `replay_is_deterministic_across_independent_processes`). This is a real,
+non-trivial addition to the `cargo test --release` CI job — the spec does not mandate a
+ceiling (SC-005 only asks it be measured and documented), but if CI budget becomes a concern,
+the determinism test's second rebuild is the first thing to reconsider dropping.

@@ -16,27 +16,91 @@
 // Graph traversal (knowledge_get_entity_neighbors) and the raw relationship listing
 // (knowledge_list_relationships) do not depend on embeddings at all, so those assertions are
 // exact-set-equality, not tolerant set-membership.
+//
+// "Zero LLM/extractor/embedder calls during replay" (FR-004) is checked explicitly, not just
+// assumed from wiring in Mock{Extractor,Embedder}: CountingExtractor/CountingEmbedder below
+// wrap the mocks with atomic call counters, and every test asserts those counters are zero
+// immediately after knowledge_rebuild_from_wal returns.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
+use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::MockEmbedder,
-    extractor::MockExtractor,
+    embedder::{Embedder, MockEmbedder},
+    error::Error as LcgError,
+    extractor::{ExtractOptions, Extractor, MockExtractor},
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
+    types::ExtractionResult,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
+
+// ── call-counting Extractor/Embedder ─────────────────────────────────────────
+//
+// Wrap Mock{Extractor,Embedder} with atomic call counters so "zero LLM/embedder calls
+// during replay" (FR-004) is an explicit, checked assertion rather than an assumption that
+// happens to hold because the wired-in implementation is a mock. Delegates entirely to the
+// Mock types for behavior; only adds counting.
+
+struct CountingExtractor {
+    inner: MockExtractor,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Extractor for CountingExtractor {
+    fn extract<'a>(
+        &'a self,
+        opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.extract(opts)
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.classify_entities(entities, allowed_types)
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.classify_relations(edges, allowed_types)
+    }
+}
+
+struct CountingEmbedder {
+    inner: MockEmbedder,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Embedder for CountingEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, LcgError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.embed(text)
+    }
+
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+}
 
 // ── fixture ─────────────────────────────────────────────────────────────────────
 
@@ -62,11 +126,20 @@ const DEFAULT_HYBRID_DEDUP_THRESHOLD: i64 = 1000;
 
 // ── harness ───────────────────────────────────────────────────────────────────
 
-/// Builds a fresh, empty lbug DB + AppState wired at `wal_dir()`, with MockExtractor/MockEmbedder
-/// so that nothing in this test file can make an LLM, extractor, or embedder network call
-/// (FR-004, FR-011) — the fixture's real embeddings are already baked into the WAL from capture
-/// time; only query-time embedding at test time is mocked.
-fn make_state(dim: usize) -> (Arc<AppState>, TempDir) {
+/// Call counters for the extractor/embedder wired into a `make_state` `AppState`, so tests
+/// can assert "zero calls" explicitly instead of relying on the mock's inherent safety.
+struct CallCounts {
+    extractor: Arc<AtomicUsize>,
+    embedder: Arc<AtomicUsize>,
+}
+
+/// Builds a fresh, empty lbug DB + AppState wired at `wal_dir()`, with call-counting
+/// Extractor/Embedder wrappers so that "nothing in this test file makes an LLM, extractor, or
+/// embedder network call" (FR-004, FR-011) is an explicit, asserted count rather than an
+/// assumption that happens to hold because the wired-in implementation is a mock. The
+/// fixture's real embeddings are already baked into the WAL from capture time; only
+/// query-time embedding at test time is mocked (and counted).
+fn make_state(dim: usize) -> (Arc<AppState>, TempDir, CallCounts) {
     let db_dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(db_dir.path().join("real_corpus.db").to_str().unwrap()).unwrap());
     {
@@ -77,12 +150,21 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir) {
         // pre-creating them here would just be redundant work this harness doesn't need.
     }
 
+    let extractor_calls = Arc::new(AtomicUsize::new(0));
+    let embedder_calls = Arc::new(AtomicUsize::new(0));
+
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     let state = Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
-        embedder: Arc::new(MockEmbedder::new(dim)),
-        extractor: Arc::new(MockExtractor),
+        embedder: Arc::new(CountingEmbedder {
+            inner: MockEmbedder::new(dim),
+            calls: Arc::clone(&embedder_calls),
+        }),
+        extractor: Arc::new(CountingExtractor {
+            inner: MockExtractor,
+            calls: Arc::clone(&extractor_calls),
+        }),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
@@ -101,7 +183,14 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir) {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     });
-    (state, db_dir)
+    (
+        state,
+        db_dir,
+        CallCounts {
+            extractor: extractor_calls,
+            embedder: embedder_calls,
+        },
+    )
 }
 
 fn req(id: i64, method: &str, params: Value) -> IpcRequest {
@@ -176,16 +265,27 @@ fn as_uuid_set(v: &Value, key: &str) -> std::collections::BTreeSet<String> {
 async fn rebuild_and_assert_all_non_determinism_expectations() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
-    let (state, _db_dir) = make_state(dim);
+    let (state, _db_dir, calls) = make_state(dim);
     let group_id = expected["group_id"].clone();
 
     // Task 7 (FR-004, FR-005): rebuild with zero LLM/extractor/embedder calls; counts match.
     let rebuild_result = rebuild(&state).await;
     assert_eq!(rebuild_result["success"], true, "{rebuild_result}");
-    // MockExtractor/MockEmbedder are wired into this AppState (see make_state) but replay
-    // never calls Extractor::extract or Embedder::embed — it mechanically re-executes the
-    // WAL's recorded Cypher. Asserting on a non-zero replay count also confirms MockExtractor's
-    // fixed Alice/Acme Corp stub never leaked in (checked explicitly below).
+    // Explicit assertion, not an assumption: replay mechanically re-executes the WAL's
+    // recorded Cypher and must never call Extractor::extract/classify_* or Embedder::embed —
+    // that's the entire point of the fixture (FR-004). CountingExtractor/CountingEmbedder
+    // (see above) make this a checked invariant instead of something that merely happens to
+    // be true because the wired-in implementation is a mock.
+    assert_eq!(
+        calls.extractor.load(Ordering::SeqCst),
+        0,
+        "replay must never call the extractor"
+    );
+    assert_eq!(
+        calls.embedder.load(Ordering::SeqCst),
+        0,
+        "replay must never call the embedder"
+    );
     assert!(
         rebuild_result["mutations_replayed"].as_u64().unwrap() > 0,
         "expected a non-trivial replay: {rebuild_result}"
@@ -417,6 +517,19 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             "fact text mismatch for {uuid}: {actual}"
         );
     }
+
+    // Final explicit check (FR-004/FR-011): the extractor must never be called anywhere in
+    // this test, at any point — none of the IPC methods exercised above (knowledge_status,
+    // knowledge_find_entities, knowledge_find_relationships, knowledge_get_entity_neighbors,
+    // knowledge_list_relationships) touch extraction, only replay and read paths. The embedder
+    // count is intentionally not re-asserted here — it is expected to be > 0 by now, since the
+    // golden-query assertions above legitimately call embed() (with the mock) for query-time
+    // embedding.
+    assert_eq!(
+        calls.extractor.load(Ordering::SeqCst),
+        0,
+        "the extractor must never be called anywhere in this test"
+    );
 }
 
 // ── Task 12: determinism (FR-010, Acceptance Scenario 6) ─────────────────────
@@ -426,8 +539,8 @@ async fn replay_is_deterministic_across_independent_processes() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
 
-    let (state_a, _db_dir_a) = make_state(dim);
-    let (state_b, _db_dir_b) = make_state(dim);
+    let (state_a, _db_dir_a, calls_a) = make_state(dim);
+    let (state_b, _db_dir_b, calls_b) = make_state(dim);
 
     let rebuild_a = rebuild(&state_a).await;
     let rebuild_b = rebuild(&state_b).await;
@@ -435,6 +548,19 @@ async fn replay_is_deterministic_across_independent_processes() {
         rebuild_a["mutations_replayed"], rebuild_b["mutations_replayed"],
         "two independent replays of the same fixture must replay the same number of mutations"
     );
+    // Explicit assertion (FR-004), not an assumption — see the primary test's comment for why.
+    for (label, counts) in [("a", &calls_a), ("b", &calls_b)] {
+        assert_eq!(
+            counts.extractor.load(Ordering::SeqCst),
+            0,
+            "replay {label} must never call the extractor"
+        );
+        assert_eq!(
+            counts.embedder.load(Ordering::SeqCst),
+            0,
+            "replay {label} must never call the embedder"
+        );
+    }
 
     let status_a = dispatch(2, "knowledge_status", json!({}), &state_a).await;
     let status_b = dispatch(2, "knowledge_status", json!({}), &state_b).await;
