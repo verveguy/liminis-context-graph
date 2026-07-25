@@ -44,14 +44,25 @@ The ordering is: name lookup → embedding lookup (only if name lookup misses) �
 
 ### Negative / Residual risks
 
-- **Full-table scan on name lookup**: Kuzu (and therefore lbug) does not support
-  function-based indexes such as `CREATE INDEX ON Entity(lower(name))`. The
-  `lower(e.name) = $lower_name` WHERE clause therefore causes a full scan over all Entity
-  nodes in the group. For groups below `hybrid_threshold` (default 1 000) the brute-force
-  embedding path already does an in-Rust full scan, so this is not a regression. For very
-  large groups the name-lookup cost is bounded by the group's Entity count (same as a property
-  scan). A `name_lower` stored column with a standard Kuzu property index is the path to O(1)
-  name lookups; that schema migration is deferred to a follow-up issue.
+- **Full-table scan on name lookup — CORRECTED, see ADR-0038.** This ADR originally stated
+  here that a `name_lower` stored column with a standard Kuzu property index was "the path to
+  O(1) name lookups," deferred to a follow-up issue. **That remedy does not work and never
+  would have**: on the current lbug 0.17.0 pin, `CREATE INDEX` on a table that already has a
+  primary key produces a catalog entry with no physical structure, and the index-scan rewrite
+  lbug's optimizer applies is PK-only — a secondary property index is accepted syntactically
+  but never consulted. More fundamentally, the predicate at issue is `lower(e.name) = $x`, a
+  scalar-function expression, not a bare property expression — no version of Kuzu/lbug supports
+  functional/expression indexes or case-insensitive collation, so even a working secondary
+  index on `name` (or a materialized `name_lower` column) could not be used to push this
+  specific predicate down. lbug's filter push-down optimizer only routes bare
+  `property = $param` predicates through an index. This was a full `Entity` table scan on
+  every call (issue #219), amplified by #209's additional call sites. **ADR-0038** replaces
+  `get_entity_by_name_ci`'s implementation with an in-process `NameIndex` accelerator that
+  restores an indexed-equivalent access path on the current lbug pin, verified against the
+  database on every hit so staleness can only ever produce a miss, never a wrong entity. A
+  materialized `name_lower` column plus a real secondary (ART) index remains the intended
+  long-term remedy, but only once lbug is upgraded past 0.17.0 (tracked as #220/#221) — not as
+  a viable fix on the current pin.
 - **TOCTOU race**: Two concurrent `add_episode` calls for the same entity name will both see
   zero existing matches (Phase B runs without the write lock), and both will commit an insert
   in Phase C. This creates duplicates under concurrent ingest. Strict serializability under
@@ -106,8 +117,10 @@ Both new call sites reuse this ADR's primitive as-is — same group scoping, sam
 case-insensitive exact-match semantics, same earliest-created-wins determinism on duplicate
 names — and inherit its documented residual risks without modification:
 
-- **Full-table scan cost** applies per unique unresolved endpoint name, in addition to the
-  existing per-entity cost during Phase B dedup.
+- **Full-table scan cost** applied per unique unresolved endpoint name, in addition to the
+  existing per-entity cost during Phase B dedup, making the total ingest cost
+  O(edges × |Entity|) per episode. **Resolved by ADR-0038** (issue #219): both call sites now
+  benefit from the same `NameIndex` accelerator with no changes of their own.
 - **TOCTOU race**: an entity resolved during (lock-free) edge validation could in principle be
   removed before Phase C's commit; not mitigated further, consistent with this ADR's existing
   position on concurrent-ingest races.

@@ -292,6 +292,68 @@ fn bench_dedup_overlap_check(c: &mut Criterion) {
     });
 }
 
+/// Baseline (issue #219): the old `lower(e.name) = $x` Cypher predicate lbug cannot route
+/// through any index — a full `Entity` table scan on every call. Issued directly via raw
+/// Cypher (bypassing `get_entity_by_name_ci`, which no longer executes this query) so the
+/// "before" figure stays measurable regardless of what the fixed implementation does
+/// internally. Values are interpolated directly since this is a fixed benchmark string, not
+/// user input.
+fn bench_name_lookup_scan_baseline_10k(c: &mut Criterion) {
+    let dim = 8;
+    let (db, _dir) = setup_bench_db_n(10_000, dim);
+
+    c.bench_function("name_lookup_scan_baseline_10k_hit", |b| {
+        b.iter(|| {
+            let conn = db.connect().unwrap();
+            let rows = conn
+                .query_cypher_raw(
+                    "MATCH (e:Entity) WHERE lower(e.name) = 'entity 9999' AND e.group_id = 'bench' \
+                     RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, e.summary, \
+                     e.attributes ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
+                )
+                .unwrap();
+            let _: Vec<_> = rows.collect();
+        });
+    });
+
+    c.bench_function("name_lookup_scan_baseline_10k_miss", |b| {
+        b.iter(|| {
+            let conn = db.connect().unwrap();
+            let rows = conn
+                .query_cypher_raw(
+                    "MATCH (e:Entity) WHERE lower(e.name) = 'no such entity' AND e.group_id = 'bench' \
+                     RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, e.summary, \
+                     e.attributes ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
+                )
+                .unwrap();
+            let _: Vec<_> = rows.collect();
+        });
+    });
+}
+
+/// After (issue #219): `get_entity_by_name_ci` resolved via the in-process `NameIndex`
+/// accelerator plus a `get_entity_by_uuid` verify-on-hit — no `Entity` table scan.
+fn bench_name_lookup_indexed_10k(c: &mut Criterion) {
+    let dim = 8;
+    let (db, _dir) = setup_bench_db_n(10_000, dim);
+
+    c.bench_function("name_lookup_indexed_10k_hit", |b| {
+        b.iter(|| {
+            let conn = db.connect().unwrap();
+            let _ = conn.get_entity_by_name_ci("Entity 9999", "bench").unwrap();
+        });
+    });
+
+    c.bench_function("name_lookup_indexed_10k_miss", |b| {
+        b.iter(|| {
+            let conn = db.connect().unwrap();
+            let _ = conn
+                .get_entity_by_name_ci("No Such Entity", "bench")
+                .unwrap();
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_hybrid_entity_search,
@@ -310,4 +372,9 @@ criterion_group!(
     bench_dedup_brute_force_50k,
     bench_dedup_hybrid_50k
 );
-criterion_main!(benches, dedup, dedup_50k);
+criterion_group!(
+    name_lookup,
+    bench_name_lookup_scan_baseline_10k,
+    bench_name_lookup_indexed_10k
+);
+criterion_main!(benches, dedup, dedup_50k, name_lookup);

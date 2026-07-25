@@ -41,6 +41,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0035](0035-mcp-stdio-transport.md) | MCP-over-stdio Transport Architecture | 2026-07-21 |
 | [0036](0036-eager-index-build-at-startup.md) | Eager HNSW/FTS Index Build at Startup + Dedup-Path Auto-Heal | 2026-07-24 |
 | [0037](0037-relation-classification-abstention-writes-unclassified.md) | Relation Classification Has No Open-Ended Mode and Abstention Writes `UNCLASSIFIED` | 2026-07-25 |
+| [0038](0038-in-process-name-index.md) | In-Process NameIndex Accelerator for Entity Name Lookup | 2026-07-25 |
 
 ## Historical numbering
 
