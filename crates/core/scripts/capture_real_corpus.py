@@ -151,6 +151,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Optional
 
 WIKI_API = "https://simple.wikipedia.org/w/api.php"
 USER_AGENT = "liminis-context-graph-fixture-capture/1.0 (https://github.com/verveguy/liminis-context-graph)"
@@ -461,7 +462,7 @@ def stage_corpus(articles: list, wiki_delay: float) -> tuple:
     return staged, skipped
 
 
-def script_git_sha() -> str:
+def script_git_sha() -> Optional[str]:
     """Best-effort git SHA of this script's own commit, for the corpus_prose.jsonl header.
 
     Provenance-only (see CLEANUP_VERSION for the actual staleness signal) — falls back to

@@ -239,7 +239,12 @@ fn as_str_vec(v: &Value, key: &str) -> Vec<String> {
         .as_array()
         .unwrap_or_else(|| panic!("expected {key} to be an array: {v}"))
         .iter()
-        .map(|n| n["name"].as_str().unwrap_or_default().to_string())
+        .map(|n| {
+            n["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected {key} element to have a string `name`: {n}"))
+                .to_string()
+        })
         .collect()
 }
 
@@ -248,7 +253,12 @@ fn as_uuid_set(v: &Value, key: &str) -> std::collections::BTreeSet<String> {
         .as_array()
         .unwrap_or_else(|| panic!("expected {key} to be an array: {v}"))
         .iter()
-        .map(|n| n["uuid"].as_str().unwrap_or_default().to_string())
+        .map(|n| {
+            n["uuid"]
+                .as_str()
+                .unwrap_or_else(|| panic!("expected {key} element to have a string `uuid`: {n}"))
+                .to_string()
+        })
         .collect()
 }
 

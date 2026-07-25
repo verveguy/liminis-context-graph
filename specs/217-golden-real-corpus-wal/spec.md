@@ -60,7 +60,7 @@ As a maintainer, when a future schema or WAL-format change makes the committed f
 
 ### Edge Cases
 
-- **Fixture size vs. repo hygiene**: a real ingest of 200–500 documents producing >1,000 entities will yield a WAL far larger than the existing hand-crafted fixtures (a few KB each). The committed fixture MUST be size-managed (compressed and/or trimmed) so it doesn't meaningfully bloat clone/checkout size; document the actual approach taken (e.g., gzip, or trimming to the smallest corpus subset that still crosses the 1,000-entity threshold with margin).
+- **Fixture size vs. repo hygiene**: a real ingest of 200–500 documents producing >1,000 entities will yield a WAL far larger than the existing hand-crafted fixtures (a few KB each). The committed fixture (and its `corpus_prose.jsonl` sibling, FR-013) MUST be size-managed (compressed and/or trimmed) so it doesn't meaningfully bloat clone/checkout size; document the actual approach taken (e.g., gzip, or trimming to the smallest corpus subset that still crosses the 1,000-entity threshold with margin).
 - **Non-determinism in downstream ops**: index build order, HNSW graph construction, or dedup tie-breaking might not be 100% deterministic even on identical input. Assertions must be written to tolerate this (e.g., assert on counts and set-membership rather than exact ordering, where the underlying operation isn't guaranteed to be order-stable) — or the harness must confirm determinism explicitly and assert exact equality if so.
 - **Corpus licensing drift**: if the pinned corpus snapshot is later taken down or re-licensed at the source, the *committed fixture* is unaffected (it's already captured and license-documented at capture time) — regeneration in the future may require selecting a new snapshot or corpus. Document the license and pinned source alongside the fixture so this is auditable later.
 - **Threshold right at the boundary**: the graph must cross the 1,000-entity hybrid-dedup threshold with enough margin that ordinary dedup collapsing (expected on a real corpus with hub entities) doesn't accidentally drop the final count back under 1,000.
@@ -82,6 +82,9 @@ As a maintainer, when a future schema or WAL-format change makes the committed f
 - **FR-010**: The e2e test MUST be deterministic — repeated runs against the same committed fixture produce identical asserted results.
 - **FR-011**: The e2e test MUST run as part of the standard `cargo test --release` CI gate (same convention as the existing `wal_replay.rs` / `ipc_parity.rs` tests), without requiring any external network access, API keys, or live LLM/embedding service.
 - **FR-012**: The fixture regeneration procedure MUST be documented (script and/or step-by-step instructions) so a future maintainer can reproduce a fixture from the pinned corpus snapshot without needing the original author's context, following the existing capture-procedure precedent in `crates/core/tests/fixtures/README.md`.
+- **FR-013**: The captured fixture MUST additionally include `corpus_prose.jsonl`: the cleaned prose text actually fed to the extractor for every consumed article, one record per article with `title` and `revision_id` provenance, behind a header recording the wikitext-cleanup version used to produce it. This is the input artifact required to compare a different extraction model against the same real corpus (a need identified by #228 and the open question on #212) — neither the WAL (post-extraction) nor a future LLM-response cassette (records one model's exchange only) can serve that purpose, and refetching from the pinned Wikipedia revisions at compare-time is not equivalent, because the prose is a derived artifact of the wikitext-cleanup code and is not guaranteed to reproduce byte-identically after a future cleanup fix.
+- **FR-014**: `corpus_prose.jsonl` MUST be documented (in the fixture-local README, FR-003) as the dedicated input fixture for extraction-model comparison (#228), explicitly distinct from the committed WAL's rebuild-only role.
+- **FR-015**: The regeneration procedure (FR-012) MUST cover regenerating `corpus_prose.jsonl` independently of a full re-capture — re-fetching the pinned revisions already recorded for the consumed articles and re-running the same cleanup function — and this path MUST be verified to require zero LLM or embedding calls.
 
 ### Key Entities
 
@@ -89,6 +92,7 @@ As a maintainer, when a future schema or WAL-format change makes the committed f
 - **Corpus snapshot**: The pinned, licensed, versioned source document set (e.g., a dated Wikipedia domain-cluster export, or a pinned Rust RFCs / Kubernetes KEPs commit) used to produce the fixture; not itself committed to the repo, only referenced/documented.
 - **Expected results record**: The recorded entity/edge/episode counts, golden queries and their expected results, and expected relation-type samples captured alongside the fixture, against which the e2e test asserts.
 - **Rebuild→assert e2e test**: The new test (or test module) that replays the fixture with zero LLM calls and performs all assertions in this spec.
+- **Corpus prose fixture**: `corpus_prose.jsonl`, the cleaned prose text (with `title`/`revision_id` provenance and a cleanup-version header) fed to the extractor for every consumed article at capture time; enables comparing a different extraction model against the same real corpus (#228) without re-fetching or re-cleaning it.
 
 ## Success Criteria *(mandatory)*
 
@@ -110,7 +114,7 @@ As a maintainer, when a future schema or WAL-format change makes the committed f
 
 ## Out of Scope
 
-- LLM-response "cassettes" for the extraction/classification steps (a separate follow-on issue) — this fixture is post-extraction and cannot test the LLM→entities/edges step itself, nor LLM-calling ops like `reprocess_relation_types`.
+- LLM-response "cassettes" for the extraction/classification steps (a separate follow-on issue, tracked as #232) — this fixture is post-extraction and cannot test the LLM→entities/edges step itself, nor LLM-calling ops like `reprocess_relation_types`.
 - Any production-code change (this is a test-fixture-and-harness-only issue).
 - Adding fixture-based assertions to #208 / #209 / #210 directly (they remain covered by their own synthetic tests; this fixture is available for them to build on afterward, not a hard blocker).
 - A private/reporter-specific corpus as the committed fixture (only a public corpus is acceptable for the committed artifact; a private corpus could at most be used as an optional, uncommitted local validation extra, which is not part of this issue's deliverable).
