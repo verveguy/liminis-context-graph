@@ -14,6 +14,16 @@ completes it captures:
   - `expected_results.json`: recorded counts, embedding dim, golden queries, a 2-hop
     traversal path, and relation-type samples — the fixture's "expected results record"
 
+Ingest stops as soon as `entity_count` reaches `--target-entities` (default 1500 —
+comfortably past the 1000 hybrid-dedup threshold with headroom), rather than always consuming
+the full manifest. In a tight domain cluster, recurring hub entities dedup heavily, so unique
+entity count grows sublinearly with article count — polling `knowledge_status` after each
+article and stopping early avoids paying for extraction on articles the fixture doesn't need.
+The manifest's remaining, unconsumed entries are left in place (a documented way to grow the
+fixture later without re-curating); the actually-consumed prefix is recorded in both
+`expected_results.json` and back into `corpus_manifest.json` (`last_capture`) for
+reproducibility.
+
 Prerequisites (all one-time/local, never required in CI):
   1. `ANTHROPIC_API_KEY` set in the environment (real LLM extraction).
   2. The local embedding sidecar reachable — either the default UDS socket
@@ -42,8 +52,13 @@ Usage:
     # 4. Stop the service, review, commit the fixture files
     kill %1
     git add crates/core/tests/fixtures/real_corpus_wal/wal.jsonl.gz \\
-            crates/core/tests/fixtures/real_corpus_wal/expected_results.json
+            crates/core/tests/fixtures/real_corpus_wal/expected_results.json \\
+            crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json
     git commit -m "test(corpus): capture golden real-corpus WAL fixture (#217)"
+
+Pass --target-entities to override the default 1500-entity stopping point (e.g.
+--target-entities 5000 for a deliberately larger fixture, or a smoke-test run with
+--limit 20 --target-entities 50 to sanity-check the pipeline cheaply before a full capture).
 
 The script fails loudly (non-zero exit) on any article fetch or ingest error rather than
 silently skipping articles — a partial/silently-degraded corpus would defeat the point of the
@@ -205,7 +220,22 @@ class ServiceClient:
 # ── Capture steps ───────────────────────────────────────────────────────────────
 
 
-def ingest_corpus(client: ServiceClient, articles: list, group_id: str, wiki_delay: float):
+def ingest_corpus(
+    client: ServiceClient,
+    articles: list,
+    group_id: str,
+    wiki_delay: float,
+    target_entities: int,
+) -> list:
+    """Ingests `articles` in manifest order, polling `knowledge_status` after each one and
+    stopping as soon as `entity_count >= target_entities`. Returns the list of consumed
+    articles (a prefix of `articles`, in the same order) so the caller can record exactly
+    what built the fixture.
+
+    Raises if the entire manifest is exhausted without reaching `target_entities` — that
+    means the manifest needs more articles, not a silently-undersized fixture.
+    """
+    consumed = []
     for i, article in enumerate(articles, start=1):
         title = article["title"]
         revision_id = article["revision_id"]
@@ -230,11 +260,36 @@ def ingest_corpus(client: ServiceClient, articles: list, group_id: str, wiki_del
                 "group_id": group_id,
             },
         )
-        print(f"    -> episode {result.get('episode_uuid')}", flush=True)
+        consumed.append(article)
+        status = client.call("knowledge_status", {})
+        entity_count = status["entity_count"]
+        print(
+            f"    -> episode {result.get('episode_uuid')}, entity_count={entity_count}",
+            flush=True,
+        )
+        if entity_count >= target_entities:
+            print(
+                f"reached target_entities={target_entities} after {len(consumed)}/{len(articles)} "
+                "articles — stopping ingest early",
+                flush=True,
+            )
+            return consumed
         time.sleep(wiki_delay)
 
+    raise RuntimeError(
+        f"exhausted all {len(articles)} manifest articles without reaching "
+        f"target_entities={target_entities} (last observed entity_count={entity_count}). "
+        "Extend corpus_manifest.json with more articles and re-run."
+    )
 
-def build_expected_results(client: ServiceClient, group_id: str) -> dict:
+
+def build_expected_results(
+    client: ServiceClient,
+    group_id: str,
+    consumed_articles: list,
+    target_entities: int,
+    total_manifest_size: int,
+) -> dict:
     status = client.call("knowledge_status", {})
 
     golden_entity_queries = []
@@ -328,6 +383,12 @@ def build_expected_results(client: ServiceClient, group_id: str) -> dict:
         "relationship_count": status["relationship_count"],
         "episode_count": status["episode_count"],
         "indices_built": status["indices_built"],
+        "target_entities": target_entities,
+        "consumed_article_count": len(consumed_articles),
+        "manifest_article_count": total_manifest_size,
+        "consumed_articles": [
+            {"title": a["title"], "revision_id": a["revision_id"]} for a in consumed_articles
+        ],
         "golden_entity_queries": golden_entity_queries,
         "golden_relationship_queries": golden_relationship_queries,
         "traversal": traversal,
@@ -365,7 +426,17 @@ def main() -> None:
         "--limit",
         type=int,
         default=None,
-        help="cap the number of articles ingested (for a quick smoke-test run)",
+        help="cap the number of articles considered for ingest (for a quick smoke-test run)",
+    )
+    parser.add_argument(
+        "--target-entities",
+        type=int,
+        default=1500,
+        help=(
+            "stop ingest as soon as knowledge_status reports entity_count >= this value "
+            "(default 1500 — comfortably past the 1000 hybrid-dedup threshold with headroom, "
+            "without paying for extraction on articles the fixture doesn't need)"
+        ),
     )
     args = parser.parse_args()
 
@@ -374,28 +445,37 @@ def main() -> None:
     articles = manifest["articles"]
     if args.limit:
         articles = articles[: args.limit]
+    total_manifest_size = len(articles)
 
     start = time.monotonic()
     client = ServiceClient(args.socket)
     try:
-        ingest_corpus(client, articles, args.group_id, args.wiki_delay)
+        consumed_articles = ingest_corpus(
+            client, articles, args.group_id, args.wiki_delay, args.target_entities
+        )
         elapsed = time.monotonic() - start
         print(f"ingest complete in {elapsed:.1f}s, building expected_results.json...")
 
-        expected = build_expected_results(client, args.group_id)
+        expected = build_expected_results(
+            client,
+            args.group_id,
+            consumed_articles,
+            args.target_entities,
+            total_manifest_size,
+        )
         expected["capture_wall_clock_seconds"] = round(elapsed, 1)
-        expected["article_count"] = len(articles)
 
         if expected["entity_count"] <= 1000:
             print(
                 f"WARNING: entity_count ({expected['entity_count']}) does not exceed the "
                 "default hybrid-dedup threshold (1000) — SC-002 requires margin above it. "
-                "Extend corpus_manifest.json with more articles and re-run.",
+                "Re-run with a higher --target-entities.",
                 file=sys.stderr,
             )
     finally:
         client.close()
 
+    import datetime
     import os
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -409,9 +489,28 @@ def main() -> None:
     gzip_wal_dir(args.wal_dir, wal_gz_path)
     print(f"wrote {wal_gz_path}")
 
+    # Note the consumed prefix back on the manifest itself, so corpus_manifest.json documents
+    # what actually built the committed fixture without needing expected_results.json open
+    # alongside it. The unconsumed remainder stays in the manifest, ready to extend the corpus
+    # in a future re-capture without re-curating article titles/revision IDs.
+    manifest["last_capture"] = {
+        "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "target_entities": args.target_entities,
+        "consumed_article_count": len(consumed_articles),
+        "manifest_article_count": total_manifest_size,
+        "final_entity_count": expected["entity_count"],
+        "final_relationship_count": expected["relationship_count"],
+        "final_episode_count": expected["episode_count"],
+    }
+    with open(args.manifest, "w") as f:
+        json.dump(manifest, f, indent=2)
+        f.write("\n")
+    print(f"annotated {args.manifest} with last_capture metadata")
+
     print(
-        f"\nCapture complete: {expected['entity_count']} entities, "
-        f"{expected['relationship_count']} relationships, {expected['episode_count']} episodes."
+        f"\nCapture complete: {len(consumed_articles)}/{total_manifest_size} articles consumed, "
+        f"{expected['entity_count']} entities, {expected['relationship_count']} relationships, "
+        f"{expected['episode_count']} episodes."
     )
 
 
