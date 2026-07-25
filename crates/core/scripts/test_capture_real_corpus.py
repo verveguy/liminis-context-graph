@@ -10,7 +10,7 @@ outside-CI tool — see its module docstring) — this is a standalone stdlib-on
 
 import unittest
 
-from capture_real_corpus import strip_templates, wikitext_to_prose
+from capture_real_corpus import strip_file_links, strip_templates, wikitext_to_prose
 
 # Simple English Wikipedia, "2026 New Glenn rocket explosion" (rev 10877681), fetched
 # verbatim. This revision's `<ref name=bbc />` self-closing tag, followed much later by a
@@ -61,6 +61,66 @@ NEW_GLENN_WIKITEXT = (
 )
 
 
+# Simple English Wikipedia, "Aryabhata (satellite)" (rev 10314108), fetched verbatim. Its
+# infobox caption `[[File:1984 CPA 5493.jpg|thumb|right|1984 USSR stamp featuring
+# [[Bhaskara (satellite)|Bhaskara]]-I, Bhaskara-II and Aryabhata satellites]]` nests a piped
+# wikilink inside the file-link caption. The old `_FILE_LINK_RE`
+# (`\[\[(File|Image|Category):[^\]]*\]\]`) stopped at the *first* `]]` — the inner link's
+# closer, not the file link's own — leaving `-I, Bhaskara-II and Aryabhata satellites]]` as
+# debris in the prose. This is also a genuine stub article (154 chars of real prose), which
+# previously tripped the short-prose guard into a hard abort instead of a skip. See #217.
+ARYABHATA_WIKITEXT = (
+    "{{Infobox spaceflight\n"
+    "| name                  = Aryabhatta\n"
+    "| image                 = Aryabhata Satellite.jpg\n"
+    "| image_size            = 270px\n"
+    "| image_caption         = File photo of Aryabhata, India's first indigenously built "
+    "satellite.\n"
+    "| mission_type          = [[Astrophysics]]\n"
+    "| operator              = [[Indian Space Research Organisation|ISRO]]\n"
+    "| website               =\n"
+    "| COSPAR_ID             = 1965-033A\n"
+    "| SATCAT                = 7752\n"
+    "| mission_duration      = 4&nbsp;days achieved\n"
+    "| spacecraft_bus        =\n"
+    "| manufacturer          =\n"
+    "| dry_mass              =\n"
+    "| launch_mass           = 360&nbsp;kg (794&nbsp;lb)\n"
+    "| power                 = 46&nbsp;watts\n"
+    "| launch_date           ={{start-date|19 April 1975, 07:30|timezone=yes}}&nbsp;UTC"
+    '<ref name="launchlog">{{cite web|url=http://planet4589.org/space/log/launchlog.txt|'
+    "title=Launch Log|first=Jonathan|last=McDowell|work=Jonathan's Space Page|"
+    "access-date=22 January 2014}}</ref>\n"
+    "| launch_rocket         = [[Kosmos-3M]]\n"
+    "| launch_site           = [[Kapustin Yar]] [[Kapustin Yar Site 107|107/2]]\n"
+    "| launch_contractor     =\n"
+    "| last_contact          = {{end-date|24 April 1975}}\n"
+    "| decay_date            = 10 February 1992\n"
+    '| orbit_epoch           = 19 May 1975<ref name="satcat">{{cite web|'
+    "url=http://planet4589.org/space/log/satcat.txt|title=Satellite Catalog|"
+    "first=Jonathan|last=McDowell|work=Jonathan's Space Page|"
+    "access-date=22 January 2014}}</ref>\n"
+    "| orbit_reference       = [[geocentric orbit|Geocentric]]\n"
+    "| orbit_regime          = [[Low Earth orbit|Low Earth]]\n"
+    "| orbit_periapsis       = {{convert|568|km|mi}}\n"
+    "| orbit_apoapsis        = {{convert|611|km|mi}}\n"
+    "| orbit_inclination     = 50.6&nbsp;degrees\n"
+    "| orbit_period          = 96.46&nbsp;minutes\n"
+    "| apsis                 = gee\n"
+    "}}\n"
+    "[[File:1984 CPA 5493.jpg|thumb|right|1984 USSR stamp featuring "
+    "[[Bhaskara (satellite)|Bhaskara]]-I, Bhaskara-II and Aryabhata satellites]]\n"
+    "'''Aryabhata''' was [[India]]'s first [[satellite (artificial)|satellite]]. It got its "
+    "name from the Indian [[astronomer]] of the same name."
+    '<ref name="ref1">{{cite web|url=http://www.isro.org/satellites/aryabhata.aspx |'
+    "title=Aryabhata - The first indigenously built satellite}}</ref>\n\n"
+    "== References ==\n{{reflist}}\n\n{{multistub|sci|Asia}}\n\n"
+    "[[Category:Satellites]]\n"
+    "[[Category:Indian Space Research Organisation]]\n"
+    "[[Category:Spacecraft launched in the 1970s]]"
+)
+
+
 class WikitextToProseTests(unittest.TestCase):
     def test_new_glenn_regression_keeps_full_prose(self):
         prose = wikitext_to_prose(NEW_GLENN_WIKITEXT)
@@ -84,6 +144,33 @@ class WikitextToProseTests(unittest.TestCase):
         text = "keep {{outer {{inner}} more}} tail"
         cleaned = strip_templates(text)
         self.assertEqual(cleaned, "keep  tail")
+
+    def test_aryabhata_regression_no_caption_debris(self):
+        prose = wikitext_to_prose(ARYABHATA_WIKITEXT)
+        self.assertNotIn("Bhaskara-II and Aryabhata satellites]]", prose)
+        self.assertIn(
+            "Aryabhata was India's first satellite. It got its name from the Indian "
+            "astronomer of the same name.",
+            prose,
+        )
+
+    def test_strip_file_links_removes_nested_link_in_caption(self):
+        text = (
+            "before [[File:x.jpg|thumb|the [[Bhaskara (satellite)|Bhaskara]]-I and "
+            "Aryabhata satellites]] after"
+        )
+        cleaned = strip_file_links(text)
+        self.assertEqual(cleaned, "before  after")
+
+    def test_strip_file_links_leaves_unmatched_opener_as_literal(self):
+        text = "before [[File:unclosed caption stays open"
+        cleaned = strip_file_links(text)
+        self.assertIn("before [[File:unclosed caption stays open", cleaned)
+
+    def test_strip_file_links_ignores_plain_wikilink(self):
+        text = "see [[Apollo 11]] for details"
+        cleaned = strip_file_links(text)
+        self.assertEqual(cleaned, text)
 
 
 if __name__ == "__main__":
