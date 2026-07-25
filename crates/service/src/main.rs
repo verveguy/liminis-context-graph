@@ -4,6 +4,7 @@ mod migration;
 mod sink;
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -282,18 +283,24 @@ async fn bootstrap_app_state(
     //   - Recoverable (lbug WAL corruption, permission denied, missing file) → autonomous
     //     startup self-recovery first; degraded mode only if recovery itself fails.
     //   - Fatal (everything else) → propagate via ? and let the process exit
-    let (maybe_db, degraded_reason): (Option<Arc<Db>>, Option<String>) = {
+    let (maybe_db, degraded_reason, indices_ready): (Option<Arc<Db>>, Option<String>, bool) = {
         let open_result = (|| -> Result<Db, Box<dyn std::error::Error>> {
             let db = Db::open(&db_path)?;
             {
                 let conn = db.connect()?;
                 conn.init_schema(embedding_dim)?;
+                // Eager build (FR-001): build HNSW/FTS indices immediately after schema init,
+                // before the socket accepts any request, so ingest never has to discover a
+                // missing entity_name_embedding_idx mid-chunk (#208). Idempotent/cheap when
+                // indices already exist (create_vector_indexes swallows "already exists");
+                // a genuine build failure propagates fatally via `?` (FR-004).
+                conn.build_indices_and_constraints()?;
             }
             Ok(db)
         })();
 
         match open_result {
-            Ok(db) => (Some(Arc::new(db)), None),
+            Ok(db) => (Some(Arc::new(db)), None, true),
             Err(e) => {
                 let msg = e.to_string();
                 let is_recoverable = msg.contains("Corrupted wal file")
@@ -333,7 +340,11 @@ async fn bootstrap_app_state(
                                 reason: Some("startup_auto_recovery".to_string()),
                                 detail: None,
                             });
-                            (Some(Arc::new(db)), None)
+                            // run_full_recovery_sequence already calls
+                            // build_indices_and_constraints (recovery.rs) and propagates a
+                            // genuine build failure fatally, so success here means indices are
+                            // built (FR-002).
+                            (Some(Arc::new(db)), None, true)
                         }
                         Ok(Err(recovery_err)) => {
                             // Recovery sequence failed — fall back to degraded mode.
@@ -348,7 +359,7 @@ async fn bootstrap_app_state(
                                 reason: Some(reason.clone()),
                                 detail: Some(serde_json::Value::String(msg)),
                             });
-                            (None, Some(reason))
+                            (None, Some(reason), false)
                         }
                         Err(join_err) => {
                             // spawn_blocking panicked — fall back to degraded mode.
@@ -363,7 +374,7 @@ async fn bootstrap_app_state(
                                 reason: Some(reason.clone()),
                                 detail: Some(serde_json::Value::String(msg)),
                             });
-                            (None, Some(reason))
+                            (None, Some(reason), false)
                         }
                     }
                 } else {
@@ -376,14 +387,19 @@ async fn bootstrap_app_state(
     // migration_failed takes precedence over db-open degraded reason.
     let degraded_reason = pre_migration_degraded.or(degraded_reason);
 
-    Ok(Arc::new(AppState::from_env(
+    let state = Arc::new(AppState::from_env(
         Arc::clone(&telemetry_sink),
         maybe_db,
         degraded_reason,
         db_path.clone(),
         embedder,
         embedding_model_probed,
-    )))
+    ));
+    // FR-008: reflect the eager build performed above (direct-open or post-recovery) so
+    // knowledge_status reports indices_built: true before the socket accepts any request,
+    // matching the flag's existing meaning for the search-handler/dedup-path auto-heal builds.
+    state.indices_built.store(indices_ready, Ordering::Release);
+    Ok(state)
 }
 
 /// Runs the Unix-socket JSON-RPC service (the pre-existing, default behavior). `listener` is
