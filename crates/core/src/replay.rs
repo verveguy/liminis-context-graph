@@ -144,7 +144,7 @@ pub struct ReplayProgress {
 /// Replays all `.jsonl` WAL files against a LadybugDB connection, ordered by each file's
 /// first-line `seq` (see the file sort in `replay_opts`) — not by full-filename comparison,
 /// since the random per-session id embedded in the filename does not track write order across
-/// sessions (see ADR-0041).
+/// sessions (see ADR-0043).
 pub struct WalReplayer {
     wal_dir: PathBuf,
 }
