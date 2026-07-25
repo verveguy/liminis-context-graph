@@ -641,7 +641,7 @@ pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Names of the four streaming methods that emit MCP progress notifications (FR-007).
+/// Names of the five streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
