@@ -2772,6 +2772,14 @@ async fn test_reprocess_entity_types_emits_progress_when_tracked() {
     assert!(
         events
             .iter()
+            .any(|e| e["type"] == "progress" && e["phase"] == "classifying"),
+        "expected a classifying-phase progress event even for a run smaller than \
+         REPROCESS_PROGRESS_EVERY (Copilot review finding on PR #224 — the classify loop's \
+         periodic send alone never fires for small runs): {events:?}"
+    );
+    assert!(
+        events
+            .iter()
             .any(|e| e["type"] == "progress" && e["phase"] == "writing"),
         "expected a writing-phase progress event: {events:?}"
     );

@@ -17,8 +17,10 @@
 //! even across a redial (FR-012).
 //!
 //! The retry boundary is safety-driven (see ADR-0040): a failure while *writing* the request
-//! (`write_all`/`flush`) means the request provably never reached the remote, so it is safe to
-//! redial and retry that write exactly once (FR-007/FR-008). A failure that surfaces only
+//! (`write_all`/`flush`) is treated as safe to retry — it's the best signal this process has
+//! that the request didn't reach the remote, even though `flush` failing after a successful
+//! `write_all` can't strictly prove no bytes arrived — so it redials and retries that write
+//! exactly once (FR-007/FR-008). A failure that surfaces only
 //! *after* the request was fully written — while waiting for or reading the response — means
 //! the remote's execution status is unknown, so that call is never retried; it fails with a
 //! descriptive error and the connection is invalidated so the *next* call redials fresh rather
@@ -82,11 +84,11 @@ impl AttachedBackend {
         Ok(BufReader::new(stream))
     }
 
-    /// Writes and flushes one request line. A failure here means the request is provably
-    /// incomplete or unsent from this process's perspective (FR-007) — the flush-failure case
-    /// is deliberately not distinguished from write_all failure, since a flush that fails after
-    /// a successful write_all leaves genuine ambiguity about how many bytes reached the kernel,
-    /// and both are treated as "safe to retry" per A1's conservative write-time boundary.
+    /// Writes and flushes one request line. A failure here is treated as safe to retry
+    /// (FR-007) — the flush-failure case is deliberately not distinguished from write_all
+    /// failure, since a flush that fails after a successful write_all leaves genuine ambiguity
+    /// about how many bytes reached the kernel, and both are treated as "safe to retry" per
+    /// A1's conservative write-time boundary.
     async fn write_request(stream: &mut BufReader<UnixStream>, line: &str) -> Result<(), String> {
         stream
             .write_all(format!("{line}\n").as_bytes())

@@ -2063,6 +2063,14 @@ async fn handle_reprocess_entity_types(
         .collect();
 
     let total = entities.len();
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(json!({
+            "type": "progress",
+            "phase": "classifying",
+            "processed": 0,
+            "total": total,
+        }));
+    }
     let mut types: Vec<String> = Vec::with_capacity(total);
     for (i, chunk) in pairs.chunks(corrections::REPROCESS_BATCH_SIZE).enumerate() {
         let processed = i * corrections::REPROCESS_BATCH_SIZE;

@@ -412,7 +412,8 @@ dispatch the socket service uses. No graph logic is duplicated in the MCP transp
     attached client fails that call with a clean timeout error rather than blocking forever.
   - **Reconnect and retry.** If the connection to the remote breaks, the client transparently
     re-dials the same socket path rather than staying wedged. If the break is detected while
-    writing the outgoing request (the request provably never reached the remote), the client
+    writing the outgoing request — treated as safe to retry, since the write failing is the
+    client's best available signal that the request didn't get through — the client
     automatically retries that request exactly once over the freshly-dialed connection. If the
     break is detected only after the request was fully written — while waiting for or reading
     the response — the call is **not** retried automatically, since the remote's execution
