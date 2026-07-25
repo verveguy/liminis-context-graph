@@ -127,6 +127,20 @@ possible for future work, but wiring them up is explicitly out of scope here.
   cannot be exercised against the real sidecar today — it exists for real OpenAI-compatible
   servers (vLLM, Ollama, LM Studio, ...) reached via `--extractor-http`, which do honor
   `max_tokens` and do emit `"length"`.
+- **Known limitation: the tier-3 auto-detected default (Apple Foundation Models via the bundled
+  sidecar) has prior evidence of inadequate extraction quality.** Private-repo evaluation
+  predating this issue (ported into this repo by #227/#228) assessed Apple Foundation Models for
+  entity/relationship extraction and found it unsuitable — insufficient context window and
+  capability for the task's quality bar — with a standing recommendation against wiring the
+  local-inference socket for extraction until a fresh capability pass. This ADR's `Extractor`
+  trait implementation and CLI/precedence-selection mechanism are unaffected by that finding (the
+  same `OaiExtractor` adapter works against any OpenAI-compatible endpoint, including
+  quality-verified local models per #227's rankings, via `--extractor-http`); what changes is that
+  tier-3 auto-detection — reached only when no `ANTHROPIC_API_KEY` and no explicit
+  `--extractor-uds`/`--extractor-http` flag are given — now logs an explicit startup warning
+  identifying this limitation, rather than silently selecting a backend with known-poor quality.
+  Resolving the quality gap itself (a stronger bundled default, or swapping in a
+  higher-quality local model) is tracked by #227/#228, not this ADR.
 
 ## Related
 

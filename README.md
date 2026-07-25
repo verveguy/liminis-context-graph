@@ -390,6 +390,14 @@ precedence (highest first):
    is running, else `LCG_EXTRACTION_URL` (HTTP), else the binary exits with a clear error
    identifying the missing configuration.
 
+> **Extraction quality via the auto-detected sidecar is unverified.** When tier 3 above selects
+> the bundled sidecar (Apple Foundation Models), the binary logs a startup warning: prior
+> evaluation found Apple Foundation Models' context window and capability insufficient for
+> reliable entity/relationship extraction (see #227 for the full evaluation once published, and
+> #228 for the in-repo eval harness that will keep this guidance current). For production-quality
+> local extraction, point `--extractor-http`/`--extractor-uds` at a quality-verified
+> OpenAI-compatible model, or set `ANTHROPIC_API_KEY` to use the hosted baseline.
+
 The resolved choice is reported in a startup log line: `extractor: provider=...,
 transport=..., endpoint=...` — `provider` is `anthropic` or `local` depending on which path was
 selected. Unlike the embedder, extraction performs no live reachability probe at startup —

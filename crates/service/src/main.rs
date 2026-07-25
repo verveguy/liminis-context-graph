@@ -293,6 +293,13 @@ async fn bootstrap_app_state(
         Http(String),
         #[cfg(unix)]
         Uds(String),
+        // Same transport as `Uds`, but reached via tier-3 auto-detection (no explicit
+        // --extractor-uds/--extractor-http and no ANTHROPIC_API_KEY) rather than an operator's
+        // explicit choice. Kept distinct so the silent-default warning below (see #212 review
+        // discussion referencing #227/#228) only fires when the operator didn't ask for this
+        // endpoint by name.
+        #[cfg(unix)]
+        AutoDetectedUds(String),
     }
 
     let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
@@ -342,7 +349,7 @@ async fn bootstrap_app_state(
         #[cfg(unix)]
         {
             if std::path::Path::new(DEFAULT_EXTRACTOR_UDS_PATH).exists() {
-                ResolvedExtractor::Uds(DEFAULT_EXTRACTOR_UDS_PATH.to_string())
+                ResolvedExtractor::AutoDetectedUds(DEFAULT_EXTRACTOR_UDS_PATH.to_string())
             } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
                 ResolvedExtractor::Http(url)
             } else {
@@ -392,6 +399,24 @@ async fn bootstrap_app_state(
             let (transport_label, endpoint) = ext.transport_info();
             eprintln!(
                 "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+            );
+            Arc::new(ext)
+        }
+        #[cfg(unix)]
+        ResolvedExtractor::AutoDetectedUds(path) => {
+            let ext = OaiExtractor::new_uds(path, extractor_model, Arc::clone(&telemetry_sink));
+            let (transport_label, endpoint) = ext.transport_info();
+            eprintln!(
+                "extractor: provider=local, transport={transport_label}, endpoint={endpoint} \
+                 (auto-detected — no ANTHROPIC_API_KEY set)"
+            );
+            eprintln!(
+                "extractor: WARNING: extraction quality via the bundled macOS sidecar (Apple \
+                 Foundation Models) has not been independently verified for entity/relationship \
+                 extraction and is known to be limited (small context window, insufficient \
+                 capability for this task in prior evaluation). For production-quality \
+                 extraction, set ANTHROPIC_API_KEY or point --extractor-http/--extractor-uds at \
+                 a stronger OpenAI-compatible local model. See docs/adr/0038-local-openai-compatible-extraction-adapter.md."
             );
             Arc::new(ext)
         }
