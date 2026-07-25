@@ -28,6 +28,11 @@ Prerequisites (all one-time/local, never required in CI):
   1. `ANTHROPIC_API_KEY` set in the environment (real LLM extraction).
   2. The local embedding sidecar reachable — either the default UDS socket
      (`/tmp/liminis-inference.sock`) or `LCG_EMBEDDING_URL` pointed at an HTTP endpoint.
+     On a fresh checkout the sidecar compiles its `.mlpackage` fine but then fails with
+     `offlineModeError("Repository not available locally")` fetching the
+     `BAAI/bge-base-en-v1.5` tokenizer — it doesn't look in the repo by default even
+     though the tokenizer ships in the embedding-assets release tarball. Point it there:
+     `export LOCAL_INFERENCE_HF_CACHE=<repo>/resources/models/tokenizer`.
   3. The compiled `liminis-context-graph` binary (`cargo build --release`).
   4. Network access to `simple.wikipedia.org` (to fetch pinned article revisions).
 
@@ -141,7 +146,13 @@ def fetch_wikitext(revision_id: int) -> str:
 
 # ── Wikitext → plain prose (good-enough for extraction, not a full parser) ────
 
-_REF_RE = re.compile(r"<ref[^>]*>.*?</ref>|<ref[^/>]*/>", re.DOTALL | re.IGNORECASE)
+# Self-closing form MUST be tried first: with the closed-ref-content alternative first,
+# a self-closing tag like `<ref name=x />` still matches it (the `.*?` is happy to match
+# zero chars up to `>`), then greedily searches for the *next* `</ref>` anywhere later in
+# the document (DOTALL) and swallows everything in between — silently dropping prose that
+# has nothing to do with the self-closing tag itself. Trying `<ref[^/>]*/>` first prevents
+# that same-tag ambiguity from ever reaching the greedy branch.
+_REF_RE = re.compile(r"<ref[^/>]*/>|<ref[^>]*>.*?</ref>", re.DOTALL | re.IGNORECASE)
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _PIPED_LINK_RE = re.compile(r"\[\[([^\]|]*)\|([^\]]*)\]\]")
@@ -153,29 +164,61 @@ _FILE_LINK_RE = re.compile(r"\[\[(File|Image|Category):[^\]]*\]\]", re.IGNORECAS
 
 
 def strip_templates(text: str) -> str:
-    """Removes balanced {{ ... }} templates (infoboxes, citations, etc.)."""
-    out = []
-    depth = 0
+    """Removes balanced {{ ... }} templates (infoboxes, citations, etc.).
+
+    Real wikitext is not guaranteed to have perfectly balanced braces by the time this
+    runs (a malformed template, or upstream cleanup that strips a `}}` along with its
+    surrounding markup, can leave a `{{` with no partner). A naive depth counter that
+    only emits text at depth == 0 treats an unmatched opener as "still inside a
+    template" for the rest of the string, silently dropping everything after it —
+    which previously turned one bad brace into an entire missing article (see #217).
+
+    Matching is stack-based instead: a `{{`/`}}` pair is only removed once a partner is
+    actually found, so an unmatched `{{` is left as literal text and stripping recovers
+    on the next real match rather than swallowing the remainder of the document.
+    """
+    stack = []
+    remove_spans = []
     i = 0
-    while i < len(text):
+    n = len(text)
+    while i < n:
         if text[i : i + 2] == "{{":
-            depth += 1
+            stack.append(i)
             i += 2
             continue
-        if text[i : i + 2] == "}}" and depth > 0:
-            depth -= 1
+        if text[i : i + 2] == "}}" and stack:
+            start = stack.pop()
+            remove_spans.append((start, i + 2))
             i += 2
             continue
-        if depth == 0:
-            out.append(text[i])
         i += 1
+
+    remove_spans.sort()
+    merged = []
+    for start, end in remove_spans:
+        if merged and start < merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1] = (merged[-1][0], end)
+            continue
+        merged.append((start, end))
+
+    out = []
+    pos = 0
+    for start, end in merged:
+        out.append(text[pos:start])
+        pos = end
+    out.append(text[pos:])
     return "".join(out)
 
 
 def wikitext_to_prose(wikitext: str) -> str:
     text = _COMMENT_RE.sub("", wikitext)
-    text = _REF_RE.sub("", text)
+    # Templates are stripped before refs: braces are balanced in raw wikitext, but a
+    # <ref>...</ref> can itself contain a template (e.g. `<ref>{{Cite web|...}}</ref>`)
+    # whose `}}` sits inside the ref while a sibling template's matching `{{` sits
+    # outside it — removing the ref first can leave that sibling unbalanced.
     text = strip_templates(text)
+    text = _REF_RE.sub("", text)
     text = _FILE_LINK_RE.sub("", text)
     text = _PIPED_LINK_RE.sub(r"\2", text)
     text = _PLAIN_LINK_RE.sub(r"\1", text)
