@@ -13,6 +13,10 @@ completes it captures:
     `WalReplayer`'s own read order) and gzip-compressed to `wal.jsonl.gz`
   - `expected_results.json`: recorded counts, embedding dim, golden queries, a 2-hop
     traversal path, and relation-type samples — the fixture's "expected results record"
+  - `corpus_prose.jsonl.gz`: the cleaned prose actually fed to the extractor for every
+    consumed article, one JSON record per article (`{title, revision_id, prose}`) behind a
+    header record (`{cleanup_version, script_git_sha, record_count}`) — see "The four
+    fixture artifacts" below
 
 Ingest stops as soon as `entity_count` reaches `--target-entities` (default 1500 —
 comfortably past the 1000 hybrid-dedup threshold with headroom), rather than always consuming
@@ -20,9 +24,29 @@ the full manifest. In a tight domain cluster, recurring hub entities dedup heavi
 entity count grows sublinearly with article count — polling `knowledge_status` after each
 article and stopping early avoids paying for extraction on articles the fixture doesn't need.
 The manifest's remaining, unconsumed entries are left in place (a documented way to grow the
-fixture later without re-curating); the actually-consumed prefix is recorded in both
-`expected_results.json` and back into `corpus_manifest.json` (`last_capture`) for
-reproducibility.
+fixture later without re-curating); the actually-consumed prefix (and the skipped-stub list) is
+recorded in `expected_results.json` and back into `corpus_manifest.json` (`last_capture`,
+including the full consumed/skipped article lists) for reproducibility.
+
+The four fixture artifacts and what each is for:
+
+  | Artifact                 | Purpose                                                    |
+  |---------------------------|------------------------------------------------------------|
+  | `corpus_manifest.json`   | provenance — pinned revisions, reproducibility             |
+  | `corpus_prose.jsonl.gz`  | re-extract the same inputs with a different model (#228)   |
+  | `wal.jsonl.gz`           | rebuild the graph deterministically, zero LLM calls         |
+  | (future) LLM cassette    | replay one model's exact request/response exchange          |
+
+`wal.jsonl.gz` is *post-extraction*, so it cannot test a different extractor; a future cassette
+records one model's exchanges, so it cannot test a different model either. Only the raw prose
+that was fed in supports an apples-to-apples extraction-model comparison — and refetching from
+Wikipedia at compare-time is not equivalent even with pinned revisions, because the prose is a
+derived artifact of `wikitext_to_prose` (see `CLEANUP_VERSION` below): a future cleanup change
+would silently change the compared input out from under a model-vs-model eval. `corpus_prose.jsonl.gz`
+is written automatically at the end of a normal capture run (from the already-fetched consumed
+articles, no extra network calls beyond the ingest itself); `--prose-only` regenerates it later,
+standalone, from `corpus_manifest.json`'s `last_capture.consumed_articles` — no service, no
+`ANTHROPIC_API_KEY`, no embedder, costing only Wikipedia re-fetches.
 
 Prerequisites (all one-time/local, never required in CI):
   1. `ANTHROPIC_API_KEY` set in the environment (real LLM extraction).
@@ -57,6 +81,7 @@ Usage:
     # 4. Stop the service, review, commit the fixture files
     kill %1
     git add crates/core/tests/fixtures/real_corpus_wal/wal.jsonl.gz \\
+            crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl.gz \\
             crates/core/tests/fixtures/real_corpus_wal/expected_results.json \\
             crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json
     git commit -m "test(corpus): capture golden real-corpus WAL fixture (#217)"
@@ -64,6 +89,21 @@ Usage:
 Pass --target-entities to override the default 1500-entity stopping point (e.g.
 --target-entities 5000 for a deliberately larger fixture, or a smoke-test run with
 --limit 20 --target-entities 50 to sanity-check the pipeline cheaply before a full capture).
+
+To regenerate ONLY `corpus_prose.jsonl.gz` later (e.g. after extending the manifest and
+re-capturing, or if the committed file is lost/corrupted) without repeating LLM extraction:
+
+    python3 crates/core/scripts/capture_real_corpus.py \\
+        --prose-only \\
+        --manifest crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json \\
+        --output-dir crates/core/tests/fixtures/real_corpus_wal
+
+This requires no `--socket`/`--wal-dir` (no running service), no `ANTHROPIC_API_KEY`, and no
+embedder — it reads the consumed-article list from `corpus_manifest.json`'s
+`last_capture.consumed_articles` (written by a prior full capture run) and re-runs the same
+`wikitext_to_prose` over freshly refetched pinned revisions. If `wikitext_to_prose` (or its
+helpers) has changed since the committed `corpus_prose.jsonl.gz` was captured, bump
+`CLEANUP_VERSION` below so the mismatch is detectable from the file's header rather than silent.
 
 The script fails loudly (non-zero exit) on any article fetch, ingest, or service error — a
 partial/silently-degraded corpus would defeat the point of the fixture (see the Research-stage
@@ -84,8 +124,10 @@ fresh) DB/WAL dir picks up where it left off instead of re-paying for already-in
 import argparse
 import gzip
 import json
+import os
 import re
 import socket
+import subprocess
 import sys
 import time
 import urllib.error
@@ -94,6 +136,17 @@ import urllib.request
 
 WIKI_API = "https://simple.wikipedia.org/w/api.php"
 USER_AGENT = "liminis-context-graph-fixture-capture/1.0 (https://github.com/verveguy/liminis-context-graph)"
+
+# Bump this whenever `wikitext_to_prose` or any helper it calls (`strip_templates`,
+# `strip_file_links`, the ref/link/heading regexes) changes behavior. It's recorded in
+# `corpus_prose.jsonl.gz`'s header record so a future extraction-model comparison (#228) can
+# detect that the committed prose predates a cleanup fix, rather than silently comparing
+# against stale/incorrect input text (see #217: three cleanup bugs were fixed during this
+# issue alone — ref/template ordering, stub handling, nested file-links).
+#   1 - initial (buggy) implementation: ref-before-template ordering, regex-based file-link
+#       stripping that broke on nested `[[...]]` captions.
+#   2 - current: template-before-ref ordering, stack-based `strip_file_links`.
+CLEANUP_VERSION = 2
 
 # Representative "hub" entities expected to recur densely across the Apollo-program corpus
 # (FR-001c) — used to build the golden-query and traversal assertions in expected_results.json.
@@ -581,8 +634,6 @@ def build_expected_results(
 
 
 def gzip_wal_dir(wal_dir: str, output_path: str):
-    import os
-
     files = sorted(f for f in os.listdir(wal_dir) if f.endswith(".jsonl"))
     if not files:
         raise RuntimeError(f"no .jsonl WAL files found in {wal_dir}")
@@ -593,11 +644,74 @@ def gzip_wal_dir(wal_dir: str, output_path: str):
                 out.write(f.read())
 
 
+def script_git_sha() -> str:
+    """Best-effort git SHA of this script's own commit, for the corpus_prose.jsonl.gz header.
+
+    Provenance-only (see CLEANUP_VERSION for the actual staleness signal) — falls back to
+    None rather than failing the capture if git isn't available (e.g. a tarball checkout).
+    """
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return None
+
+
+def build_corpus_prose(consumed_articles: list, wiki_delay: float) -> list:
+    """Refetches each consumed article's pinned revision and re-runs `wikitext_to_prose`,
+    returning `[{title, revision_id, prose}, ...]` in manifest order.
+
+    This is the exact text that was fed to `knowledge_add_episode` for every episode in the
+    committed WAL (same pinned revisions, same cleanup function) — the input fixture for
+    comparing a different extraction model against the same real corpus (#228), which neither
+    the WAL (post-extraction) nor a future LLM cassette (one model's exchange only) can serve.
+    Zero LLM/embedder calls; costs only Wikipedia fetches.
+    """
+    records = []
+    for i, article in enumerate(consumed_articles, start=1):
+        title = article["title"]
+        revision_id = article["revision_id"]
+        print(f"[{i}/{len(consumed_articles)}] fetching prose for {title!r} (rev {revision_id})...", flush=True)
+        wikitext = fetch_wikitext(revision_id)
+        prose = wikitext_to_prose(wikitext)
+        records.append({"title": title, "revision_id": revision_id, "prose": prose})
+        time.sleep(wiki_delay)
+    return records
+
+
+def write_corpus_prose_gz(records: list, output_path: str) -> None:
+    """Writes `records` as gzip-compressed JSONL behind a header record, so
+    `corpus_prose.jsonl.gz` self-documents the cleanup version it was captured against
+    (see CLEANUP_VERSION) without needing `expected_results.json` open alongside it.
+    """
+    header = {
+        "_header": True,
+        "cleanup_version": CLEANUP_VERSION,
+        "script_git_sha": script_git_sha(),
+        "record_count": len(records),
+    }
+    with gzip.open(output_path, "wt", encoding="utf-8") as out:
+        out.write(json.dumps(header) + "\n")
+        for record in records:
+            out.write(json.dumps(record) + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--socket", required=True, help="Path to the running service's Unix socket")
+    parser.add_argument(
+        "--socket", default=None, help="Path to the running service's Unix socket (required unless --prose-only)"
+    )
     parser.add_argument("--manifest", required=True, help="Path to corpus_manifest.json")
-    parser.add_argument("--wal-dir", required=True, help="WAL directory the running service writes to")
+    parser.add_argument(
+        "--wal-dir", default=None, help="WAL directory the running service writes to (required unless --prose-only)"
+    )
     parser.add_argument("--output-dir", required=True, help="real_corpus_wal/ fixture directory")
     parser.add_argument("--group-id", default="apollo_program", help="group_id used for all episodes")
     parser.add_argument(
@@ -622,10 +736,39 @@ def main() -> None:
             "without paying for extraction on articles the fixture doesn't need)"
         ),
     )
+    parser.add_argument(
+        "--prose-only",
+        action="store_true",
+        help=(
+            "Skip ingest entirely and only (re)generate corpus_prose.jsonl.gz, reading the "
+            "consumed-article list from corpus_manifest.json's last_capture.consumed_articles "
+            "(written by a prior full capture run). No service connection, no "
+            "ANTHROPIC_API_KEY, no embedder — costs only Wikipedia re-fetches."
+        ),
+    )
     args = parser.parse_args()
 
     with open(args.manifest) as f:
         manifest = json.load(f)
+
+    if args.prose_only:
+        consumed = manifest.get("last_capture", {}).get("consumed_articles")
+        if not consumed:
+            raise SystemExit(
+                "--prose-only requires corpus_manifest.json to already have a "
+                "last_capture.consumed_articles record from a prior full capture run "
+                "(run this script without --prose-only first)"
+            )
+        os.makedirs(args.output_dir, exist_ok=True)
+        records = build_corpus_prose(consumed, args.wiki_delay)
+        prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl.gz")
+        write_corpus_prose_gz(records, prose_path)
+        print(f"wrote {prose_path} ({len(records)} articles, cleanup_version={CLEANUP_VERSION})")
+        return
+
+    if not args.socket or not args.wal_dir:
+        raise SystemExit("--socket and --wal-dir are required unless --prose-only is given")
+
     articles = manifest["articles"]
     if args.limit:
         articles = articles[: args.limit]
@@ -673,7 +816,6 @@ def main() -> None:
         client.close()
 
     import datetime
-    import os
 
     os.makedirs(args.output_dir, exist_ok=True)
     expected_path = os.path.join(args.output_dir, "expected_results.json")
@@ -686,8 +828,20 @@ def main() -> None:
     gzip_wal_dir(args.wal_dir, wal_gz_path)
     print(f"wrote {wal_gz_path}")
 
-    # Note the consumed prefix back on the manifest itself, so corpus_manifest.json documents
-    # what actually built the committed fixture without needing expected_results.json open
+    # corpus_prose.jsonl.gz — the cleaned prose fed to the extractor for every consumed
+    # article, the input fixture for comparing a different extraction model against this same
+    # real corpus (#228). Written here (not just via --prose-only) so a normal capture run
+    # produces all committed artifacts in one pass; costs one extra Wikipedia-fetch pass
+    # (zero LLM/embedder calls) since the prose computed during ingest_corpus isn't retained
+    # across the resume-skip branch (see build_corpus_prose).
+    prose_records = build_corpus_prose(consumed_articles, args.wiki_delay)
+    prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl.gz")
+    write_corpus_prose_gz(prose_records, prose_path)
+    print(f"wrote {prose_path}")
+
+    # Note the consumed/skipped article lists back on the manifest itself, so
+    # corpus_manifest.json documents exactly what built the committed fixture (and can drive a
+    # standalone --prose-only regeneration later) without needing expected_results.json open
     # alongside it. The unconsumed remainder stays in the manifest, ready to extend the corpus
     # in a future re-capture without re-curating article titles/revision IDs.
     manifest["last_capture"] = {
@@ -698,6 +852,11 @@ def main() -> None:
         "final_entity_count": expected["entity_count"],
         "final_relationship_count": expected["relationship_count"],
         "final_episode_count": expected["episode_count"],
+        "consumed_articles": [
+            {"title": a["title"], "revision_id": a["revision_id"]} for a in consumed_articles
+        ],
+        "skipped_articles": skipped_articles,
+        "cleanup_version": CLEANUP_VERSION,
     }
     with open(args.manifest, "w") as f:
         json.dump(manifest, f, indent=2)

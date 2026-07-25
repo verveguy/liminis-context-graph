@@ -8,9 +8,20 @@ outside-CI tool — see its module docstring) — this is a standalone stdlib-on
 `unittest` file for a maintainer to run locally when touching the cleanup regexes.
 """
 
+import gzip
+import json
+import tempfile
 import unittest
+from unittest import mock
 
-from capture_real_corpus import strip_file_links, strip_templates, wikitext_to_prose
+import capture_real_corpus
+from capture_real_corpus import (
+    build_corpus_prose,
+    strip_file_links,
+    strip_templates,
+    wikitext_to_prose,
+    write_corpus_prose_gz,
+)
 
 # Simple English Wikipedia, "2026 New Glenn rocket explosion" (rev 10877681), fetched
 # verbatim. This revision's `<ref name=bbc />` self-closing tag, followed much later by a
@@ -171,6 +182,47 @@ class WikitextToProseTests(unittest.TestCase):
         text = "see [[Apollo 11]] for details"
         cleaned = strip_file_links(text)
         self.assertEqual(cleaned, text)
+
+
+class CorpusProseTests(unittest.TestCase):
+    """Covers the #217 follow-up: persisting the cleaned prose fed to the extractor
+    (`corpus_prose.jsonl.gz`), since neither the WAL (post-extraction) nor a future LLM
+    cassette (one model's exchange only) can serve as input for an extraction-model
+    comparison (#228) — see the module docstring's "four fixture artifacts" table.
+    """
+
+    def test_build_corpus_prose_refetches_and_cleans_each_consumed_article(self):
+        consumed = [
+            {"title": "2026 New Glenn rocket explosion", "revision_id": 10877681},
+            {"title": "Aryabhata (satellite)", "revision_id": 10314108},
+        ]
+        wikitexts = {10877681: NEW_GLENN_WIKITEXT, 10314108: ARYABHATA_WIKITEXT}
+        with mock.patch.object(
+            capture_real_corpus, "fetch_wikitext", side_effect=lambda rev: wikitexts[rev]
+        ):
+            records = build_corpus_prose(consumed, wiki_delay=0)
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["title"], "2026 New Glenn rocket explosion")
+        self.assertEqual(records[0]["revision_id"], 10877681)
+        self.assertIn("New Glenn rocket blew up during testing", records[0]["prose"])
+        self.assertEqual(records[1]["title"], "Aryabhata (satellite)")
+        self.assertIn("Aryabhata was India's first satellite", records[1]["prose"])
+
+    def test_write_corpus_prose_gz_round_trips_with_header(self):
+        records = [{"title": "Apollo 11", "revision_id": 42, "prose": "Apollo 11 landed."}]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl.gz") as tmp:
+            write_corpus_prose_gz(records, tmp.name)
+            with gzip.open(tmp.name, "rt", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f]
+
+        self.assertEqual(len(lines), 2)
+        header, record = lines
+        self.assertTrue(header["_header"])
+        self.assertEqual(header["cleanup_version"], capture_real_corpus.CLEANUP_VERSION)
+        self.assertEqual(header["record_count"], 1)
+        self.assertIn("script_git_sha", header)
+        self.assertEqual(record, records[0])
 
 
 if __name__ == "__main__":
