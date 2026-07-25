@@ -16,7 +16,7 @@ AI assistants and agents need durable, structured context: *who* was mentioned, 
 
 2. **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files in `.lcg/wal/` before it touches the database. The WAL is human-readable, append-only, and **git-friendly**: check it into the same repository as your notes or documents, diff it, and carry it across machines. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
 
-3. **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters. **Embeddings run fully local today** — a Unix-socket or HTTP endpoint speaking the OpenAI `/v1/embeddings` shape (the repo ships a macOS CoreML sidecar). **Entity/relationship extraction currently requires a hosted Anthropic model** and `ANTHROPIC_API_KEY`; a local/OpenAI-compatible extraction adapter is planned. The engine itself contains no ML runtime.
+3. **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters. **Both embedding and extraction can run fully local** — a Unix-socket or HTTP endpoint speaking the OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` shapes (the repo ships a macOS CoreML sidecar serving both). Extraction also supports a hosted Anthropic model via `ANTHROPIC_API_KEY` for users who prefer it; the two are selected automatically (local sidecar auto-detected when no hosted key is configured) or explicitly via `--extractor-uds`/`--extractor-http`. The engine itself contains no ML runtime.
 
 The result is a context graph you can treat like the rest of your local tooling: a single process, a directory of files, versionable with git, rebuildable from its own log.
 
@@ -212,14 +212,16 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
 | `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe) |
-| `LCG_EXTRACTION_LLM` | No | LLM model for entity extraction, optional `primary:fallback` format |
+| `LCG_EXTRACTION_LLM` | No | Anthropic model for entity extraction, optional `primary:fallback` format. Only consulted on the Anthropic path (see `ANTHROPIC_API_KEY` below); ignored when a local extraction endpoint is selected. |
+| `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed, `ANTHROPIC_API_KEY` is unset, and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. If this var is also unset in that situation, the binary exits with an error identifying the missing extraction configuration. |
+| `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
 | `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
 | `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
 | `LCG_WAL_DIR` | No | Directory for write-ahead log JSONL files (default `.lcg/wal`) |
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
-| `ANTHROPIC_API_KEY` | Yes, for LLM ops | API key for Anthropic entity/relationship extraction. **Required for any LLM-backed operation** — ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`), which also call the configured extractor. Extraction is Anthropic-only today (a local adapter is planned). Not needed for read-only, embedding-only, or non-LLM tools. |
+| `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the hosted Anthropic API for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). When unset, extraction falls back to a local OpenAI-compatible endpoint (the CoreML sidecar, if running, or `LCG_EXTRACTION_URL`) — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 
 ## Ontology
@@ -346,17 +348,13 @@ not call the embedder (`health_check`, `knowledge_status`, `knowledge_list_entit
 
 This repository ships a Swift CoreML sidecar at [`native/local-inference/`](native/local-inference/)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
-(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference: no
-API key, no network. macOS 26+ and Xcode command-line tools are required. See
-[`native/local-inference/README.md`](native/local-inference/README.md) for build and run instructions.
+(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
+both embedding and extraction: no API key, no network. macOS 26+ and Xcode command-line tools are
+required. See [`native/local-inference/README.md`](native/local-inference/README.md) for build and
+run instructions.
 
-> **Note:** the engine currently uses only the sidecar's `/v1/embeddings` route. The
-> `/v1/chat/completions` route is served but **not yet wired for extraction** — extraction is
-> Anthropic-only today (see the `ANTHROPIC_API_KEY` row above). So embeddings are fully local now;
-> fully-local *extraction* is planned.
-
-`liminis-context-graph` discovers the sidecar's default UDS socket automatically — start the
-sidecar first, then start the binary.
+`liminis-context-graph` discovers the sidecar's default UDS socket automatically for both
+embedding and extraction — start the sidecar first, then start the binary.
 
 ### HTTP transport (CI / Linux / custom embedders)
 
@@ -370,6 +368,35 @@ liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings
 See [ADR 0006](docs/adr/0006-embedder-http-contract.md) and
 [ADR 0016](docs/adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
 specification and transport decision record.
+
+## Extractor: local or hosted
+
+Entity/relationship extraction runs against one of two providers, selected with the following
+precedence (highest first):
+
+1. **Explicit CLI flag** — `--extractor-uds <path>` or `--extractor-http <url>` always selects the
+   local OpenAI-compatible adapter, regardless of whether `ANTHROPIC_API_KEY` is set:
+
+   ```bash
+   liminis-context-graph --extractor-uds /tmp/liminis-inference.sock              # Unix domain socket
+   liminis-context-graph --extractor-http http://127.0.0.1:8765/v1/chat/completions  # HTTP
+   ```
+
+   (`--extractor-uds` and `--extractor-http` are mutually exclusive.)
+2. **`ANTHROPIC_API_KEY` set, no explicit flag** — extraction uses the hosted Anthropic API,
+   unchanged from prior versions. A reachable local sidecar never silently redirects this traffic.
+3. **Neither of the above** — auto-detected: the default UDS socket
+   (`/tmp/liminis-inference.sock`, the same socket and process the embedder uses) if the sidecar
+   is running, else `LCG_EXTRACTION_URL` (HTTP), else the binary exits with a clear error
+   identifying the missing configuration.
+
+The resolved choice is reported in a startup log line: `extractor: provider=..., transport=...,
+endpoint=...`. Unlike the embedder, extraction performs no live reachability probe at startup —
+Foundation Models' on-device warm-up can be slow, and there is no response shape to auto-detect —
+so an unreachable local endpoint surfaces as an error on the first extraction call rather than at
+startup. See [ADR 0041](docs/adr/0041-local-openai-compatible-extraction-adapter.md) for the full
+design, including why the local adapter uses `response_format: json_object` rather than
+function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
 
 ## MCP-over-stdio transport
 
