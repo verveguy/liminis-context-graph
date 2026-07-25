@@ -6,61 +6,71 @@ This is a one-time, offline, OUTSIDE-CI step (see specs/217-golden-real-corpus-w
 Assumptions). It drives a real, running `liminis-context-graph` service instance — configured
 with the real `AnthropicExtractor` (via `ANTHROPIC_API_KEY`) and the real `OaiEmbedder` (the
 local CoreML sidecar, `native/local-inference/`) — over its Unix socket, ingesting the pinned
-Simple English Wikipedia corpus in `corpus_manifest.json` one article per episode. When ingest
-completes it captures:
+Simple English Wikipedia corpus in `corpus_manifest.json`.
 
-  - the resulting WAL, concatenated across files (lexicographic order, matching
-    `WalReplayer`'s own read order) and gzip-compressed to `wal.jsonl.gz`
-  - `expected_results.json`: recorded counts, embedding dim, golden queries, a 2-hop
-    traversal path, and relation-type samples — the fixture's "expected results record"
-  - `corpus_prose.jsonl.gz`: the cleaned prose actually fed to the extractor for every
-    consumed article, one JSON record per article (`{title, revision_id, prose}`) behind a
-    header record (`{cleanup_version, script_git_sha, record_count}`) — see "The four
-    fixture artifacts" below
+The capture is split into two explicit phases, run separately (`--stage-only` / `--ingest-only`)
+or back-to-back (the default, with neither flag given):
 
-Ingest stops as soon as `entity_count` reaches `--target-entities` (default 1500 —
-comfortably past the 1000 hybrid-dedup threshold with headroom), rather than always consuming
-the full manifest. In a tight domain cluster, recurring hub entities dedup heavily, so unique
-entity count grows sublinearly with article count — polling `knowledge_status` after each
-article and stopping early avoids paying for extraction on articles the fixture doesn't need.
-The manifest's remaining, unconsumed entries are left in place (a documented way to grow the
-fixture later without re-curating); the actually-consumed prefix (and the skipped-stub list) is
-recorded in `expected_results.json` and back into `corpus_manifest.json` (`last_capture`,
-including the full consumed/skipped article lists) for reproducibility.
+  Phase 1 — stage (free, no service required, idempotent):
+    Fetches and cleans every considered manifest article's wikitext into prose, skipping
+    genuine stub articles (<200 chars of cleaned prose). Writes `corpus_prose.jsonl` — no
+    LLM calls, no running service, no cost beyond Wikipedia fetches. Safe to re-run at will.
 
-The four fixture artifacts and what each is for:
+  Phase 2 — ingest (paid):
+    Reads prose from the staged `corpus_prose.jsonl` — makes ZERO Wikipedia/network calls.
+    Ingests staged articles in order via `knowledge_add_episode` (real extractor + embedder,
+    over the service's Unix socket) until `knowledge_status` reports `entity_count >=
+    --target-entities`, then captures `wal.jsonl` (the run's WAL files, copied verbatim into
+    a `wal/` directory) and `expected_results.json`.
+
+Splitting these phases matters because interleaving fetch/clean/ingest per article (the
+original design) coupled a network dependency to an expensive LLM run: of six early capture
+attempts, two died mid-run on a Wikipedia/infra fault after 20-36 articles of already-paid
+extraction, discarding all of it. With staging done up front and persisted, the ingest phase
+depends on nothing but the local service and cannot fail on a Wikipedia blip; interrupting and
+re-running it does not refetch or re-clean anything (see #217).
+
+The three fixture artifacts and what each is for:
 
   | Artifact                 | Purpose                                                    |
   |---------------------------|------------------------------------------------------------|
   | `corpus_manifest.json`   | provenance — pinned revisions, reproducibility             |
-  | `corpus_prose.jsonl.gz`  | re-extract the same inputs with a different model (#228)   |
-  | `wal.jsonl.gz`           | rebuild the graph deterministically, zero LLM calls         |
+  | `corpus_prose.jsonl`     | re-extract the same inputs with a different model (#228)   |
+  | `wal/*.jsonl`            | rebuild the graph deterministically, zero LLM calls         |
   | (future) LLM cassette    | replay one model's exact request/response exchange          |
 
-`wal.jsonl.gz` is *post-extraction*, so it cannot test a different extractor; a future cassette
+`wal/*.jsonl` is *post-extraction*, so it cannot test a different extractor; a future cassette
 records one model's exchanges, so it cannot test a different model either. Only the raw prose
 that was fed in supports an apples-to-apples extraction-model comparison — and refetching from
 Wikipedia at compare-time is not equivalent even with pinned revisions, because the prose is a
 derived artifact of `wikitext_to_prose` (see `CLEANUP_VERSION` below): a future cleanup change
-would silently change the compared input out from under a model-vs-model eval. `corpus_prose.jsonl.gz`
-is written automatically at the end of a normal capture run (from the already-fetched consumed
-articles, no extra network calls beyond the ingest itself); `--prose-only` regenerates it later,
-standalone, from `corpus_manifest.json`'s `last_capture.consumed_articles` — no service, no
-`ANTHROPIC_API_KEY`, no embedder, costing only Wikipedia re-fetches.
+would silently change the compared input out from under a model-vs-model eval. `corpus_prose.jsonl`
+is committed uncompressed and is exactly the staged input Phase 2 reads from — nothing is
+regenerated or re-derived after staging, so the committed file and the ingest input are
+byte-identical by construction.
+
+Neither fixture artifact is gzip-compressed, and the WAL is committed as the run's individual
+`.jsonl` files (original filenames preserved) rather than concatenated into one file: git
+already compresses blobs for storage/transport, so gzip buys nothing on the wire while making
+the fixture non-diffable and defeating delta compression across re-captures (a one-byte input
+change would otherwise make the entire multi-MB blob a brand new object in history, forever).
+Individual WAL files stay well under GitHub's per-file size warnings; a single concatenated file
+would not.
 
 Prerequisites (all one-time/local, never required in CI):
-  1. `ANTHROPIC_API_KEY` set in the environment (real LLM extraction).
+  1. `ANTHROPIC_API_KEY` set in the environment (real LLM extraction) — only for Phase 2.
   2. The local embedding sidecar reachable — either the default UDS socket
-     (`/tmp/liminis-inference.sock`) or `LCG_EMBEDDING_URL` pointed at an HTTP endpoint.
-     On a fresh checkout the sidecar compiles its `.mlpackage` fine but then fails with
-     `offlineModeError("Repository not available locally")` fetching the
-     `BAAI/bge-base-en-v1.5` tokenizer — it doesn't look in the repo by default even
-     though the tokenizer ships in the embedding-assets release tarball. Point it there:
+     (`/tmp/liminis-inference.sock`) or `LCG_EMBEDDING_URL` pointed at an HTTP endpoint — only
+     for Phase 2. On a fresh checkout the sidecar compiles its `.mlpackage` fine but then fails
+     with `offlineModeError("Repository not available locally")` fetching the
+     `BAAI/bge-base-en-v1.5` tokenizer — it doesn't look in the repo by default even though the
+     tokenizer ships in the embedding-assets release tarball. Point it there:
      `export LOCAL_INFERENCE_HF_CACHE=<repo>/resources/models/tokenizer`.
-  3. The compiled `liminis-context-graph` binary (`cargo build --release`).
-  4. Network access to `simple.wikipedia.org` (to fetch pinned article revisions).
+  3. The compiled `liminis-context-graph` binary (`cargo build --release`) — only for Phase 2.
+  4. Network access to `simple.wikipedia.org` (to fetch pinned article revisions) — only for
+     Phase 1.
 
-Usage:
+Usage (full capture, staging then ingest in one command):
     # 1. Build the release binary
     cargo build --release -p lcg-service
 
@@ -80,52 +90,53 @@ Usage:
 
     # 4. Stop the service, review, commit the fixture files
     kill %1
-    git add crates/core/tests/fixtures/real_corpus_wal/wal.jsonl.gz \\
-            crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl.gz \\
+    git add crates/core/tests/fixtures/real_corpus_wal/wal/ \\
+            crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl \\
             crates/core/tests/fixtures/real_corpus_wal/expected_results.json \\
             crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json
     git commit -m "test(corpus): capture golden real-corpus WAL fixture (#217)"
 
-Pass --target-entities to override the default 1500-entity stopping point (e.g.
---target-entities 5000 for a deliberately larger fixture, or a smoke-test run with
---limit 20 --target-entities 50 to sanity-check the pipeline cheaply before a full capture).
+Usage (split — recommended for a long/expensive corpus, since Phase 1 is free and Phase 2
+cannot fail on a Wikipedia blip once staging is done):
 
-To regenerate ONLY `corpus_prose.jsonl.gz` later (e.g. after extending the manifest and
-re-capturing, or if the committed file is lost/corrupted) without repeating LLM extraction:
-
-    python3 crates/core/scripts/capture_real_corpus.py \\
-        --prose-only \\
+    # Phase 1 — free, no service, re-runnable at will
+    python3 crates/core/scripts/capture_real_corpus.py --stage-only \\
         --manifest crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json \\
         --output-dir crates/core/tests/fixtures/real_corpus_wal
 
-This requires no `--socket`/`--wal-dir` (no running service), no `ANTHROPIC_API_KEY`, and no
-embedder — it reads the consumed-article list from `corpus_manifest.json`'s
-`last_capture.consumed_articles` (written by a prior full capture run) and re-runs the same
-`wikitext_to_prose` over freshly refetched pinned revisions. If `wikitext_to_prose` (or its
-helpers) has changed since the committed `corpus_prose.jsonl.gz` was captured, bump
-`CLEANUP_VERSION` below so the mismatch is detectable from the file's header rather than silent.
+    # Phase 2 — paid, reads corpus_prose.jsonl from --output-dir, zero network calls
+    python3 crates/core/scripts/capture_real_corpus.py --ingest-only \\
+        --socket /tmp/real_corpus_capture/service.sock \\
+        --manifest crates/core/tests/fixtures/real_corpus_wal/corpus_manifest.json \\
+        --wal-dir /tmp/real_corpus_capture/wal \\
+        --output-dir crates/core/tests/fixtures/real_corpus_wal
 
-The script fails loudly (non-zero exit) on any article fetch, ingest, or service error — a
-partial/silently-degraded corpus would defeat the point of the fixture (see the Research-stage
-"Risks" note on reproducibility). The one exception is an individual article whose wikitext
-cleans up to suspiciously short prose (<200 chars): that's skipped and recorded in
-`expected_results.json`'s `skipped_articles`, not a hard abort, since Simple English Wikipedia
-has many genuine stub articles and a real, paid extraction run shouldn't throw away everything
-already ingested over one stub. The run still aborts if skipped articles exceed ~20% of
-attempted articles (see `SKIP_RATIO_THRESHOLD`) — that's a systemic cleanup regression, not
-stub noise.
+Pass --target-entities to override the default 1500-entity stopping point (e.g.
+--target-entities 5000 for a deliberately larger fixture, or a smoke-test run with
+--limit 20 --target-entities 50 to sanity-check the pipeline cheaply before a full capture).
+--limit caps how many manifest articles Phase 1 stages (and therefore how many are available
+for Phase 2 to ingest); it has no effect in --ingest-only (staging already happened).
 
-Resumable: at startup the script queries which episodes already exist for `--group-id` and
-skips re-fetching/re-extracting those manifest articles. If a run aborts partway (a service
-crash, a systemic-skip abort, etc.), re-running the same command against the *same* (not a
-fresh) DB/WAL dir picks up where it left off instead of re-paying for already-ingested articles.
+The staging phase fails loudly (non-zero exit) on any article fetch error, and on the corpus as
+a whole if too many attempted articles produce suspiciously short prose (see
+SKIP_RATIO_THRESHOLD) — that's a systemic cleanup regression, not stub noise, and staging is the
+free phase to catch it in, before any LLM spend. An individual short-prose article on its own is
+just skipped and recorded in the staged file's header (`skipped_articles`) and later in
+`expected_results.json`, since Simple English Wikipedia has many genuine stub articles. The
+ingest phase fails loudly on any service/ingest error.
+
+Resumable: at startup the ingest phase queries which episodes already exist for `--group-id`
+and skips re-adding those articles. If a run aborts partway (a service crash, etc.), re-running
+`--ingest-only` against the same (not fresh) DB/WAL dir picks up where it left off — with no
+re-fetch or re-clean, since ingest never touches the network.
 """
 
 import argparse
-import gzip
+import datetime
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -139,7 +150,7 @@ USER_AGENT = "liminis-context-graph-fixture-capture/1.0 (https://github.com/verv
 
 # Bump this whenever `wikitext_to_prose` or any helper it calls (`strip_templates`,
 # `strip_file_links`, the ref/link/heading regexes) changes behavior. It's recorded in
-# `corpus_prose.jsonl.gz`'s header record so a future extraction-model comparison (#228) can
+# `corpus_prose.jsonl`'s header record so a future extraction-model comparison (#228) can
 # detect that the committed prose predates a cleanup fix, rather than silently comparing
 # against stale/incorrect input text (see #217: three cleanup bugs were fixed during this
 # issue alone — ref/template ordering, stub handling, nested file-links).
@@ -379,74 +390,37 @@ class ServiceClient:
         self.sock.close()
 
 
-# ── Capture steps ───────────────────────────────────────────────────────────────
+# ── Phase 1: stage (fetch + clean, no service, no LLM) ─────────────────────────
 
-# A too-short article aborts the whole run only once skipped articles exceed this share
-# of attempted articles (and a minimum sample has been attempted, so one early stub
+# A too-short article aborts the whole staging run only once skipped articles exceed this
+# share of attempted articles (and a minimum sample has been attempted, so one early stub
 # doesn't trip the guard) — see #217: an isolated short article is normal stub-article
-# noise on Simple English Wikipedia, not a cleanup regression.
+# noise on Simple English Wikipedia, not a cleanup regression. Checked during staging (free)
+# rather than during ingest (paid), so a systemic cleanup regression is caught before any
+# LLM spend.
 SKIP_RATIO_THRESHOLD = 0.20
 SKIP_RATIO_MIN_SAMPLE = 10
 
 
-def fetch_already_ingested_titles(client: ServiceClient, group_id: str) -> set:
-    """Returns the episode `name`s already present for `group_id`.
+def stage_corpus(articles: list, wiki_delay: float) -> tuple:
+    """Fetches and cleans each of `articles` into prose, in manifest order. Zero service/LLM
+    calls — pure Wikipedia fetch + `wikitext_to_prose`. Returns `(staged, skipped)`:
 
-    Lets a re-run of this script (pointed at a non-fresh DB/WAL dir left over from a
-    prior aborted run) skip re-fetching and re-extracting articles it already paid for,
-    instead of re-paying for the whole prefix on every retry (see #217).
+      - `staged`: `[{title, revision_id, prose}, ...]` for articles with usable prose, in
+        manifest order — this is exactly the committed `corpus_prose.jsonl` content and the
+        input Phase 2 ingests from.
+      - `skipped`: articles whose cleaned prose was suspiciously short (<200 chars), each as
+        `{title, revision_id, prose_chars}` — genuine stub articles, not an error (Simple
+        English Wikipedia has many).
+
+    Raises if skipped articles exceed `SKIP_RATIO_THRESHOLD` of attempted articles once a
+    minimum sample has been attempted — that's a systemic cleanup regression, not stub noise.
     """
-    result = client.call("knowledge_get_episodes", {"group_id": group_id, "last_n": 10000})
-    return {ep.get("name") for ep in result.get("episodes", []) if ep.get("name")}
-
-
-def ingest_corpus(
-    client: ServiceClient,
-    articles: list,
-    group_id: str,
-    wiki_delay: float,
-    target_entities: int,
-    already_ingested_titles: set = None,
-) -> tuple:
-    """Ingests `articles` in manifest order, polling `knowledge_status` after each newly
-    added episode and stopping as soon as `entity_count >= target_entities`. Returns
-    `(consumed, skipped)`:
-
-      - `consumed`: articles that contributed an episode to the graph, either just now or
-        in a prior run (`already_ingested_titles`), in manifest order — so the caller can
-        record exactly what built the fixture.
-      - `skipped`: articles skipped because wikitext cleanup produced suspiciously short
-        prose, each as `{title, revision_id, prose_chars}`.
-
-    A too-short article is skipped rather than aborting the whole run: prose length varies
-    legitimately (Simple English Wikipedia has many genuine stub articles — e.g.
-    "Aryabhata (satellite)", 154 chars, is entirely correct output), and a hard abort
-    throws away every dollar already spent on real LLM extraction for prior articles in
-    this run (see #217). The run still aborts on short prose once skipped articles exceed
-    `SKIP_RATIO_THRESHOLD` of attempted articles — that's a systemic cleanup regression,
-    not stub-article noise. Non-recoverable errors (network/ingest/service failures) still
-    abort immediately; skipping only applies to the short-prose heuristic.
-
-    Raises if the entire manifest is exhausted without reaching `target_entities` — that
-    means the manifest needs more articles, not a silently-undersized fixture.
-    """
-    already = already_ingested_titles or set()
-    consumed = []
+    staged = []
     skipped = []
-    entity_count = None
     for i, article in enumerate(articles, start=1):
         title = article["title"]
         revision_id = article["revision_id"]
-
-        if title in already:
-            print(
-                f"[{i}/{len(articles)}] {title!r} already ingested (resuming) — "
-                "skipping fetch/extract",
-                flush=True,
-            )
-            consumed.append(article)
-            continue
-
         print(f"[{i}/{len(articles)}] fetching {title!r} (rev {revision_id})...", flush=True)
         wikitext = fetch_wikitext(revision_id)
         prose = wikitext_to_prose(wikitext)
@@ -454,7 +428,7 @@ def ingest_corpus(
             skipped.append(
                 {"title": title, "revision_id": revision_id, "prose_chars": len(prose)}
             )
-            attempted = len(consumed) + len(skipped)
+            attempted = len(staged) + len(skipped)
             print(
                 f"    SKIP: only {len(prose)} chars of prose after wikitext cleanup "
                 f"(likely a genuine stub article) — {len(skipped)}/{attempted} attempted "
@@ -474,46 +448,165 @@ def ingest_corpus(
             time.sleep(wiki_delay)
             continue
 
-        ref_time = article["revision_timestamp"]
+        staged.append({"title": title, "revision_id": revision_id, "prose": prose})
+        time.sleep(wiki_delay)
+
+    return staged, skipped
+
+
+def script_git_sha() -> str:
+    """Best-effort git SHA of this script's own commit, for the corpus_prose.jsonl header.
+
+    Provenance-only (see CLEANUP_VERSION for the actual staleness signal) — falls back to
+    None rather than failing the capture if git isn't available (e.g. a tarball checkout).
+    """
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return None
+
+
+def write_corpus_prose(staged: list, skipped: list, output_path: str) -> None:
+    """Writes `staged` as plain (uncompressed) JSONL behind a header record, so
+    `corpus_prose.jsonl` self-documents the cleanup version it was staged against (see
+    CLEANUP_VERSION) and the articles skipped as stubs, without needing
+    `expected_results.json` open alongside it.
+
+    Uncompressed: git already compresses blobs for storage/transport, and a plain-text
+    fixture is diffable/greppable and delta-compresses across re-captures — a gzip blob does
+    neither (see module docstring).
+    """
+    header = {
+        "_header": True,
+        "cleanup_version": CLEANUP_VERSION,
+        "script_git_sha": script_git_sha(),
+        "record_count": len(staged),
+        "skipped_articles": skipped,
+    }
+    with open(output_path, "w", encoding="utf-8") as out:
+        out.write(json.dumps(header) + "\n")
+        for record in staged:
+            out.write(json.dumps(record) + "\n")
+
+
+def read_corpus_prose(input_path: str) -> tuple:
+    """Reads back a `corpus_prose.jsonl` written by `write_corpus_prose`. Returns
+    `(staged, skipped)` — the exact staged records Phase 2 ingests from, and the skipped-stub
+    list recorded at staging time (carried through into `expected_results.json`).
+    """
+    with open(input_path, encoding="utf-8") as f:
+        lines = [json.loads(line) for line in f if line.strip()]
+    if not lines or not lines[0].get("_header"):
+        raise RuntimeError(f"{input_path} is missing its header record — not a valid staged corpus")
+    header = lines[0]
+    staged = lines[1:]
+    if len(staged) != header.get("record_count"):
+        raise RuntimeError(
+            f"{input_path} header record_count={header.get('record_count')} does not match "
+            f"{len(staged)} staged records found — file may be truncated/corrupted"
+        )
+    return staged, header.get("skipped_articles", [])
+
+
+# ── Phase 2: ingest (paid, zero network calls) ──────────────────────────────────
+
+
+def fetch_already_ingested_titles(client: ServiceClient, group_id: str) -> set:
+    """Returns the episode `name`s already present for `group_id`.
+
+    Lets a re-run of `--ingest-only` (pointed at a non-fresh DB/WAL dir left over from a
+    prior aborted run) skip re-adding episodes it already paid for, instead of re-paying for
+    the whole prefix on every retry (see #217).
+    """
+    result = client.call("knowledge_get_episodes", {"group_id": group_id, "last_n": 10000})
+    return {ep.get("name") for ep in result.get("episodes", []) if ep.get("name")}
+
+
+def ingest_from_staged(
+    client: ServiceClient,
+    staged: list,
+    timestamps_by_key: dict,
+    group_id: str,
+    target_entities: int,
+    already_ingested_titles: set = None,
+) -> list:
+    """Ingests `staged` records (from `corpus_prose.jsonl`) in order, calling
+    `knowledge_add_episode` with the already-cleaned prose — no Wikipedia fetch, no wikitext
+    cleanup, no network call beyond the local service socket. Polls `knowledge_status` after
+    each newly added episode and stops as soon as `entity_count >= target_entities`.
+
+    Returns `consumed`: staged records that contributed an episode to the graph, either just
+    now or in a prior run (`already_ingested_titles`), in staged order — so the caller can
+    record exactly what built the fixture.
+
+    Raises if every staged record is consumed without reaching `target_entities` — that means
+    the staged corpus needs more articles (re-run Phase 1 against a larger manifest slice),
+    not a silently-undersized fixture.
+    """
+    already = already_ingested_titles or set()
+    consumed = []
+    entity_count = None
+    for i, record in enumerate(staged, start=1):
+        title = record["title"]
+        revision_id = record["revision_id"]
+
+        if title in already:
+            print(
+                f"[{i}/{len(staged)}] {title!r} already ingested (resuming) — skipping",
+                flush=True,
+            )
+            consumed.append(record)
+            continue
+
+        ref_time = timestamps_by_key.get((title, revision_id))
         result = client.call(
             "knowledge_add_episode",
             {
                 "name": title,
-                "episode_body": prose,
+                "episode_body": record["prose"],
                 "source": "text",
                 "source_description": f"Simple English Wikipedia: {title} (rev {revision_id})",
                 "reference_time": ref_time,
                 "group_id": group_id,
             },
         )
-        consumed.append(article)
+        consumed.append(record)
         status = client.call("knowledge_status", {})
         entity_count = status["entity_count"]
         print(
-            f"    -> episode {result.get('episode_uuid')}, entity_count={entity_count}",
+            f"[{i}/{len(staged)}] {title!r} -> episode {result.get('episode_uuid')}, "
+            f"entity_count={entity_count}",
             flush=True,
         )
         if entity_count >= target_entities:
             print(
-                f"reached target_entities={target_entities} after {len(consumed)}/{len(articles)} "
-                "articles — stopping ingest early",
+                f"reached target_entities={target_entities} after {len(consumed)}/{len(staged)} "
+                "staged articles — stopping ingest early",
                 flush=True,
             )
-            return consumed, skipped
-        time.sleep(wiki_delay)
+            return consumed
 
     if entity_count is None:
-        # Every manifest article was already ingested in a prior run (pure resume) —
-        # check status directly rather than assuming the target was reached.
+        # Every staged article was already ingested in a prior run (pure resume) — check
+        # status directly rather than assuming the target was reached.
         status = client.call("knowledge_status", {})
         entity_count = status["entity_count"]
         if entity_count >= target_entities:
-            return consumed, skipped
+            return consumed
 
     raise RuntimeError(
-        f"exhausted all {len(articles)} manifest articles without reaching "
+        f"exhausted all {len(staged)} staged articles without reaching "
         f"target_entities={target_entities} (last observed entity_count={entity_count}). "
-        "Extend corpus_manifest.json with more articles and re-run."
+        "Re-run --stage-only against a larger manifest slice (raise --limit or extend the "
+        "manifest) and re-run --ingest-only."
     )
 
 
@@ -633,84 +726,32 @@ def build_expected_results(
     }
 
 
-def gzip_wal_dir(wal_dir: str, output_path: str):
+def copy_wal_dir(wal_dir: str, output_dir: str) -> list:
+    """Copies the run's `.jsonl` WAL files verbatim (no concatenation, no compression) into
+    `output_dir`, preserving original filenames. `WalReplayer` reads a directory and sorts
+    files lexicographically (`replay.rs`), so this is exactly the layout the engine produces
+    and consumes in production — closer to reality than a single synthetic concatenated file,
+    and it keeps individual committed blobs small and delta-friendly across re-captures (see
+    module docstring).
+    """
     files = sorted(f for f in os.listdir(wal_dir) if f.endswith(".jsonl"))
     if not files:
         raise RuntimeError(f"no .jsonl WAL files found in {wal_dir}")
-    print(f"concatenating {len(files)} WAL files (lexicographic order) -> {output_path}")
-    with gzip.open(output_path, "wb") as out:
-        for fname in files:
-            with open(os.path.join(wal_dir, fname), "rb") as f:
-                out.write(f.read())
-
-
-def script_git_sha() -> str:
-    """Best-effort git SHA of this script's own commit, for the corpus_prose.jsonl.gz header.
-
-    Provenance-only (see CLEANUP_VERSION for the actual staleness signal) — falls back to
-    None rather than failing the capture if git isn't available (e.g. a tarball checkout).
-    """
-    try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=os.path.dirname(os.path.abspath(__file__)),
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-    except Exception:
-        return None
-
-
-def build_corpus_prose(consumed_articles: list, wiki_delay: float) -> list:
-    """Refetches each consumed article's pinned revision and re-runs `wikitext_to_prose`,
-    returning `[{title, revision_id, prose}, ...]` in manifest order.
-
-    This is the exact text that was fed to `knowledge_add_episode` for every episode in the
-    committed WAL (same pinned revisions, same cleanup function) — the input fixture for
-    comparing a different extraction model against the same real corpus (#228), which neither
-    the WAL (post-extraction) nor a future LLM cassette (one model's exchange only) can serve.
-    Zero LLM/embedder calls; costs only Wikipedia fetches.
-    """
-    records = []
-    for i, article in enumerate(consumed_articles, start=1):
-        title = article["title"]
-        revision_id = article["revision_id"]
-        print(f"[{i}/{len(consumed_articles)}] fetching prose for {title!r} (rev {revision_id})...", flush=True)
-        wikitext = fetch_wikitext(revision_id)
-        prose = wikitext_to_prose(wikitext)
-        records.append({"title": title, "revision_id": revision_id, "prose": prose})
-        time.sleep(wiki_delay)
-    return records
-
-
-def write_corpus_prose_gz(records: list, output_path: str) -> None:
-    """Writes `records` as gzip-compressed JSONL behind a header record, so
-    `corpus_prose.jsonl.gz` self-documents the cleanup version it was captured against
-    (see CLEANUP_VERSION) without needing `expected_results.json` open alongside it.
-    """
-    header = {
-        "_header": True,
-        "cleanup_version": CLEANUP_VERSION,
-        "script_git_sha": script_git_sha(),
-        "record_count": len(records),
-    }
-    with gzip.open(output_path, "wt", encoding="utf-8") as out:
-        out.write(json.dumps(header) + "\n")
-        for record in records:
-            out.write(json.dumps(record) + "\n")
+    os.makedirs(output_dir, exist_ok=True)
+    for fname in files:
+        shutil.copy2(os.path.join(wal_dir, fname), os.path.join(output_dir, fname))
+    print(f"copied {len(files)} WAL files (original filenames preserved) -> {output_dir}")
+    return files
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
-        "--socket", default=None, help="Path to the running service's Unix socket (required unless --prose-only)"
+        "--socket", default=None, help="Path to the running service's Unix socket (required for ingest)"
     )
     parser.add_argument("--manifest", required=True, help="Path to corpus_manifest.json")
     parser.add_argument(
-        "--wal-dir", default=None, help="WAL directory the running service writes to (required unless --prose-only)"
+        "--wal-dir", default=None, help="WAL directory the running service writes to (required for ingest)"
     )
     parser.add_argument("--output-dir", required=True, help="real_corpus_wal/ fixture directory")
     parser.add_argument("--group-id", default="apollo_program", help="group_id used for all episodes")
@@ -718,13 +759,13 @@ def main() -> None:
         "--wiki-delay",
         type=float,
         default=1.0,
-        help="seconds to sleep between Wikipedia API fetches (rate-limit friendliness)",
+        help="seconds to sleep between Wikipedia API fetches during staging (rate-limit friendliness)",
     )
     parser.add_argument(
         "--limit",
         type=int,
         default=None,
-        help="cap the number of articles considered for ingest (for a quick smoke-test run)",
+        help="cap the number of manifest articles staged (for a quick smoke-test run); no effect with --ingest-only",
     )
     parser.add_argument(
         "--target-entities",
@@ -737,42 +778,77 @@ def main() -> None:
         ),
     )
     parser.add_argument(
-        "--prose-only",
+        "--stage-only",
         action="store_true",
         help=(
-            "Skip ingest entirely and only (re)generate corpus_prose.jsonl.gz, reading the "
-            "consumed-article list from corpus_manifest.json's last_capture.consumed_articles "
-            "(written by a prior full capture run). No service connection, no "
-            "ANTHROPIC_API_KEY, no embedder — costs only Wikipedia re-fetches."
+            "Run Phase 1 only: fetch + clean manifest articles into corpus_prose.jsonl under "
+            "--output-dir. No service, no ANTHROPIC_API_KEY, no embedder, no --socket/--wal-dir "
+            "needed — costs only Wikipedia fetches."
+        ),
+    )
+    parser.add_argument(
+        "--ingest-only",
+        action="store_true",
+        help=(
+            "Run Phase 2 only: ingest from the corpus_prose.jsonl already staged under "
+            "--output-dir (requires a prior --stage-only or combined run). Requires --socket "
+            "and --wal-dir. Makes zero network calls."
         ),
     )
     args = parser.parse_args()
 
+    if args.stage_only and args.ingest_only:
+        raise SystemExit("--stage-only and --ingest-only are mutually exclusive")
+
     with open(args.manifest) as f:
         manifest = json.load(f)
 
-    if args.prose_only:
-        consumed = manifest.get("last_capture", {}).get("consumed_articles")
-        if not consumed:
-            raise SystemExit(
-                "--prose-only requires corpus_manifest.json to already have a "
-                "last_capture.consumed_articles record from a prior full capture run "
-                "(run this script without --prose-only first)"
-            )
+    prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl")
+
+    if args.stage_only:
+        articles = manifest["articles"]
+        if args.limit:
+            articles = articles[: args.limit]
         os.makedirs(args.output_dir, exist_ok=True)
-        records = build_corpus_prose(consumed, args.wiki_delay)
-        prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl.gz")
-        write_corpus_prose_gz(records, prose_path)
-        print(f"wrote {prose_path} ({len(records)} articles, cleanup_version={CLEANUP_VERSION})")
+        staged, skipped = stage_corpus(articles, args.wiki_delay)
+        write_corpus_prose(staged, skipped, prose_path)
+        print(
+            f"wrote {prose_path} ({len(staged)} staged, {len(skipped)} skipped as stubs, "
+            f"cleanup_version={CLEANUP_VERSION})"
+        )
         return
 
-    if not args.socket or not args.wal_dir:
-        raise SystemExit("--socket and --wal-dir are required unless --prose-only is given")
+    if args.ingest_only:
+        if not args.socket or not args.wal_dir:
+            raise SystemExit("--ingest-only requires --socket and --wal-dir")
+        staged, skipped_articles = read_corpus_prose(prose_path)
+        _run_ingest(args, manifest, staged, skipped_articles)
+        return
 
+    # Combined default: stage, then ingest, in one command.
+    if not args.socket or not args.wal_dir:
+        raise SystemExit("--socket and --wal-dir are required unless --stage-only is given")
     articles = manifest["articles"]
     if args.limit:
         articles = articles[: args.limit]
-    total_manifest_size = len(articles)
+    os.makedirs(args.output_dir, exist_ok=True)
+    staged, skipped_articles = stage_corpus(articles, args.wiki_delay)
+    write_corpus_prose(staged, skipped_articles, prose_path)
+    print(
+        f"wrote {prose_path} ({len(staged)} staged, {len(skipped_articles)} skipped as stubs)"
+    )
+    _run_ingest(args, manifest, staged, skipped_articles)
+
+
+def _run_ingest(args, manifest: dict, staged: list, skipped_articles: list) -> None:
+    """Shared Phase-2 driver for both the combined default path and --ingest-only: ingests
+    `staged` records, builds `expected_results.json`, copies the WAL, and annotates the
+    manifest. Makes zero Wikipedia/network calls — `staged` already carries the cleaned prose.
+    """
+    timestamps_by_key = {
+        (a["title"], a["revision_id"]): a["revision_timestamp"] for a in manifest["articles"]
+    }
+    total_manifest_size = len(manifest["articles"])
 
     start = time.monotonic()
     client = ServiceClient(args.socket)
@@ -781,14 +857,14 @@ def main() -> None:
         if already_ingested_titles:
             print(
                 f"resuming: {len(already_ingested_titles)} episode(s) already present for "
-                f"group_id={args.group_id!r} — matching manifest articles will be skipped",
+                f"group_id={args.group_id!r} — matching staged articles will be skipped",
                 flush=True,
             )
-        consumed_articles, skipped_articles = ingest_corpus(
+        consumed_articles = ingest_from_staged(
             client,
-            articles,
+            staged,
+            timestamps_by_key,
             args.group_id,
-            args.wiki_delay,
             args.target_entities,
             already_ingested_titles,
         )
@@ -815,8 +891,6 @@ def main() -> None:
     finally:
         client.close()
 
-    import datetime
-
     os.makedirs(args.output_dir, exist_ok=True)
     expected_path = os.path.join(args.output_dir, "expected_results.json")
     with open(expected_path, "w") as f:
@@ -824,26 +898,14 @@ def main() -> None:
         f.write("\n")
     print(f"wrote {expected_path}")
 
-    wal_gz_path = os.path.join(args.output_dir, "wal.jsonl.gz")
-    gzip_wal_dir(args.wal_dir, wal_gz_path)
-    print(f"wrote {wal_gz_path}")
-
-    # corpus_prose.jsonl.gz — the cleaned prose fed to the extractor for every consumed
-    # article, the input fixture for comparing a different extraction model against this same
-    # real corpus (#228). Written here (not just via --prose-only) so a normal capture run
-    # produces all committed artifacts in one pass; costs one extra Wikipedia-fetch pass
-    # (zero LLM/embedder calls) since the prose computed during ingest_corpus isn't retained
-    # across the resume-skip branch (see build_corpus_prose).
-    prose_records = build_corpus_prose(consumed_articles, args.wiki_delay)
-    prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl.gz")
-    write_corpus_prose_gz(prose_records, prose_path)
-    print(f"wrote {prose_path}")
+    wal_output_dir = os.path.join(args.output_dir, "wal")
+    copy_wal_dir(args.wal_dir, wal_output_dir)
 
     # Note the consumed/skipped article lists back on the manifest itself, so
-    # corpus_manifest.json documents exactly what built the committed fixture (and can drive a
-    # standalone --prose-only regeneration later) without needing expected_results.json open
-    # alongside it. The unconsumed remainder stays in the manifest, ready to extend the corpus
-    # in a future re-capture without re-curating article titles/revision IDs.
+    # corpus_manifest.json documents exactly what built the committed fixture, without needing
+    # expected_results.json open alongside it. The unconsumed remainder stays in the manifest,
+    # ready to extend the corpus in a future re-capture without re-curating article
+    # titles/revision IDs.
     manifest["last_capture"] = {
         "captured_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "target_entities": args.target_entities,

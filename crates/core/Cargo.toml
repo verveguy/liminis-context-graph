@@ -30,7 +30,6 @@ tempfile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 lbug = { workspace = true }
-flate2 = { workspace = true }
 
 [[bench]]
 name = "concurrent_rw"
