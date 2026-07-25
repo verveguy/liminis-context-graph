@@ -343,9 +343,19 @@ async fn uds_transport_connection_count_bounded() {
 /// SC-002: killing and restarting the sidecar mid-run causes at most one
 /// failed embed call internally, with the *caller-visible* call still
 /// succeeding transparently once the pool re-dials.
+///
+/// The pool round-robins across `UDS_POOL_SIZE` slots (one per `embed()`
+/// call), so a single call before and after the restart would land on two
+/// different, independently-lazily-dialed slots and never actually touch a
+/// connection broken by the restart — exercising nothing but a fresh dial
+/// into a virgin slot. To genuinely exercise the redial-on-broken-connection
+/// path, every slot must hold a connection to the *first* server before the
+/// restart, so that every slot in the following round is provably stale.
 #[cfg(unix)]
 #[tokio::test]
 async fn uds_transport_reconnects_after_restart() {
+    const UDS_POOL_SIZE: usize = 4;
+
     let dir = tempfile::TempDir::new().unwrap();
     let sock_path = dir.path().join("restart_test.sock");
     let dim = 16;
@@ -353,9 +363,11 @@ async fn uds_transport_reconnects_after_restart() {
         spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
 
-    // Establish a pooled connection.
-    let first = embedder.embed("hello world").await.unwrap();
-    assert_eq!(first.len(), dim);
+    // Populate every pool slot with a held connection to the first server.
+    for _ in 0..UDS_POOL_SIZE {
+        let v = embedder.embed("hello world").await.unwrap();
+        assert_eq!(v.len(), dim);
+    }
 
     // Simulate the sidecar process dying and restarting: tear down the old
     // server (accept loop + already-accepted connections) and remove its
@@ -365,10 +377,14 @@ async fn uds_transport_reconnects_after_restart() {
     let (_server2, _accept_count2) =
         spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
 
-    // The next embed call transparently re-dials once and succeeds — no
-    // manual retry needed by the caller.
-    let second = embedder.embed("hello again").await.unwrap();
-    assert_eq!(second.len(), dim);
+    // Cycle through every slot again — each now holds a connection to the
+    // dead first server, so each independently detects the break, re-dials
+    // once against the new server, and the call still succeeds transparently
+    // with no manual retry needed by the caller.
+    for _ in 0..UDS_POOL_SIZE {
+        let v = embedder.embed("hello again").await.unwrap();
+        assert_eq!(v.len(), dim);
+    }
 }
 
 /// SC-003: parallel embedding throughput must be no worse than the
