@@ -16,7 +16,7 @@
 //! mid-reconnect — so the "one call in flight at a time" invariant above holds by construction
 //! even across a redial (FR-012).
 //!
-//! The retry boundary is safety-driven (see ADR-0038): a failure while *writing* the request
+//! The retry boundary is safety-driven (see ADR-0040): a failure while *writing* the request
 //! (`write_all`/`flush`) means the request provably never reached the remote, so it is safe to
 //! redial and retry that write exactly once (FR-007/FR-008). A failure that surfaces only
 //! *after* the request was fully written — while waiting for or reading the response — means

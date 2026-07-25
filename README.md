@@ -402,10 +402,26 @@ dispatch the socket service uses. No graph logic is duplicated in the MCP transp
 - **Attached (`--connect <socket-path>`)**: the MCP process never opens the database; it
   forwards each call over the given socket to a service that already has it open. Use this to
   add MCP access to a workspace where the Liminis app (or another socket-service instance) is
-  already running, without contending for lbug's single-writer lock. If the remote service
-  stops responding mid-call (e.g. it crashes), the attached client fails that call with a clean
-  timeout error rather than blocking forever — tune the idle-read timeout (default 30s) via
-  `LCG_ATTACHED_CALL_TIMEOUT_MS`.
+  already running, without contending for lbug's single-writer lock.
+  - **Idle timeout.** `LCG_ATTACHED_CALL_TIMEOUT_MS` (default 30s) is a **per-read-line** idle
+    timeout, not a whole-call timeout: it resets on every line read off the socket, including
+    `{"type":"progress"}` lines. A call that keeps emitting progress (see
+    [Progress notifications](#progress-notifications) below) is never bounded by it, no matter
+    how long the call runs in total — only genuine silence (no output at all for the full
+    timeout window) trips it. If the remote stops responding mid-call (e.g. it crashes), the
+    attached client fails that call with a clean timeout error rather than blocking forever.
+  - **Reconnect and retry.** If the connection to the remote breaks, the client transparently
+    re-dials the same socket path rather than staying wedged. If the break is detected while
+    writing the outgoing request (the request provably never reached the remote), the client
+    automatically retries that request exactly once over the freshly-dialed connection. If the
+    break is detected only after the request was fully written — while waiting for or reading
+    the response — the call is **not** retried automatically, since the remote's execution
+    status is unknown and blind retry could double-apply a non-idempotent write (e.g.
+    `knowledge_add_episode`); that call fails with a clear "connection lost mid-call" error, but
+    the connection is marked dead so the *next* call reconnects fresh. If a reconnect attempt
+    itself fails (no listener at that path), the call fails with a clear, descriptive error —
+    never a hang — and a later call will try reconnecting again. See
+    [ADR-0040](docs/adr/0040-attached-mode-reconnect-retry-boundary.md) for the full rationale.
 
 ### Scopes
 
@@ -503,11 +519,15 @@ genuine fact-based classification instead of lexical matching or pseudo-typing:
 
 ### Progress notifications
 
-The four long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
-`knowledge_backfill_relation_types`, and `knowledge_reprocess_relation_types` — bridge to MCP
-progress notifications when the client attaches a progress token to the `tools/call` request
-(`_meta.progressToken`), in both standalone and attached mode. Without a progress token, these
-calls simply block until they complete, same as over the socket protocol.
+The five long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+`knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, and
+`knowledge_reprocess_entity_types` — bridge to MCP progress notifications when the client
+attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both
+standalone and attached mode. Without a progress token, these calls simply block until they
+complete, same as over the socket protocol. In attached mode, each progress notification also
+re-arms `LCG_ATTACHED_CALL_TIMEOUT_MS`'s per-read-line idle timer (see
+[DB-access modes](#db-access-modes) above), so a progress-tracked call isn't falsely reported as
+timed out just because it runs longer than that timeout in total.
 
 ### Example MCP client config
 
