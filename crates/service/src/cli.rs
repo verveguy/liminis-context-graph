@@ -13,12 +13,22 @@ pub enum EmbedderFlag {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum ExtractorFlag {
+    Uds(String),
+    Http(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum CliMode {
     /// Default: run the Unix-socket JSON-RPC service (existing behavior).
-    Socket { embedder: Option<EmbedderFlag> },
+    Socket {
+        embedder: Option<EmbedderFlag>,
+        extractor: Option<ExtractorFlag>,
+    },
     /// `--mcp-stdio`: run an MCP server over stdin/stdout (FR-001).
     Mcp {
         embedder: Option<EmbedderFlag>,
+        extractor: Option<ExtractorFlag>,
         /// `--connect <path>`: attached mode — forward calls to a running service instead
         /// of opening the DB directly (FR-006).
         connect: Option<String>,
@@ -57,6 +67,12 @@ OPTIONS:
     --embedder-uds <SOCKET>    Reach the embedding sidecar over this Unix socket.
     --embedder-http <URL>      Reach the embedding sidecar over this HTTP URL.
                                (--embedder-uds and --embedder-http are mutually exclusive.)
+    --extractor-uds <SOCKET>  Reach a local OpenAI-compatible extraction endpoint over this
+                               Unix socket (e.g. the CoreML sidecar's /v1/chat/completions
+                               route), instead of Anthropic's hosted API.
+    --extractor-http <URL>    Reach a local OpenAI-compatible extraction endpoint over this
+                               HTTP URL.
+                               (--extractor-uds and --extractor-http are mutually exclusive.)
     -h, --help                 Print this help and exit.
     -V, --version              Print version and exit.
 
@@ -72,6 +88,8 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut allow_remote_close = false;
     let mut cli_uds: Option<String> = None;
     let mut cli_http: Option<String> = None;
+    let mut extractor_cli_uds: Option<String> = None;
+    let mut extractor_cli_http: Option<String> = None;
     let mut want_help = false;
     let mut want_version = false;
 
@@ -104,6 +122,22 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                     args.get(i)
                         .cloned()
                         .ok_or("--embedder-http requires a URL argument")?,
+                );
+            }
+            "--extractor-uds" => {
+                i += 1;
+                extractor_cli_uds = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--extractor-uds requires a socket path argument")?,
+                );
+            }
+            "--extractor-http" => {
+                i += 1;
+                extractor_cli_http = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--extractor-http requires a URL argument")?,
                 );
             }
             "--scope" => {
@@ -145,13 +179,28 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         _ => None,
     };
 
+    if extractor_cli_uds.is_some() && extractor_cli_http.is_some() {
+        return Err(
+            "--extractor-uds and --extractor-http are mutually exclusive; specify only one"
+                .to_string(),
+        );
+    }
+    let extractor = match (extractor_cli_uds, extractor_cli_http) {
+        (Some(u), _) => Some(ExtractorFlag::Uds(u)),
+        (_, Some(h)) => Some(ExtractorFlag::Http(h)),
+        _ => None,
+    };
+
     if !mcp_stdio {
         if connect.is_some() || scope_arg.is_some() {
             return Err("--connect and --scope require --mcp-stdio".to_string());
         }
         // --allow-remote-close only affects attached MCP mode; silently accepted elsewhere
         // per the spec's explicit "no effect" edge case rather than erroring.
-        return Ok(CliMode::Socket { embedder });
+        return Ok(CliMode::Socket {
+            embedder,
+            extractor,
+        });
     }
 
     if allow_remote_close && connect.is_none() {
@@ -165,6 +214,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
 
     Ok(CliMode::Mcp {
         embedder,
+        extractor,
         connect,
         scopes,
         allow_remote_close,
@@ -183,7 +233,10 @@ mod tests {
     fn defaults_to_socket_mode() {
         assert_eq!(
             parse_args(&args(&[])).unwrap(),
-            CliMode::Socket { embedder: None }
+            CliMode::Socket {
+                embedder: None,
+                extractor: None
+            }
         );
     }
 
@@ -192,7 +245,8 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["--embedder-uds", "/tmp/x.sock"])).unwrap(),
             CliMode::Socket {
-                embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string()))
+                embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
+                extractor: None
             }
         );
     }
@@ -210,6 +264,57 @@ mod tests {
     }
 
     #[test]
+    fn socket_mode_with_extractor_uds() {
+        assert_eq!(
+            parse_args(&args(&["--extractor-uds", "/tmp/x.sock"])).unwrap(),
+            CliMode::Socket {
+                embedder: None,
+                extractor: Some(ExtractorFlag::Uds("/tmp/x.sock".to_string()))
+            }
+        );
+    }
+
+    #[test]
+    fn socket_mode_with_extractor_http() {
+        assert_eq!(
+            parse_args(&args(&["--extractor-http", "http://x"])).unwrap(),
+            CliMode::Socket {
+                embedder: None,
+                extractor: Some(ExtractorFlag::Http("http://x".to_string()))
+            }
+        );
+    }
+
+    #[test]
+    fn extractor_uds_and_http_are_mutually_exclusive() {
+        let err = parse_args(&args(&[
+            "--extractor-uds",
+            "/tmp/x.sock",
+            "--extractor-http",
+            "http://x",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn embedder_and_extractor_flags_are_independent() {
+        assert_eq!(
+            parse_args(&args(&[
+                "--embedder-uds",
+                "/tmp/e.sock",
+                "--extractor-http",
+                "http://x",
+            ]))
+            .unwrap(),
+            CliMode::Socket {
+                embedder: Some(EmbedderFlag::Uds("/tmp/e.sock".to_string())),
+                extractor: Some(ExtractorFlag::Http("http://x".to_string()))
+            }
+        );
+    }
+
+    #[test]
     fn mcp_stdio_defaults_to_all_scope_standalone() {
         match parse_args(&args(&["--mcp-stdio"])).unwrap() {
             CliMode::Mcp {
@@ -217,11 +322,13 @@ mod tests {
                 scopes,
                 allow_remote_close,
                 embedder,
+                extractor,
             } => {
                 assert_eq!(connect, None);
                 assert_eq!(scopes, Scope::ALL.to_vec());
                 assert!(!allow_remote_close);
                 assert_eq!(embedder, None);
+                assert_eq!(extractor, None);
             }
             other => panic!("expected Mcp mode, got {other:?}"),
         }
@@ -339,7 +446,8 @@ mod tests {
         assert_eq!(
             parse_args(&args(&["--embedder-uds", "/tmp/x.sock"])).unwrap(),
             CliMode::Socket {
-                embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string()))
+                embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
+                extractor: None
             }
         );
     }
@@ -352,6 +460,7 @@ mod tests {
             "--scope",
             "--connect",
             "--embedder-uds",
+            "--extractor-uds",
             "--help",
         ] {
             assert!(u.contains(flag), "usage missing {flag}");

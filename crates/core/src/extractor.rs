@@ -767,6 +767,582 @@ fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
     }
 }
 
+// ── OaiExtractor ──────────────────────────────────────────────────────────────
+
+enum ExtractTransport {
+    Http {
+        client: Client,
+        url: String,
+    },
+    #[cfg(unix)]
+    Uds {
+        path: String,
+    },
+}
+
+/// Explicit JSON-shape instructions appended to the (reused, provider-agnostic) system prompts.
+/// The bundled macOS sidecar — and OpenAI-compatible servers generally — cannot be relied on
+/// for function-calling / tool-use (see ADR-0038), so structured output is coerced via
+/// `response_format: {"type": "json_object"}` plus a literal shape instruction rather than the
+/// Anthropic path's schema-enforced tool use.
+const ENTITY_JSON_INSTRUCTION: &str = "\n\nRespond with ONLY a single JSON object of the form \
+{\"entities\": [{\"name\": \"...\", \"entity_type\": \"...\", \"summary\": \"...\"}, ...]}. \
+No other text, no markdown code fences.";
+
+const EDGE_JSON_INSTRUCTION: &str = "\n\nRespond with ONLY a single JSON object of the form \
+{\"edges\": [{\"source_name\": \"...\", \"target_name\": \"...\", \"fact\": \"...\", \
+\"relation_type\": \"...\" or null, \"valid_at\": \"...\" or null, \"invalid_at\": \"...\" or null}, ...]}. \
+No other text, no markdown code fences.";
+
+/// Out-of-process entity/relationship extraction adapter targeting an OpenAI-compatible
+/// `POST /v1/chat/completions` endpoint (FR-001) — e.g. the macOS CoreML sidecar's Foundation
+/// Models route (the same process/socket already used for `/v1/embeddings`), or any real
+/// OpenAI-compatible server reached via `--extractor-http`.
+pub struct OaiExtractor {
+    transport: ExtractTransport,
+    model: String,
+    sink: Arc<dyn TelemetrySink>,
+}
+
+impl OaiExtractor {
+    /// Constructs an HTTP-transport extractor pointing at the given `/v1/chat/completions` URL.
+    pub fn new_http(
+        url: impl Into<String>,
+        model: impl Into<String>,
+        sink: Arc<dyn TelemetrySink>,
+    ) -> Self {
+        Self {
+            transport: ExtractTransport::Http {
+                client: Client::new(),
+                url: url.into(),
+            },
+            model: model.into(),
+            sink,
+        }
+    }
+
+    /// Constructs a UDS-transport extractor pointing at the given socket path.
+    #[cfg(unix)]
+    pub fn new_uds(
+        path: impl Into<String>,
+        model: impl Into<String>,
+        sink: Arc<dyn TelemetrySink>,
+    ) -> Self {
+        Self {
+            transport: ExtractTransport::Uds { path: path.into() },
+            model: model.into(),
+            sink,
+        }
+    }
+
+    /// Constructs from environment variables — HTTP transport.
+    ///
+    /// - `LCG_EXTRACTION_URL` (default `http://127.0.0.1:8765/v1/chat/completions`)
+    /// - `LCG_EXTRACTION_MODEL` (default `local`)
+    pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
+        let url = std::env::var("LCG_EXTRACTION_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8765/v1/chat/completions".to_string());
+        let model = std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
+        Self::new_http(url, model, sink)
+    }
+
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    /// Returns `("uds"|"http", endpoint_string)` for the startup log line.
+    pub fn transport_info(&self) -> (&'static str, String) {
+        match &self.transport {
+            ExtractTransport::Http { url, .. } => ("http", url.clone()),
+            #[cfg(unix)]
+            ExtractTransport::Uds { path } => ("uds", path.clone()),
+        }
+    }
+
+    async fn send_chat(
+        &self,
+        system_text: &str,
+        user_text: &str,
+        max_tokens: u32,
+    ) -> Result<Value, Error> {
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text}
+            ]
+        });
+        match &self.transport {
+            ExtractTransport::Http { client, url } => {
+                let resp: Value = client
+                    .post(url)
+                    .json(&body)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                Ok(resp)
+            }
+            #[cfg(unix)]
+            ExtractTransport::Uds { path } => self.send_chat_uds(path, &body).await,
+        }
+    }
+
+    #[cfg(unix)]
+    async fn send_chat_uds(&self, path: &str, body: &Value) -> Result<Value, Error> {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper::Request;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::UnixStream;
+
+        let stream = UnixStream::connect(path)
+            .await
+            .map_err(|e| Error::Ipc(format!("UDS connect to {path}: {e}")))?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| Error::Ipc(format!("UDS HTTP/1.1 handshake: {e}")))?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let body_bytes = serde_json::to_vec(body)
+            .map_err(|e| Error::Ipc(format!("serialize chat completion request: {e}")))?;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("host", "localhost")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .map_err(|e| Error::Ipc(format!("build UDS request: {e}")))?;
+
+        let resp = sender
+            .send_request(req)
+            .await
+            .map_err(|e| Error::Ipc(format!("UDS send request: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(Error::Ipc(format!(
+                "UDS extractor returned status {}",
+                resp.status()
+            )));
+        }
+
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| Error::Ipc(format!("UDS read response body: {e}")))?
+            .to_bytes();
+
+        serde_json::from_slice(&bytes)
+            .map_err(|e| Error::Ipc(format!("parse UDS chat completion response: {e}")))
+    }
+
+    /// Maps the OpenAI-compatible `usage` object (`prompt_tokens`/`completion_tokens` — different
+    /// field names than Anthropic's `input_tokens`/`output_tokens`) onto the same telemetry event.
+    /// No-ops (FR-009) when `usage` is absent, matching non-compliant local servers.
+    fn emit_token_usage(&self, resp: &Value) {
+        let usage = &resp["usage"];
+        if !usage.is_object() {
+            return;
+        }
+        let input_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+        let output_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+        // Local models are never present in the Anthropic pricing table, so this naturally
+        // returns None — no special-casing needed to satisfy FR-009's "no-op gracefully".
+        let estimated_cost_usd = cost_for_usage(&self.model, input_tokens, output_tokens, 0, 0);
+        self.sink.emit(TelemetryEvent::TokenUsage {
+            ts_ms: now_ms(),
+            role: "extraction".to_string(),
+            model: self.model.clone(),
+            input_tokens,
+            output_tokens,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            estimated_cost_usd,
+        });
+    }
+
+    async fn do_extract_entities(
+        &self,
+        opts: &ExtractOptions<'_>,
+    ) -> Result<Vec<ExtractedEntity>, Error> {
+        let system_text = format!(
+            "{}{}",
+            prompts::entity_system_prompt(opts.source_type, opts.ontology),
+            ENTITY_JSON_INSTRUCTION
+        );
+        let user_text = prompts::entity_user_prompt_for(
+            opts.source_type,
+            opts.episode_body,
+            opts.custom_instructions,
+        );
+
+        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let chunk_len_bytes = opts.episode_body.len();
+        let mut max_tokens = INITIAL_MAX_TOKENS;
+        let mut max_tokens_retried = false;
+
+        loop {
+            let resp = self.send_chat(&system_text, &user_text, max_tokens).await?;
+            self.emit_token_usage(&resp);
+
+            match parse_oai_entity_response(&resp) {
+                OaiChatOutcome::Success(entities) => {
+                    if max_tokens_retried {
+                        self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                            ts_ms: now_ms(),
+                            model: self.model.clone(),
+                            chunk_len_bytes,
+                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            retry_succeeded: true,
+                        });
+                    }
+                    return Ok(entities);
+                }
+                OaiChatOutcome::BudgetExhausted => {
+                    if !max_tokens_retried {
+                        max_tokens *= 2;
+                        max_tokens_retried = true;
+                        continue;
+                    }
+                    self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        chunk_len_bytes,
+                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        retry_succeeded: false,
+                    });
+                    return Err(Error::Ipc(
+                        "entity extraction budget exhausted after retry".to_string(),
+                    ));
+                }
+                OaiChatOutcome::ParseError(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn do_extract_edges(
+        &self,
+        opts: &ExtractOptions<'_>,
+        entity_names: &[String],
+    ) -> Result<Vec<ExtractedEdge>, Error> {
+        let system_text = format!(
+            "{}{}",
+            prompts::edge_system_prompt(opts.ontology),
+            EDGE_JSON_INSTRUCTION
+        );
+        let user_text = prompts::edge_user_prompt(
+            entity_names,
+            opts.reference_time,
+            opts.episode_body,
+            opts.custom_instructions,
+        );
+
+        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let chunk_len_bytes = opts.episode_body.len();
+        let mut max_tokens = INITIAL_MAX_TOKENS;
+        let mut max_tokens_retried = false;
+
+        loop {
+            let resp = self.send_chat(&system_text, &user_text, max_tokens).await?;
+            self.emit_token_usage(&resp);
+
+            match parse_oai_edge_response(&resp) {
+                OaiChatOutcome::Success(mut edges) => {
+                    if max_tokens_retried {
+                        self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                            ts_ms: now_ms(),
+                            model: self.model.clone(),
+                            chunk_len_bytes,
+                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            retry_succeeded: true,
+                        });
+                    }
+                    // Normalize relation_type to SCREAMING_SNAKE_CASE (FR-012).
+                    for edge in &mut edges {
+                        if let Some(rt) = edge.relation_type.as_ref() {
+                            let normalized = normalize_relation_type(rt);
+                            if normalized != *rt {
+                                edge.relation_type = Some(normalized);
+                            }
+                        }
+                    }
+                    // FR-012: ensure every extracted edge has a non-empty relation_type, falling
+                    // back to a fact-derived value when the local model omits the field — the
+                    // same fallback the Anthropic path applies.
+                    for edge in &mut edges {
+                        match edge.relation_type.as_deref() {
+                            None | Some("") => {
+                                edge.relation_type =
+                                    Some(derive_relation_type_from_fact(&edge.fact));
+                            }
+                            _ => {}
+                        }
+                    }
+                    return Ok(edges);
+                }
+                OaiChatOutcome::BudgetExhausted => {
+                    if !max_tokens_retried {
+                        max_tokens *= 2;
+                        max_tokens_retried = true;
+                        continue;
+                    }
+                    self.sink.emit(TelemetryEvent::ExtractionTruncated {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        chunk_len_bytes,
+                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        retry_succeeded: false,
+                    });
+                    // Edge budget exhaustion is not fatal — return empty list (matches Anthropic).
+                    eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
+                    return Ok(vec![]);
+                }
+                OaiChatOutcome::ParseError(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
+        let entities = self.do_extract_entities(&opts).await?;
+        if entities.is_empty() {
+            return Ok(ExtractionResult {
+                entities,
+                edges: vec![],
+            });
+        }
+        let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
+        let edges = self.do_extract_edges(&opts, &entity_names).await?;
+        Ok(ExtractionResult { entities, edges })
+    }
+
+    async fn do_classify_entities(
+        &self,
+        entities: &[(&str, &str)],
+        allowed_types: Option<&[String]>,
+    ) -> Result<Vec<String>, Error> {
+        if entities.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let system_text: String = if let Some(types) = allowed_types {
+            let type_list = types.join(", ");
+            format!(
+                "You are a knowledge graph entity classifier. Given a list of entities \
+                (name and summary), assign each a specific entity type label from the \
+                following allowed types: {type_list}. Do not use any other types. \
+                Respond with ONLY a single JSON object of the form {{\"types\": [...]}}: an \
+                array of strings, one per input entity, in the same order as the input. If no \
+                allowed type fits, use an empty string for that entity. No other text, no \
+                markdown code fences."
+            )
+        } else {
+            "You are a knowledge graph entity classifier. Given a list of entities \
+            (name and summary), assign each a specific entity type label. Use concise PascalCase \
+            labels such as Person, Organization, Location, Concept, Product, Event, Technology. \
+            Respond with ONLY a single JSON object of the form {\"types\": [...]}: an array of \
+            strings, one per input entity, in the same order as the input. Use an empty string \
+            for an entity whose type cannot be determined. No other text, no markdown code \
+            fences."
+                .to_string()
+        };
+
+        let input: Vec<Value> = entities
+            .iter()
+            .map(|(name, summary)| json!({"name": name, "summary": summary}))
+            .collect();
+        let user_text = format!(
+            "Classify the entity types for:\n\n{}",
+            serde_json::to_string(&input)
+                .map_err(|e| Error::Ipc(format!("failed to serialize entities: {e}")))?
+        );
+
+        let resp = self.send_chat(&system_text, &user_text, 512).await?;
+        self.emit_token_usage(&resp);
+
+        let content = oai_message_content(&resp).ok_or_else(|| {
+            Error::Ipc("classify_entities response missing message content".to_string())
+        })?;
+
+        let json_str = extract_json_block(content);
+        #[derive(serde::Deserialize)]
+        struct TypesPayload {
+            types: Vec<String>,
+        }
+        let payload: TypesPayload = serde_json::from_str(json_str)?;
+        let mut result = payload.types;
+        result.resize(entities.len(), String::new());
+        // Server-side enforcement: convert out-of-set responses to empty string (FR-003).
+        if let Some(types_list) = allowed_types {
+            let allowed_set: std::collections::HashSet<&str> =
+                types_list.iter().map(|s| s.as_str()).collect();
+            for entry in &mut result {
+                if !entry.is_empty() && !allowed_set.contains(entry.as_str()) {
+                    *entry = String::new();
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    async fn do_classify_relations(
+        &self,
+        edges: &[(&str, &str)],
+        allowed_types: &[(String, Option<String>)],
+    ) -> Result<Vec<String>, Error> {
+        if edges.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let type_list: String = allowed_types
+            .iter()
+            .map(|(name, desc)| match desc.as_deref() {
+                Some(d) if !d.is_empty() => format!("{name}: {d}"),
+                _ => name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        let system_text = format!(
+            "You are a knowledge graph relation classifier. Given a list of edges (each with a \
+            'fact' sentence and its current 'current_type', if any), assign each edge exactly \
+            one relation type label from the following allowed types: {type_list}. Do not \
+            invent any type outside this list. If none of the allowed types honestly fits the \
+            fact, use an empty string for that edge — never guess the nearest type. Respond \
+            with ONLY a single JSON object of the form {{\"types\": [...]}}: an array of \
+            strings, one per input edge, in the same order as the input. No other text, no \
+            markdown code fences."
+        );
+
+        let input: Vec<Value> = edges
+            .iter()
+            .map(|(fact, current_type)| json!({"fact": fact, "current_type": current_type}))
+            .collect();
+        let user_text = format!(
+            "Classify the relation types for:\n\n{}",
+            serde_json::to_string(&input)
+                .map_err(|e| Error::Ipc(format!("failed to serialize edges: {e}")))?
+        );
+
+        let resp = self.send_chat(&system_text, &user_text, 1024).await?;
+        self.emit_token_usage(&resp);
+
+        let content = oai_message_content(&resp).ok_or_else(|| {
+            Error::Ipc("classify_relations response missing message content".to_string())
+        })?;
+
+        let json_str = extract_json_block(content);
+        #[derive(serde::Deserialize)]
+        struct TypesPayload {
+            types: Vec<String>,
+        }
+        let payload: TypesPayload = serde_json::from_str(json_str)?;
+        let mut result = payload.types;
+        result.resize(edges.len(), String::new());
+        // Server-side enforcement: convert out-of-set responses to empty string (FR-003).
+        let allowed_set: std::collections::HashSet<&str> = allowed_types
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        for entry in &mut result {
+            if !entry.is_empty() && !allowed_set.contains(entry.as_str()) {
+                *entry = String::new();
+            }
+        }
+        Ok(result)
+    }
+}
+
+impl Extractor for OaiExtractor {
+    fn extract<'a>(
+        &'a self,
+        opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        Box::pin(self.do_extract(opts))
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(self.do_classify_entities(entities, allowed_types))
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+}
+
+// ── OaiChatOutcome / response parsing ─────────────────────────────────────────
+
+enum OaiChatOutcome<T> {
+    Success(T),
+    BudgetExhausted,
+    ParseError(Error),
+}
+
+fn oai_finish_reason(resp: &Value) -> Option<&str> {
+    resp["choices"].as_array()?.first()?["finish_reason"].as_str()
+}
+
+fn oai_message_content(resp: &Value) -> Option<&str> {
+    resp["choices"].as_array()?.first()?["message"]["content"].as_str()
+}
+
+fn parse_oai_entity_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEntity>> {
+    if oai_finish_reason(resp) == Some("length") {
+        return OaiChatOutcome::BudgetExhausted;
+    }
+    let Some(content) = oai_message_content(resp) else {
+        return OaiChatOutcome::ParseError(Error::Ipc(
+            "entity extraction response missing message content".to_string(),
+        ));
+    };
+
+    let json_str = extract_json_block(content);
+    #[derive(serde::Deserialize)]
+    struct EntityPayload {
+        entities: Vec<ExtractedEntity>,
+    }
+    match serde_json::from_str::<EntityPayload>(json_str) {
+        Ok(payload) => OaiChatOutcome::Success(payload.entities),
+        Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
+    }
+}
+
+fn parse_oai_edge_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEdge>> {
+    if oai_finish_reason(resp) == Some("length") {
+        return OaiChatOutcome::BudgetExhausted;
+    }
+    let Some(content) = oai_message_content(resp) else {
+        return OaiChatOutcome::ParseError(Error::Ipc(
+            "edge extraction response missing message content".to_string(),
+        ));
+    };
+
+    let json_str = extract_json_block(content);
+    #[derive(serde::Deserialize)]
+    struct EdgePayload {
+        edges: Vec<ExtractedEdge>,
+    }
+    match serde_json::from_str::<EdgePayload>(json_str) {
+        Ok(payload) => OaiChatOutcome::Success(payload.edges),
+        Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
+    }
+}
+
 // ── MockExtractor ─────────────────────────────────────────────────────────────
 
 /// Zero-latency extractor for tests and benches. Returns a fixed 2-entity, 1-edge result.
@@ -1164,5 +1740,120 @@ mod tests {
             "UNCLASSIFIED",
             "empty fact must yield UNCLASSIFIED sentinel"
         );
+    }
+
+    // ── OaiExtractor: SC-005 response-parsing coverage ────────────────────────
+
+    #[test]
+    fn oai_extractor_transport_info_reports_http() {
+        let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+        let extractor =
+            OaiExtractor::new_http("http://127.0.0.1:8765/v1/chat/completions", "local", sink);
+        let (label, endpoint) = extractor.transport_info();
+        assert_eq!(label, "http");
+        assert_eq!(endpoint, "http://127.0.0.1:8765/v1/chat/completions");
+        assert_eq!(extractor.model_name(), "local");
+    }
+
+    #[test]
+    fn parse_oai_entity_response_success() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}]}"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success(entities) => {
+                assert_eq!(entities.len(), 1);
+                assert_eq!(entities[0].name, "Alice");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_oai_entity_response_malformed_content_is_parse_error() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "not json at all"}
+            }]
+        });
+        assert!(matches!(
+            parse_oai_entity_response(&resp),
+            OaiChatOutcome::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_oai_entity_response_missing_content_is_parse_error() {
+        let resp = json!({
+            "choices": [{"finish_reason": "stop", "message": {}}]
+        });
+        assert!(matches!(
+            parse_oai_entity_response(&resp),
+            OaiChatOutcome::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_oai_entity_response_truncated_is_budget_exhausted() {
+        let resp = json!({
+            "choices": [{"finish_reason": "length", "message": {"content": "{\"entities\": ["}}]
+        });
+        assert!(matches!(
+            parse_oai_entity_response(&resp),
+            OaiChatOutcome::BudgetExhausted
+        ));
+    }
+
+    #[test]
+    fn parse_oai_edge_response_success() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"edges\": [{\"source_name\": \"Alice\", \"target_name\": \"Acme\", \"fact\": \"Alice works at Acme\", \"relation_type\": \"works_at\"}]}"
+                }
+            }]
+        });
+        match parse_oai_edge_response(&resp) {
+            OaiChatOutcome::Success(edges) => {
+                assert_eq!(edges.len(), 1);
+                assert_eq!(edges[0].source_name, "Alice");
+                assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_oai_edge_response_malformed_content_is_parse_error() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "{\"not_edges\": []}"}
+            }]
+        });
+        assert!(matches!(
+            parse_oai_edge_response(&resp),
+            OaiChatOutcome::ParseError(_)
+        ));
+    }
+
+    #[test]
+    fn parse_oai_edge_response_truncated_is_budget_exhausted() {
+        let resp = json!({
+            "choices": [{"finish_reason": "length", "message": {"content": "{\"edges\": ["}}]
+        });
+        assert!(matches!(
+            parse_oai_edge_response(&resp),
+            OaiChatOutcome::BudgetExhausted
+        ));
     }
 }

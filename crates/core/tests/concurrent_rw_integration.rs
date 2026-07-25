@@ -39,8 +39,10 @@ async fn llm_router_fallback_emitted_once_per_session() {
         Arc::clone(&sink) as Arc<dyn TelemetrySink>,
     );
     let router = LlmRouter::new(
-        primary,
-        Some(fallback),
+        Arc::new(primary) as Arc<dyn Extractor>,
+        "claude-haiku-4-5-20251001".to_string(),
+        Some(Arc::new(fallback) as Arc<dyn Extractor>),
+        "claude-haiku-4-5-fallback".to_string(),
         Arc::clone(&sink) as Arc<dyn TelemetrySink>,
     );
 

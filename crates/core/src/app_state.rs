@@ -14,7 +14,6 @@ use crate::{
     env::lcg_env_var,
     error::Error,
     extractor::Extractor,
-    llm_router::LlmRouter,
     ontology::{load_ontology, Ontology},
     ontology_sidecar,
     rebuild_job::RebuildJob,
@@ -79,7 +78,8 @@ impl AppState {
     /// Builds `AppState` from environment variables.
     ///
     /// - `LCG_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
-    /// - `LCG_EXTRACTION_LLM`: parsed by `LlmRouter::from_env`.
+    /// - `extractor`: already-resolved by the caller (mirrors `embedder`) — provider/transport
+    ///   selection (Anthropic vs. local OpenAI-compatible) happens once in `main.rs`, not here.
     /// - `LCG_WAL_DIR`: WAL directory path (default `.lcg/wal`).
     /// - `LCG_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
     pub fn from_env(
@@ -89,8 +89,8 @@ impl AppState {
         db_path: String,
         embedder: Arc<dyn Embedder>,
         embedding_model: String,
+        extractor: Arc<dyn Extractor>,
     ) -> Self {
-        let extractor: Arc<dyn Extractor> = Arc::new(LlmRouter::from_env(Arc::clone(&sink)));
         // deprecated: remove in Phase B (see #59)
         let dedup: Arc<dyn DedupAdapter> =
             if lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM").is_ok() {
