@@ -65,9 +65,20 @@ Pass --target-entities to override the default 1500-entity stopping point (e.g.
 --target-entities 5000 for a deliberately larger fixture, or a smoke-test run with
 --limit 20 --target-entities 50 to sanity-check the pipeline cheaply before a full capture).
 
-The script fails loudly (non-zero exit) on any article fetch or ingest error rather than
-silently skipping articles — a partial/silently-degraded corpus would defeat the point of the
-fixture (see the Research-stage "Risks" note on reproducibility).
+The script fails loudly (non-zero exit) on any article fetch, ingest, or service error — a
+partial/silently-degraded corpus would defeat the point of the fixture (see the Research-stage
+"Risks" note on reproducibility). The one exception is an individual article whose wikitext
+cleans up to suspiciously short prose (<200 chars): that's skipped and recorded in
+`expected_results.json`'s `skipped_articles`, not a hard abort, since Simple English Wikipedia
+has many genuine stub articles and a real, paid extraction run shouldn't throw away everything
+already ingested over one stub. The run still aborts if skipped articles exceed ~20% of
+attempted articles (see `SKIP_RATIO_THRESHOLD`) — that's a systemic cleanup regression, not
+stub noise.
+
+Resumable: at startup the script queries which episodes already exist for `--group-id` and
+skips re-fetching/re-extracting those manifest articles. If a run aborts partway (a service
+crash, a systemic-skip abort, etc.), re-running the same command against the *same* (not a
+fresh) DB/WAL dir picks up where it left off instead of re-paying for already-ingested articles.
 """
 
 import argparse
@@ -160,7 +171,7 @@ _PLAIN_LINK_RE = re.compile(r"\[\[([^\]]*)\]\]")
 _EXTERNAL_LINK_RE = re.compile(r"\[https?://[^\s\]]+\s+([^\]]*)\]")
 _BOLD_ITALIC_RE = re.compile(r"'{2,5}")
 _HEADING_RE = re.compile(r"^=+\s*(.*?)\s*=+$", re.MULTILINE)
-_FILE_LINK_RE = re.compile(r"\[\[(File|Image|Category):[^\]]*\]\]", re.IGNORECASE)
+_FILE_LINK_START_RE = re.compile(r"\[\[(File|Image|Category)\s*:", re.IGNORECASE)
 
 
 def strip_templates(text: str) -> str:
@@ -211,6 +222,61 @@ def strip_templates(text: str) -> str:
     return "".join(out)
 
 
+def strip_file_links(text: str) -> str:
+    """Removes balanced [[File:...]] / [[Image:...]] / [[Category:...]] links, including
+    any nested [[...]] wiki links inside a caption (e.g.
+    `[[File:x.jpg|thumb|the [[Saturn V]] rocket]]`).
+
+    The previous implementation (`\\[\\[(File|Image|Category):[^\\]]*\\]\\]`) assumed the
+    caption contained no further `[[...]]` link — but Simple English Wikipedia captions
+    routinely link other articles inside the caption text. The regex's `[^\\]]*` stopped
+    at the *first* `]]` it found, which was the inner link's closer, not the file link's
+    own closer, leaving a debris tail like `-I, Bhaskara-II and Aryabhata satellites]]` in
+    the prose (see #217, "Aryabhata (satellite)" rev 10314108).
+
+    Matching is stack-based, mirroring `strip_templates`: only a `[[`/`]]` pair that
+    actually finds its partner is removed, so an unmatched `[[` is left as literal text
+    instead of silently swallowing the rest of the document.
+    """
+    stack = []  # list of (start_index, is_file_link)
+    remove_spans = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i : i + 2] == "[[":
+            is_file = bool(_FILE_LINK_START_RE.match(text, i))
+            stack.append((i, is_file))
+            i += 2
+            continue
+        if text[i : i + 2] == "]]" and stack:
+            start, is_file = stack.pop()
+            if is_file:
+                remove_spans.append((start, i + 2))
+            i += 2
+            continue
+        i += 1
+
+    if not remove_spans:
+        return text
+
+    remove_spans.sort()
+    merged = []
+    for start, end in remove_spans:
+        if merged and start < merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1] = (merged[-1][0], end)
+            continue
+        merged.append((start, end))
+
+    out = []
+    pos = 0
+    for start, end in merged:
+        out.append(text[pos:start])
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def wikitext_to_prose(wikitext: str) -> str:
     text = _COMMENT_RE.sub("", wikitext)
     # Templates are stripped before refs: braces are balanced in raw wikitext, but a
@@ -219,7 +285,7 @@ def wikitext_to_prose(wikitext: str) -> str:
     # outside it — removing the ref first can leave that sibling unbalanced.
     text = strip_templates(text)
     text = _REF_RE.sub("", text)
-    text = _FILE_LINK_RE.sub("", text)
+    text = strip_file_links(text)
     text = _PIPED_LINK_RE.sub(r"\2", text)
     text = _PLAIN_LINK_RE.sub(r"\1", text)
     text = _EXTERNAL_LINK_RE.sub(r"\1", text)
@@ -262,6 +328,24 @@ class ServiceClient:
 
 # ── Capture steps ───────────────────────────────────────────────────────────────
 
+# A too-short article aborts the whole run only once skipped articles exceed this share
+# of attempted articles (and a minimum sample has been attempted, so one early stub
+# doesn't trip the guard) — see #217: an isolated short article is normal stub-article
+# noise on Simple English Wikipedia, not a cleanup regression.
+SKIP_RATIO_THRESHOLD = 0.20
+SKIP_RATIO_MIN_SAMPLE = 10
+
+
+def fetch_already_ingested_titles(client: ServiceClient, group_id: str) -> set:
+    """Returns the episode `name`s already present for `group_id`.
+
+    Lets a re-run of this script (pointed at a non-fresh DB/WAL dir left over from a
+    prior aborted run) skip re-fetching and re-extracting articles it already paid for,
+    instead of re-paying for the whole prefix on every retry (see #217).
+    """
+    result = client.call("knowledge_get_episodes", {"group_id": group_id, "last_n": 10000})
+    return {ep.get("name") for ep in result.get("episodes", []) if ep.get("name")}
+
 
 def ingest_corpus(
     client: ServiceClient,
@@ -269,27 +353,73 @@ def ingest_corpus(
     group_id: str,
     wiki_delay: float,
     target_entities: int,
-) -> list:
-    """Ingests `articles` in manifest order, polling `knowledge_status` after each one and
-    stopping as soon as `entity_count >= target_entities`. Returns the list of consumed
-    articles (a prefix of `articles`, in the same order) so the caller can record exactly
-    what built the fixture.
+    already_ingested_titles: set = None,
+) -> tuple:
+    """Ingests `articles` in manifest order, polling `knowledge_status` after each newly
+    added episode and stopping as soon as `entity_count >= target_entities`. Returns
+    `(consumed, skipped)`:
+
+      - `consumed`: articles that contributed an episode to the graph, either just now or
+        in a prior run (`already_ingested_titles`), in manifest order — so the caller can
+        record exactly what built the fixture.
+      - `skipped`: articles skipped because wikitext cleanup produced suspiciously short
+        prose, each as `{title, revision_id, prose_chars}`.
+
+    A too-short article is skipped rather than aborting the whole run: prose length varies
+    legitimately (Simple English Wikipedia has many genuine stub articles — e.g.
+    "Aryabhata (satellite)", 154 chars, is entirely correct output), and a hard abort
+    throws away every dollar already spent on real LLM extraction for prior articles in
+    this run (see #217). The run still aborts on short prose once skipped articles exceed
+    `SKIP_RATIO_THRESHOLD` of attempted articles — that's a systemic cleanup regression,
+    not stub-article noise. Non-recoverable errors (network/ingest/service failures) still
+    abort immediately; skipping only applies to the short-prose heuristic.
 
     Raises if the entire manifest is exhausted without reaching `target_entities` — that
     means the manifest needs more articles, not a silently-undersized fixture.
     """
+    already = already_ingested_titles or set()
     consumed = []
+    skipped = []
+    entity_count = None
     for i, article in enumerate(articles, start=1):
         title = article["title"]
         revision_id = article["revision_id"]
+
+        if title in already:
+            print(
+                f"[{i}/{len(articles)}] {title!r} already ingested (resuming) — "
+                "skipping fetch/extract",
+                flush=True,
+            )
+            consumed.append(article)
+            continue
+
         print(f"[{i}/{len(articles)}] fetching {title!r} (rev {revision_id})...", flush=True)
         wikitext = fetch_wikitext(revision_id)
         prose = wikitext_to_prose(wikitext)
         if len(prose) < 200:
-            raise RuntimeError(
-                f"article {title!r} (rev {revision_id}) produced suspiciously short prose "
-                f"({len(prose)} chars) after wikitext cleanup — check the cleanup regexes"
+            skipped.append(
+                {"title": title, "revision_id": revision_id, "prose_chars": len(prose)}
             )
+            attempted = len(consumed) + len(skipped)
+            print(
+                f"    SKIP: only {len(prose)} chars of prose after wikitext cleanup "
+                f"(likely a genuine stub article) — {len(skipped)}/{attempted} attempted "
+                "articles skipped so far",
+                flush=True,
+            )
+            if (
+                attempted >= SKIP_RATIO_MIN_SAMPLE
+                and len(skipped) / attempted > SKIP_RATIO_THRESHOLD
+            ):
+                raise RuntimeError(
+                    f"{len(skipped)}/{attempted} attempted articles skipped for short prose "
+                    f"(>{SKIP_RATIO_THRESHOLD:.0%}) — this looks like a systemic wikitext "
+                    "cleanup regression, not normal stub-article noise. Skipped so far: "
+                    f"{[s['title'] for s in skipped]}"
+                )
+            time.sleep(wiki_delay)
+            continue
 
         ref_time = article["revision_timestamp"]
         result = client.call(
@@ -316,8 +446,16 @@ def ingest_corpus(
                 "articles — stopping ingest early",
                 flush=True,
             )
-            return consumed
+            return consumed, skipped
         time.sleep(wiki_delay)
+
+    if entity_count is None:
+        # Every manifest article was already ingested in a prior run (pure resume) —
+        # check status directly rather than assuming the target was reached.
+        status = client.call("knowledge_status", {})
+        entity_count = status["entity_count"]
+        if entity_count >= target_entities:
+            return consumed, skipped
 
     raise RuntimeError(
         f"exhausted all {len(articles)} manifest articles without reaching "
@@ -330,6 +468,7 @@ def build_expected_results(
     client: ServiceClient,
     group_id: str,
     consumed_articles: list,
+    skipped_articles: list,
     target_entities: int,
     total_manifest_size: int,
 ) -> dict:
@@ -432,6 +571,8 @@ def build_expected_results(
         "consumed_articles": [
             {"title": a["title"], "revision_id": a["revision_id"]} for a in consumed_articles
         ],
+        "skipped_article_count": len(skipped_articles),
+        "skipped_articles": skipped_articles,
         "golden_entity_queries": golden_entity_queries,
         "golden_relationship_queries": golden_relationship_queries,
         "traversal": traversal,
@@ -493,8 +634,20 @@ def main() -> None:
     start = time.monotonic()
     client = ServiceClient(args.socket)
     try:
-        consumed_articles = ingest_corpus(
-            client, articles, args.group_id, args.wiki_delay, args.target_entities
+        already_ingested_titles = fetch_already_ingested_titles(client, args.group_id)
+        if already_ingested_titles:
+            print(
+                f"resuming: {len(already_ingested_titles)} episode(s) already present for "
+                f"group_id={args.group_id!r} — matching manifest articles will be skipped",
+                flush=True,
+            )
+        consumed_articles, skipped_articles = ingest_corpus(
+            client,
+            articles,
+            args.group_id,
+            args.wiki_delay,
+            args.target_entities,
+            already_ingested_titles,
         )
         elapsed = time.monotonic() - start
         print(f"ingest complete in {elapsed:.1f}s, building expected_results.json...")
@@ -503,6 +656,7 @@ def main() -> None:
             client,
             args.group_id,
             consumed_articles,
+            skipped_articles,
             args.target_entities,
             total_manifest_size,
         )
@@ -551,9 +705,9 @@ def main() -> None:
     print(f"annotated {args.manifest} with last_capture metadata")
 
     print(
-        f"\nCapture complete: {len(consumed_articles)}/{total_manifest_size} articles consumed, "
-        f"{expected['entity_count']} entities, {expected['relationship_count']} relationships, "
-        f"{expected['episode_count']} episodes."
+        f"\nCapture complete: {len(consumed_articles)}/{total_manifest_size} articles consumed "
+        f"({len(skipped_articles)} skipped), {expected['entity_count']} entities, "
+        f"{expected['relationship_count']} relationships, {expected['episode_count']} episodes."
     )
 
 
