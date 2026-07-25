@@ -129,6 +129,13 @@ Resumable: at startup the ingest phase queries which episodes already exist for 
 and skips re-adding those articles. If a run aborts partway (a service crash, etc.), re-running
 `--ingest-only` against the same (not fresh) DB/WAL dir picks up where it left off — with no
 re-fetch or re-clean, since ingest never touches the network.
+
+One-off backfill: the fixture actually committed for #217 was captured before this stage/ingest
+split existed, so its `corpus_prose.jsonl` was derived after the fact directly from the already-
+captured WAL's `Episodic` records (`--derive-prose-from-wal WAL_DIR`) rather than from a staged
+file — zero network calls, and using the exact prose bytes that were fed to the extractor at
+capture time (see `derive_prose_from_wal`). A future full re-capture doesn't need this: Phase 1's
+staged `corpus_prose.jsonl` already *is* the ingest input.
 """
 
 import argparse
@@ -685,7 +692,11 @@ def build_expected_results(
     relationships = client.call(
         "knowledge_list_relationships", {"group_ids": [group_id], "num_results": 1000}
     )
-    edges = relationships.get("edges", [])
+    # handle_list_relationships (handlers.rs) returns {"facts": [...], "count": ...} — not
+    # "edges". Reading the wrong key silently produced an empty relation_type_samples in the
+    # #217 capture run (see the committed fixture's derive_relation_type_samples_from_wal
+    # fallback), so a future capture must read "facts" here.
+    edges = relationships.get("facts", [])
     relation_type_samples = [
         {
             "uuid": e.get("uuid"),
@@ -744,12 +755,114 @@ def copy_wal_dir(wal_dir: str, output_dir: str) -> list:
     return files
 
 
+_SOURCE_DESCRIPTION_REV_RE = re.compile(r"\(rev (\d+)\)\s*$")
+
+
+def derive_prose_from_wal(wal_dir: str) -> list:
+    """Derives staged-corpus-shaped records `[{title, revision_id, prose}, ...]` directly from
+    an already-captured WAL directory's `CREATE (:Episodic {...})` records, with zero network
+    calls — no Wikipedia refetch, no re-run of `wikitext_to_prose`.
+
+    Each episode's `content` param is byte-identical to the prose that was actually fed to
+    `knowledge_add_episode` (and therefore to the extractor) at capture time, so this is a more
+    faithful source than re-deriving prose from Wikipedia through a cleanup function that may
+    have changed since capture. `title` comes from the episode's `name` param (matches
+    `capture_real_corpus.py`'s own `knowledge_add_episode` call, which passes the article title
+    as `name`); `revision_id` is parsed back out of `source_description`
+    (`"Simple English Wikipedia: {title} (rev {revision_id})"`, the exact string this script
+    writes at ingest time).
+
+    This is the one-off path used to backfill `corpus_prose.jsonl` for a WAL that was captured
+    before the corpus-staging split existed (see #217) — a normal future capture's
+    `corpus_prose.jsonl` comes from `write_corpus_prose` during Phase 1 instead, since that
+    staged file *is* the ingest input, not something derived after the fact.
+
+    Raises if an Episodic record's `source_description` doesn't match the expected
+    `(rev <digits>)` suffix — better to fail loudly than to silently write a bogus/missing
+    revision_id into the fixture.
+    """
+    records = []
+    files = sorted(f for f in os.listdir(wal_dir) if f.endswith(".jsonl"))
+    if not files:
+        raise RuntimeError(f"no .jsonl WAL files found in {wal_dir}")
+    for fname in files:
+        with open(os.path.join(wal_dir, fname), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                cypher = entry.get("cypher", "")
+                if not cypher.startswith("CREATE (:Episodic {"):
+                    continue
+                params = entry["params"]
+                title = params["name"]
+                source_description = params.get("source_description", "")
+                match = _SOURCE_DESCRIPTION_REV_RE.search(source_description)
+                if not match:
+                    raise RuntimeError(
+                        f"Episodic {title!r} in {fname} has an unexpected "
+                        f"source_description {source_description!r} — cannot recover revision_id"
+                    )
+                revision_id = int(match.group(1))
+                records.append(
+                    {"title": title, "revision_id": revision_id, "prose": params["content"]}
+                )
+    return records
+
+
+def derive_relation_type_samples_from_wal(wal_dir: str, sample_size: int = 50) -> list:
+    """Derives `relation_type_samples` (as `build_expected_results` would) directly from an
+    already-captured WAL directory's `CREATE (:RelatesToNode_ {...})` records, with zero
+    network/service calls.
+
+    One-off backfill: `build_expected_results` read `knowledge_list_relationships`'s response
+    under the wrong key (`"edges"` instead of the actual `"facts"`, see `handle_list_relationships`
+    in `handlers.rs`), so the #217 capture's `expected_results.json` recorded an empty
+    `relation_type_samples` despite the graph having 2,392 real relationships. Fixed for future
+    captures (`build_expected_results` now reads `"facts"`); this function recovers the samples
+    for the already-captured WAL without re-running the capture.
+    """
+    samples = []
+    files = sorted(f for f in os.listdir(wal_dir) if f.endswith(".jsonl"))
+    if not files:
+        raise RuntimeError(f"no .jsonl WAL files found in {wal_dir}")
+    for fname in files:
+        if len(samples) >= sample_size:
+            break
+        with open(os.path.join(wal_dir, fname), encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                cypher = entry.get("cypher", "")
+                if not cypher.startswith("CREATE (:RelatesToNode_ {"):
+                    continue
+                params = entry["params"]
+                fact = params.get("fact")
+                if not fact:
+                    continue
+                samples.append(
+                    {
+                        "uuid": params["uuid"],
+                        "fact": fact,
+                        "relation_type": params.get("relation_type"),
+                    }
+                )
+                if len(samples) >= sample_size:
+                    break
+    return samples
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--socket", default=None, help="Path to the running service's Unix socket (required for ingest)"
     )
-    parser.add_argument("--manifest", required=True, help="Path to corpus_manifest.json")
+    parser.add_argument(
+        "--manifest", default=None, help="Path to corpus_manifest.json (not needed with --derive-prose-from-wal)"
+    )
     parser.add_argument(
         "--wal-dir", default=None, help="WAL directory the running service writes to (required for ingest)"
     )
@@ -795,10 +908,69 @@ def main() -> None:
             "and --wal-dir. Makes zero network calls."
         ),
     )
+    parser.add_argument(
+        "--derive-prose-from-wal",
+        default=None,
+        metavar="WAL_DIR",
+        help=(
+            "One-off backfill: derive corpus_prose.jsonl under --output-dir directly from an "
+            "already-captured WAL directory's Episodic records (content/name/source_description "
+            "params) instead of Wikipedia — zero network calls, and immune to any cleanup-code "
+            "drift since the WAL was captured. For a WAL captured before the stage/ingest split "
+            "existed. No --socket/--manifest/--wal-dir needed."
+        ),
+    )
+    parser.add_argument(
+        "--backfill-relation-samples-from-wal",
+        default=None,
+        metavar="WAL_DIR",
+        help=(
+            "One-off backfill: recompute relation_type_samples in the expected_results.json "
+            "already under --output-dir directly from an already-captured WAL directory's "
+            "RelatesToNode_ records, and rewrite the file in place — zero network/service calls. "
+            "Fixes captures made before build_expected_results read knowledge_list_relationships' "
+            "response under the correct 'facts' key (see derive_relation_type_samples_from_wal)."
+        ),
+    )
     args = parser.parse_args()
 
-    if args.stage_only and args.ingest_only:
-        raise SystemExit("--stage-only and --ingest-only are mutually exclusive")
+    modes = [
+        args.stage_only,
+        args.ingest_only,
+        bool(args.derive_prose_from_wal),
+        bool(args.backfill_relation_samples_from_wal),
+    ]
+    if sum(modes) > 1:
+        raise SystemExit(
+            "--stage-only, --ingest-only, --derive-prose-from-wal, and "
+            "--backfill-relation-samples-from-wal are mutually exclusive"
+        )
+
+    if args.derive_prose_from_wal:
+        os.makedirs(args.output_dir, exist_ok=True)
+        records = derive_prose_from_wal(args.derive_prose_from_wal)
+        prose_path = os.path.join(args.output_dir, "corpus_prose.jsonl")
+        write_corpus_prose(records, [], prose_path)
+        print(
+            f"wrote {prose_path} ({len(records)} records derived from "
+            f"{args.derive_prose_from_wal}, zero network calls)"
+        )
+        return
+
+    if args.backfill_relation_samples_from_wal:
+        expected_path = os.path.join(args.output_dir, "expected_results.json")
+        with open(expected_path) as f:
+            expected = json.load(f)
+        samples = derive_relation_type_samples_from_wal(args.backfill_relation_samples_from_wal)
+        expected["relation_type_samples"] = samples
+        with open(expected_path, "w") as f:
+            json.dump(expected, f, indent=2)
+            f.write("\n")
+        print(f"backfilled {len(samples)} relation_type_samples into {expected_path}")
+        return
+
+    if not args.manifest:
+        raise SystemExit("--manifest is required unless --derive-prose-from-wal is given")
 
     with open(args.manifest) as f:
         manifest = json.load(f)

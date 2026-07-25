@@ -1879,5 +1879,966 @@
       "revision_id": 8765859,
       "revision_timestamp": "2023-04-11T15:46:06Z"
     }
-  ]
+  ],
+  "last_capture": {
+    "captured_at": "2026-07-25T12:20:11.617901+00:00",
+    "target_entities": 1500,
+    "consumed_article_count": 228,
+    "manifest_article_count": 309,
+    "final_entity_count": 1506,
+    "final_relationship_count": 2392,
+    "final_episode_count": 228,
+    "consumed_articles": [
+      {
+        "title": "2026 New Glenn rocket explosion",
+        "revision_id": 10877681
+      },
+      {
+        "title": "AS-202",
+        "revision_id": 10266446
+      },
+      {
+        "title": "Aditya-L1",
+        "revision_id": 9967980
+      },
+      {
+        "title": "Akihiko Hoshide",
+        "revision_id": 9291487
+      },
+      {
+        "title": "Alan Bean",
+        "revision_id": 9811416
+      },
+      {
+        "title": "Alan Shepard",
+        "revision_id": 10778663
+      },
+      {
+        "title": "Alfred Worden",
+        "revision_id": 8798737
+      },
+      {
+        "title": "Almaz",
+        "revision_id": 10367952
+      },
+      {
+        "title": "Andy Thomas",
+        "revision_id": 9002398
+      },
+      {
+        "title": "Angara (rocket family)",
+        "revision_id": 10423427
+      },
+      {
+        "title": "Apollo 1",
+        "revision_id": 9203956
+      },
+      {
+        "title": "Apollo 10",
+        "revision_id": 9266936
+      },
+      {
+        "title": "Apollo 11",
+        "revision_id": 10814753
+      },
+      {
+        "title": "Apollo 12",
+        "revision_id": 10637848
+      },
+      {
+        "title": "Apollo 13",
+        "revision_id": 9579948
+      },
+      {
+        "title": "Apollo 14",
+        "revision_id": 10530663
+      },
+      {
+        "title": "Apollo 15",
+        "revision_id": 10497880
+      },
+      {
+        "title": "Apollo 16",
+        "revision_id": 9267321
+      },
+      {
+        "title": "Apollo 17",
+        "revision_id": 9565507
+      },
+      {
+        "title": "Apollo 4",
+        "revision_id": 8762083
+      },
+      {
+        "title": "Apollo 5",
+        "revision_id": 10515348
+      },
+      {
+        "title": "Apollo 6",
+        "revision_id": 9359640
+      },
+      {
+        "title": "Apollo 7",
+        "revision_id": 10497888
+      },
+      {
+        "title": "Apollo 8",
+        "revision_id": 9571730
+      },
+      {
+        "title": "Apollo 8 Genesis reading",
+        "revision_id": 7555714
+      },
+      {
+        "title": "Apollo 9",
+        "revision_id": 8762092
+      },
+      {
+        "title": "Apollo Lunar Module",
+        "revision_id": 10704536
+      },
+      {
+        "title": "Apollo command and service module",
+        "revision_id": 10460406
+      },
+      {
+        "title": "Apollo program",
+        "revision_id": 10931012
+      },
+      {
+        "title": "Ares I",
+        "revision_id": 10247862
+      },
+      {
+        "title": "Ares V",
+        "revision_id": 10216846
+      },
+      {
+        "title": "Ariane 6",
+        "revision_id": 10632202
+      },
+      {
+        "title": "Arianespace",
+        "revision_id": 10002105
+      },
+      {
+        "title": "Arnaldo Tamayo M\u00e9ndez",
+        "revision_id": 8835549
+      },
+      {
+        "title": "Astronaut",
+        "revision_id": 9638456
+      },
+      {
+        "title": "Atlas V",
+        "revision_id": 9571938
+      },
+      {
+        "title": "Bangladesh Satellite-1",
+        "revision_id": 10730195
+      },
+      {
+        "title": "Barbara Morgan",
+        "revision_id": 9470801
+      },
+      {
+        "title": "Bill Nelson",
+        "revision_id": 10681319
+      },
+      {
+        "title": "Black powder rocket motor",
+        "revision_id": 10406747
+      },
+      {
+        "title": "Bloodhound SSC",
+        "revision_id": 10397840
+      },
+      {
+        "title": "Bob Behnken",
+        "revision_id": 9612081
+      },
+      {
+        "title": "Boeing Crewed Flight Test",
+        "revision_id": 10158946
+      },
+      {
+        "title": "Boeing Starliner",
+        "revision_id": 10203027
+      },
+      {
+        "title": "Bonnie J. Dunbar",
+        "revision_id": 10398035
+      },
+      {
+        "title": "Boris Morukov",
+        "revision_id": 9146047
+      },
+      {
+        "title": "Bruce McCandless II",
+        "revision_id": 8798567
+      },
+      {
+        "title": "Buzz Aldrin",
+        "revision_id": 10861721
+      },
+      {
+        "title": "Cape Canaveral Air Force Station",
+        "revision_id": 10460078
+      },
+      {
+        "title": "Cape Canaveral Space Force Base",
+        "revision_id": 10460079
+      },
+      {
+        "title": "Chandra Deep Field South",
+        "revision_id": 8241437
+      },
+      {
+        "title": "Charles Bolden",
+        "revision_id": 7330367
+      },
+      {
+        "title": "Charles Duke",
+        "revision_id": 10299832
+      },
+      {
+        "title": "Chopsticks landing",
+        "revision_id": 9833248
+      },
+      {
+        "title": "Christa McAuliffe",
+        "revision_id": 9525256
+      },
+      {
+        "title": "Christopher C. Kraft Jr.",
+        "revision_id": 9125648
+      },
+      {
+        "title": "Claudie Haigner\u00e9",
+        "revision_id": 9125770
+      },
+      {
+        "title": "Communications satellite",
+        "revision_id": 10880039
+      },
+      {
+        "title": "Dale Gardner",
+        "revision_id": 8483299
+      },
+      {
+        "title": "Daniel Goldin",
+        "revision_id": 7999966
+      },
+      {
+        "title": "David M. Brown",
+        "revision_id": 9027970
+      },
+      {
+        "title": "David Scott",
+        "revision_id": 9608799
+      },
+      {
+        "title": "David Wolf (astronaut)",
+        "revision_id": 10308920
+      },
+      {
+        "title": "Deep Space Network",
+        "revision_id": 10340618
+      },
+      {
+        "title": "Deke Slayton",
+        "revision_id": 10512233
+      },
+      {
+        "title": "Delta II",
+        "revision_id": 9720153
+      },
+      {
+        "title": "Delta IV",
+        "revision_id": 10445374
+      },
+      {
+        "title": "Dick Scobee",
+        "revision_id": 8657442
+      },
+      {
+        "title": "Don L. Lind",
+        "revision_id": 8798541
+      },
+      {
+        "title": "Donald E. Williams",
+        "revision_id": 7848522
+      },
+      {
+        "title": "Donald H. Peterson",
+        "revision_id": 8798641
+      },
+      {
+        "title": "Dorothy Metcalf-Lindenburger",
+        "revision_id": 7295962
+      },
+      {
+        "title": "Double Asteroid Redirection Test",
+        "revision_id": 10140143
+      },
+      {
+        "title": "Doug Hurley",
+        "revision_id": 9296190
+      },
+      {
+        "title": "ESTCube-1",
+        "revision_id": 8815575
+      },
+      {
+        "title": "Earthrise",
+        "revision_id": 9716282
+      },
+      {
+        "title": "Ed Dwight",
+        "revision_id": 10694527
+      },
+      {
+        "title": "Edgar Mitchell",
+        "revision_id": 10723735
+      },
+      {
+        "title": "Edward Gibson",
+        "revision_id": 8617078
+      },
+      {
+        "title": "Edward Higgins White",
+        "revision_id": 9110759
+      },
+      {
+        "title": "Elaine Denniston",
+        "revision_id": 9502311
+      },
+      {
+        "title": "Ellen Ochoa",
+        "revision_id": 9382458
+      },
+      {
+        "title": "Ellison Onizuka",
+        "revision_id": 9002357
+      },
+      {
+        "title": "Emirates Mars Mission",
+        "revision_id": 10018654
+      },
+      {
+        "title": "Emma Hwang",
+        "revision_id": 9127367
+      },
+      {
+        "title": "Eugene Cernan",
+        "revision_id": 10723738
+      },
+      {
+        "title": "Exede",
+        "revision_id": 9701522
+      },
+      {
+        "title": "Exploration Upper Stage",
+        "revision_id": 8763634
+      },
+      {
+        "title": "Exploration of the Moon",
+        "revision_id": 9413797
+      },
+      {
+        "title": "Fajr 3",
+        "revision_id": 9474382
+      },
+      {
+        "title": "Falcon 9",
+        "revision_id": 10305356
+      },
+      {
+        "title": "Falcon 9 Block 5",
+        "revision_id": 10186768
+      },
+      {
+        "title": "Falcon Heavy",
+        "revision_id": 10857303
+      },
+      {
+        "title": "Fobos-Grunt",
+        "revision_id": 8785788
+      },
+      {
+        "title": "Frank Borman",
+        "revision_id": 10537499
+      },
+      {
+        "title": "Fred Haise",
+        "revision_id": 9578964
+      },
+      {
+        "title": "Frederick Hauck",
+        "revision_id": 10616709
+      },
+      {
+        "title": "GLONASS",
+        "revision_id": 9792048
+      },
+      {
+        "title": "Geostationary orbit",
+        "revision_id": 10039986
+      },
+      {
+        "title": "Geosynchronous orbit",
+        "revision_id": 8738516
+      },
+      {
+        "title": "Gerald Carr",
+        "revision_id": 9128118
+      },
+      {
+        "title": "Giant impact hypothesis",
+        "revision_id": 10232282
+      },
+      {
+        "title": "Global Positioning System",
+        "revision_id": 10576607
+      },
+      {
+        "title": "Glynn Lunney",
+        "revision_id": 9002332
+      },
+      {
+        "title": "Gordon Cooper",
+        "revision_id": 10508952
+      },
+      {
+        "title": "Gregory Jarvis",
+        "revision_id": 8798620
+      },
+      {
+        "title": "Grumman X-29",
+        "revision_id": 8801711
+      },
+      {
+        "title": "Guion Bluford",
+        "revision_id": 10887066
+      },
+      {
+        "title": "Gus Grissom",
+        "revision_id": 10507076
+      },
+      {
+        "title": "Hakuto-R Mission 1",
+        "revision_id": 10375544
+      },
+      {
+        "title": "Harrison Schmitt",
+        "revision_id": 10302870
+      },
+      {
+        "title": "Helen Sharman",
+        "revision_id": 10739106
+      },
+      {
+        "title": "Henry Hartsfield",
+        "revision_id": 9521018
+      },
+      {
+        "title": "Hera (space mission)",
+        "revision_id": 10506931
+      },
+      {
+        "title": "Hipparcos",
+        "revision_id": 10438174
+      },
+      {
+        "title": "History of the Earth",
+        "revision_id": 10897483
+      },
+      {
+        "title": "Hubble Ultra-Deep Field",
+        "revision_id": 10927801
+      },
+      {
+        "title": "Ilan Ramon",
+        "revision_id": 9808950
+      },
+      {
+        "title": "Indian National Satellite System",
+        "revision_id": 9880706
+      },
+      {
+        "title": "Innovative Interstellar Explorer",
+        "revision_id": 10642067
+      },
+      {
+        "title": "International Designator",
+        "revision_id": 9996435
+      },
+      {
+        "title": "International Lunar Research Station",
+        "revision_id": 10257393
+      },
+      {
+        "title": "International Space Station",
+        "revision_id": 10815115
+      },
+      {
+        "title": "Interstellar Probe (1999)",
+        "revision_id": 10642072
+      },
+      {
+        "title": "Interstellar Probe (spacecraft)",
+        "revision_id": 10642073
+      },
+      {
+        "title": "Ion thruster",
+        "revision_id": 9129376
+      },
+      {
+        "title": "Jack King (NASA)",
+        "revision_id": 8431788
+      },
+      {
+        "title": "Jack Kinzler",
+        "revision_id": 8847929
+      },
+      {
+        "title": "Jack R. Lousma",
+        "revision_id": 10446070
+      },
+      {
+        "title": "Jack Swigert",
+        "revision_id": 10798444
+      },
+      {
+        "title": "Jake Garn",
+        "revision_id": 8670259
+      },
+      {
+        "title": "James Hansen",
+        "revision_id": 9947094
+      },
+      {
+        "title": "James Irwin",
+        "revision_id": 10007127
+      },
+      {
+        "title": "James McDivitt",
+        "revision_id": 8498890
+      },
+      {
+        "title": "Jared Isaacman",
+        "revision_id": 10681328
+      },
+      {
+        "title": "Jim Lovell",
+        "revision_id": 10800477
+      },
+      {
+        "title": "John Glenn",
+        "revision_id": 10893562
+      },
+      {
+        "title": "John Houbolt",
+        "revision_id": 8847988
+      },
+      {
+        "title": "John W. Young",
+        "revision_id": 8787313
+      },
+      {
+        "title": "Jon McBride",
+        "revision_id": 9805287
+      },
+      {
+        "title": "Judith Resnik",
+        "revision_id": 9129997
+      },
+      {
+        "title": "K. Megan McArthur",
+        "revision_id": 10611141
+      },
+      {
+        "title": "Kalpana Chawla",
+        "revision_id": 10254433
+      },
+      {
+        "title": "Ken Mattingly",
+        "revision_id": 9267066
+      },
+      {
+        "title": "Kennedy Space Center",
+        "revision_id": 10850159
+      },
+      {
+        "title": "Kennedy Space Center Launch Complex 39",
+        "revision_id": 8355261
+      },
+      {
+        "title": "Kholod",
+        "revision_id": 5662294
+      },
+      {
+        "title": "Konstantin Tsiolkovsky",
+        "revision_id": 9002463
+      },
+      {
+        "title": "Kwangmy\u014fngs\u014fng-2",
+        "revision_id": 9191203
+      },
+      {
+        "title": "Kwangmy\u014fngs\u014fng-3 Unit 2",
+        "revision_id": 9474743
+      },
+      {
+        "title": "LISA Pathfinder",
+        "revision_id": 10150565
+      },
+      {
+        "title": "Lagrange point",
+        "revision_id": 9888782
+      },
+      {
+        "title": "Late Heavy Bombardment",
+        "revision_id": 10589000
+      },
+      {
+        "title": "LauncherOne",
+        "revision_id": 7997662
+      },
+      {
+        "title": "Laurel Clark",
+        "revision_id": 7572785
+      },
+      {
+        "title": "Leonid Kadeniuk",
+        "revision_id": 9481531
+      },
+      {
+        "title": "List of Apollo astronauts",
+        "revision_id": 10511680
+      },
+      {
+        "title": "List of Kosmos satellites (2501\u20132750)",
+        "revision_id": 9565773
+      },
+      {
+        "title": "List of people who have walked on the Moon",
+        "revision_id": 10862912
+      },
+      {
+        "title": "List of satellites sent to Venus",
+        "revision_id": 10512869
+      },
+      {
+        "title": "Lodewijk van den Berg",
+        "revision_id": 10725700
+      },
+      {
+        "title": "Loren Acton",
+        "revision_id": 9575762
+      },
+      {
+        "title": "Luna 1",
+        "revision_id": 9149622
+      },
+      {
+        "title": "Luna 2",
+        "revision_id": 8762118
+      },
+      {
+        "title": "Lunar Roving Vehicle",
+        "revision_id": 9936554
+      },
+      {
+        "title": "Lunar calendar",
+        "revision_id": 9398241
+      },
+      {
+        "title": "Lunar time",
+        "revision_id": 10257404
+      },
+      {
+        "title": "Lunokhod 1",
+        "revision_id": 10838760
+      },
+      {
+        "title": "Mae Jemison",
+        "revision_id": 10762245
+      },
+      {
+        "title": "Marcus Wandt",
+        "revision_id": 10093853
+      },
+      {
+        "title": "Mariner 1",
+        "revision_id": 10870071
+      },
+      {
+        "title": "Mariner 2",
+        "revision_id": 10369013
+      },
+      {
+        "title": "Mariner 3",
+        "revision_id": 10545820
+      },
+      {
+        "title": "Mariner 4",
+        "revision_id": 10514323
+      },
+      {
+        "title": "Mark Kelly",
+        "revision_id": 10877251
+      },
+      {
+        "title": "Mars Orbiter Mission 2",
+        "revision_id": 10253063
+      },
+      {
+        "title": "Mercury Seven",
+        "revision_id": 10505097
+      },
+      {
+        "title": "Mercury-Redstone 3",
+        "revision_id": 8762075
+      },
+      {
+        "title": "Michael Collins (astronaut)",
+        "revision_id": 10809469
+      },
+      {
+        "title": "Michael John Smith",
+        "revision_id": 5026463
+      },
+      {
+        "title": "Michael P. Anderson",
+        "revision_id": 8616658
+      },
+      {
+        "title": "Michael R. Clifford",
+        "revision_id": 7930595
+      },
+      {
+        "title": "Michael S. Hopkins",
+        "revision_id": 9133485
+      },
+      {
+        "title": "Michel Tognini",
+        "revision_id": 10225997
+      },
+      {
+        "title": "Mike Melvill",
+        "revision_id": 10864465
+      },
+      {
+        "title": "Millie Hughes-Fulford",
+        "revision_id": 7460699
+      },
+      {
+        "title": "Mir",
+        "revision_id": 8876367
+      },
+      {
+        "title": "Model rocket",
+        "revision_id": 10016815
+      },
+      {
+        "title": "Moon",
+        "revision_id": 10928354
+      },
+      {
+        "title": "Moon landing",
+        "revision_id": 10614033
+      },
+      {
+        "title": "Moon landing conspiracy theories",
+        "revision_id": 10898618
+      },
+      {
+        "title": "Moonbase",
+        "revision_id": 10816425
+      },
+      {
+        "title": "NASA",
+        "revision_id": 10872394
+      },
+      {
+        "title": "NASA TV",
+        "revision_id": 10933873
+      },
+      {
+        "title": "NEAR Shoemaker",
+        "revision_id": 8525763
+      },
+      {
+        "title": "National Space Science Data Center",
+        "revision_id": 6300876
+      },
+      {
+        "title": "Neil Armstrong",
+        "revision_id": 10825802
+      },
+      {
+        "title": "New Glenn",
+        "revision_id": 10711702
+      },
+      {
+        "title": "New Shepard",
+        "revision_id": 9756150
+      },
+      {
+        "title": "Nuclear thermal rocket",
+        "revision_id": 8739669
+      },
+      {
+        "title": "Operations and Checkout Building",
+        "revision_id": 9609349
+      },
+      {
+        "title": "Orbit of the Moon",
+        "revision_id": 10588416
+      },
+      {
+        "title": "Owen Garriott",
+        "revision_id": 9002237
+      },
+      {
+        "title": "Pamela Melroy",
+        "revision_id": 10309550
+      },
+      {
+        "title": "Paul J. Weitz",
+        "revision_id": 8129705
+      },
+      {
+        "title": "Paul Scully-Power",
+        "revision_id": 7577590
+      },
+      {
+        "title": "Peggy Whitson",
+        "revision_id": 8836890
+      },
+      {
+        "title": "Pete Conrad",
+        "revision_id": 10533116
+      },
+      {
+        "title": "Phases of the Moon",
+        "revision_id": 10904962
+      },
+      {
+        "title": "Philip K. Chapman",
+        "revision_id": 8022328
+      },
+      {
+        "title": "Pioneer 10",
+        "revision_id": 10252244
+      },
+      {
+        "title": "Pioneer Venus Orbiter",
+        "revision_id": 9586966
+      },
+      {
+        "title": "Project Gemini",
+        "revision_id": 10872396
+      },
+      {
+        "title": "Proton (rocket family)",
+        "revision_id": 10400184
+      },
+      {
+        "title": "R-7 (rocket family)",
+        "revision_id": 8434185
+      },
+      {
+        "title": "Richard F. Gordon Jr.",
+        "revision_id": 8798426
+      },
+      {
+        "title": "Richard H. Truly",
+        "revision_id": 9385810
+      },
+      {
+        "title": "Rick Husband",
+        "revision_id": 8639148
+      },
+      {
+        "title": "Robert J. Cenker",
+        "revision_id": 10553645
+      },
+      {
+        "title": "Robert L. Gibson",
+        "revision_id": 8616663
+      },
+      {
+        "title": "Robotic spacecraft",
+        "revision_id": 10065402
+      },
+      {
+        "title": "Rocket",
+        "revision_id": 10261395
+      },
+      {
+        "title": "Rocket engine",
+        "revision_id": 9554925
+      },
+      {
+        "title": "Rocket engine nozzle",
+        "revision_id": 7846163
+      },
+      {
+        "title": "Rocket fuel",
+        "revision_id": 9069841
+      },
+      {
+        "title": "Rocketdyne F-1",
+        "revision_id": 8762133
+      },
+      {
+        "title": "Roger B. Chaffee",
+        "revision_id": 7579658
+      },
+      {
+        "title": "Ronald Evans (astronaut)",
+        "revision_id": 10723741
+      }
+    ],
+    "skipped_articles": [
+      {
+        "title": "Air-launch-to-orbit",
+        "revision_id": 9317657,
+        "prose_chars": 166
+      },
+      {
+        "title": "Aryabhata (satellite)",
+        "revision_id": 10314108,
+        "prose_chars": 111
+      },
+      {
+        "title": "Heavy-lift launch vehicle",
+        "revision_id": 10019647,
+        "prose_chars": 142
+      },
+      {
+        "title": "Johnson Space Center",
+        "revision_id": 9929255,
+        "prose_chars": 184
+      },
+      {
+        "title": "Lunar phase",
+        "revision_id": 8660303,
+        "prose_chars": 28
+      },
+      {
+        "title": "Planetshine",
+        "revision_id": 4596995,
+        "prose_chars": 166
+      },
+      {
+        "title": "Richard O. Covey",
+        "revision_id": 7120933,
+        "prose_chars": 175
+      }
+    ],
+    "cleanup_version": 2
+  }
 }

@@ -9,12 +9,15 @@ outside-CI tool — see its module docstring) — this is a standalone stdlib-on
 """
 
 import json
+import os
 import tempfile
 import unittest
 from unittest import mock
 
 import capture_real_corpus
 from capture_real_corpus import (
+    derive_prose_from_wal,
+    derive_relation_type_samples_from_wal,
     read_corpus_prose,
     stage_corpus,
     strip_file_links,
@@ -258,6 +261,106 @@ class CorpusProseTests(unittest.TestCase):
             tmp.flush()
             with self.assertRaises(RuntimeError):
                 read_corpus_prose(tmp.name)
+
+
+class DeriveFromWalTests(unittest.TestCase):
+    """Covers the #217 one-off backfill path: the WAL fixture actually committed was captured
+    before the stage/ingest split existed, so its `corpus_prose.jsonl` and
+    `expected_results.json.relation_type_samples` were derived after the fact directly from the
+    already-captured WAL rather than from a staged file or a live `knowledge_list_relationships`
+    call. See `derive_prose_from_wal` and `derive_relation_type_samples_from_wal`.
+    """
+
+    def _write_wal_dir(self, lines_by_file):
+        tmpdir = tempfile.mkdtemp()
+        for fname, lines in lines_by_file.items():
+            with open(os.path.join(tmpdir, fname), "w", encoding="utf-8") as f:
+                for line in lines:
+                    f.write(json.dumps(line) + "\n")
+        return tmpdir
+
+    def test_derive_prose_from_wal_recovers_title_revision_and_prose(self):
+        wal_dir = self._write_wal_dir(
+            {
+                "0000.jsonl": [
+                    {
+                        "cypher": "CREATE (:Episodic {uuid: $uuid, name: $name, ...})",
+                        "params": {
+                            "uuid": "ep-1",
+                            "name": "Apollo 11",
+                            "source": "text",
+                            "source_description": "Simple English Wikipedia: Apollo 11 (rev 42)",
+                            "content": "Apollo 11 was the first crewed Moon landing.",
+                        },
+                    },
+                    {
+                        "cypher": "CREATE (:Entity {uuid: $uuid, name: $name, ...})",
+                        "params": {"uuid": "e-1", "name": "NASA"},
+                    },
+                ]
+            }
+        )
+        records = derive_prose_from_wal(wal_dir)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["title"], "Apollo 11")
+        self.assertEqual(records[0]["revision_id"], 42)
+        self.assertEqual(records[0]["prose"], "Apollo 11 was the first crewed Moon landing.")
+
+    def test_derive_prose_from_wal_raises_on_unparseable_source_description(self):
+        wal_dir = self._write_wal_dir(
+            {
+                "0000.jsonl": [
+                    {
+                        "cypher": "CREATE (:Episodic {uuid: $uuid, name: $name, ...})",
+                        "params": {
+                            "uuid": "ep-1",
+                            "name": "Apollo 11",
+                            "source_description": "not the expected format",
+                            "content": "text",
+                        },
+                    }
+                ]
+            }
+        )
+        with self.assertRaises(RuntimeError):
+            derive_prose_from_wal(wal_dir)
+
+    def test_derive_relation_type_samples_from_wal_reads_relates_to_node_records(self):
+        wal_dir = self._write_wal_dir(
+            {
+                "0000.jsonl": [
+                    {
+                        "cypher": "CREATE (:RelatesToNode_ {uuid: $uuid, fact: $fact, relation_type: $relation_type, ...})",
+                        "params": {
+                            "uuid": "rn-1",
+                            "fact": "NASA launched Apollo 11",
+                            "relation_type": "LAUNCHED",
+                        },
+                    },
+                    {
+                        "cypher": "CREATE (:RelatesToNode_ {uuid: $uuid, fact: $fact, relation_type: $relation_type, ...})",
+                        "params": {"uuid": "rn-2", "fact": None, "relation_type": None},
+                    },
+                ]
+            }
+        )
+        samples = derive_relation_type_samples_from_wal(wal_dir)
+        self.assertEqual(len(samples), 1)
+        self.assertEqual(samples[0]["uuid"], "rn-1")
+        self.assertEqual(samples[0]["fact"], "NASA launched Apollo 11")
+        self.assertEqual(samples[0]["relation_type"], "LAUNCHED")
+
+    def test_derive_relation_type_samples_from_wal_respects_sample_size(self):
+        lines = [
+            {
+                "cypher": "CREATE (:RelatesToNode_ {uuid: $uuid, fact: $fact, relation_type: $relation_type, ...})",
+                "params": {"uuid": f"rn-{i}", "fact": f"fact {i}", "relation_type": "X"},
+            }
+            for i in range(5)
+        ]
+        wal_dir = self._write_wal_dir({"0000.jsonl": lines})
+        samples = derive_relation_type_samples_from_wal(wal_dir, sample_size=2)
+        self.assertEqual(len(samples), 2)
 
 
 if __name__ == "__main__":
