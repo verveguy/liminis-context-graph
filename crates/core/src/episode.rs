@@ -4,8 +4,9 @@ use std::sync::{Arc, OnceLock};
 use chrono::DateTime;
 
 use crate::{
-    app_state::{AppState, OntologyDriftState},
-    error::Error,
+    app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
+    db::Db,
+    error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
     ontology_sidecar,
@@ -78,6 +79,44 @@ fn validate_llm_timestamp(s: Option<String>) -> Option<String> {
         );
         None
     }
+}
+
+/// Resolves each extracted entity name against the persisted graph: an exact case-insensitive
+/// name match short-circuits to `NameMatch`, otherwise falls back to embedding-based candidate
+/// lookup (hybrid HNSW+FTS above the dedup threshold, brute-force cosine scan below it).
+///
+/// Runs the whole batch inside a single `spawn_blocking` closure. On a missing-index error
+/// (the hybrid path depends on `entity_name_embedding_idx`), the caller retries by calling this
+/// function again in full — there is no partial/mid-batch resume.
+async fn resolve_phase_b(
+    db: Arc<Db>,
+    group_id: String,
+    entity_names: Vec<String>,
+    name_embeddings: Vec<Vec<f32>>,
+    use_hybrid: bool,
+) -> Result<Vec<PhaseBResult>, Error> {
+    tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let mut out = Vec::with_capacity(entity_names.len());
+        for (i, name) in entity_names.iter().enumerate() {
+            let trimmed = name.trim();
+            // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
+            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &group_id)? {
+                out.push(PhaseBResult::NameMatch { existing });
+                continue;
+            }
+            // Embedding-based resolution fallback.
+            let emb = &name_embeddings[i];
+            let candidate = if use_hybrid {
+                conn.hybrid_dedup_similar_entity(emb, trimmed, &group_id, DEDUP_THRESHOLD)?
+            } else {
+                conn.brute_force_similar_entity(emb, &group_id, DEDUP_THRESHOLD)?
+            };
+            out.push(PhaseBResult::EmbeddingCandidate { candidate });
+        }
+        Ok::<_, Error>(out)
+    })
+    .await?
 }
 
 /// Runs the full add_episode pipeline in three async phases (AD-4).
@@ -255,7 +294,6 @@ pub async fn add_episode(
         Error::DbUnavailable(reason)
     })?;
     let gid_b = group_id.to_string();
-    let name_embs_b = name_embeddings.clone();
     let db_b = Arc::clone(&db_shared);
     let entity_count = tokio::task::spawn_blocking(move || {
         let conn = db_b.connect()?;
@@ -264,31 +302,47 @@ pub async fn add_episode(
     .await??;
 
     let use_hybrid = entity_count >= hybrid_threshold();
-    let db_b = Arc::clone(&db_shared);
-    let gid_b = group_id.to_string();
-    let entity_names_b = entity_names.clone();
-    let phase_b_results: Vec<PhaseBResult> = tokio::task::spawn_blocking(move || {
-        let conn = db_b.connect()?;
-        let mut out = Vec::with_capacity(entity_names_b.len());
-        for (i, name) in entity_names_b.iter().enumerate() {
-            let trimmed = name.trim();
-            // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
-            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &gid_b)? {
-                out.push(PhaseBResult::NameMatch { existing });
-                continue;
+    // Above the hybrid-dedup threshold, this query depends on entity_name_embedding_idx (and the
+    // FTS indexes hybrid_dedup_similar_entity also uses). On a workspace where nothing has ever
+    // built those indices, retry once via the same missing-index auto-heal the search handlers
+    // use (ADR-0025) rather than failing the chunk (#208).
+    let phase_b_attempt = resolve_phase_b(
+        Arc::clone(&db_shared),
+        group_id.to_string(),
+        entity_names.clone(),
+        name_embeddings.clone(),
+        use_hybrid,
+    )
+    .await;
+    let phase_b_results: Vec<PhaseBResult> = match phase_b_attempt {
+        Ok(results) => results,
+        Err(e) if is_missing_index_error(&e) => {
+            if state.indices_built.load(Ordering::Acquire) {
+                // Indices are supposedly built but the query still failed this way — a redundant
+                // rebuild wouldn't help (mirrors the search handlers' identical quirk).
+                return Err(Error::Ipc(MISSING_INDEX_USER_MSG.to_string()));
             }
-            // Embedding-based resolution fallback.
-            let emb = &name_embs_b[i];
-            let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(emb, trimmed, &gid_b, DEDUP_THRESHOLD)?
-            } else {
-                conn.brute_force_similar_entity(emb, &gid_b, DEDUP_THRESHOLD)?
-            };
-            out.push(PhaseBResult::EmbeddingCandidate { candidate });
+            build_indices_once(&state).await?;
+            // Reload the db in case a concurrent clear_all swapped it while we were building.
+            let db_retry = load_db(&state)?;
+            resolve_phase_b(
+                db_retry,
+                group_id.to_string(),
+                entity_names.clone(),
+                name_embeddings.clone(),
+                use_hybrid,
+            )
+            .await
+            .map_err(|e2| {
+                if is_missing_index_error(&e2) {
+                    Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                } else {
+                    e2
+                }
+            })?
         }
-        Ok::<_, Error>(out)
-    })
-    .await??;
+        Err(e) => return Err(e),
+    };
 
     // Async dedup verification loop (no lock)
     let mut decisions: Vec<DedupDecision> = Vec::with_capacity(extraction.entities.len());
@@ -516,4 +570,54 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FR-007: a genuine (non-missing-index) error from the hybrid dedup query must be
+    /// distinguishable from a missing-index error, since `add_episode`'s retry logic only
+    /// triggers `build_indices_once` when `is_missing_index_error` returns true — anything
+    /// else takes the `Err(e) => return Err(e)` arm and propagates immediately, un-retried.
+    ///
+    /// `resolve_phase_b` is private, so this is exercised directly here rather than through
+    /// the public `add_episode` API (there is no clean way to force a genuine DB error through
+    /// the full ingest pipeline without reaching into internals — see #208 Plan).
+    #[tokio::test]
+    async fn resolve_phase_b_genuine_error_is_not_classified_as_missing_index() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("phase_b_error_test.db");
+        let dim = 8;
+        let db = Arc::new(crate::db::Db::open(db_path.to_str().unwrap()).unwrap());
+        {
+            let conn = db.connect().unwrap();
+            conn.init_schema(dim).unwrap();
+            // Build indices for real, so a subsequent failure here cannot be a missing-index
+            // error — isolating the "genuine DB error" case FR-007 is about.
+            conn.build_indices_and_constraints().unwrap();
+        }
+
+        // A name_embedding of the wrong dimension (dim+1 instead of dim) against an
+        // already-indexed table is a genuine query failure, not a missing-index condition.
+        let wrong_dim_embedding = vec![0.0f32; dim + 1];
+        let result = resolve_phase_b(
+            db,
+            "test-group".to_string(),
+            vec!["Someone".to_string()],
+            vec![wrong_dim_embedding],
+            true, // use_hybrid
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("dimension-mismatched vector query should fail"),
+            Err(e) => e,
+        };
+        assert!(
+            !is_missing_index_error(&err),
+            "a dimension-mismatch error must not be classified as a missing-index error \
+             (FR-007: only missing-index errors trigger auto-heal), got: {err}"
+        );
+    }
 }

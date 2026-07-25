@@ -43,6 +43,12 @@ impl From<tokio::task::JoinError> for Error {
     }
 }
 
+/// User-facing message returned when a missing-index query fails auto-heal (either because a
+/// rebuild attempt itself failed, or because `indices_built` was already `true` so no rebuild
+/// was attempted). Shared by the search handlers' and the ingest dedup path's auto-heal logic.
+pub const MISSING_INDEX_USER_MSG: &str =
+    "Knowledge graph indices not yet built. Call knowledge_build_indices to resolve.";
+
 /// True if `err` is lbug's "no index with this name" binder exception, raised when a search
 /// query targets an FTS/HNSW index that hasn't been (re)built yet. Used by the search handlers'
 /// auto-heal path (ADR-0025) to distinguish "indices missing" from any other query failure.

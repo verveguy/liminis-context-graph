@@ -38,12 +38,17 @@ lbug errors do not expose a structured error hierarchy through its Rust bindings
 
 ```rust
 let is_recoverable = msg.contains("Corrupted wal file")
+    || msg.contains("the WAL file is corrupted")
     || msg.contains("Permission denied")
     || msg.contains("No such file or directory");
 ```
 
 **Recoverable** errors (enter degraded mode):
-- `"Corrupted wal file"` — lbug WAL corruption, the primary case
+- `"Corrupted wal file"` — lbug WAL corruption from an invalid record type (`wal_record.cpp`)
+- `"the WAL file is corrupted"` — lbug WAL corruption from a checksum mismatch
+  (`wal_replayer.cpp`), the shape produced by a torn/garbage WAL tail (e.g. a crash mid-write) —
+  added in ADR-0036 after this classifier was found to miss it, silently disabling self-recovery
+  for this corruption class
 - `"Permission denied"` — DB file unreadable; user can fix permissions and recover
 - `"No such file or directory"` — DB file missing; workspace WAL replay can rebuild
 

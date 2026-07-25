@@ -8,11 +8,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::{
-    app_state::{AppState, OntologyDriftState},
+    app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
     backfill, canonicalize, corrections,
     db::Db,
     episode,
-    error::{is_missing_index_error, Error},
+    error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     ipc::{IpcRequest, IpcResponse},
     ontology_sidecar,
     rebuild_job::{JobStatus, RebuildJob},
@@ -25,42 +25,6 @@ use crate::{
 };
 
 const DEFAULT_GROUP_ID: &str = "liminis";
-
-const MISSING_INDEX_USER_MSG: &str =
-    "Knowledge graph indices not yet built. Call knowledge_build_indices to resolve.";
-
-/// Acquires the write lock and calls `build_indices_and_constraints`, then sets the
-/// `indices_built` flag so subsequent searches skip the auto-heal path (FR-003).
-/// Called at most once per session per DB lifecycle event.
-async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
-    let _guard = state.write_lock.write().await;
-    // Double-check inside the lock: another task may have completed the build while we waited.
-    if state.indices_built.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    // Load DB after acquiring the lock so we build on the current instance, not a stale
-    // snapshot that predates a concurrent clear_all swap.
-    let db = load_db(state)?;
-    let result = tokio::task::spawn_blocking(move || {
-        let conn = db.connect()?;
-        conn.build_indices_and_constraints()
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => {
-            // Set flag while still holding the write lock to eliminate the window between
-            // guard release and flag update that would allow redundant builds.
-            state.indices_built.store(true, Ordering::Release);
-            Ok(())
-        }
-        Ok(Err(e)) => Err(Error::Ipc(format!(
-            "Auto-build of knowledge graph indices failed: {e}"
-        ))),
-        Err(e) => Err(Error::Ipc(format!(
-            "Auto-build of knowledge graph indices failed: {e}"
-        ))),
-    }
-}
 
 /// Dispatches an IPC request to the appropriate library function. [IPC]
 ///
@@ -2581,22 +2545,6 @@ async fn recover_restore_from_backup(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-/// Extract `Arc<Db>` from the `ArcSwapOption`, returning `Error::DbUnavailable` if `None`.
-///
-/// The degraded-mode guard in `handle()` prevents most handlers from reaching this point
-/// when the DB is unavailable, so this acts as a safety net for internal calls.
-fn load_db(state: &AppState) -> Result<Arc<Db>, Error> {
-    state.db.load_full().ok_or_else(|| {
-        let reason = state
-            .degraded_reason
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-            .unwrap_or_else(|| "unknown".to_string());
-        Error::DbUnavailable(reason)
-    })
-}
 
 fn validate_from_seq(v: &Value) -> Result<u64, Error> {
     match v {
