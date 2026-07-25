@@ -65,7 +65,7 @@ pub struct ReplayStats {
     /// lines_skipped() + match_prefixed_no_op + match_delete_no_op` (the latter two were carved
     /// out of `lines_replayed` by FR-005 and are likewise excluded from `lines_skipped()`).
     /// `knowledge_rebuild_from_wal`'s JSON response reports `lines_skipped` but does not
-    /// (yet — a deliberate scoping decision, see ADR-0042) include `match_prefixed_no_op`/
+    /// (yet — a deliberate scoping decision, see ADR-0043) include `match_prefixed_no_op`/
     /// `match_delete_no_op`, so a JSON/IPC caller cannot reconstruct this total from that
     /// response alone; only a direct Rust caller holding the full `ReplayStats` can.
     pub legacy_skipped_lines: u64,
@@ -631,7 +631,7 @@ impl ReplayBatch {
 ///
 /// Reads incrementally via `BufReader::lines()` rather than loading the whole file into memory —
 /// this runs once per `.jsonl` file up front, before the first progress event, so a full-file
-/// read (as an earlier version of this function did, contradicting this fix's own ADR-0042 claim
+/// read (as an earlier version of this function did, contradicting this fix's own ADR-0043 claim
 /// of "one line, not a full-file scan") turns a large WAL directory into an apparent startup hang.
 /// In the common case the first line parses immediately and only that one line is read; only a
 /// genuinely corrupt prefix costs more.
@@ -687,7 +687,7 @@ fn with_match_count_probe(template: &str) -> String {
 /// fallback above exists for) is classified DELETE-form, exempting a genuinely lost SET from the
 /// fidelity ratio. Judged low-likelihood (none of this codebase's own templates mix the two) and
 /// left as-is rather than hand-rolling a Cypher parser; a future contributor tightening this
-/// should keep the ADR-0042 discussion of this limitation in sync.
+/// should keep the ADR-0043 discussion of this limitation in sync.
 fn is_delete_form(template: &str) -> bool {
     let upper = template.to_uppercase();
     strip_quoted_literals(&upper)
