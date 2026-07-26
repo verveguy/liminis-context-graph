@@ -136,3 +136,81 @@ jobs:
       # #[ignore]-and-gate-out-of-the-PR-path posture as its siblings (FR-018).
       - name: cargo test --release --test mcp_real_corpus_mutation_e2e -- --ignored
         run: cargo test -p lcg-service --release --test mcp_real_corpus_mutation_e2e -- --ignored
+
+  mcp-admin-data-e2e:
+    name: mcp_real_corpus_admin_data_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml's build-lbug/test jobs, so a push-to-main run (which follows
+      # a PR's ci.yml run against the same commit) gets a cache hit instead of rebuilding
+      # lbug's C++ core from source.
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      # MCP admin/lifecycle e2e suite, data-plane half (#236): dump→rebuild round-trips
+      # (including group_id scoping), full rebuild with progress notifications, checkpoint
+      # coherence, and index rebuild on an index-less graph. Sibling of mcp_real_corpus_e2e
+      # (#234) and mcp_real_corpus_mutation_e2e (#235), completing the MCP e2e trilogy over the
+      # same golden real-corpus fixture. Same #[ignore]-and-gate-out-of-the-PR-path posture
+      # (FR-016).
+      - name: cargo test --release --test mcp_real_corpus_admin_data_e2e -- --ignored
+        run: cargo test -p lcg-service --release --test mcp_real_corpus_admin_data_e2e -- --ignored
+
+  mcp-admin-lifecycle-e2e:
+    name: mcp_real_corpus_admin_lifecycle_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml's build-lbug/test jobs, so a push-to-main run (which follows
+      # a PR's ci.yml run against the same commit) gets a cache hit instead of rebuilding
+      # lbug's C++ core from source.
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      # MCP admin/lifecycle e2e suite, process-lifecycle half (#236): degraded-mode startup and
+      # recovery (ADR-0009, the direct regression guard for #207), knowledge_close checkpoint
+      # semantics (ADR-0017) and attached-mode --allow-remote-close gating, and admin-scope
+      # tool-visibility gating. Same #[ignore]-and-gate-out-of-the-PR-path posture (FR-016).
+      - name: cargo test --release --test mcp_real_corpus_admin_lifecycle_e2e -- --ignored
+        run: cargo test -p lcg-service --release --test mcp_real_corpus_admin_lifecycle_e2e -- --ignored
