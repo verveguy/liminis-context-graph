@@ -105,12 +105,21 @@ pub struct AnthropicJudgeClient {
     client: reqwest::Client,
 }
 
+/// A stalled/unresponsive judge call would otherwise block the whole harness run
+/// indefinitely (there's no other progress signal or retry budget above this client);
+/// bound it generously since a large reference/candidate payload can legitimately take
+/// a while to judge.
+const JUDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
 impl AnthropicJudgeClient {
     pub fn new(api_key: String, model: String) -> Self {
         Self {
             api_key,
             model,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(JUDGE_REQUEST_TIMEOUT)
+                .build()
+                .expect("reqwest client with a fixed timeout is infallible to build"),
         }
     }
 }
@@ -199,7 +208,12 @@ fn extract_json_block(s: &str) -> &str {
         }
     }
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
-        return &s[start..=end];
+        // A malformed/refusal response can have a stray '}' before the first '{' (e.g. no
+        // real JSON present at all), which would make `start > end` and panic on the slice
+        // below. Fall through to returning the trimmed whole string in that case.
+        if start <= end {
+            return &s[start..=end];
+        }
     }
     s.trim()
 }
@@ -277,6 +291,15 @@ mod tests {
     fn extract_json_block_finds_braces_without_fences() {
         let s = "sure, here you go: {\"matched\": []} thanks";
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
+    }
+
+    #[test]
+    fn extract_json_block_does_not_panic_on_inverted_braces() {
+        // A '}' before any '{' with no fences (e.g. a refusal or truncated response with
+        // a stray brace) must not panic on the `s[start..=end]` slice — it should fall
+        // through to returning the trimmed whole string instead.
+        let s = "oops } no real json here {";
+        assert_eq!(extract_json_block(s), s);
     }
 
     /// Canned judge client for tests — never makes a network call.
