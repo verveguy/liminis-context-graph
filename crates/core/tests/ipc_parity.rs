@@ -81,6 +81,50 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     })
 }
 
+/// Same as `make_state`, but with `wal_dir` configured — required for
+/// `knowledge_rebuild_from_wal` (issue #239's `force_clear` wire-contract parity tests).
+///
+/// Takes a real, resolvable `db_path` (not the placeholder `"test.db"` most of this file's
+/// other `make_state*` helpers use) because `force_clear: true` invokes `clear_db_for_rebuild`,
+/// which deletes and reopens the file at `db_path` — a placeholder path would either no-op
+/// against a nonexistent file or, worse, create a stray `test.db` in the crate's working
+/// directory (mirrors `handlers_wal_admin.rs`'s `make_state_with_wal_and_path`).
+fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path,
+        wal_dir: Some(wal_dir),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+/// A standalone `Entity` WAL line, param-bound (mirrors `handlers_wal_admin.rs`'s helper of the
+/// same shape) — used only to give `knowledge_rebuild_from_wal` valid content to replay after a
+/// `force_clear`.
+fn entity_wal_line(seq: u64, uuid: &str) -> String {
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {{uuid: '{uuid}'}}) ON CREATE SET n.name = '{uuid}', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-05-22 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{{}}'","params":{{}}}}"#
+    )
+}
+
 fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
@@ -3426,5 +3470,88 @@ async fn test_reprocess_relation_scope_off_ontology_mixed_candidates() {
             .as_deref(),
         Some("AUTHORED"),
         "already-correct edge must be untouched"
+    );
+}
+
+// ── knowledge_rebuild_from_wal: force_clear wire contract (issue #239, FR-005/FR-006) ─────────
+
+/// A `from_seq: 0` (default) rebuild against a non-empty database must fail fast over the wire
+/// with a structural JSON-RPC error (-32000) rather than silently succeeding with a flood of
+/// duplicate-primary-key `failed_samples` — this is the wire-contract shape CodeRabbit flagged
+/// as untested in this file (behavioral coverage already exists in handlers_wal_admin.rs).
+#[tokio::test]
+async fn parity_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
+    let (db, dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "parity-rebuild-001",
+        "Pre-existing",
+        "g",
+        vec!["Entity".to_string()],
+    );
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260726_000000_parity.jsonl"),
+        entity_wal_line(0, "parity-rebuild-001") + "\n",
+    )
+    .unwrap();
+    let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch_val(100, "knowledge_rebuild_from_wal", json!({}), state).await;
+
+    assert_err_resp(&v, 100, -32000);
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("force_clear") || msg.contains("knowledge_clear_all"),
+        "error must name the corrective action: {v}"
+    );
+}
+
+/// `force_clear: true` on the same non-empty-database scenario clears the database and lets the
+/// rebuild proceed to completion, returning a normal JSON-RPC success result over the wire.
+#[tokio::test]
+async fn parity_rebuild_from_wal_force_clear_succeeds() {
+    let (db, dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "parity-rebuild-002",
+        "Pre-existing",
+        "g",
+        vec!["Entity".to_string()],
+    );
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260726_000000_parity.jsonl"),
+        entity_wal_line(0, "parity-rebuild-002") + "\n",
+    )
+    .unwrap();
+    let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    // Use the streaming path (progress_tx: Some) so the rebuild completes synchronously within
+    // this call, instead of needing to poll knowledge_rebuild_status for a background job.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let resp = handlers::dispatch(
+        req(
+            101,
+            "knowledge_rebuild_from_wal",
+            json!({"force_clear": true}),
+        ),
+        state,
+        Some(tx),
+    )
+    .await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_ok_resp(&v, 101);
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(
+        v["result"]["failed_samples"],
+        json!([]),
+        "force_clear must have removed the stale entity, leaving zero duplicate-key failures: {v}"
     );
 }

@@ -57,7 +57,10 @@ pub struct ReplayStats {
     pub failed_lines: u64,
     /// Lines that failed JSON parsing or had an I/O read error (both are data corruption).
     pub unparseable_lines: u64,
-    /// Sampled failure details for `failed_lines` (first N, capped by `ReplayOptions::failure_sample_cap`).
+    /// Deduplicated failure details for `failed_lines`, keyed by `(template, error)` and capped
+    /// at `ReplayOptions::failure_sample_cap` distinct categories — not capped by row count. Each
+    /// entry's `count` reflects every row that shared that `(template, error)` pair, including
+    /// occurrences beyond the cap (FR-001–FR-003, issue #239).
     pub failed_samples: Vec<FailureSample>,
     pub files_read: u64,
     /// Always 0 — `WalReplayer` itself never builds indexes; `handle_rebuild_from_wal` builds
@@ -81,9 +84,14 @@ pub struct ReplayStats {
     /// `match_delete_no_op`, so a JSON/IPC caller cannot reconstruct this total from that
     /// response alone; only a direct Rust caller holding the full `ReplayStats` can.
     pub legacy_skipped_lines: u64,
-    /// Populated when `(failed_lines + match_prefixed_no_op) / (lines_replayed + failed_lines +
-    /// match_prefixed_no_op) > threshold` after replay completes. Threshold defaults to 10% and
-    /// is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
+    /// Populated when `(failed_lines + match_prefixed_no_op + unrecognised_lines +
+    /// unparseable_lines) / (lines_replayed + failed_lines + match_prefixed_no_op +
+    /// unrecognised_lines + unparseable_lines) > threshold` after replay completes (FR-008,
+    /// issue #239 — `unrecognised_lines`/`unparseable_lines` join both sides so a wholly
+    /// unrecognised/unparseable WAL doesn't leave the denominator at 0). `legacy_skipped_lines`
+    /// and `match_delete_no_op` stay excluded from both sides (FR-009). Threshold defaults to 10%
+    /// and is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0). See
+    /// `compute_fidelity_warning` for the exact computation.
     pub fidelity_warning: Option<String>,
     /// SET-form `MATCH`-prefixed mutations (`MATCH ... SET`, entity-type relabelling, edge
     /// invalidation, etc. — anything MATCH-prefixed that is not a DELETE) whose execution

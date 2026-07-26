@@ -1,4 +1,4 @@
-# ADR-0045: WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency
+# ADR-0046: WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency
 
 **Status**: Accepted
 **Date**: 2026-07-26

@@ -48,7 +48,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0042](0042-oai-extractor-uds-connection-pooling.md) | OaiExtractor UDS Connection Pooling | 2026-07-25 |
 | [0043](0043-wal-replay-seq-ordering-and-noop-accounting.md) | WAL Replay — Seq-Based File Ordering and MATCH-Write No-Op Accounting | 2026-07-25 |
 | [0044](0044-llm-cassette-record-replay-seam.md) | LLM Cassette Record/Replay Seam | 2026-07-26 |
-| [0045](0045-wal-replay-failure-dedup-and-rebuild-idempotency.md) | WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency | 2026-07-26 |
+| [0046](0046-wal-replay-failure-dedup-and-rebuild-idempotency.md) | WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency | 2026-07-26 |
 
 ## Historical numbering
 
