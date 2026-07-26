@@ -1482,7 +1482,16 @@ fn four_bucket_regression() {
     );
 }
 
-/// FR-006: sample_cap_respected — failure_sample_cap limits the number of collected samples.
+/// FR-001/FR-003: sample_cap_respected — the cap bounds the number of *distinct* `(template,
+/// error)` categories retained, not the number of failing rows. Rewritten from the pre-#239
+/// version of this test, which asserted the opposite (5 byte-identical failures → 3 stored
+/// samples, i.e. the cap capped rows) — that was the exact defect this issue fixes, so the old
+/// assertion is now wrong by design, not a regression to preserve.
+///
+/// Uses 5 distinct pre-existing conflicting uuids so each produces its own `(template, error)`
+/// pair (`entity_create_wal_line`'s CREATE binds `uuid` via `$uuid`, so the template text is
+/// identical across all rows — lbug's duplicate-PK error message includes the offending uuid,
+/// so the *error string* is what makes each uuid's failures a distinct category).
 #[test]
 fn sample_cap_respected() {
     let wal_dir = TempDir::new().unwrap();
@@ -1492,14 +1501,80 @@ fn sample_cap_respected() {
     let conn = db.connect().unwrap();
     conn.init_schema(4).unwrap();
 
-    // Pre-insert so all 5 CREATE lines will fail with duplicate PK.
-    conn.run_cypher("CREATE (:Entity {uuid: 'dup-cap-uuid'})")
+    let uuids = [
+        "cap-dup-1",
+        "cap-dup-2",
+        "cap-dup-3",
+        "cap-dup-4",
+        "cap-dup-5",
+    ];
+    for uuid in &uuids {
+        conn.run_cypher(&format!("CREATE (:Entity {{uuid: '{uuid}'}})"))
+            .unwrap();
+    }
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    let mut seq = 0u64;
+    for uuid in &uuids {
+        // 2 occurrences per uuid → 5 categories, each exceeding a cap of 3.
+        for _ in 0..2 {
+            lines.push_str(&entity_create_wal_line(seq, uuid, "X", emb));
+            lines.push('\n');
+            seq += 1;
+        }
+    }
+    fs::write(
+        wal_dir.path().join("20260522_000000_bbb222_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(3),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort");
+
+    assert_eq!(stats.failed_lines, 10, "all ten rows failed");
+    assert_eq!(
+        stats.failed_samples.len(),
+        3,
+        "cap bounds distinct categories (3), not the 5 categories or 10 failing rows"
+    );
+    for sample in &stats.failed_samples {
+        assert_eq!(
+            sample.count, 2,
+            "each stored category occurred exactly twice: {:?}",
+            sample.error
+        );
+    }
+}
+
+/// FR-002: sample_dedup_counts_rows_beyond_cap — a single failing template/error occurring many
+/// times collapses into exactly one sample whose `count` reflects every occurrence, including
+/// rows beyond the sample cap.
+#[test]
+fn sample_dedup_counts_rows_beyond_cap() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert so all 15 CREATE lines fail with the exact same duplicate-PK error.
+    conn.run_cypher("CREATE (:Entity {uuid: 'dedup-cap-uuid'})")
         .unwrap();
 
-    let content: String = (0..5u64)
+    let content: String = (0..15u64)
         .map(|seq| {
             format!(
-                r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'dup-cap-uuid'}})","params":{{}}}}"#
+                r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: 'dedup-cap-uuid'}})","params":{{}}}}"#
             )
         })
         .collect::<Vec<_>>()
@@ -1516,18 +1591,131 @@ fn sample_cap_respected() {
         .replay_opts(
             &conn,
             ReplayOptions {
-                failure_sample_cap: Some(3),
+                failure_sample_cap: Some(10),
                 ..Default::default()
             },
         )
         .expect("replay must not abort");
 
-    assert_eq!(stats.failed_lines, 5, "all five lines failed");
+    assert_eq!(stats.failed_lines, 15, "all fifteen lines failed");
     assert_eq!(
         stats.failed_samples.len(),
-        3,
-        "only first 3 samples collected (cap=3)"
+        1,
+        "identical (template, error) collapses into one sample"
     );
+    assert_eq!(
+        stats.failed_samples[0].count, 15,
+        "sample count reflects every occurrence, including rows beyond the cap of 10"
+    );
+}
+
+/// Edge case: two failures sharing a template but with different error strings (a
+/// data-dependent constraint violation whose message differs per row) are distinct categories,
+/// not merged under the same sample.
+#[test]
+fn sample_dedup_same_template_different_error_are_distinct() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    conn.run_cypher("CREATE (:Entity {uuid: 'distinct-err-a'})")
+        .unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid: 'distinct-err-b'})")
+        .unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    lines.push_str(&entity_create_wal_line(0, "distinct-err-a", "A", emb));
+    lines.push('\n');
+    lines.push_str(&entity_create_wal_line(1, "distinct-err-b", "B", emb));
+    lines.push('\n');
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort");
+
+    assert_eq!(stats.failed_lines, 2);
+    assert_eq!(
+        stats.failed_samples.len(),
+        2,
+        "same template but different error strings must not be merged"
+    );
+    assert!(stats.failed_samples.iter().all(|s| s.count == 1));
+    assert!(
+        stats
+            .failed_samples
+            .iter()
+            .any(|s| s.error.contains("distinct-err-a")),
+        "must include the error mentioning the first conflicting uuid"
+    );
+    assert!(
+        stats
+            .failed_samples
+            .iter()
+            .any(|s| s.error.contains("distinct-err-b")),
+        "must include the error mentioning the second conflicting uuid"
+    );
+}
+
+/// Edge case: dedup must cover both `classify_replay_failure` call sites — a batch `prepare()`
+/// failure (this test) as well as the per-row `execute()` failure (covered by
+/// `sample_dedup_counts_rows_beyond_cap` above, which fails at execute time on a duplicate PK).
+/// A malformed template that fails to *prepare* is classified once per row sharing that batch
+/// (`for _ in &match_prefixed { classify_replay_failure(...) }`); dedup must still collapse
+/// those repeated calls into a single sample with an accurate count.
+#[test]
+fn sample_dedup_prepare_failure_site() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let mut lines = String::new();
+    for i in 0..3u64 {
+        lines.push_str(&format!(
+            r#"{{"seq":{i},"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {{uuid: $uuid BROKEN SYNTAX HERE","params":{{"uuid":"broken-{i}"}}}}"#
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on a prepare failure");
+
+    assert_eq!(stats.failed_lines, 3, "all three rows in the batch failed");
+    assert_eq!(
+        stats.failed_samples.len(),
+        1,
+        "a batch-wide prepare failure is one category, not one sample per row"
+    );
+    assert_eq!(stats.failed_samples[0].count, 3);
 }
 
 /// SC-003: apostrophe in string param must replay without parse error and store correctly.
@@ -2001,6 +2189,89 @@ fn empty_wal_all_zeros() {
     assert!(
         stats.failed_samples.is_empty(),
         "no failures → empty sample vec"
+    );
+}
+
+/// SC-003/FR-008: a WAL directory whose lines are all present but none recognised as a mutation
+/// (e.g. pointed at the wrong directory, or a read-only-shaped query) must not report a silent,
+/// un-warned `mutations_replayed: 0` — that's indistinguishable from "nothing to do". This is
+/// distinct from `empty_wal_all_zeros` above (no files at all, `total == 0` legitimately).
+#[test]
+fn test_all_unrecognised_wal_triggers_fidelity_warning() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let content: String = (0..5u64)
+        .map(|seq| {
+            format!(
+                r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MATCH (n) RETURN n","params":{{}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_unrec_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must not abort");
+
+    assert_eq!(stats.lines_replayed, 0);
+    assert_eq!(stats.unrecognised_lines, 5);
+    assert!(
+        stats.fidelity_warning.is_some(),
+        "a wholly-unrecognised WAL must surface a fidelity_warning, not a silent no-op"
+    );
+}
+
+/// SC-004 regression guard: a fully healthy replay (mixed valid mutations, zero failures) must
+/// not trip `fidelity_warning`.
+#[test]
+fn test_healthy_replay_no_fidelity_warning_regression() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    for i in 0..10u64 {
+        lines.push_str(&entity_merge_wal_line(
+            i,
+            &format!("healthy-e-{i}"),
+            &format!("Healthy{i}"),
+            emb,
+        ));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260522_000000_healthy_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn)
+        .expect("replay must succeed");
+
+    assert_eq!(stats.lines_replayed, 10);
+    assert_eq!(stats.failed_lines, 0);
+    assert_eq!(stats.unrecognised_lines, 0);
+    assert_eq!(stats.unparseable_lines, 0);
+    assert!(
+        stats.fidelity_warning.is_none(),
+        "a fully healthy replay must not warn: {:?}",
+        stats.fidelity_warning
     );
 }
 
