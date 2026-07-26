@@ -272,15 +272,34 @@ pub struct McpClient {
     /// Lines observed that were not the response to the most recently awaited id — mostly
     /// `notifications/progress`. Kept so progress tests can inspect them.
     pub stashed_notifications: Vec<Value>,
+    /// Set only by `spawn_capturing_stderr`; joined (and taken) by `collect_stderr`.
+    stderr_handle: Option<std::thread::JoinHandle<Vec<String>>>,
 }
 
 impl McpClient {
     /// Spawns `cmd` with piped stdin/stdout (stderr inherited so failures show in test output).
-    pub fn spawn(mut cmd: Command) -> Self {
+    pub fn spawn(cmd: Command) -> Self {
+        Self::spawn_with_stderr(cmd, false)
+    }
+
+    /// Like `spawn`, but pipes stderr and captures it on a background reader thread instead of
+    /// inheriting it, so a test can assert on the child's stderr log content (#247). Failures
+    /// are no longer printed live to the test harness's own stderr in this mode — call
+    /// `collect_stderr` and include the lines in any panic message to preserve debuggability.
+    pub fn spawn_capturing_stderr(cmd: Command) -> Self {
+        Self::spawn_with_stderr(cmd, true)
+    }
+
+    fn spawn_with_stderr(mut cmd: Command, capture_stderr: bool) -> Self {
+        let stderr_mode = if capture_stderr {
+            Stdio::piped()
+        } else {
+            Stdio::inherit()
+        };
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr_mode)
             .spawn()
             .expect("failed to spawn liminis-context-graph");
 
@@ -303,13 +322,42 @@ impl McpClient {
             }
         });
 
+        let stderr_handle = capture_stderr.then(|| {
+            let stderr = child.stderr.take().expect("child stderr");
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stderr);
+                let mut lines = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => lines.push(line),
+                    }
+                }
+                lines
+            })
+        });
+
         Self {
             child,
             stdin,
             lines: rx,
             next_id: 1,
             stashed_notifications: Vec::new(),
+            stderr_handle,
         }
+    }
+
+    /// Waits for the stderr reader thread to observe EOF (guaranteed once the child's stderr
+    /// pipe closes, i.e. after the process has exited) and returns every captured line. Only
+    /// valid for a client spawned via `spawn_capturing_stderr`; panics otherwise or if called
+    /// more than once.
+    pub fn collect_stderr(&mut self) -> Vec<String> {
+        self.stderr_handle
+            .take()
+            .expect("collect_stderr requires spawn_capturing_stderr and can only be called once")
+            .join()
+            .expect("stderr reader thread panicked")
     }
 
     fn write_line(&mut self, value: &Value) {
