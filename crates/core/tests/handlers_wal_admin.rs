@@ -1252,17 +1252,22 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
         )
         .await;
         let status = status_v["result"]["status"].as_str().unwrap_or("?");
-        if status == "completed" {
-            assert_eq!(
-                status_v["result"]["result"]["failed_lines"], 0,
-                "clean rebuild after force_clear must have zero duplicate-key failures: {status_v}"
-            );
-            break;
+        match status {
+            "completed" => {
+                assert_eq!(
+                    status_v["result"]["result"]["failed_lines"], 0,
+                    "clean rebuild after force_clear must have zero duplicate-key failures: {status_v}"
+                );
+                break;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "rebuild job did not complete within 5s: {status_v}"
-        );
     }
 
     // The stale pre-existing entity must be gone; only the WAL-replayed entity remains.

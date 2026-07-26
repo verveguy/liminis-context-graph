@@ -1368,6 +1368,15 @@ async fn handle_rebuild_from_wal(
                         .to_string(),
                 ));
             }
+            // Refuse to destructively clear the database while a write is in flight — checking
+            // only in the later streaming/non-streaming branches would let the clear happen
+            // before either of those checks ever runs, since this block executes first.
+            let active = state.active_writes.load(Ordering::Relaxed);
+            if active > 0 {
+                return Err(Error::Ipc(format!(
+                    "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
+                )));
+            }
             clear_db_for_rebuild(&state).await?;
         }
     }
@@ -1833,6 +1842,11 @@ async fn clear_db_for_rebuild(state: &Arc<AppState>) -> Result<(), Error> {
     let _guard = state.write_lock.write().await;
     let db_path = state.db_path.clone();
     let embedding_dim = state.embedder.dim();
+    // Drop the old handle before deleting its files — readers don't take write_lock (ADR-0002),
+    // so a concurrent read against the about-to-be-deleted DB directory could otherwise race
+    // the file removal below. load_db() already treats a None state.db as Error::DbUnavailable,
+    // so this briefly surfaces as the existing degraded-mode error rather than a file-not-found.
+    state.db.store(None);
     let new_db = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
         let path = std::path::Path::new(&db_path);
         if path.is_dir() {
