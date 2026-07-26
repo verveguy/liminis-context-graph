@@ -1326,6 +1326,66 @@ async fn handle_rebuild_from_wal(
         )));
     }
 
+    // FR-005: a `from_seq: 0` full rebuild against a database that already has data would emit
+    // a native CREATE (Entity/Episodic/RelatesToNode_, see db.rs) for every existing row,
+    // producing a duplicate-primary-key failure per node — a large, benign-looking failed_lines
+    // count that (via FR-001's fix) still surfaces as noise, not the operator's real problem.
+    // A `from_seq > 0` incremental resume intentionally targets a non-empty database (e.g.
+    // resuming after a checkpoint) and must not be affected — see FR-006.
+    let force_clear = p["force_clear"].as_bool().unwrap_or(false);
+    if from_seq == 0 {
+        let db_for_check = load_db(&state)?;
+        let non_empty = tokio::task::spawn_blocking(move || -> Result<bool, Error> {
+            let conn = db_for_check.connect()?;
+            // An unqueryable label (older/partially-initialised schema missing the table) is
+            // treated as empty, not a hard error — this guard's only job is "is there data I
+            // would collide with?", and erroring here would make the rebuild/recovery tool
+            // unusable in exactly the degraded situation an operator reaches for it (mirrors
+            // recovery.rs's `count_nodes("Episodic").unwrap_or(0)` precedent).
+            let entity = conn.count_nodes("Entity").unwrap_or(0);
+            let episodic = conn.count_nodes("Episodic").unwrap_or(0);
+            let relates = conn.count_nodes("RelatesToNode_").unwrap_or(0);
+            Ok(entity > 0 || episodic > 0 || relates > 0)
+        })
+        .await??;
+
+        if non_empty {
+            if dry_run {
+                // A dry run never executes Cypher (see replay_opts), so it can't reproduce the
+                // duplicate-key failure either way — but dry-run is the primary way operators
+                // preview a rebuild before committing to one, so it must surface this problem
+                // rather than silently preview a "clean" run that would fail for real.
+                return Err(Error::Ipc(
+                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
+                     is a full rebuild. A dry run cannot preview this cleanly — replaying against \
+                     a populated database would fail with a duplicate-primary-key error for every \
+                     existing node. Clear the database first with knowledge_clear_all, or re-run \
+                     with force_clear: true (non-dry-run) to clear it automatically before replay."
+                        .to_string(),
+                ));
+            }
+            if !force_clear {
+                return Err(Error::Ipc(
+                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
+                     is a full rebuild. Replaying now would fail with a duplicate-primary-key error \
+                     for every existing node. Pass force_clear: true to clear the database before \
+                     replaying, or clear it first with knowledge_clear_all."
+                        .to_string(),
+                ));
+            }
+            // Refuse to destructively clear the database while a write is in flight — checking
+            // only in the later streaming/non-streaming branches would let the clear happen
+            // before either of those checks ever runs, since this block executes first.
+            let active = state.active_writes.load(Ordering::Relaxed);
+            if active > 0 {
+                return Err(Error::Ipc(format!(
+                    "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
+                )));
+            }
+            clear_db_for_rebuild(&state).await?;
+        }
+    }
+
     let is_streaming = progress_tx.is_some();
 
     if is_streaming {
@@ -1350,9 +1410,18 @@ async fn handle_rebuild_from_wal(
         let shutdown_flag_cancel = state.cancel_token.clone();
         let shutdown_cancelled_inner = Arc::clone(&shutdown_cancelled);
 
-        // Write lock held in async scope; guard released after spawn_blocking completes.
+        // Write lock held in async scope; guard released after spawn_blocking completes. A
+        // dry run takes a *read* guard instead: it never mutates the DB, but it does read it,
+        // and holding no lock at all would let a concurrent `force_clear: true` rebuild delete
+        // the DB files mid-read (`active_writes` doesn't cover this — it only tracks episode
+        // ingest writes, not rebuild reads).
         let _write_guard = if !dry_run {
             Some(state.write_lock.write().await)
+        } else {
+            None
+        };
+        let _read_guard = if dry_run {
+            Some(state.write_lock.read().await)
         } else {
             None
         };
@@ -1443,6 +1512,7 @@ async fn handle_rebuild_from_wal(
             bg_indices_built.store(indices_built, Ordering::Release);
         }
         drop(_write_guard);
+        drop(_read_guard);
 
         state.sink.emit(TelemetryEvent::WalReplayComplete {
             ts_ms: now_ms(),
@@ -1505,6 +1575,7 @@ async fn handle_rebuild_from_wal(
             "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
         });
         if dry_run {
@@ -1530,6 +1601,12 @@ async fn handle_rebuild_from_wal(
 
     // Non-streaming dry_run: run synchronously and return stats immediately
     if dry_run {
+        // A dry run never mutates the DB, but it does read it — hold a *read* guard for the
+        // duration of the replay so a concurrent `force_clear: true` rebuild (which takes
+        // `write_lock.write()` in `clear_db_for_rebuild`) cannot delete the DB files out from
+        // under this in-flight read. `active_writes` doesn't cover this: it only tracks episode
+        // ingest writes, not rebuild reads, so nothing else previously serialized these two.
+        let _read_guard = state.write_lock.read().await;
         let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let replay_started_at = std::time::Instant::now();
@@ -1573,6 +1650,7 @@ async fn handle_rebuild_from_wal(
             "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
         }));
     }
@@ -1728,6 +1806,7 @@ async fn handle_rebuild_from_wal(
                             "legacy_skipped_lines": stats.legacy_skipped_lines,
                             "lines_skipped": stats.lines_skipped(),
                             "failed_samples": stats.failed_samples,
+                            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
                             "fidelity_warning": stats.fidelity_warning,
                         });
                         // Dry-run never touches indices (FR-007) — omit the field.
@@ -1776,6 +1855,52 @@ async fn handle_rebuild_from_wal(
         "job_id": job_id,
         "status": "running",
     }))
+}
+
+/// Clears the lbug database (never the WAL directory — the caller is about to replay it) so a
+/// `from_seq: 0` `knowledge_rebuild_from_wal` call can proceed without duplicate-primary-key
+/// collisions (FR-005). Mirrors `recover_rebuild_from_workspace_wal`'s DB-file-delete + reopen +
+/// `state.db` ArcSwap hot-swap pattern (ADR-0003), scoped identically: only the lbug DB file/dir
+/// and its `.wal`/`.lock` sidecars are removed.
+async fn clear_db_for_rebuild(state: &Arc<AppState>) -> Result<(), Error> {
+    let _guard = state.write_lock.write().await;
+    let db_path = state.db_path.clone();
+    let embedding_dim = state.embedder.dim();
+    // Drop the old handle before deleting its files — readers don't take write_lock (ADR-0002),
+    // so a concurrent read against the about-to-be-deleted DB directory could otherwise race
+    // the file removal below. load_db() already treats a None state.db as Error::DbUnavailable,
+    // so this briefly surfaces as the existing degraded-mode error rather than a file-not-found.
+    state.db.store(None);
+    let new_db = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
+        let path = std::path::Path::new(&db_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path)))?;
+        } else if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path)))?;
+        }
+        for ext in &[".wal", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
+        }
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let db = Db::open(&db_path)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            conn.rebuild_name_index()?;
+        }
+        Ok(db)
+    })
+    .await??;
+
+    state.db.store(Some(Arc::new(new_db)));
+    state.indices_built.store(false, Ordering::Release);
+    Ok(())
 }
 
 async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {

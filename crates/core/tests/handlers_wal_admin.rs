@@ -1091,3 +1091,294 @@ async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
         "indices_built flag must be false after a genuine build failure"
     );
 }
+
+// ── FR-005: non-empty-database guard for from_seq: 0 rebuilds (issue #239) ────────────────────
+
+/// Like `make_db`, but also returns the real on-disk DB path so `clear_db_for_rebuild` (invoked
+/// via `force_clear: true`) can locate and reopen the same file `db` was opened from — unlike
+/// most of this file's other tests, which use a placeholder `db_path` that never has to resolve
+/// to a real file because none of those handlers touch it.
+fn make_db_with_path(dim: usize) -> (Arc<Db>, TempDir, String) {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir
+        .path()
+        .join("wal_admin_test.db")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let db = Arc::new(Db::open(&db_path).unwrap());
+    {
+        let conn = db.connect().unwrap();
+        conn.init_schema(dim).unwrap();
+    }
+    (db, dir, db_path)
+}
+
+fn make_state_with_wal_and_path(
+    db: Arc<Db>,
+    wal_dir: std::path::PathBuf,
+    db_path: String,
+) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    let wal_writer = WalWriter::new(&wal_dir, 10_000, 0).ok();
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path,
+        wal_dir: Some(wal_dir),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+/// SC-002: a `from_seq: 0` rebuild against a non-empty database fails fast by default, with a
+/// clear, explicit error — not a flood of duplicate-primary-key `failed_samples`.
+#[tokio::test]
+async fn test_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'pre-existing-entity'})")
+            .unwrap();
+    }
+    let entity_count_before = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260701_000000_fff666_0000.jsonl"),
+        entity_wal_line(0, "fr005-entity") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        30,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected an explicit error for a from_seq:0 rebuild against a non-empty DB: {v}"
+    );
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("already contains data") || msg.contains("non-empty"),
+        "error must name the non-empty database as the cause: {v}"
+    );
+    assert!(
+        msg.contains("force_clear") || msg.contains("knowledge_clear_all"),
+        "error must state the corrective action: {v}"
+    );
+
+    // No job was created and no replay happened — no rebuild_jobs entry, no partial state.
+    let entity_count_after = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+    assert_eq!(
+        entity_count_before, entity_count_after,
+        "fail-fast must occur before any write — entity count must be untouched"
+    );
+}
+
+/// SC-002: `force_clear: true` clears the database before replaying, producing a clean rebuild
+/// with no duplicate-key noise.
+#[tokio::test]
+async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'stale-entity-to-be-cleared'})")
+            .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260701_000000_ggg777_0000.jsonl"),
+        entity_wal_line(0, "force-clear-entity") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        31,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(
+        v["result"]["success"], true,
+        "force_clear:true must allow the rebuild to proceed: {v}"
+    );
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    // Poll until completed (up to 5 seconds).
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            32,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => {
+                assert_eq!(
+                    status_v["result"]["result"]["failed_lines"], 0,
+                    "clean rebuild after force_clear must have zero duplicate-key failures: {status_v}"
+                );
+                break;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    // The stale pre-existing entity must be gone; only the WAL-replayed entity remains.
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid("stale-entity-to-be-cleared")
+            .unwrap()
+            .is_none(),
+        "force_clear must have removed the stale pre-existing entity"
+    );
+    assert!(
+        conn.get_entity_by_uuid("force-clear-entity")
+            .unwrap()
+            .is_some(),
+        "the WAL-replayed entity must exist after the clean rebuild"
+    );
+}
+
+/// A dry run against a non-empty database must fail fast the same way, regardless of
+/// `force_clear` — dry runs never mutate the DB, so "clearing" has no meaning there, and the
+/// whole point is to surface the problem before the operator commits to a real run.
+#[tokio::test]
+async fn test_rebuild_from_wal_non_empty_db_dry_run_fails_fast_even_with_force_clear() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'dry-run-pre-existing'})")
+            .unwrap();
+    }
+    let entity_count_before = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260701_000000_hhh888_0000.jsonl"),
+        entity_wal_line(0, "dry-run-entity") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        33,
+        "knowledge_rebuild_from_wal",
+        json!({"dry_run": true, "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "dry_run against a non-empty DB must fail fast even with force_clear:true: {v}"
+    );
+
+    let entity_count_after = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+    assert_eq!(
+        entity_count_before, entity_count_after,
+        "dry_run must never mutate the DB, including via force_clear"
+    );
+}
+
+/// FR-006 regression guard: a non-empty database with `from_seq > 0` (incremental resume) must
+/// not be blocked by the FR-005 guard — that protection is scoped to `from_seq: 0` full rebuilds
+/// only.
+#[tokio::test]
+async fn test_rebuild_from_wal_non_empty_db_from_seq_gt_zero_unaffected() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'resume-pre-existing'})")
+            .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    let content = [
+        entity_wal_line(0, "resume-skip"),
+        entity_wal_line(1, "resume-apply"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260701_000000_iii999_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        34,
+        "knowledge_rebuild_from_wal",
+        json!({"from_seq": 1}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(
+        v["result"]["success"], true,
+        "from_seq > 0 against a non-empty DB must proceed unaffected by the FR-005 guard: {v}"
+    );
+    assert!(
+        v.get("error").is_none(),
+        "must not surface the non-empty-database error for an incremental resume: {v}"
+    );
+}

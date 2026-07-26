@@ -27,13 +27,25 @@ use crate::wal::{strip_quoted_literals, WalLine};
 /// one-line pattern without reintroducing the classification plumbing.
 const LEGACY_SCHEMA_ERROR_PATTERNS: &[&str] = &[];
 
-/// A single captured failure from a `raw_query` execution error during replay.
+/// A single captured failure category from a `raw_query` execution error during replay.
+///
+/// One `FailureSample` represents every row that shared the same `(template, error)` pair, not
+/// one row — `classify_replay_failure` deduplicates on that key so a single bad template can no
+/// longer consume the entire `sample_cap` and hide every other distinct failure category (FR-001).
 #[derive(Serialize)]
 pub struct FailureSample {
     /// First 200 chars of the interpolated Cypher that was executed.
     pub cypher: String,
     /// The lbug error message returned by `raw_query`.
     pub error: String,
+    /// Number of rows that produced this `(template, error)` pair (FR-002), including
+    /// occurrences beyond the sample cap.
+    pub count: u64,
+    /// Full (untruncated) template string, used only as the dedup key — never serialized.
+    /// Using the truncated `cypher` preview as the key risks a false merge between two distinct
+    /// long templates that happen to share the same first 200 chars.
+    #[serde(skip)]
+    template: String,
 }
 
 /// Statistics returned from a WAL replay run.
@@ -45,7 +57,10 @@ pub struct ReplayStats {
     pub failed_lines: u64,
     /// Lines that failed JSON parsing or had an I/O read error (both are data corruption).
     pub unparseable_lines: u64,
-    /// Sampled failure details for `failed_lines` (first N, capped by `ReplayOptions::failure_sample_cap`).
+    /// Deduplicated failure details for `failed_lines`, keyed by `(template, error)` and capped
+    /// at `ReplayOptions::failure_sample_cap` distinct categories — not capped by row count. Each
+    /// entry's `count` reflects every row that shared that `(template, error)` pair, including
+    /// occurrences beyond the cap (FR-001–FR-003, issue #239).
     pub failed_samples: Vec<FailureSample>,
     pub files_read: u64,
     /// Always 0 — `WalReplayer` itself never builds indexes; `handle_rebuild_from_wal` builds
@@ -69,9 +84,14 @@ pub struct ReplayStats {
     /// `match_delete_no_op`, so a JSON/IPC caller cannot reconstruct this total from that
     /// response alone; only a direct Rust caller holding the full `ReplayStats` can.
     pub legacy_skipped_lines: u64,
-    /// Populated when `(failed_lines + match_prefixed_no_op) / (lines_replayed + failed_lines +
-    /// match_prefixed_no_op) > threshold` after replay completes. Threshold defaults to 10% and
-    /// is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0).
+    /// Populated when `(failed_lines + match_prefixed_no_op + unrecognised_lines +
+    /// unparseable_lines) / (lines_replayed + failed_lines + match_prefixed_no_op +
+    /// unrecognised_lines + unparseable_lines) > threshold` after replay completes (FR-008,
+    /// issue #239 — `unrecognised_lines`/`unparseable_lines` join both sides so a wholly
+    /// unrecognised/unparseable WAL doesn't leave the denominator at 0). `legacy_skipped_lines`
+    /// and `match_delete_no_op` stay excluded from both sides (FR-009). Threshold defaults to 10%
+    /// and is overridable via `LCG_REPLAY_FIDELITY_THRESHOLD` (float 0.0–1.0). See
+    /// `compute_fidelity_warning` for the exact computation.
     pub fidelity_warning: Option<String>,
     /// SET-form `MATCH`-prefixed mutations (`MATCH ... SET`, entity-type relabelling, edge
     /// invalidation, etc. — anything MATCH-prefixed that is not a DELETE) whose execution
@@ -103,6 +123,13 @@ pub struct ReplayStats {
     /// ordering miss into new data loss) but the regression is counted and logged so it is never
     /// silent.
     pub seq_regressions: u64,
+    /// Count of distinct `(template, error)` failure categories that could not be recorded in
+    /// `failed_samples` because `sample_cap` distinct categories were already stored. FR-001–003
+    /// eliminated the old row-capping defect where one bad template could hide every other
+    /// category, but a WAL with more than `sample_cap` genuinely distinct failure categories can
+    /// still drop some at the (unchanged) default cap of 10 — this counter makes that truncation
+    /// visible (e.g. "10 of 14 categories shown") instead of silent.
+    pub failed_sample_categories_dropped: u64,
 }
 
 impl ReplayStats {
@@ -224,6 +251,7 @@ impl WalReplayer {
             match_prefixed_no_op: 0,
             match_delete_no_op: 0,
             seq_regressions: 0,
+            failed_sample_categories_dropped: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -539,24 +567,58 @@ impl WalReplayer {
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(0.10)
             .clamp(0.0, 1.0);
-        // FR-006: match_prefixed_no_op joins both sides of the ratio, not just the numerator —
-        // FR-005 removes no-ops from lines_replayed, so they must also join the denominator or
-        // the ratio would never change. legacy_skipped_lines stays excluded from both, exactly
-        // as it was before this fix.
-        let total = stats.lines_replayed + stats.failed_lines + stats.match_prefixed_no_op;
-        if total > 0 {
-            let ineffective = stats.failed_lines + stats.match_prefixed_no_op;
-            let ratio = ineffective as f64 / total as f64;
-            if ratio > threshold {
-                stats.fidelity_warning = Some(format!(
-                    "{:.1}% of mutations failed or had no effect (threshold: {:.1}%); rebuilt graph may be incomplete",
-                    ratio * 100.0,
-                    threshold * 100.0,
-                ));
-            }
-        }
+        stats.fidelity_warning = compute_fidelity_warning(&stats, threshold);
 
         Ok(stats)
+    }
+}
+
+/// Computes the `fidelity_warning` message (if any) for a completed replay.
+///
+/// FR-006: `match_prefixed_no_op` joins both sides of the ratio, not just the numerator —
+/// FR-005 removes no-ops from `lines_replayed`, so they must also join the denominator or the
+/// ratio would never change.
+///
+/// FR-008/FR-009 (issue #239): `unrecognised_lines` and `unparseable_lines` join both sides too,
+/// following the same symmetric-join pattern — a WAL that is 100% unrecognised (wrong directory,
+/// incompatible format) must not leave `total == 0`, which would short-circuit the `total > 0`
+/// guard below and report a silent, un-warned `mutations_replayed: 0` that is indistinguishable
+/// from a healthy no-op WAL. `legacy_skipped_lines` remains excluded from both sides — a benign,
+/// expected outcome that must not by itself push a healthy replay over the warning threshold.
+fn compute_fidelity_warning(stats: &ReplayStats, threshold: f64) -> Option<String> {
+    let total = stats.lines_replayed
+        + stats.failed_lines
+        + stats.match_prefixed_no_op
+        + stats.unrecognised_lines
+        + stats.unparseable_lines;
+    if total == 0 {
+        return None;
+    }
+    let ineffective = stats.failed_lines
+        + stats.match_prefixed_no_op
+        + stats.unrecognised_lines
+        + stats.unparseable_lines;
+    let ratio = ineffective as f64 / total as f64;
+    if ratio > threshold {
+        // Break down the bucket counts rather than lumping them under one "failed or had no
+        // effect" label: that phrasing undersells FR-008's motivating case (a WAL pointed at the
+        // wrong directory, or in an incompatible format) — an all-`unrecognised_lines` WAL is
+        // not "failed", it was never recognised as a mutation at all, and an all-`unparseable_lines`
+        // WAL was never even parsed. The breakdown lets an operator tell "the schema is broken"
+        // (failed/no-op) from "you pointed me at the wrong directory" (unrecognised/unparseable)
+        // at a glance instead of having to cross-reference the surrounding JSON fields.
+        Some(format!(
+            "{:.1}% of mutations failed or had no effect (threshold: {:.1}%); rebuilt graph may be \
+             incomplete (failed={}, no-op={}, unrecognised={}, unparseable={})",
+            ratio * 100.0,
+            threshold * 100.0,
+            stats.failed_lines,
+            stats.match_prefixed_no_op,
+            stats.unrecognised_lines,
+            stats.unparseable_lines,
+        ))
+    } else {
+        None
     }
 }
 
@@ -847,8 +909,11 @@ fn flush_batch(
 }
 
 /// Classifies a replay failure (from prepare or execute) as legacy-skipped vs. genuine
-/// failure, updating `stats`. Genuine failures record a sample using the template (there is
-/// no interpolated string under bound-parameter execution).
+/// failure, updating `stats`. Genuine failures record — or bump the count of — a sample keyed
+/// by the full `(template, error)` pair (there is no interpolated string under bound-parameter
+/// execution), so a template that fails on every row in a batch consumes exactly one sample slot
+/// regardless of how many rows share it (FR-001–FR-003). `failed_lines` is incremented
+/// unconditionally, independent of sample-cap/dedup bookkeeping (FR-004).
 fn classify_replay_failure(
     err_str: &str,
     template: &str,
@@ -878,13 +943,39 @@ fn classify_replay_failure(
         eprintln!("[WAL SKIP] legacy-schema mutation: {err_str} | cypher: {cypher_preview}");
         stats.legacy_skipped_lines += 1;
     } else {
-        eprintln!("[WAL WARN] replay execution error: {err_str} | cypher: {cypher_preview}");
         stats.failed_lines += 1;
-        if stats.failed_samples.len() < sample_cap {
+        // Log only on a category's first occurrence, not once per row: the JSON `failed_samples`
+        // payload was already deduplicated by (template, error) (FR-001), but before this, the
+        // `eprintln!` fired unconditionally per row — so a template failing on every row of a
+        // multi-hour replay still flooded the service log (the primary post-mortem artifact for
+        // a long-running rebuild) with millions of byte-identical `[WAL WARN]` lines even though
+        // the JSON response no longer did.
+        if let Some(existing) = stats
+            .failed_samples
+            .iter_mut()
+            .find(|s| s.template == template && s.error == err_str)
+        {
+            existing.count += 1;
+        } else if stats.failed_samples.len() < sample_cap {
+            eprintln!("[WAL WARN] replay execution error: {err_str} | cypher: {cypher_preview}");
             stats.failed_samples.push(FailureSample {
-                cypher: template.chars().take(200).collect(),
+                cypher: cypher_preview,
                 error: err_str.to_string(),
+                count: 1,
+                template: template.to_string(),
             });
+        } else {
+            // A genuinely new (template, error) category, but `sample_cap` distinct categories
+            // are already stored — this is the same "one category hides another" failure mode
+            // FR-001 targeted, just resurfacing at a higher threshold. Log its first occurrence
+            // once (so it isn't silently absent from both the log and the JSON payload) and
+            // count it so the caller can report e.g. "10 of 14 categories shown" instead of
+            // truncating without a trace.
+            eprintln!(
+                "[WAL WARN] replay execution error (new category dropped, cap={sample_cap} \
+                 reached): {err_str} | cypher: {cypher_preview}"
+            );
+            stats.failed_sample_categories_dropped += 1;
         }
     }
 }
@@ -927,5 +1018,96 @@ mod replay_tests {
             ..Default::default()
         };
         assert_eq!(resolve_batch_size(&opts).unwrap(), 256);
+    }
+
+    fn zero_stats() -> ReplayStats {
+        ReplayStats {
+            lines_replayed: 0,
+            unrecognised_lines: 0,
+            failed_lines: 0,
+            unparseable_lines: 0,
+            failed_samples: Vec::new(),
+            files_read: 0,
+            indexes_created: 0,
+            match_prefixed_replayed: 0,
+            legacy_skipped_lines: 0,
+            fidelity_warning: None,
+            match_prefixed_no_op: 0,
+            match_delete_no_op: 0,
+            seq_regressions: 0,
+            failed_sample_categories_dropped: 0,
+        }
+    }
+
+    /// FR-008/SC-003: a wholly-unrecognised WAL (`total` driven entirely by
+    /// `unrecognised_lines`) must not leave the denominator at 0 — it must warn.
+    #[test]
+    fn test_compute_fidelity_warning_all_unrecognised() {
+        let stats = ReplayStats {
+            unrecognised_lines: 5,
+            ..zero_stats()
+        };
+        let warning = compute_fidelity_warning(&stats, 0.10);
+        assert!(
+            warning.is_some(),
+            "a wholly-unrecognised WAL must produce a fidelity_warning, not a zero-denominator no-op"
+        );
+        let msg = warning.unwrap();
+        assert!(
+            msg.contains("unrecognised=5"),
+            "message must break down bucket counts so an operator can tell 'wrong directory' \
+             (unrecognised) from 'schema is broken' (failed/no-op): {msg}"
+        );
+    }
+
+    /// FR-008/SC-003: same as above but for `unparseable_lines` (corrupt JSON), the other
+    /// counter defect C names.
+    #[test]
+    fn test_compute_fidelity_warning_all_unparseable() {
+        let stats = ReplayStats {
+            unparseable_lines: 5,
+            ..zero_stats()
+        };
+        assert!(
+            compute_fidelity_warning(&stats, 0.10).is_some(),
+            "a wholly-unparseable WAL must produce a fidelity_warning"
+        );
+    }
+
+    /// SC-004 regression guard: a fully healthy replay (zero failures/unrecognised/unparseable)
+    /// must not warn.
+    #[test]
+    fn test_compute_fidelity_warning_healthy_replay_none() {
+        let stats = ReplayStats {
+            lines_replayed: 100,
+            ..zero_stats()
+        };
+        assert!(compute_fidelity_warning(&stats, 0.10).is_none());
+    }
+
+    /// SC-004 / FR-009 regression guard: `legacy_skipped_lines` alone must never push a replay
+    /// over the warning threshold — it stays excluded from both sides of the ratio, unchanged by
+    /// the FR-008 fix.
+    #[test]
+    fn test_compute_fidelity_warning_legacy_skip_only_none() {
+        let stats = ReplayStats {
+            legacy_skipped_lines: 1000,
+            ..zero_stats()
+        };
+        assert!(
+            compute_fidelity_warning(&stats, 0.10).is_none(),
+            "legacy_skipped_lines must not by itself trigger a fidelity_warning"
+        );
+    }
+
+    /// Regression guard for the pre-existing `match_delete_no_op` exclusion (ADR-0026): it must
+    /// stay excluded from both sides of the ratio, same as `legacy_skipped_lines`.
+    #[test]
+    fn test_compute_fidelity_warning_match_delete_no_op_only_none() {
+        let stats = ReplayStats {
+            match_delete_no_op: 1000,
+            ..zero_stats()
+        };
+        assert!(compute_fidelity_warning(&stats, 0.10).is_none());
     }
 }
