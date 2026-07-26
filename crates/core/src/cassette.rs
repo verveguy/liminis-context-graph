@@ -241,7 +241,10 @@ impl Extractor for RecordingExtractor {
         let request = classify_entities_request_value(entities, allowed_types);
         let key = request_key(&request);
         Box::pin(async move {
-            let result = self.inner.classify_entities(entities, allowed_types).await?;
+            let result = self
+                .inner
+                .classify_entities(entities, allowed_types)
+                .await?;
             let response = serde_json::to_value(&result)?;
             self.record("classify_entities", key, request, &response)?;
             Ok(result)
@@ -299,7 +302,10 @@ impl ReplayingExtractor {
                     i + 1
                 ))
             })?;
-            index.entry(record.key).or_default().push_back(record.response);
+            index
+                .entry(record.key)
+                .or_default()
+                .push_back(record.response);
         }
 
         Ok(Self {
@@ -490,7 +496,10 @@ mod tests {
         let inner: Arc<dyn Extractor> = Arc::new(crate::extractor::MockExtractor);
         let recorder = RecordingExtractor::new(inner, "mock", "mock-model", Arc::clone(&writer));
 
-        let result = recorder.extract(opts("Alice works at Acme.")).await.unwrap();
+        let result = recorder
+            .extract(opts("Alice works at Acme."))
+            .await
+            .unwrap();
         assert_eq!(result.entities.len(), 2);
 
         let replayer = ReplayingExtractor::load(&path).unwrap();
@@ -511,10 +520,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
 
         let replayer = ReplayingExtractor::load(&path).unwrap();
-        let err = replayer
-            .extract(opts("never recorded"))
-            .await
-            .unwrap_err();
+        let err = replayer.extract(opts("never recorded")).await.unwrap_err();
         assert!(
             matches!(err, Error::CassetteMiss(_)),
             "expected CassetteMiss, got {err:?}"
