@@ -1091,7 +1091,6 @@ async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
         "indices_built flag must be false after a genuine build failure"
     );
 }
-}
 
 // ── FR-005: non-empty-database guard for from_seq: 0 rebuilds (issue #239) ────────────────────
 
@@ -1171,7 +1170,13 @@ async fn test_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
 
     let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
 
-    let v = dispatch(30, "knowledge_rebuild_from_wal", json!({}), Arc::clone(&state)).await;
+    let v = dispatch(
+        30,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
 
     assert!(
         v.get("error").is_some(),
@@ -1249,7 +1254,7 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
         let status = status_v["result"]["status"].as_str().unwrap_or("?");
         if status == "completed" {
             assert_eq!(
-                status_v["result"]["failed_lines"], 0,
+                status_v["result"]["result"]["failed_lines"], 0,
                 "clean rebuild after force_clear must have zero duplicate-key failures: {status_v}"
             );
             break;
@@ -1261,7 +1266,10 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
     }
 
     // The stale pre-existing entity must be gone; only the WAL-replayed entity remains.
-    let db_after = state.db.load_full().expect("db must be present after clear+rebuild");
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
     let conn = db_after.connect().unwrap();
     assert!(
         conn.get_entity_by_uuid("stale-entity-to-be-cleared")
@@ -1270,7 +1278,9 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
         "force_clear must have removed the stale pre-existing entity"
     );
     assert!(
-        conn.get_entity_by_uuid("force-clear-entity").unwrap().is_some(),
+        conn.get_entity_by_uuid("force-clear-entity")
+            .unwrap()
+            .is_some(),
         "the WAL-replayed entity must exist after the clean rebuild"
     );
 }
