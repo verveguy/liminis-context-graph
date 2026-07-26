@@ -56,6 +56,20 @@ impl LlmRouter {
     }
 
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
+        Self::from_env_with(sink, |extractor, _model_name| extractor)
+    }
+
+    /// Like [`Self::from_env`], but passes each constructed leaf extractor (primary, and
+    /// fallback if configured) through `wrap` — along with its model name — before storing it.
+    /// `from_env` delegates here with an identity closure, so its behavior is byte-for-byte
+    /// unchanged; this seam exists so a caller (e.g. `main.rs` under `LCG_RECORD_LLM`) can wrap
+    /// each leaf in a `RecordingExtractor` individually, producing distinguishable,
+    /// correctly-attributed cassette entries on primary→fallback failover (#232 User Story 4)
+    /// without duplicating this function's `LCG_EXTRACTION_LLM` parsing logic elsewhere.
+    pub fn from_env_with(
+        sink: Arc<dyn TelemetrySink>,
+        wrap: impl Fn(Arc<dyn Extractor>, &str) -> Arc<dyn Extractor>,
+    ) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         // deprecated: remove in Phase B (see #59)
         let spec = lcg_env_var("LCG_EXTRACTION_LLM", "GRAPHITI_EXTRACTION_LLM")
@@ -68,18 +82,24 @@ impl LlmRouter {
             .to_string();
         let fallback_model = parts.next().map(str::to_string);
 
-        let primary: Arc<dyn Extractor> = Arc::new(AnthropicExtractor::with_model(
-            primary_model.clone(),
-            api_key.clone(),
-            Arc::clone(&sink),
-        ));
+        let primary: Arc<dyn Extractor> = wrap(
+            Arc::new(AnthropicExtractor::with_model(
+                primary_model.clone(),
+                api_key.clone(),
+                Arc::clone(&sink),
+            )),
+            &primary_model,
+        );
         let fallback_model_name = fallback_model.clone().unwrap_or_default();
         let fallback: Option<Arc<dyn Extractor>> = fallback_model.map(|m| {
-            Arc::new(AnthropicExtractor::with_model(
-                m,
-                api_key,
-                Arc::clone(&sink),
-            )) as Arc<dyn Extractor>
+            wrap(
+                Arc::new(AnthropicExtractor::with_model(
+                    m.clone(),
+                    api_key,
+                    Arc::clone(&sink),
+                )),
+                &m,
+            )
         });
 
         Self {

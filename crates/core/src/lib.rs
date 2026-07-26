@@ -1,6 +1,7 @@
 pub mod app_state;
 pub mod backfill;
 pub mod canonicalize;
+pub mod cassette;
 pub mod corrections;
 pub mod db;
 pub mod dedup_adapter;
@@ -30,6 +31,7 @@ pub mod wal;
 pub(crate) mod wal_exec;
 
 pub use app_state::AppState;
+pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
 pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};

@@ -13,6 +13,7 @@ use std::time::Duration;
 use cli::{CliMode, EmbedderFlag, ExtractorFlag};
 use lcg_core::{
     app_state::AppState,
+    cassette::{CassetteWriter, RecordingExtractor, ReplayingExtractor},
     db::Db,
     embedder::{is_transport_error, Embedder, OaiEmbedder},
     env::lcg_env_var,
@@ -278,113 +279,185 @@ async fn bootstrap_app_state(
         )),
     };
 
-    // ── Extractor resolution (FR-006/FR-007) ───────────────────────────────────────
-    // Priority: explicit CLI flag (always selects the local adapter, regardless of
-    // ANTHROPIC_API_KEY) > ANTHROPIC_API_KEY set (Anthropic path, byte-for-byte unchanged,
-    // FR-015) > LCG_EXTRACTION_URL env > fatal error (FR-011). Unlike the embedder, there is no
-    // live probe here — extraction has no response shape to auto-detect, and a blocking
-    // Foundation-Models warm-up call would regress startup latency for no benefit. Reachability
-    // failures at call time surface through the normal `Extractor` error path (FR-010), not here.
-    //
-    // Deliberately NOT mirrored from the embedder: no default-UDS-socket auto-detection tier.
-    // The bundled macOS sidecar's /v1/chat/completions route (Apple Foundation Models) was
-    // evaluated in prior work and found inadequate for entity/relationship extraction —
-    // insufficient context window and capability (see #227/#228). Silently selecting it just
-    // because the socket exists and no ANTHROPIC_API_KEY is set would trade a false "requires a
-    // hosted key" claim for an equally misleading "fully local extraction just works" one.
-    // Selecting that same sidecar remains possible — via explicit `--extractor-uds` or
-    // `LCG_EXTRACTION_URL` — it is simply never the silent default (see PR #223 review
-    // discussion).
-    let extractor_model =
-        std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
-
-    enum ResolvedExtractor {
-        Anthropic,
-        Http(String),
-        #[cfg(unix)]
-        Uds(String),
+    // ── Record/replay cassette resolution (#232, FR-002/FR-007) ────────────────────
+    // Read before any provider resolution below: replay mode bypasses provider resolution
+    // entirely (FR-002 — zero network access, no credentials needed, by construction — see
+    // `ReplayingExtractor`), and record mode wraps whichever provider is resolved. Checked for
+    // mutual exclusivity up front so a misconfigured combination fails fast and loudly rather
+    // than silently picking one mode over the other.
+    let record_llm_path = std::env::var("LCG_RECORD_LLM").ok();
+    let replay_llm_path = std::env::var("LCG_REPLAY_LLM").ok();
+    if record_llm_path.is_some() && replay_llm_path.is_some() {
+        return Err(
+            "LCG_RECORD_LLM and LCG_REPLAY_LLM cannot both be set — recording captures a live \
+             extraction pass to a cassette, replay serves calls from one with no network access; \
+             these are mutually exclusive modes."
+                .into(),
+        );
     }
 
-    let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
-        Some(ExtractorFlag::Uds(p)) => (Some(p), None),
-        Some(ExtractorFlag::Http(u)) => (None, Some(u)),
-        None => (None, None),
-    };
+    let extractor: Arc<dyn Extractor> = if let Some(path) = replay_llm_path {
+        eprintln!("extractor: provider=cassette-replay, path={path}");
+        Arc::new(ReplayingExtractor::load(&path)?)
+    } else {
+        // ── Extractor resolution (FR-006/FR-007) ───────────────────────────────────────
+        // Priority: explicit CLI flag (always selects the local adapter, regardless of
+        // ANTHROPIC_API_KEY) > ANTHROPIC_API_KEY set (Anthropic path, byte-for-byte unchanged,
+        // FR-015) > LCG_EXTRACTION_URL env > fatal error (FR-011). Unlike the embedder, there is
+        // no live probe here — extraction has no response shape to auto-detect, and a blocking
+        // Foundation-Models warm-up call would regress startup latency for no benefit.
+        // Reachability failures at call time surface through the normal `Extractor` error path
+        // (FR-010), not here.
+        //
+        // Deliberately NOT mirrored from the embedder: no default-UDS-socket auto-detection
+        // tier. The bundled macOS sidecar's /v1/chat/completions route (Apple Foundation
+        // Models) was evaluated in prior work and found inadequate for entity/relationship
+        // extraction — insufficient context window and capability (see #227/#228). Silently
+        // selecting it just because the socket exists and no ANTHROPIC_API_KEY is set would
+        // trade a false "requires a hosted key" claim for an equally misleading "fully local
+        // extraction just works" one. Selecting that same sidecar remains possible — via
+        // explicit `--extractor-uds` or `LCG_EXTRACTION_URL` — it is simply never the silent
+        // default (see PR #223 review discussion).
+        let extractor_model =
+            std::env::var("LCG_EXTRACTION_MODEL").unwrap_or_else(|_| "local".to_string());
 
-    let resolved_extractor = if let Some(uds_path) = extractor_cli_uds {
-        #[cfg(unix)]
-        {
-            if !std::path::Path::new(&uds_path).exists() {
+        enum ResolvedExtractor {
+            Anthropic,
+            Http(String),
+            #[cfg(unix)]
+            Uds(String),
+        }
+
+        let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
+            Some(ExtractorFlag::Uds(p)) => (Some(p), None),
+            Some(ExtractorFlag::Http(u)) => (None, Some(u)),
+            None => (None, None),
+        };
+
+        let resolved_extractor = if let Some(uds_path) = extractor_cli_uds {
+            #[cfg(unix)]
+            {
+                if !std::path::Path::new(&uds_path).exists() {
+                    return Err(format!(
+                        "extractor UDS socket not found at {uds_path}. \
+                         Ensure the liminis-inference sidecar is running."
+                    )
+                    .into());
+                }
+                ResolvedExtractor::Uds(uds_path)
+            }
+            #[cfg(not(unix))]
+            {
+                return Err("--extractor-uds is only supported on Unix platforms".into());
+            }
+        } else if let Some(http_url) = extractor_cli_http {
+            let host_part = http_url
+                .strip_prefix("https://")
+                .or_else(|| http_url.strip_prefix("http://"));
+            // A leading '/' right after the scheme (e.g. "http:///path") means the host segment
+            // is empty even though the raw suffix isn't — split off the host before checking.
+            let has_host = host_part
+                .map(|h| !h.split('/').next().unwrap_or("").is_empty())
+                .unwrap_or(false);
+            if !has_host {
                 return Err(format!(
-                    "extractor UDS socket not found at {uds_path}. \
-                     Ensure the liminis-inference sidecar is running."
+                    "Invalid --extractor-http URL: {http_url:?}. \
+                     Must start with http:// or https:// and include a host."
                 )
                 .into());
             }
-            ResolvedExtractor::Uds(uds_path)
-        }
-        #[cfg(not(unix))]
-        {
-            return Err("--extractor-uds is only supported on Unix platforms".into());
-        }
-    } else if let Some(http_url) = extractor_cli_http {
-        let host_part = http_url
-            .strip_prefix("https://")
-            .or_else(|| http_url.strip_prefix("http://"));
-        // A leading '/' right after the scheme (e.g. "http:///path") means the host segment
-        // is empty even though the raw suffix isn't — split off the host before checking.
-        let has_host = host_part
-            .map(|h| !h.split('/').next().unwrap_or("").is_empty())
-            .unwrap_or(false);
-        if !has_host {
-            return Err(format!(
-                "Invalid --extractor-http URL: {http_url:?}. \
-                 Must start with http:// or https:// and include a host."
-            )
-            .into());
-        }
-        ResolvedExtractor::Http(http_url)
-    } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-        // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
-        // reachable local sidecar when no explicit local-endpoint flag was given.
-        ResolvedExtractor::Anthropic
-    } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
-        ResolvedExtractor::Http(url)
-    } else {
-        return Err(
-            "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
-             LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into local \
-             extraction with --extractor-uds <path>, --extractor-http <url>, or \
-             LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
-             bundled macOS sidecar — note its Foundation Models backend is not recommended for \
-             extraction quality; see docs/adr/0041-local-openai-compatible-extraction-adapter.md)."
-                .into(),
-        );
-    };
+            ResolvedExtractor::Http(http_url)
+        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+            // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
+            // reachable local sidecar when no explicit local-endpoint flag was given.
+            ResolvedExtractor::Anthropic
+        } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
+            ResolvedExtractor::Http(url)
+        } else {
+            return Err(
+                "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
+                 LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into \
+                 local extraction with --extractor-uds <path>, --extractor-http <url>, or \
+                 LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
+                 bundled macOS sidecar — note its Foundation Models backend is not recommended \
+                 for extraction quality; \
+                 see docs/adr/0041-local-openai-compatible-extraction-adapter.md)."
+                    .into(),
+            );
+        };
 
-    let extractor: Arc<dyn Extractor> = match resolved_extractor {
-        ResolvedExtractor::Anthropic => {
-            eprintln!(
-                "extractor: provider=anthropic, transport=http, endpoint={ANTHROPIC_API_URL}"
-            );
-            Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink)))
-        }
-        ResolvedExtractor::Http(url) => {
-            let ext = OaiExtractor::new_http(url, extractor_model, Arc::clone(&telemetry_sink));
-            let (transport_label, endpoint) = ext.transport_info();
-            eprintln!(
-                "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
-            );
-            Arc::new(ext)
-        }
-        #[cfg(unix)]
-        ResolvedExtractor::Uds(path) => {
-            let ext = OaiExtractor::new_uds(path, extractor_model, Arc::clone(&telemetry_sink));
-            let (transport_label, endpoint) = ext.transport_info();
-            eprintln!(
-                "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
-            );
-            Arc::new(ext)
+        // record_llm_path, if set, is applied per-arm below: the Anthropic arm wraps each
+        // LlmRouter leaf individually (via `from_env_with`) so a primary→fallback failover
+        // still produces two distinguishable, correctly-attributed cassette entries (#232 User
+        // Story 4); the local (Http/Uds) arms wrap the single bare `OaiExtractor` directly.
+        match resolved_extractor {
+            ResolvedExtractor::Anthropic => {
+                eprintln!(
+                    "extractor: provider=anthropic, transport=http, endpoint={ANTHROPIC_API_URL}"
+                );
+                match &record_llm_path {
+                    Some(path) => {
+                        let writer = Arc::new(CassetteWriter::open(path)?);
+                        eprintln!("extractor: recording cassette to {path}");
+                        Arc::new(LlmRouter::from_env_with(
+                            Arc::clone(&telemetry_sink),
+                            move |inner, model_name| {
+                                Arc::new(RecordingExtractor::new(
+                                    inner,
+                                    "anthropic",
+                                    model_name,
+                                    Arc::clone(&writer),
+                                ))
+                            },
+                        ))
+                    }
+                    None => Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink))),
+                }
+            }
+            ResolvedExtractor::Http(url) => {
+                let ext = OaiExtractor::new_http(url, extractor_model, Arc::clone(&telemetry_sink));
+                let (transport_label, endpoint) = ext.transport_info();
+                let model_name = ext.model_name().to_string();
+                eprintln!(
+                    "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                );
+                match &record_llm_path {
+                    Some(path) => {
+                        let writer = Arc::new(CassetteWriter::open(path)?);
+                        eprintln!("extractor: recording cassette to {path}");
+                        Arc::new(RecordingExtractor::new(
+                            Arc::new(ext),
+                            "local",
+                            model_name,
+                            writer,
+                        ))
+                    }
+                    None => Arc::new(ext),
+                }
+            }
+            #[cfg(unix)]
+            ResolvedExtractor::Uds(uds_path) => {
+                let ext =
+                    OaiExtractor::new_uds(uds_path, extractor_model, Arc::clone(&telemetry_sink));
+                let (transport_label, endpoint) = ext.transport_info();
+                let model_name = ext.model_name().to_string();
+                eprintln!(
+                    "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                );
+                match &record_llm_path {
+                    Some(path) => {
+                        let writer = Arc::new(CassetteWriter::open(path)?);
+                        eprintln!("extractor: recording cassette to {path}");
+                        Arc::new(RecordingExtractor::new(
+                            Arc::new(ext),
+                            "local",
+                            model_name,
+                            writer,
+                        ))
+                    }
+                    None => Arc::new(ext),
+                }
+            }
         }
     };
 
