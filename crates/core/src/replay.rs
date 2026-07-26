@@ -987,7 +987,16 @@ fn flush_batch(
     for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
         if let Some(cancel) = cancel_fn {
             if cancel() {
-                conn.exec_transaction_control("ROLLBACK")?;
+                // Cancellation is a normal outcome, not an exception — unlike the genuine
+                // execute-failure path below, the engine has not necessarily already cleared
+                // its own transaction state, so an explicit ROLLBACK is issued here. But a
+                // ROLLBACK failure (e.g. the engine cleared state some other way) must not
+                // abort the whole replay and discard `stats`/`last_committed_seq` for every
+                // transaction already committed earlier in this run — the batch is being
+                // discarded either way, so this is logged and treated as non-fatal.
+                if let Err(e) = conn.exec_transaction_control("ROLLBACK") {
+                    eprintln!("[WAL WARN] ROLLBACK after cancellation failed (non-fatal): {e}");
+                }
                 stats.rolled_back_lines += batch_len as u64;
                 stats.transactions_rolled_back += 1;
                 *cache = None;
