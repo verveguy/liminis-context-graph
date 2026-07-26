@@ -989,7 +989,7 @@ fn flush_batch(
     // template to reuse — settled, not the initial attempt, so a mid-batch probe→unprobed
     // fallback above is what gets cached (see this function's doc comment).
     *cache = Some(PreparedCache {
-        template: batch.template.clone(),
+        template: std::mem::take(&mut batch.template),
         use_probe,
         statement: prepared,
     });
