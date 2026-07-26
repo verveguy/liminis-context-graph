@@ -35,12 +35,16 @@ jobs:
       # extract() calls against the same model, not a single reused result. Judged F1
       # should land near the noise floor; strict-string F1 should be materially lower.
       - name: run baseline-vs-itself smoke pass
+        env:
+          # Routed through an env var rather than interpolated directly into the script,
+          # so a crafted workflow_dispatch input can't inject shell syntax.
+          EVAL_LIMIT: ${{ inputs.limit || '5' }}
         run: |
           cargo run --release -p lcg-eval -- \
             --backend baseline=anthropic \
             --backend candidate=anthropic \
             --reference baseline \
-            --limit "${{ inputs.limit || '5' }}" \
+            --limit "$EVAL_LIMIT" \
             --judge-cache eval_judge_cache.jsonl \
             --output eval_report.json \
             2>&1 | tee eval_report.txt
