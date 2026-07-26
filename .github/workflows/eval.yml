@@ -1,0 +1,103 @@
+name: Extraction-Quality Eval
+
+# workflow_dispatch-only (FR-011): this harness is not run on every PR — it costs real
+# money (LLM-as-judge calls against a hosted model) and isn't part of the correctness
+# gate. This job runs a small baseline-vs-itself smoke pass to keep SC-004's noise-floor
+# property (judged F1 near-perfect, strict F1 materially lower on pure wording variance)
+# checked on demand. The full hosted-vs-local model comparison is #248's scope, a
+# maintainer-run operation requiring a local model server and real spend — not this job.
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Number of corpus chunks for the smoke pass'
+        required: false
+        default: '5'
+
+jobs:
+  eval-smoke:
+    name: eval (baseline-vs-itself smoke pass)
+    runs-on: ubuntu-latest
+    env:
+      LBUG_BUILD_FROM_SOURCE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # No step in this job pushes or otherwise writes back to the repo, so don't
+          # leave the checkout token persisted in git config for later steps to find.
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build lcg-eval
+        run: cargo build --release -p lcg-eval
+
+      - name: require ANTHROPIC_API_KEY
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY is required for the judged SC-004 smoke pass" >&2
+            exit 1
+          fi
+
+      # SC-004: same backend as both "reference" and "candidate" — two independent
+      # extract() calls against the same model, not a single reused result. Judged F1
+      # should land near 1.0 (the judge sees past pure wording variance); strict-string
+      # F1 should be materially lower (it's the wording-variance noise floor itself).
+      #
+      # ANTHROPIC_API_KEY is scoped to just this step (not the job-level env), since no
+      # other step in this job needs it.
+      - name: run baseline-vs-itself smoke pass
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Routed through an env var rather than interpolated directly into the script,
+          # so a crafted workflow_dispatch input can't inject shell syntax.
+          EVAL_LIMIT: ${{ inputs.limit || '5' }}
+        run: |
+          set -o pipefail
+          cargo run --release -p lcg-eval -- \
+            --backend baseline=anthropic \
+            --backend candidate=anthropic \
+            --reference baseline \
+            --limit "$EVAL_LIMIT" \
+            --judge-cache eval_judge_cache.jsonl \
+            --output eval_report.json \
+            2>&1 | tee eval_report.txt
+
+      - name: enforce SC-004 noise-floor property
+        run: |
+          candidate=$(jq -c '.candidates[] | select(.backend_name == "candidate")' eval_report.json)
+          judged=$(echo "$candidate" | jq -r '.judged_entity_f1')
+          strict=$(echo "$candidate" | jq -r '.strict_entity_f1')
+          echo "judged_entity_f1=$judged strict_entity_f1=$strict"
+          # Hard-fail only on a clearly broken judge path (missing score, or a judge score
+          # so low it can't be sampling noise) — a default 5-chunk smoke pass is too small
+          # a sample to hard-gate the "materially lower" comparison without risking flaky
+          # failures on a legitimate run, so that property is a warning annotation, not a
+          # blocking check.
+          if [ "$judged" = "null" ]; then
+            echo "judged_entity_f1 is null — ANTHROPIC_API_KEY wasn't picked up by the judge client" >&2
+            exit 1
+          fi
+          awk -v j="$judged" -v s="$strict" 'BEGIN {
+            if (j < 0.5) { print "judged_entity_f1 " j " is implausibly low for a baseline-vs-itself comparison"; exit 1 }
+            if (j - s < 0.05) { print "::warning::judged_entity_f1 " j " is not materially above strict_entity_f1 " s " on this smoke sample (expected on a small/noisy sample; re-run with a larger --limit if this persists)" }
+            exit 0
+          }'
+
+      - name: upload eval report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report-${{ github.sha }}
+          path: |
+            eval_report.txt
+            eval_report.json
+            eval_judge_cache.jsonl
+          retention-days: 30
