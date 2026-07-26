@@ -3,9 +3,12 @@
 //! previously-scored comparisons — this is what makes repeated runs affordable (judge
 //! calls cost real money against a hosted model).
 //!
-//! The cache key scheme is ported verbatim from the prior Python harness:
-//! `sha256(json({"cand": ..., "prompt": ..., "ref": ...}, sort_keys=True))[:24]`. Getting
-//! this exact scheme right (not a "Rust-idiomatic" redesign) is load-bearing for SC-003.
+//! The cache key scheme is ported from the prior Python harness's
+//! `sha256(json({"cand": ..., "prompt": ..., "ref": ...}, sort_keys=True))[:24]`, extended
+//! with a `judge_model` field: this harness (unlike the ported original, which pinned one
+//! fixed judge model) exposes `--judge-model` as a run-time choice, so the key must include
+//! it — otherwise switching judge models would silently reuse another model's verdicts
+//! from the same cache file.
 
 use std::collections::HashMap;
 use std::fs::OpenOptions;
@@ -51,10 +54,16 @@ fn canonical_json(value: &Value) -> Value {
     }
 }
 
-/// `sha256(json({"cand", "prompt", "ref"}, sort_keys=True))[:24]` — verbatim key scheme.
-pub fn cache_key(prompt_name: &str, reference: &Value, candidate: &Value) -> String {
+/// `sha256(json({"cand", "judge_model", "prompt", "ref"}, sort_keys=True))[:24]`.
+pub fn cache_key(
+    prompt_name: &str,
+    judge_model: &str,
+    reference: &Value,
+    candidate: &Value,
+) -> String {
     let value = json!({
         "cand": candidate,
+        "judge_model": judge_model,
         "prompt": prompt_name,
         "ref": reference,
     });
@@ -122,19 +131,21 @@ impl JudgeCache {
         self.entries.lock().unwrap().get(key).cloned()
     }
 
-    /// Records a freshly-judged verdict both in memory and durably on disk (append-only,
+    /// Records a freshly-judged verdict both durably on disk and in memory (append-only,
     /// matching `CassetteWriter`'s convention — re-opening never truncates). The lock is
-    /// held across the file write too, not just the in-memory insert, so concurrent
-    /// callers can't interleave partial JSONL lines on disk.
+    /// held across the whole call, not just the in-memory insert, so concurrent callers
+    /// can't interleave partial JSONL lines on disk. The disk write happens *before* the
+    /// in-memory insert: if the write fails, the verdict must not become visible to `get`,
+    /// or a later cache hit in this same process would report success for a comparison
+    /// that was never actually persisted.
     pub fn insert(&self, key: String, verdict: JudgeVerdict) -> Result<(), String> {
         let mut entries = self.entries.lock().unwrap();
-        entries.insert(key.clone(), verdict.clone());
 
         let entry = CacheEntry {
-            key,
-            matched: verdict.matched,
-            unmatched_reference: verdict.unmatched_reference,
-            unmatched_candidate: verdict.unmatched_candidate,
+            key: key.clone(),
+            matched: verdict.matched.clone(),
+            unmatched_reference: verdict.unmatched_reference.clone(),
+            unmatched_candidate: verdict.unmatched_candidate.clone(),
         };
         let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
 
@@ -149,6 +160,8 @@ impl JudgeCache {
             .open(&self.path)
             .map_err(|e| e.to_string())?;
         writeln!(file, "{line}").map_err(|e| e.to_string())?;
+
+        entries.insert(key, verdict);
         Ok(())
     }
 }
@@ -162,11 +175,13 @@ mod tests {
     fn cache_key_is_stable_and_order_independent_of_construction() {
         let a = cache_key(
             "extract_nodes.extract_text",
+            "claude-sonnet-4-6",
             &json!({"x": 1, "y": 2}),
             &json!({}),
         );
         let b = cache_key(
             "extract_nodes.extract_text",
+            "claude-sonnet-4-6",
             &json!({"y": 2, "x": 1}),
             &json!({}),
         );
@@ -175,21 +190,40 @@ mod tests {
 
     #[test]
     fn cache_key_changes_with_prompt_name() {
-        let a = cache_key("extract_nodes.extract_text", &json!({}), &json!({}));
-        let b = cache_key("extract_edges.default", &json!({}), &json!({}));
+        let a = cache_key(
+            "extract_nodes.extract_text",
+            "claude-sonnet-4-6",
+            &json!({}),
+            &json!({}),
+        );
+        let b = cache_key(
+            "extract_edges.default",
+            "claude-sonnet-4-6",
+            &json!({}),
+            &json!({}),
+        );
         assert_ne!(a, b);
     }
 
     #[test]
     fn cache_key_changes_with_reference_or_candidate() {
-        let a = cache_key("p", &json!({"a": 1}), &json!({}));
-        let b = cache_key("p", &json!({"a": 2}), &json!({}));
+        let a = cache_key("p", "claude-sonnet-4-6", &json!({"a": 1}), &json!({}));
+        let b = cache_key("p", "claude-sonnet-4-6", &json!({"a": 2}), &json!({}));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn cache_key_changes_with_judge_model() {
+        // FR-005/SC-003's cache scope includes judge_model: switching --judge-model must
+        // not silently reuse another model's cached verdicts.
+        let a = cache_key("p", "claude-sonnet-4-6", &json!({}), &json!({}));
+        let b = cache_key("p", "claude-haiku-4-5-20251001", &json!({}), &json!({}));
         assert_ne!(a, b);
     }
 
     #[test]
     fn cache_key_is_24_hex_chars() {
-        let k = cache_key("p", &json!({}), &json!({}));
+        let k = cache_key("p", "claude-sonnet-4-6", &json!({}), &json!({}));
         assert_eq!(k.len(), 24);
         assert!(k.chars().all(|c| c.is_ascii_hexdigit()));
     }
