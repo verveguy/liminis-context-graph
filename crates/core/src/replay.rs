@@ -123,6 +123,13 @@ pub struct ReplayStats {
     /// ordering miss into new data loss) but the regression is counted and logged so it is never
     /// silent.
     pub seq_regressions: u64,
+    /// Count of distinct `(template, error)` failure categories that could not be recorded in
+    /// `failed_samples` because `sample_cap` distinct categories were already stored. FR-001–003
+    /// eliminated the old row-capping defect where one bad template could hide every other
+    /// category, but a WAL with more than `sample_cap` genuinely distinct failure categories can
+    /// still drop some at the (unchanged) default cap of 10 — this counter makes that truncation
+    /// visible (e.g. "10 of 14 categories shown") instead of silent.
+    pub failed_sample_categories_dropped: u64,
 }
 
 impl ReplayStats {
@@ -244,6 +251,7 @@ impl WalReplayer {
             match_prefixed_no_op: 0,
             match_delete_no_op: 0,
             seq_regressions: 0,
+            failed_sample_categories_dropped: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -592,10 +600,22 @@ fn compute_fidelity_warning(stats: &ReplayStats, threshold: f64) -> Option<Strin
         + stats.unparseable_lines;
     let ratio = ineffective as f64 / total as f64;
     if ratio > threshold {
+        // Break down the bucket counts rather than lumping them under one "failed or had no
+        // effect" label: that phrasing undersells FR-008's motivating case (a WAL pointed at the
+        // wrong directory, or in an incompatible format) — an all-`unrecognised_lines` WAL is
+        // not "failed", it was never recognised as a mutation at all, and an all-`unparseable_lines`
+        // WAL was never even parsed. The breakdown lets an operator tell "the schema is broken"
+        // (failed/no-op) from "you pointed me at the wrong directory" (unrecognised/unparseable)
+        // at a glance instead of having to cross-reference the surrounding JSON fields.
         Some(format!(
-            "{:.1}% of mutations failed or had no effect (threshold: {:.1}%); rebuilt graph may be incomplete",
+            "{:.1}% of mutations failed or had no effect (threshold: {:.1}%); rebuilt graph may be \
+             incomplete (failed={}, no-op={}, unrecognised={}, unparseable={})",
             ratio * 100.0,
             threshold * 100.0,
+            stats.failed_lines,
+            stats.match_prefixed_no_op,
+            stats.unrecognised_lines,
+            stats.unparseable_lines,
         ))
     } else {
         None
@@ -923,8 +943,13 @@ fn classify_replay_failure(
         eprintln!("[WAL SKIP] legacy-schema mutation: {err_str} | cypher: {cypher_preview}");
         stats.legacy_skipped_lines += 1;
     } else {
-        eprintln!("[WAL WARN] replay execution error: {err_str} | cypher: {cypher_preview}");
         stats.failed_lines += 1;
+        // Log only on a category's first occurrence, not once per row: the JSON `failed_samples`
+        // payload was already deduplicated by (template, error) (FR-001), but before this, the
+        // `eprintln!` fired unconditionally per row — so a template failing on every row of a
+        // multi-hour replay still flooded the service log (the primary post-mortem artifact for
+        // a long-running rebuild) with millions of byte-identical `[WAL WARN]` lines even though
+        // the JSON response no longer did.
         if let Some(existing) = stats
             .failed_samples
             .iter_mut()
@@ -932,12 +957,25 @@ fn classify_replay_failure(
         {
             existing.count += 1;
         } else if stats.failed_samples.len() < sample_cap {
+            eprintln!("[WAL WARN] replay execution error: {err_str} | cypher: {cypher_preview}");
             stats.failed_samples.push(FailureSample {
                 cypher: cypher_preview,
                 error: err_str.to_string(),
                 count: 1,
                 template: template.to_string(),
             });
+        } else {
+            // A genuinely new (template, error) category, but `sample_cap` distinct categories
+            // are already stored — this is the same "one category hides another" failure mode
+            // FR-001 targeted, just resurfacing at a higher threshold. Log its first occurrence
+            // once (so it isn't silently absent from both the log and the JSON payload) and
+            // count it so the caller can report e.g. "10 of 14 categories shown" instead of
+            // truncating without a trace.
+            eprintln!(
+                "[WAL WARN] replay execution error (new category dropped, cap={sample_cap} \
+                 reached): {err_str} | cypher: {cypher_preview}"
+            );
+            stats.failed_sample_categories_dropped += 1;
         }
     }
 }
@@ -997,6 +1035,7 @@ mod replay_tests {
             match_prefixed_no_op: 0,
             match_delete_no_op: 0,
             seq_regressions: 0,
+            failed_sample_categories_dropped: 0,
         }
     }
 
@@ -1008,9 +1047,16 @@ mod replay_tests {
             unrecognised_lines: 5,
             ..zero_stats()
         };
+        let warning = compute_fidelity_warning(&stats, 0.10);
         assert!(
-            compute_fidelity_warning(&stats, 0.10).is_some(),
+            warning.is_some(),
             "a wholly-unrecognised WAL must produce a fidelity_warning, not a zero-denominator no-op"
+        );
+        let msg = warning.unwrap();
+        assert!(
+            msg.contains("unrecognised=5"),
+            "message must break down bucket counts so an operator can tell 'wrong directory' \
+             (unrecognised) from 'schema is broken' (failed/no-op): {msg}"
         );
     }
 

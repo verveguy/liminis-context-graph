@@ -1337,9 +1337,14 @@ async fn handle_rebuild_from_wal(
         let db_for_check = load_db(&state)?;
         let non_empty = tokio::task::spawn_blocking(move || -> Result<bool, Error> {
             let conn = db_for_check.connect()?;
-            let entity = conn.count_nodes("Entity")?;
-            let episodic = conn.count_nodes("Episodic")?;
-            let relates = conn.count_nodes("RelatesToNode_")?;
+            // An unqueryable label (older/partially-initialised schema missing the table) is
+            // treated as empty, not a hard error — this guard's only job is "is there data I
+            // would collide with?", and erroring here would make the rebuild/recovery tool
+            // unusable in exactly the degraded situation an operator reaches for it (mirrors
+            // recovery.rs's `count_nodes("Episodic").unwrap_or(0)` precedent).
+            let entity = conn.count_nodes("Entity").unwrap_or(0);
+            let episodic = conn.count_nodes("Episodic").unwrap_or(0);
+            let relates = conn.count_nodes("RelatesToNode_").unwrap_or(0);
             Ok(entity > 0 || episodic > 0 || relates > 0)
         })
         .await??;
@@ -1405,9 +1410,18 @@ async fn handle_rebuild_from_wal(
         let shutdown_flag_cancel = state.cancel_token.clone();
         let shutdown_cancelled_inner = Arc::clone(&shutdown_cancelled);
 
-        // Write lock held in async scope; guard released after spawn_blocking completes.
+        // Write lock held in async scope; guard released after spawn_blocking completes. A
+        // dry run takes a *read* guard instead: it never mutates the DB, but it does read it,
+        // and holding no lock at all would let a concurrent `force_clear: true` rebuild delete
+        // the DB files mid-read (`active_writes` doesn't cover this — it only tracks episode
+        // ingest writes, not rebuild reads).
         let _write_guard = if !dry_run {
             Some(state.write_lock.write().await)
+        } else {
+            None
+        };
+        let _read_guard = if dry_run {
+            Some(state.write_lock.read().await)
         } else {
             None
         };
@@ -1498,6 +1512,7 @@ async fn handle_rebuild_from_wal(
             bg_indices_built.store(indices_built, Ordering::Release);
         }
         drop(_write_guard);
+        drop(_read_guard);
 
         state.sink.emit(TelemetryEvent::WalReplayComplete {
             ts_ms: now_ms(),
@@ -1560,6 +1575,7 @@ async fn handle_rebuild_from_wal(
             "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
         });
         if dry_run {
@@ -1585,6 +1601,12 @@ async fn handle_rebuild_from_wal(
 
     // Non-streaming dry_run: run synchronously and return stats immediately
     if dry_run {
+        // A dry run never mutates the DB, but it does read it — hold a *read* guard for the
+        // duration of the replay so a concurrent `force_clear: true` rebuild (which takes
+        // `write_lock.write()` in `clear_db_for_rebuild`) cannot delete the DB files out from
+        // under this in-flight read. `active_writes` doesn't cover this: it only tracks episode
+        // ingest writes, not rebuild reads, so nothing else previously serialized these two.
+        let _read_guard = state.write_lock.read().await;
         let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let replay_started_at = std::time::Instant::now();
@@ -1628,6 +1650,7 @@ async fn handle_rebuild_from_wal(
             "legacy_skipped_lines": stats.legacy_skipped_lines,
             "lines_skipped": stats.lines_skipped(),
             "failed_samples": stats.failed_samples,
+            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
         }));
     }
@@ -1783,6 +1806,7 @@ async fn handle_rebuild_from_wal(
                             "legacy_skipped_lines": stats.legacy_skipped_lines,
                             "lines_skipped": stats.lines_skipped(),
                             "failed_samples": stats.failed_samples,
+                            "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
                             "fidelity_warning": stats.fidelity_warning,
                         });
                         // Dry-run never touches indices (FR-007) — omit the field.
