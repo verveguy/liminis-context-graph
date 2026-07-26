@@ -42,18 +42,3 @@ jobs:
           claude_args: "--allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Safety net: guarantee the review gate always clears even if the agent
-      # posted only a comment. A no-op if a formal review already exists.
-      - name: Ensure a formal review exists
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -m
-          count=$(gh pr view "$PR" --json reviews \
-            --jq '[.reviews[] | select(.author.login=="github-actions" or (.author.login|startswith("claude")))] | length')
-          if [ "${count:-0}" -eq 0 ]; then
-            gh pr review "$PR" --comment --body "🤖 Automated test-repo review (Claude). No blocking issues surfaced by the agent step."
-          fi
