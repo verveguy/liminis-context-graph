@@ -6,6 +6,9 @@ name: Extraction-Quality Eval
 # property (judged F1 near-perfect, strict F1 materially lower on pure wording variance)
 # checked on demand. The full hosted-vs-local model comparison is #248's scope, a
 # maintainer-run operation requiring a local model server and real spend — not this job.
+permissions:
+  contents: read
+
 on:
   workflow_dispatch:
     inputs:
@@ -20,9 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       LBUG_BUILD_FROM_SOURCE: "1"
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # No step in this job pushes or otherwise writes back to the repo, so don't
+          # leave the checkout token persisted in git config for later steps to find.
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -32,6 +38,8 @@ jobs:
         run: cargo build --release -p lcg-eval
 
       - name: require ANTHROPIC_API_KEY
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "ANTHROPIC_API_KEY is required for the judged SC-004 smoke pass" >&2
@@ -42,8 +50,12 @@ jobs:
       # extract() calls against the same model, not a single reused result. Judged F1
       # should land near 1.0 (the judge sees past pure wording variance); strict-string
       # F1 should be materially lower (it's the wording-variance noise floor itself).
+      #
+      # ANTHROPIC_API_KEY is scoped to just this step (not the job-level env), since no
+      # other step in this job needs it.
       - name: run baseline-vs-itself smoke pass
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Routed through an env var rather than interpolated directly into the script,
           # so a crafted workflow_dispatch input can't inject shell syntax.
           EVAL_LIMIT: ${{ inputs.limit || '5' }}
