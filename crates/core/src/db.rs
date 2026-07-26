@@ -168,6 +168,19 @@ impl<'db> Conn<'db> {
         Ok(self.inner.prepare(cypher)?)
     }
 
+    /// Issues a transaction-control statement (`BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`) via
+    /// `Connection::query`, without recording anything into `executed_mutations`.
+    ///
+    /// Deliberately distinct from [`Conn::raw_query`]: `raw_query` records every call into
+    /// `executed_mutations`, a buffer meant for live-write WAL logging that nothing drains for a
+    /// replay connection — using it here would accumulate one entry per transaction for the life
+    /// of a multi-hour replay, an unbounded-memory regression this issue exists to avoid (User
+    /// Story 4), not to introduce in a different place. Used only by WAL replay's `flush_batch`.
+    pub(crate) fn exec_transaction_control(&self, sql: &str) -> Result<(), Error> {
+        let _ = self.inner.query(sql)?;
+        Ok(())
+    }
+
     /// Binds `params` and executes an already-prepared statement. Does **not** record to the
     /// WAL — used by WAL replay (which is rebuilding *from* the WAL and must not re-log) and
     /// internally by [`Conn::exec_params`] (which records separately on success).
@@ -2454,6 +2467,56 @@ mod create_vector_indexes_tests {
         assert!(
             !crate::error::is_already_exists_error(&err),
             "missing-table error must not be misclassified as already-exists: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exec_transaction_control_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// `exec_transaction_control` must not accumulate into `executed_mutations` — that buffer is
+    /// drained for live-write WAL logging, and a replay connection's transaction-control calls
+    /// (BEGIN/COMMIT/ROLLBACK, one pair per flushed batch) must not grow it unboundedly over a
+    /// multi-hour replay (issue #240, User Story 4).
+    #[test]
+    fn does_not_accumulate_in_executed_mutations() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.drain_mutations(); // discard init_schema's own recorded DDL
+
+        for _ in 0..5 {
+            conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+            conn.exec_transaction_control("COMMIT").unwrap();
+        }
+
+        assert!(
+            conn.drain_mutations().is_empty(),
+            "exec_transaction_control must never record into executed_mutations"
+        );
+    }
+
+    /// A statement executed inside the open transaction still records normally via
+    /// `exec_params`/`raw_query` — only the transaction-control calls themselves are exempt.
+    #[test]
+    fn does_not_suppress_recording_of_statements_inside_the_transaction() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.drain_mutations(); // discard init_schema's own recorded DDL
+
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        conn.raw_query("CREATE (:Episodic {uuid: 'txn-record-probe', name: 'n', group_id: 'g', created_at: timestamp('2026-01-01'), source: 'text', source_description: '', content: 'c', valid_at: timestamp('2026-01-01')})").unwrap();
+        conn.exec_transaction_control("COMMIT").unwrap();
+
+        assert_eq!(
+            conn.drain_mutations().len(),
+            1,
+            "the one statement executed between BEGIN and COMMIT must still be recorded"
         );
     }
 }
