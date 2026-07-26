@@ -1042,11 +1042,8 @@ fn flush_batch(
     stats.match_delete_no_op += local_match_delete_no_op;
     stats.transactions_committed += 1;
     if let Some(max_seq) = max_seq_in_batch {
-        stats.last_committed_seq = Some(
-            stats
-                .last_committed_seq
-                .map_or(max_seq, |m| m.max(max_seq)),
-        );
+        stats.last_committed_seq =
+            Some(stats.last_committed_seq.map_or(max_seq, |m| m.max(max_seq)));
     }
 
     // Carry the settled (template, use_probe, statement) forward for the next flush of the

@@ -740,13 +740,12 @@ fn test_match_set_with_existing_return_clause_falls_back_and_still_applies() {
 }
 
 /// Review finding: the probe-prepare fallback only covers a probe that fails to *prepare*, not
-/// one that prepares fine but fails to *execute*. Exercises the execute-failure fallback branch
-/// in `flush_batch` with a genuine execute-time error (binding a plain string, under a param
-/// name outside `TIMESTAMP_PARAM_NAMES`, into a `TIMESTAMP` column via a bare `SET` — lbug does
-/// not implicitly cast `STRING`→`TIMESTAMP` there) that fails identically whether or not the
-/// probe's `RETURN count(*)` is appended, so the fallback's retry against the unmodified
-/// template must also fail and the row must land in `failed_lines` exactly once — not silently
-/// dropped, and not double-counted.
+/// one that prepares fine but fails to *execute*. Exercises the execute-failure path in
+/// `flush_batch` with a genuine execute-time error (binding a plain string, under a param name
+/// outside `TIMESTAMP_PARAM_NAMES`, into a `TIMESTAMP` column via a bare `SET` — lbug does not
+/// implicitly cast `STRING`→`TIMESTAMP` there). This is a single-row batch, so issue #240's
+/// whole-transaction-rollback semantics have no other row to discard — the row must land in
+/// `failed_lines` exactly once, not silently dropped, and not double-counted.
 #[test]
 fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure() {
     let wal_dir = TempDir::new().unwrap();
@@ -797,22 +796,23 @@ fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure(
     );
 }
 
-/// Issue #238 review finding (blocking): caching the *settled* `use_probe` after a per-row
-/// probe-*execute* failure would make that row's degradation permanent for every later flush of
-/// the same template — silently disabling no-op detection (the ADR-0043 failure mode: a no-op
-/// counted as a successful write) and violating FR-003. `flush_batch` must distinguish a
-/// template-level probe-*prepare* rejection (a property of the template, safe to cache forever)
-/// from a row-level probe-*execute* failure (must NOT be cached — the next flush must re-probe
-/// fresh). This also pins FR-002 within a degraded batch itself: a second row hitting the same
-/// execute failure must reuse the already-prepared fallback statement, not re-prepare per row.
+/// Issue #240 superseded the old probe-execute-failure retry-in-place mechanism this test used
+/// to pin: lbug's engine rolls back the *whole* transaction on any row's execute exception (see
+/// `db::lbug_transaction_semantics_pinning_tests` and ADR-0047), so retrying a failed row inline
+/// and continuing the batch is no longer possible — the moment row 1 throws, the engine has
+/// already discarded the transaction, and row 2 is never attempted at all. This test now pins
+/// that replacement behavior: a probe-execute failure (a) classifies exactly the triggering row
+/// as failed, (b) counts every other row in the same (now-rolled-back) batch into
+/// `rolled_back_lines` rather than `lines_replayed`, and (c) drops the prepared-statement cache
+/// so the next flush of the same template re-probes fresh rather than reusing a statement whose
+/// last use ended in a rolled-back transaction.
 ///
-/// Uses two consecutive flushes of one MATCH-prefixed template that both fail at execute() (the
-/// "bad_val"-into-TIMESTAMP type mismatch from the test above, which lbug validates at bind
-/// time — independent of whether MATCH finds any rows, so a clean "no-op" signal isn't available
-/// here to distinguish fixed from unfixed behavior). What DOES distinguish them is
-/// `prepare_calls`: if flush 1's row-level degradation were wrongly cached (pre-fix), flush 2
-/// would reuse the stale unprobed statement with zero new `prepare()` calls; with the fix, the
-/// cache is dropped after flush 1 and flush 2 must re-probe from scratch.
+/// Uses two consecutive flushes (batch_size: 2) of one MATCH-prefixed template that both fail at
+/// execute() (the "bad_val"-into-TIMESTAMP type mismatch from the test above, which lbug
+/// validates at bind time — independent of whether MATCH finds any rows). `prepare_calls`
+/// distinguishes a dropped cache from a reused one: if flush 1's failure left a stale cache
+/// entry behind, flush 2 would be a cache hit with zero new `prepare()` calls; with the cache
+/// correctly dropped, flush 2 must re-probe from scratch.
 #[test]
 fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
     let wal_dir = TempDir::new().unwrap();
@@ -823,12 +823,11 @@ fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
     // "bad_val" is deliberately not in TIMESTAMP_PARAM_NAMES (db.rs), so it always binds as a
     // plain string; assigning it into the TIMESTAMP `created_at` column fails at bind/execute
     // time regardless of the row's uuid — identically whether or not the probe's RETURN count(*)
-    // is appended (same mechanism as the test above), so both flushes fail deterministically.
-    // Flush 1 (rows 1,2): row 1 triggers the probe-execute fallback; row 2 must reuse that
-    // fallback statement rather than re-preparing (FR-002 within one degraded batch).
+    // is appended, so both flushes fail deterministically on their first row.
+    // Flush 1 (rows 1,2): row 1 fails at execute, rolling back the whole 2-row transaction; row
+    // 2 is never attempted — it must land in rolled_back_lines, not lines_replayed or failed_lines.
     // Flush 2 (rows 3,4): same template — row 3 must trigger a FRESH probed prepare (proving the
-    // cache was dropped, not reused with a stale use_probe=false), and row 4 must again reuse
-    // its own fallback statement rather than re-preparing.
+    // cache was dropped after flush 1's rollback, not reused), and row 4 is again never attempted.
     let bad_set_line = |seq: u64| -> String {
         format!(
             r#"{{"seq":{seq},"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {{uuid: $uuid}}) SET n.created_at = $bad_val","params":{{"uuid":"probe-cache-target","bad_val":"not-a-real-timestamp"}}}}"#
@@ -868,20 +867,29 @@ fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
         "only the CREATE must have replayed"
     );
     assert_eq!(
-        stats.failed_lines, 4,
-        "all four type-mismatched SET rows must be classified as failed, in both flushes"
+        stats.failed_lines, 2,
+        "exactly the triggering row of each of the two flushes must be classified as failed"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 2,
+        "the never-attempted second row of each rolled-back flush must be counted here, not \
+         in lines_replayed or failed_lines"
+    );
+    assert_eq!(
+        stats.transactions_committed, 1,
+        "only the CREATE's transaction committed"
+    );
+    assert_eq!(
+        stats.transactions_rolled_back, 2,
+        "both bad_set_line flushes rolled back"
     );
     assert_eq!(stats.match_prefixed_no_op, 0);
     assert_eq!(stats.match_delete_no_op, 0);
     assert_eq!(
-        stats.prepare_calls, 5,
-        "1 for the CREATE template, then: flush 1 — 1 initial probe + 1 fallback prepare for \
-         row 1 (row 2 must reuse it, not re-prepare); flush 2 — 1 FRESH re-probe (the cache must \
-         have been dropped after flush 1's row-level degradation, not reused with a stale \
-         use_probe=false) + 1 fallback prepare for row 3 (row 4 must reuse it). Reverting the \
-         cache-drop (finding 1) would make flush 2 a cache hit with zero new prepares, lowering \
-         this count; reverting the per-row fallback reuse (finding 2) would make rows 2 and 4 \
-         each trigger their own extra prepare, raising it."
+        stats.prepare_calls, 3,
+        "1 for the CREATE template, then 1 probed prepare for flush 1 and 1 FRESH probed \
+         prepare for flush 2 — the cache must have been dropped after flush 1's rollback, not \
+         reused. If the cache were wrongly kept, flush 2 would be a cache hit and this would be 2."
     );
 }
 
@@ -2578,7 +2586,10 @@ fn batch_fallback_rolls_back_whole_batch_on_bad_row() {
         stats.lines_replayed, 0,
         "none of this transaction's rows persisted — the whole batch was rolled back"
     );
-    assert_eq!(stats.failed_lines, 1, "exactly 1 mutation classified as the trigger");
+    assert_eq!(
+        stats.failed_lines, 1,
+        "exactly 1 mutation classified as the trigger"
+    );
     assert_eq!(
         stats.rolled_back_lines, 4,
         "the other 4 rows in the same transaction (2 that ran earlier, 2 never attempted) \
