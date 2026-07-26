@@ -558,7 +558,13 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_rebuild_from_wal",
             description: "Rebuild the graph by replaying application WAL files, optionally \
                            from a given sequence number. Supports MCP progress notifications \
-                           when called with a progress token.",
+                           when called with a progress token. A `from_seq: 0` (default) full \
+                           rebuild fails fast with an explicit error if the database already \
+                           contains data, rather than silently producing a duplicate-primary-key \
+                           failure per node — pass `force_clear: true` to clear the database \
+                           automatically before replaying, or clear it first with \
+                           `knowledge_clear_all`. This check does not apply to `from_seq > 0` \
+                           (incremental resume against an intentionally non-empty database).",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -570,7 +576,17 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "dry_run": {
                             "type": "boolean", "default": false,
-                            "description": "Compute replay statistics without writing or touching indices."
+                            "description": "Compute replay statistics without writing or touching indices. \
+                                             Still fails fast against a non-empty database on a from_seq: 0 \
+                                             request, regardless of force_clear, since a dry run must never \
+                                             mutate the database."
+                        },
+                        "force_clear": {
+                            "type": "boolean", "default": false,
+                            "description": "When true and from_seq is 0, clear the database before \
+                                             replaying if it already contains data, instead of failing fast. \
+                                             Ignored for from_seq > 0 and for dry_run (which always fails \
+                                             fast on a non-empty database)."
                         }
                     }
                 })
