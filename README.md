@@ -487,7 +487,8 @@ either updates the eval or breaks its build. It closes the gap noted in [ADR
 adapter's quality claim used to rest on a manual-testing caveat instead of anything
 measurable. See [docs/extraction-quality-evaluation.md](docs/extraction-quality-evaluation.md)
 for the prior research findings this harness re-baselines, and #248 for the maintainer-run
-full-corpus model comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it.
+full-corpus model comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it — see
+[docs/eval-full-corpus-runbook.md](docs/eval-full-corpus-runbook.md) for the exact commands.
 
 ### Running the harness
 

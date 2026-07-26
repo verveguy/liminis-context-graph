@@ -18,10 +18,33 @@ Treat everything below as **historical prior art indicating relative ranking** �
 family leads, roughly how far behind the hosted baseline it falls, which approaches failed — not as
 a current guarantee for this engine. Issue [#228](https://github.com/verveguy/liminis-context-graph/issues/228)
 (an in-repo Rust eval harness) and issue [#248](https://github.com/verveguy/liminis-context-graph/issues/248)
-(a benchmark run already capturing fresh, on-this-engine cassettes comparing the hosted baseline
-against `qwen3.6-27b`) are what will re-baseline these numbers against the current pipeline. Until
-then, this is the best evidence available, and it's why [ADR-0041](adr/0041-local-openai-compatible-extraction-adapter.md)
-does not auto-select the bundled sidecar's model for extraction.
+(a benchmark run comparing the hosted baseline against `qwen3.6-27b`, on this engine and corpus,
+with cassettes captured for both — see the [full-corpus runbook](eval-full-corpus-runbook.md) for
+the exact maintainer-run procedure) are what will re-baseline these numbers against the current
+pipeline. Until then, this is the best evidence available, and it's why
+[ADR-0041](adr/0041-local-openai-compatible-extraction-adapter.md) does not auto-select the bundled
+sidecar's model for extraction.
+
+## Measured results (this engine) — Status: Pending, not yet measured
+
+This section is reserved for #248's measured figures once a maintainer runs the
+[full-corpus runbook](eval-full-corpus-runbook.md) and supplies its report and cassettes. **No
+run has been executed yet as of this section being added** — the numbers below are deliberately
+absent rather than estimated or copied from the historical section above, per the spec's Edge
+Cases ("must say so explicitly rather than fabricate placeholder numbers").
+
+Once a run completes, this section is replaced (not the historical section below, which stays as
+labeled prior art) with:
+
+- Judged F1 for nodes/edges/summaries for `qwen3.6-27b`, read against this engine's own measured
+  hosted-vs-itself noise floor (not the historical 0.990/0.978/0.900 figures above, which were
+  measured on a different pipeline and corpus).
+- Structured-output reliability (clean/recovered/malformed JSON parse counts) for both the
+  hosted and local backends — a dimension the historical evaluation above did not track at all,
+  since the predecessor pipeline had no equivalent telemetry.
+- A direct statement of whether this engine's local-vs-hosted gap is in line with, narrower
+  than, or wider than the inherited ~7 percentage-point gap — and, per FR-007, whether that
+  changes the README's "quality-verified" framing.
 
 ## Methodology: replay against frozen inputs, not a fresh pipeline run per candidate
 
