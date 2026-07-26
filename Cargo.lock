@@ -1053,6 +1053,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lcg-eval"
+version = "0.10.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "lcg-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "lcg-service"
 version = "0.10.0"
 dependencies = [

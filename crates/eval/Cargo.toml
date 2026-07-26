@@ -1,0 +1,24 @@
+[package]
+name = "lcg-eval"
+version.workspace = true
+edition = "2021"
+description = "Extraction-quality eval harness (replay + LLM-as-judge) over the public Wikipedia corpus"
+license = "MIT"
+repository.workspace = true
+
+[[bin]]
+name = "lcg-eval"
+path = "src/main.rs"
+
+[dependencies]
+lcg-core = { path = "../core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
