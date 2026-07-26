@@ -96,3 +96,43 @@ jobs:
       # path posture as real_corpus_e2e (FR-015).
       - name: cargo test --release --test mcp_real_corpus_e2e -- --ignored
         run: cargo test -p lcg-service --release --test mcp_real_corpus_e2e -- --ignored
+
+  mcp-write-mutation-e2e:
+    name: mcp_real_corpus_mutation_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Get rustc version for cache key
+        id: rustc-ver
+        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+
+      - name: Get lbug version hash for cache key
+        id: lbug-hash
+        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Same cache key as ci.yml's build-lbug/test jobs, so a push-to-main run (which follows
+      # a PR's ci.yml run against the same commit) gets a cache hit instead of rebuilding
+      # lbug's C++ core from source.
+      - name: Restore lbug build artifacts from cache
+        uses: actions/cache/restore@v4
+        with:
+          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
+          path: |
+            target/release/build/lbug-*
+            target/release/.fingerprint/lbug-*
+            target/release/deps/liblbug-*
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      # MCP write/mutation-path e2e suite (#235): the sibling of mcp_real_corpus_e2e above,
+      # covering the mutation surface (deletes, merges/corrections, entity/relation retyping,
+      # ingest into the pre-populated graph, knowledge_clear_all) instead of the read surface.
+      # Forks the seeded workspace once per user-story block (FR-002) rather than reseeding, so
+      # this job's cost is one seed + several cheap filesystem copies, not N reseeds. Same
+      # #[ignore]-and-gate-out-of-the-PR-path posture as its siblings (FR-018).
+      - name: cargo test --release --test mcp_real_corpus_mutation_e2e -- --ignored
+        run: cargo test -p lcg-service --release --test mcp_real_corpus_mutation_e2e -- --ignored

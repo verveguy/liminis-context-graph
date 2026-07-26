@@ -48,6 +48,220 @@ pub fn binary_path() -> &'static str {
     env!("CARGO_BIN_EXE_liminis-context-graph")
 }
 
+// ── Stub extraction endpoint (issue #235) ─────────────────────────────────────
+//
+// A deterministic, content-keyed OpenAI-compatible `/v1/chat/completions` stub, so the
+// write/mutation-path suite can exercise `knowledge_process_chunk`/`knowledge_add_episode`/
+// `knowledge_reprocess_entity_types`/`knowledge_reprocess_relation_types` with no live LLM.
+// `OaiExtractor::send_chat` (crates/core/src/extractor.rs) posts a plain JSON body
+// (`{model, max_tokens, response_format:{type:"json_object"}, messages:[{role:"system",...},
+// {role:"user",...}]}`) and expects a standard OpenAI chat-completion response whose
+// `choices[0].message.content` is itself a JSON string. There are four distinct request shapes
+// sharing this one endpoint (entity extraction, edge extraction, entity classification, relation
+// classification) — distinguished here by fixed substrings that `extractor.rs`'s own prompt
+// construction always includes verbatim in the system prompt (see the marker constants below).
+
+/// One canned extraction result: the entities and edges a marker in the ingested text should
+/// produce. `edges` reference `entities`/pre-existing-fixture names by exact string; the stub
+/// does not validate cross-references, it just echoes what the test configured.
+#[derive(Clone, Default)]
+pub struct ExtractionFixture {
+    pub entities: Vec<(String, String, String)>, // (name, entity_type, summary)
+    pub edges: Vec<(String, String, String, Option<String>)>, // (source_name, target_name, fact, relation_type)
+}
+
+/// Shared, mutable configuration for [`spawn_stub_extractor`]'s server thread. The test updates
+/// this (via the returned `Arc<Mutex<_>>`) before each `tools/call` that will trigger
+/// extraction/classification, so one long-lived stub server can serve every ingest/reclassify
+/// call in a suite without restarting.
+#[derive(Default)]
+pub struct StubExtractorConfig {
+    /// Marker substring (expected to appear in the raw episode/chunk text) → the extraction
+    /// result to return for both the entity pass and the edge pass. Checked as a substring
+    /// against the request's user-message text; first configured marker found wins.
+    pub extraction: std::collections::HashMap<String, ExtractionFixture>,
+    /// Entity classification verdicts, keyed by exact entity name. Missing key ⇒ empty string
+    /// (abstain), matching production's own "LLM returned no assignment" contract.
+    pub entity_verdicts: std::collections::HashMap<String, String>,
+    /// Relation classification verdicts, keyed by exact edge `fact` text. Missing key ⇒ empty
+    /// string (abstain ⇒ caller writes the literal `UNCLASSIFIED` sentinel).
+    pub relation_verdicts: std::collections::HashMap<String, String>,
+}
+
+/// Spawns the stub extraction server on a random OS-assigned port and returns
+/// `(port, shared_config)`. The caller mutates `shared_config` (via `.lock().unwrap()`) to
+/// script each subsequent extraction/classification call before issuing the `tools/call` that
+/// triggers it.
+pub fn spawn_stub_extractor() -> (u16, std::sync::Arc<std::sync::Mutex<StubExtractorConfig>>) {
+    use std::io::{BufRead, BufReader, Read as _};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = Arc::new(Mutex::new(StubExtractorConfig::default()));
+    let config_thread = Arc::clone(&config);
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub tcp stream"));
+
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap_or(0);
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(rest) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(str::to_string)
+                {
+                    content_length = rest.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+
+            let content = build_stub_response_content(&req, &config_thread);
+            let resp_body = json!({
+                "choices": [{
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": content},
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            });
+            let resp_body_str = serde_json::to_string(&resp_body).unwrap();
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body_str.len(),
+                resp_body_str
+            );
+            let _ = Write::write_all(&mut stream, http_response.as_bytes());
+        }
+    });
+
+    (port, config)
+}
+
+/// Fixed substrings `extractor.rs`'s `OaiExtractor` always includes verbatim in its system
+/// prompt for each of the four request shapes this stub must distinguish (see
+/// `ENTITY_JSON_INSTRUCTION`/`EDGE_JSON_INSTRUCTION`/`do_classify_entities`/
+/// `do_classify_relations` in crates/core/src/extractor.rs).
+const ENTITY_EXTRACTION_MARKER: &str = "\"entities\": [{\"name\"";
+const EDGE_EXTRACTION_MARKER: &str = "\"edges\": [{\"source_name\"";
+const ENTITY_CLASSIFY_MARKER: &str = "entity classifier";
+const RELATION_CLASSIFY_MARKER: &str = "relation classifier";
+
+fn stub_message(req: &Value, role: &str) -> String {
+    req["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["role"].as_str() == Some(role))
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn build_stub_response_content(
+    req: &Value,
+    config: &std::sync::Mutex<StubExtractorConfig>,
+) -> String {
+    let system_text = stub_message(req, "system");
+    let user_text = stub_message(req, "user");
+    let config = config.lock().unwrap_or_else(|e| e.into_inner());
+
+    if system_text.contains(ENTITY_CLASSIFY_MARKER) {
+        let items = extract_json_array_after_prefix(&user_text);
+        let types: Vec<Value> = items
+            .iter()
+            .map(|item| {
+                let name = item["name"].as_str().unwrap_or("");
+                json!(config
+                    .entity_verdicts
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+            .collect();
+        return json!({"types": types}).to_string();
+    }
+
+    if system_text.contains(RELATION_CLASSIFY_MARKER) {
+        let items = extract_json_array_after_prefix(&user_text);
+        let types: Vec<Value> = items
+            .iter()
+            .map(|item| {
+                let fact = item["fact"].as_str().unwrap_or("");
+                json!(config
+                    .relation_verdicts
+                    .get(fact)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+            .collect();
+        return json!({"types": types}).to_string();
+    }
+
+    let fixture = config
+        .extraction
+        .iter()
+        .find(|(marker, _)| user_text.contains(marker.as_str()))
+        .map(|(_, fixture)| fixture.clone())
+        .unwrap_or_default();
+
+    if system_text.contains(ENTITY_EXTRACTION_MARKER) {
+        let entities: Vec<Value> = fixture
+            .entities
+            .iter()
+            .map(|(name, entity_type, summary)| {
+                json!({"name": name, "entity_type": entity_type, "summary": summary})
+            })
+            .collect();
+        return json!({"entities": entities}).to_string();
+    }
+
+    if system_text.contains(EDGE_EXTRACTION_MARKER) {
+        let edges: Vec<Value> = fixture
+            .edges
+            .iter()
+            .map(|(source_name, target_name, fact, relation_type)| {
+                json!({
+                    "source_name": source_name,
+                    "target_name": target_name,
+                    "fact": fact,
+                    "relation_type": relation_type,
+                    "valid_at": Value::Null,
+                    "invalid_at": Value::Null,
+                })
+            })
+            .collect();
+        return json!({"edges": edges}).to_string();
+    }
+
+    // Unrecognized request shape: respond with an empty object rather than panicking on the
+    // background thread (a panic there is invisible — the caller just sees a parse failure).
+    json!({}).to_string()
+}
+
+/// Parses the JSON array embedded after `"...:\n\n"` in a classification user prompt (see
+/// `do_classify_entities`/`do_classify_relations`'s `format!("Classify the ... for:\n\n{json}")`
+/// construction in extractor.rs).
+fn extract_json_array_after_prefix(user_text: &str) -> Vec<Value> {
+    let json_start = user_text.find('[').unwrap_or(user_text.len());
+    serde_json::from_str(&user_text[json_start..]).unwrap_or_default()
+}
+
 /// Drives one MCP-over-stdio subprocess. Reads run on a dedicated background thread so every
 /// wait in the test has an explicit timeout instead of risking an indefinite blocking read.
 pub struct McpClient {

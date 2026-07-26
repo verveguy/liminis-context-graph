@@ -78,6 +78,90 @@ impl SeededWorkspace {
             .args(extra_args);
         McpClient::spawn(cmd)
     }
+
+    /// Recursively copies this workspace's already-rebuilt `db_path`/`wal_dir` into a fresh
+    /// `TempDir`, returning a new, independently-mutable `SeededWorkspace` (issue #235,
+    /// FR-002). `Db::open` embeds no path-derived state and nothing holds an OS lock past a
+    /// clean process exit, so copying the on-disk files while no process has them open and
+    /// reopening the copy from a fresh subprocess is safe — this is strictly cheaper than
+    /// re-seeding (~60-140s) since it skips WAL replay and index rebuild entirely.
+    ///
+    /// Callers must not hold any `McpClient` open against `self` (or a prior fork) while
+    /// forking — the source files must be quiescent for the copy to be consistent.
+    pub fn fork(&self) -> SeededWorkspace {
+        let dir = TempDir::new().expect("create fork temp dir");
+        let db_path = dir.path().join("real_corpus.db");
+        let wal_dir = dir.path().join("wal");
+
+        copy_dir_recursive(&self.db_path, &db_path);
+        copy_dir_recursive(&self.wal_dir, &wal_dir);
+        // If lbug represented db_path as a single file (rather than a directory), it may have
+        // written sibling files next to it (e.g. `<db>.wal`, `<db>.lock`) — mirrors the sibling
+        // cleanup handle_clear_all performs in the file-DB case. Copy them too, if present.
+        for ext in &[".wal", ".lock"] {
+            let sibling = PathBuf::from(format!("{}{}", self.db_path.display(), ext));
+            if sibling.exists() {
+                let dest = PathBuf::from(format!("{}{}", db_path.display(), ext));
+                std::fs::copy(&sibling, &dest).unwrap_or_else(|e| {
+                    panic!(
+                        "copy sibling {} to {}: {e}",
+                        sibling.display(),
+                        dest.display()
+                    )
+                });
+            }
+        }
+
+        SeededWorkspace {
+            dir,
+            db_path,
+            wal_dir,
+            expected: self.expected.clone(),
+        }
+    }
+
+    /// Spawns a fresh `--mcp-stdio` subprocess reopening this workspace's already-rebuilt
+    /// `db_path`, with `LIMINIS_WORKSPACE_ROOT` set to `workspace_root` and `--extractor-http`
+    /// pointed at a real, listening stub extraction endpoint (issue #235) — unlike
+    /// `spawn_reader`'s never-dialed URL, mutation tools that classify/extract
+    /// (`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`,
+    /// `knowledge_reprocess_relation_types`) actually call this endpoint. `workspace_root` must
+    /// already contain any `.lcg/ontology.yaml` / `.liminis/knowledge-corrections.yaml` the
+    /// caller's assertions depend on — both are read once at process startup, not per-request.
+    pub fn spawn_mutator(
+        &self,
+        embedder_url: &str,
+        extractor_url: &str,
+        workspace_root: &Path,
+        extra_args: &[&str],
+    ) -> McpClient {
+        let mut cmd = Command::new(binary_path());
+        cmd.env("LCG_DB_PATH", self.db_path.to_str().unwrap())
+            .env("LCG_WAL_DIR", self.wal_dir.to_str().unwrap())
+            .env("LIMINIS_WORKSPACE_ROOT", workspace_root.to_str().unwrap())
+            .args(["--mcp-stdio", "--embedder-http", embedder_url])
+            .args(["--extractor-http", extractor_url])
+            .args(extra_args);
+        McpClient::spawn(cmd)
+    }
+}
+
+/// Recursively copies `src` to `dst` (`dst`'s parent must already exist; `dst` itself must not).
+/// Used by [`SeededWorkspace::fork`] to clone an already-rebuilt workspace's on-disk files.
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)
+            .unwrap_or_else(|e| panic!("create dir {}: {e}", dst.display()));
+        for entry in
+            std::fs::read_dir(src).unwrap_or_else(|e| panic!("read dir {}: {e}", src.display()))
+        {
+            let entry = entry.expect("read dir entry");
+            copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()));
+        }
+    } else {
+        std::fs::copy(src, dst)
+            .unwrap_or_else(|e| panic!("copy {} to {}: {e}", src.display(), dst.display()));
+    }
 }
 
 /// Seeds a fresh temp workspace from the committed real-corpus WAL fixture and rebuilds it
