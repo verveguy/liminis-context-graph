@@ -857,9 +857,17 @@ fn is_delete_form(template: &str) -> bool {
 /// statement is reused and no `conn.prepare()` call is made at all — this is what bounds
 /// `stats.prepare_calls` to the distinct-template count for a homogeneous WAL (FR-001/FR-002).
 /// On a cache miss, the existing prepare logic runs unchanged (including error classification,
-/// FR-005) and, on success, the *settled* `(template, use_probe, statement)` — reflecting any
-/// mid-batch probe→unprobed fallback below, not the initial attempt — is written back into
-/// `cache` after the row loop so the next flush of the same template can reuse it.
+/// FR-005) and, on success, the *settled* `(template, use_probe, statement)` is written back
+/// into `cache` after the row loop so the next flush of the same template can reuse it —
+/// *unless* `use_probe` was downgraded by a per-row execute failure rather than a template-level
+/// prepare failure, in which case the cache is dropped instead (see `probe_downgraded_by_row`
+/// below): the prepare-time probe rejection at the top of this function is a property of the
+/// template and safe to persist forever, but the execute-time fallback inside the row loop can
+/// be caused by one row's params, not the template's shape, and persisting it into the
+/// cross-flush cache would silently disable no-op detection (`match_prefixed_no_op` /
+/// `match_delete_no_op`) for every later flush of that template — an accounting change FR-003
+/// forbids. Dropping the cache instead restores the pre-cache behavior of re-probing fresh at
+/// the next flush.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
@@ -876,10 +884,14 @@ fn flush_batch(
     let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
     let is_delete_form_batch = is_match_prefixed_batch && is_delete_form(&batch.template);
 
-    let cache_hit = cache.as_ref().is_some_and(|c| c.template == batch.template);
+    let cached = cache.take().filter(|c| c.template == batch.template);
 
-    let (mut prepared, mut use_probe) = if cache_hit {
-        let c = cache.take().expect("cache_hit implies cache is Some");
+    // Set only when `use_probe` is downgraded by a per-row execute failure inside the loop
+    // below, never by the template-level prepare rejection above — see this function's doc
+    // comment for why the two must be treated differently at cache write-back time.
+    let mut probe_downgraded_by_row = false;
+
+    let (mut prepared, mut use_probe) = if let Some(c) = cached {
         (c.statement, c.use_probe)
     } else if is_match_prefixed_batch {
         let probed_template = with_match_count_probe(&batch.template);
@@ -948,20 +960,28 @@ fn flush_batch(
                     );
                     stats.prepare_calls += 1;
                     match conn.prepare(&batch.template) {
-                        Ok(mut fallback) => match conn.execute_prepared(&mut fallback, &params) {
-                            Ok(_) => {
-                                stats.lines_replayed += 1;
-                                stats.match_prefixed_replayed += 1;
-                                prepared = fallback;
-                                use_probe = false;
+                        Ok(mut fallback) => {
+                            // Adopt the fallback regardless of this row's own outcome below:
+                            // the failure is a params problem, not a template problem, and
+                            // re-preparing per row is exactly the unbounded growth FR-002
+                            // exists to bound.
+                            let exec_result = conn.execute_prepared(&mut fallback, &params);
+                            prepared = fallback;
+                            use_probe = false;
+                            probe_downgraded_by_row = true;
+                            match exec_result {
+                                Ok(_) => {
+                                    stats.lines_replayed += 1;
+                                    stats.match_prefixed_replayed += 1;
+                                }
+                                Err(e) => classify_replay_failure(
+                                    &e.to_string(),
+                                    &batch.template,
+                                    stats,
+                                    sample_cap,
+                                ),
                             }
-                            Err(e) => classify_replay_failure(
-                                &e.to_string(),
-                                &batch.template,
-                                stats,
-                                sample_cap,
-                            ),
-                        },
+                        }
                         Err(e) => classify_replay_failure(
                             &e.to_string(),
                             &batch.template,
@@ -985,14 +1005,21 @@ fn flush_batch(
             }
         }
     }
-    // Carry the settled (template, use_probe, statement) forward for the next flush of the same
-    // template to reuse — settled, not the initial attempt, so a mid-batch probe→unprobed
-    // fallback above is what gets cached (see this function's doc comment).
-    *cache = Some(PreparedCache {
-        template: std::mem::take(&mut batch.template),
-        use_probe,
-        statement: prepared,
-    });
+    if probe_downgraded_by_row {
+        // A per-row execute failure downgraded this batch to unprobed mode — that's about this
+        // row's params, not this template, so it must not become the template's permanent
+        // cached state (see this function's doc comment). Drop the cache; the next flush of
+        // this template re-probes fresh, matching pre-cache (batch-scoped) behavior.
+        *cache = None;
+    } else {
+        // Carry the settled (template, use_probe, statement) forward for the next flush of the
+        // same template to reuse (see this function's doc comment).
+        *cache = Some(PreparedCache {
+            template: std::mem::take(&mut batch.template),
+            use_probe,
+            statement: prepared,
+        });
+    }
     batch.clear();
 }
 
@@ -1325,5 +1352,94 @@ mod replay_tests {
             templates.len() as u64 * lines_per_template
         );
         assert_eq!(stats.failed_lines, 0);
+    }
+
+    // ADR-0045: pins the accepted LRU-1 limitation so a future change to it (e.g. a bounded
+    // multi-entry cache) doesn't silently alter this documented trade-off. An interleaved WAL
+    // (A, B, A, B, ...) never has two consecutive same-template flushes, so every flush is a
+    // cache miss and prepare_calls must equal the number of lines, not the number of distinct
+    // templates.
+    #[test]
+    fn prepare_calls_unbounded_for_fully_interleaved_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        let templates = [
+            "CREATE (:Episodic {uuid: $uuid})",
+            "CREATE (:Episodic {uuid: $uuid, name: 'a'})",
+        ];
+        let total_lines = 10;
+        for i in 0..total_lines {
+            write_wal_cypher_line(
+                &wal_dir,
+                "0001.jsonl",
+                i + 1,
+                templates[(i % 2) as usize],
+                &format!("ep-{i}"),
+            );
+        }
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    batch_size: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            stats.prepare_calls, total_lines,
+            "an alternating template never has consecutive same-template flushes, so LRU-1 \
+             provides zero benefit by design — see ADR-0045"
+        );
+        assert_eq!(stats.lines_replayed, total_lines);
+    }
+
+    // Edge case (spec.md): the cache is not required to survive a WAL file boundary, but is
+    // also not prohibited from doing so if the next file happens to start with the same
+    // template — pin the latter, since it's a real efficiency win when it happens naturally.
+    #[test]
+    fn prepare_calls_bounded_across_wal_file_boundary_for_same_template() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        let template = "CREATE (:Episodic {uuid: $uuid})";
+        for i in 0..5 {
+            write_wal_cypher_line(&wal_dir, "0001.jsonl", i + 1, template, &format!("a-{i}"));
+        }
+        for i in 0..5 {
+            write_wal_cypher_line(
+                &wal_dir,
+                "0002.jsonl",
+                5 + i + 1,
+                template,
+                &format!("b-{i}"),
+            );
+        }
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    batch_size: Some(64),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            stats.prepare_calls, 1,
+            "the same template recurring immediately across a file boundary should still hit \
+             the cache — this is a bonus, not a requirement (spec.md edge cases)"
+        );
+        assert_eq!(stats.lines_replayed, 10);
     }
 }

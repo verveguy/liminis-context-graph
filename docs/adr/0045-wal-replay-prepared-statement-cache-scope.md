@@ -17,6 +17,29 @@ only by `batch_size` being reached with the same template as the previous flush,
 in `CachedPreparedStatementManager` (lbug internal, C++). That manager has **no eviction policy
 and no removal API** — its `statementMap` only grows. Dropping the Rust `PreparedStatement`
 frees the FFI handle but not the cached parsed statement and logical plan held by the connection.
+
+This is confirmed by the manager's actual keying, not just its name: `addStatement` (lbug
+0.17.0, `lbug-src/src/main/prepared_statement_manager.cpp`) keys every insertion off a
+monotonically incrementing counter, not the statement's Cypher text —
+
+```cpp
+std::string CachedPreparedStatementManager::addStatement(
+    std::unique_ptr<CachedPreparedStatement> statement) {
+    std::unique_lock lck{mtx};
+    auto idx = std::to_string(currentIdx);
+    currentIdx++;
+    statementMap.insert({idx, std::move(statement)});
+    return idx;
+}
+```
+
+— and `ClientContext::prepare` (`client_context.cpp`) calls `addStatement` unconditionally on
+every `prepare()`, regardless of whether an identical template was prepared before. So this is
+not a text-deduplicating cache despite the name: **every** `prepare()` call leaks a new entry,
+which is what makes per-flush (not per-distinct-template) growth the real failure mode this ADR
+addresses, and is also why "roughly one entry per batch" below is accurate rather than an
+overclaim — a text-deduplicating cache would never have leaked in the homogeneous case at all.
+
 For a homogeneous WAL (a small number of recurring mutation templates — the common case), this
 meant roughly one cache entry accumulated per **batch**, not per distinct template: a 5M-line WAL
 at the default `batch_size` of 64 could accumulate ~78k entries, growing RSS monotonically over
@@ -52,15 +75,52 @@ User Story targets, and an LRU-N reintroduces a tuning knob (what's N?) with no 
 from the available evidence. LRU-1 is the minimal mechanism that satisfies FR-001/FR-002 exactly
 as scoped.
 
-### Settled state, not the initial attempt, is what gets cached
+There is also a correctness reason to prefer LRU-1 over LRU-N here, not just a simplicity one:
+LRU-1 is safe against schema-mutating WAL lines in a way LRU-N would not automatically be. A DDL
+line (e.g. a legacy-migration `ALTER`/`CREATE INDEX` mutation) necessarily has a different
+template text from whatever preceded it, so under LRU-1 it evicts the single cached entry both
+before and after itself — no cached statement can ever outlive a schema change it was planned
+against. An LRU-N cache would need its own explicit invalidation rule for this case (a naive
+LRU-N would happily keep serving a statement planned against pre-DDL schema for any of its other
+N-1 slots); LRU-1 gets this invariant for free as a consequence of holding only one entry.
+
+### Settled state, not the initial attempt, is what gets cached — unless the settling was row-level
 
 A `MATCH`-prefixed batch may prepare with a `RETURN count(*)` probe appended
-(`with_match_count_probe`), then fall back mid-batch to the unprobed template if the probed
-statement fails at *execute* time (pre-existing logic, unrelated to this issue). The cache is
-populated once, after the row loop completes, with whichever `(template, use_probe, statement)`
-the batch ended on — so a flush that started probed but fell back unprobed caches the unprobed
-statement, and the next flush of that same template correctly skips straight to unprobed
-execution instead of re-attempting a probe already known to fail for this WAL's shape.
+(`with_match_count_probe`), then fall back to the unprobed template if the probed statement
+fails to *prepare* (pre-existing logic, unrelated to this issue) or fails to *execute* mid-batch.
+These two fallback triggers are template-shaped and row-shaped respectively, and the cache
+write-back must treat them differently:
+
+- A probe **prepare** rejection (e.g. the template already ends in its own `RETURN` clause, so
+  appending a second one doesn't parse) is a property of the template's text — every row sharing
+  that template would hit the same rejection, so it is safe, and correct, to cache the settled
+  `use_probe: false` permanently.
+- A probe **execute** failure is reached per row and can be caused by that row's own params (a
+  bind-time type mismatch, a value the appended `RETURN` interacts badly with, etc.) rather than
+  the template's shape. Caching `use_probe: false` from this trigger would make one bad row's
+  degradation outlive the batch it happened in — every later flush of the same template would
+  then skip the probe, and rows that should have landed in `match_prefixed_no_op` /
+  `match_delete_no_op` would instead be miscounted as successful writes. This is exactly the
+  "no-op reported as a successful write" failure mode ADR-0043 exists to prevent, and it would
+  violate FR-003 (no change to `ReplayStats` counters) — caught in PR review before merge.
+
+`flush_batch` tracks which trigger fired (`probe_downgraded_by_row`) and, at write-back time,
+drops the cache entirely (`*cache = None`) when the execute-time trigger fired, instead of
+persisting the degraded state — the next flush of that template then re-probes fresh, matching
+the pre-cache (batch-scoped) behavior for this one path. The prepare-time trigger still caches
+normally, since it's the template-level, correctly-permanent case described above.
+
+Within a degraded batch itself, the first row's execute failure still triggers the fallback
+`prepare()` (there is no cache entry to serve it — the template's plan hasn't been fetched in
+unprobed form yet), but every subsequent row in that same batch reuses the resulting fallback
+statement directly rather than re-preparing per row — the fallback is adopted unconditionally
+once its own `prepare()` succeeds, regardless of whether that particular row's `execute()`
+afterward succeeds or fails. Adopting it only on the row's execute success (the initial
+implementation's shape) would leave `use_probe` stuck `true` for every subsequent row whenever
+the fallback's execute also fails for row-specific reasons, and each such row would then
+re-attempt the doomed probe and re-prepare its own fallback — an O(rows), not O(distinct
+templates), prepare-call pattern for exactly the pathological rows this issue exists to bound.
 
 ### `ReplayStats::prepare_calls` as the observable bound
 
@@ -127,3 +187,8 @@ against the API-shape cost noted above.
 - Issue #237 (prior issue in the same WAL-replay-audit series; ADR-0043)
 - `crates/core/src/replay.rs`: `PreparedCache`, `flush_batch`, `ReplayStats::prepare_calls`
 - `crates/core/src/db.rs`: `Conn::prepare`
+- `crates/core/tests/wal_replay.rs`:
+  `test_match_probe_execute_failure_does_not_poison_cache_for_next_flush` (pins the row-level vs.
+  template-level cache write-back distinction above),
+  `test_match_delete_no_op_prepare_cache_across_flushes` (pins cache reuse across multiple
+  flushes of a `MATCH`-prefixed probed template)
