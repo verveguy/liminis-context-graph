@@ -35,8 +35,8 @@ inherited figures.
 
 ## The combined run (recommended)
 
-A single `lcg-eval` invocation with three `--backend` entries produces both benchmark legs from
-one full-corpus Anthropic-side cost, instead of paying for the Anthropic leg twice:
+A single `lcg-eval` invocation with three `--backend` entries produces both benchmark legs while
+reducing the separate-run cost from three full-corpus Anthropic passes to two:
 
 - `baseline=anthropic` — the reference. Cassette-recorded; this cassette **is**
   `anthropic-<model>.jsonl` (FR-002).
@@ -162,10 +162,11 @@ deterministically with zero live calls goes through the same primitive
 `lcg_core::cassette::ReplayingExtractor::load`. There's nothing to load yet in this Fabrik run
 (no cassette exists), so this is left as a code sketch for a follow-up `#[ignore]`d integration
 test, once the cassettes are committed — following the existing precedent set by
-`crates/core/tests/real_corpus_replay_perf.rs` for slow, explicitly-invoked-only tests:
+`crates/core/tests/real_corpus_replay_perf.rs` for slow, explicitly-invoked-only tests. SC-005
+covers **both** committed cassettes, so the sketch below verifies each one:
 
 ```rust
-// crates/eval/tests/cassette_replay_determinism.rs (sketch — write once a cassette exists)
+// crates/eval/tests/cassette_replay_determinism.rs (sketch — write once cassettes exist)
 use lcg_core::cassette::ReplayingExtractor;
 use lcg_core::extractor::{ExtractOptions, Extractor};
 use lcg_core::types::SourceType;
@@ -173,11 +174,9 @@ use lcg_eval::corpus::{default_corpus_path, load_corpus};
 
 const REFERENCE_TIME: &str = "2026-01-01T00:00:00Z"; // match runner.rs's constant exactly
 
-#[tokio::test]
-#[ignore]
-async fn qwen_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
+async fn assert_cassette_replays_every_corpus_chunk(cassette_path: &str) {
     let corpus = load_corpus(default_corpus_path()).unwrap();
-    let replayer = ReplayingExtractor::load("qwen3.6-27b.jsonl").unwrap();
+    let replayer = ReplayingExtractor::load(cassette_path).unwrap();
 
     for chunk in &corpus {
         // Same ExtractOptions shape `run_backend` (crates/eval/src/runner.rs) used to
@@ -196,7 +195,19 @@ async fn qwen_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
         replayer.extract(opts).await.expect("cassette entry for this chunk");
     }
 }
+
+#[tokio::test]
+#[ignore]
+async fn qwen_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
+    assert_cassette_replays_every_corpus_chunk("qwen3.6-27b.jsonl").await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn anthropic_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
+    assert_cassette_replays_every_corpus_chunk("anthropic-claude-haiku-4-5-20251001.jsonl").await;
+}
 ```
 
-Run it with `cargo test -p lcg-eval --release --test cassette_replay_determinism -- --ignored`
+Run both with `cargo test -p lcg-eval --release --test cassette_replay_determinism -- --ignored`
 once written, mirroring how `real_corpus_replay_perf.rs`'s tests are run today.
