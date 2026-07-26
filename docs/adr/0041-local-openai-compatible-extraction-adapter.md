@@ -139,21 +139,17 @@ possible for future work, but wiring them up is explicitly out of scope here.
   `max_tokens` and do emit `"length"`.
 - **Known limitation, and the reason Decision 3 has no socket-auto-detection tier: the bundled
   sidecar's backend (Apple Foundation Models) has prior evidence of inadequate extraction
-  quality.** Private-repo evaluation predating this issue (ported into this repo by #227/#228)
-  assessed Apple Foundation Models for entity/relationship extraction and found it unsuitable —
-  insufficient context window and capability for the task's quality bar — with a standing
-  recommendation against wiring the local-inference socket for extraction until a fresh capability
-  pass. The same evaluation identified `qwen3.6-27b`, served via any OpenAI-compatible endpoint
-  (e.g. `mlx_lm.server`), as a local model that does clear the quality bar (judged F1
-  0.894/0.852/0.900 against a 0.990/0.978 hosted noise floor). This ADR's `Extractor` trait
-  implementation and CLI/precedence-selection mechanism are unaffected by that finding — the same
-  `OaiExtractor` adapter works against any OpenAI-compatible endpoint, including
+  quality.** See [`docs/extraction-quality-evaluation.md`](../extraction-quality-evaluation.md) for
+  the full evaluation, methodology, and model rankings this finding is based on — including the
+  quality-verified local alternative (`qwen3.6-27b`) that does clear the quality bar. This ADR's
+  `Extractor` trait implementation and CLI/precedence-selection mechanism are unaffected by that
+  finding — the same `OaiExtractor` adapter works against any OpenAI-compatible endpoint, including
   quality-verified local models, via `--extractor-http`/`--extractor-uds`. What the finding changed
   in this design is Decision 3: an operator can still point `--extractor-uds` at the bundled
   sidecar and get exactly the behavior a bare auto-detection tier would have produced, but the
   engine never makes that specific choice on the operator's behalf. Resolving the quality gap
   itself (a stronger bundled default, or swapping in a higher-quality local model) is tracked by
-  #227/#228, not this ADR.
+  #228, not this ADR.
 
 ## Related
 

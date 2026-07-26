@@ -401,9 +401,11 @@ before it will use a local endpoint at all.
 
 > **The bundled sidecar's model is not recommended for extraction quality.** Prior evaluation
 > found Apple Foundation Models' context window and capability insufficient for reliable
-> entity/relationship extraction (see #227 for the full evaluation once published, and #228 for
-> the in-repo eval harness that will keep this guidance current). For local extraction that meets
-> a reasonable quality bar, run a model such as `qwen3.6-27b` behind an OpenAI-compatible server
+> entity/relationship extraction (see
+> [docs/extraction-quality-evaluation.md](docs/extraction-quality-evaluation.md) for the full
+> evaluation, methodology, and model rankings, and #228 for the in-repo eval harness that will keep
+> this guidance current). For local extraction that meets a reasonable quality bar, run a model
+> such as `qwen3.6-27b` behind an OpenAI-compatible server
 > (e.g. `mlx_lm.server`) and point `--extractor-http`/`--extractor-uds` at it, or set
 > `ANTHROPIC_API_KEY` to use the hosted baseline. The bundled sidecar's `/v1/chat/completions`
 > route is still reachable for extraction if you want it anyway — pass `--extractor-uds
