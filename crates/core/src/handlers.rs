@@ -1326,6 +1326,52 @@ async fn handle_rebuild_from_wal(
         )));
     }
 
+    // FR-005: a `from_seq: 0` full rebuild against a database that already has data would emit
+    // a native CREATE (Entity/Episodic/RelatesToNode_, see db.rs) for every existing row,
+    // producing a duplicate-primary-key failure per node — a large, benign-looking failed_lines
+    // count that (via FR-001's fix) still surfaces as noise, not the operator's real problem.
+    // A `from_seq > 0` incremental resume intentionally targets a non-empty database (e.g.
+    // resuming after a checkpoint) and must not be affected — see FR-006.
+    let force_clear = p["force_clear"].as_bool().unwrap_or(false);
+    if from_seq == 0 {
+        let db_for_check = load_db(&state)?;
+        let non_empty = tokio::task::spawn_blocking(move || -> Result<bool, Error> {
+            let conn = db_for_check.connect()?;
+            let entity = conn.count_nodes("Entity")?;
+            let episodic = conn.count_nodes("Episodic")?;
+            let relates = conn.count_nodes("RelatesToNode_")?;
+            Ok(entity > 0 || episodic > 0 || relates > 0)
+        })
+        .await??;
+
+        if non_empty {
+            if dry_run {
+                // A dry run never executes Cypher (see replay_opts), so it can't reproduce the
+                // duplicate-key failure either way — but dry-run is the primary way operators
+                // preview a rebuild before committing to one, so it must surface this problem
+                // rather than silently preview a "clean" run that would fail for real.
+                return Err(Error::Ipc(
+                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
+                     is a full rebuild. A dry run cannot preview this cleanly — replaying against \
+                     a populated database would fail with a duplicate-primary-key error for every \
+                     existing node. Clear the database first with knowledge_clear_all, or re-run \
+                     with force_clear: true (non-dry-run) to clear it automatically before replay."
+                        .to_string(),
+                ));
+            }
+            if !force_clear {
+                return Err(Error::Ipc(
+                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
+                     is a full rebuild. Replaying now would fail with a duplicate-primary-key error \
+                     for every existing node. Pass force_clear: true to clear the database before \
+                     replaying, or clear it first with knowledge_clear_all."
+                        .to_string(),
+                ));
+            }
+            clear_db_for_rebuild(&state).await?;
+        }
+    }
+
     let is_streaming = progress_tx.is_some();
 
     if is_streaming {
@@ -1776,6 +1822,47 @@ async fn handle_rebuild_from_wal(
         "job_id": job_id,
         "status": "running",
     }))
+}
+
+/// Clears the lbug database (never the WAL directory — the caller is about to replay it) so a
+/// `from_seq: 0` `knowledge_rebuild_from_wal` call can proceed without duplicate-primary-key
+/// collisions (FR-005). Mirrors `recover_rebuild_from_workspace_wal`'s DB-file-delete + reopen +
+/// `state.db` ArcSwap hot-swap pattern (ADR-0003), scoped identically: only the lbug DB file/dir
+/// and its `.wal`/`.lock` sidecars are removed.
+async fn clear_db_for_rebuild(state: &Arc<AppState>) -> Result<(), Error> {
+    let _guard = state.write_lock.write().await;
+    let db_path = state.db_path.clone();
+    let embedding_dim = state.embedder.dim();
+    let new_db = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
+        let path = std::path::Path::new(&db_path);
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path)))?;
+        } else if path.exists() {
+            std::fs::remove_file(path)
+                .map_err(|e| Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path)))?;
+        }
+        for ext in &[".wal", ".lock"] {
+            let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
+        }
+        if let Some(parent) = std::path::Path::new(&db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        let db = Db::open(&db_path)?;
+        {
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            conn.rebuild_name_index()?;
+        }
+        Ok(db)
+    })
+    .await??;
+
+    state.db.store(Some(Arc::new(new_db)));
+    state.indices_built.store(false, Ordering::Release);
+    Ok(())
 }
 
 async fn handle_rebuild_status(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
