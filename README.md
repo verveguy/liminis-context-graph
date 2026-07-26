@@ -63,7 +63,7 @@ The result is a context graph you can treat like the rest of your local tooling:
 - **Hybrid retrieval** — full-text + HNSW vector similarity in one query path, plus raw Cypher (`knowledge_query_cypher`) for arbitrary graph queries.
 - **Optional ontology** — declare entity and relation types (with single-parent hierarchies) in YAML; `open` mode prefers your vocabulary, `strict` mode enforces it. Drift detection flags when the graph predates an ontology change.
 - **Episodes with provenance** — every ingested chunk is a time-stamped episode linked to the entities and relationships it produced.
-- **WAL administration** — rebuild the database from the log (`knowledge_rebuild_from_wal`), dump the database back to a compacted log (`knowledge_dump_wal`), checkpoint before backups (`knowledge_prepare_checkpoint`). A successful non-dry-run rebuild automatically rebuilds the entity/relationship search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable afterward — `knowledge_build_indices` is not normally required. Check the rebuild result's (or `knowledge_status`'s) `indices_built` field to confirm search-readiness rather than assuming it (see [`knowledge_status` summary](#knowledge_status-summary) below). A `from_seq: 0` full rebuild refuses to run against a non-empty database unless `force_clear: true` is passed — see [Recovery and export live under `admin`](#mcp-over-stdio-transport) below. Failure reports also dedupe by `(template, error)`, so a schema gap on one mutation type can no longer hide an unrelated failure category behind a wall of identical samples.
+- **WAL administration** — rebuild the database from the log (`knowledge_rebuild_from_wal`), dump the database back to a compacted log (`knowledge_dump_wal`), checkpoint before backups (`knowledge_prepare_checkpoint`). A successful non-dry-run rebuild automatically rebuilds the entity/relationship search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable afterward — `knowledge_build_indices` is not normally required. Check the rebuild result's (or `knowledge_status`'s) `indices_built` field to confirm search-readiness rather than assuming it (see [`knowledge_status` summary](#knowledge_status-summary) below). A `from_seq: 0` full rebuild refuses to run against a non-empty database unless `force_clear: true` is passed — see [Scopes](#scopes) below. Failure reports also dedupe by `(template, error)`, so a schema gap on one mutation type can no longer hide an unrelated failure category behind a wall of identical samples.
 - **Self-healing** — the service binds its socket *before* opening the database, so a corrupted store leaves it reachable in degraded mode rather than dead; autonomous startup recovery reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
 - **Streaming progress** — long operations accept a `_progress_token` and stream progress frames before the terminal result.
 - **Operational telemetry** — structured JSONL events on stderr with per-call timings and LLM token/cost accounting (see [`docs/telemetry.md`](docs/telemetry.md)).
@@ -564,6 +564,18 @@ and `knowledge_recover` / `knowledge_recover_full` are all `admin`-scope tools �
 only sees them when launched with `--scope=admin` (or `all`). If a mutation goes wrong, this is the
 recovery path. Note the WAL replays **forward-only**, so take periodic `knowledge_dump_wal` snapshots
 if you want restore points before large or destructive operations.
+
+**`knowledge_rebuild_from_wal` refuses to run against a non-empty database, unless you ask it
+not to.** A `from_seq: 0` (default) full rebuild against a database that already contains data
+fails fast with an explicit error rather than silently emitting a duplicate-primary-key failure
+for every existing `Entity`/`Episodic`/`RelatesToNode_` row — the native write path uses `CREATE`,
+not `MERGE`, for those labels. Pass `force_clear: true` to have the call clear the database itself
+before replaying (the same DB-file-delete-and-reopen behavior `knowledge_recover`'s
+`rebuild_from_workspace_wal` strategy uses), or clear it yourself first with `knowledge_clear_all`.
+`dry_run: true` always fails fast on a non-empty database regardless of `force_clear`, since a dry
+run must never mutate the database — this lets a preview surface the problem before you commit to
+a real rebuild. None of this applies to an incremental `from_seq > 0` resume, which intentionally
+targets a database that already has state.
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
