@@ -10,7 +10,7 @@ mod clean_shutdown_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::process::{Child, Command};
+    use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use lcg_core::db::Db;
@@ -38,11 +38,35 @@ mod clean_shutdown_tests {
         None
     }
 
+    /// Sends SIGTERM directly from this test process (rather than shelling out to `kill`), so
+    /// the known sender PID for FR-008's assertion is trivially this process's own PID (#247).
     fn send_sigterm(pid: u32) {
-        Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()
-            .expect("kill command failed");
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        assert_eq!(
+            rc,
+            0,
+            "libc::kill failed: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// Spawns a background thread that reads `stderr` line-by-line and returns a join handle
+    /// yielding every captured line once the pipe reaches EOF (i.e. after the child exits).
+    fn spawn_stderr_reader(
+        stderr: std::process::ChildStderr,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut lines = Vec::new();
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => lines.push(line),
+                }
+            }
+            lines
+        })
     }
 
     /// Spawns a minimal stub HTTP embedder on a random OS-assigned port.
@@ -98,8 +122,10 @@ mod clean_shutdown_tests {
             // knowledge_build_indices), so this URL need not be reachable.
             .args(["--embedder-http", &embedder_url])
             .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
+            .stderr(Stdio::piped())
             .spawn()
             .expect("failed to spawn liminis-context-graph");
+        let stderr_handle = spawn_stderr_reader(child.stderr.take().expect("child stderr"));
 
         let ready = wait_for_socket(&socket_path, Duration::from_secs(15));
         if !ready {
@@ -129,7 +155,9 @@ mod clean_shutdown_tests {
 
         drop(reader);
 
-        // Send SIGTERM — the service should checkpoint the WAL and exit cleanly.
+        // Send SIGTERM directly from this test process — the service should checkpoint the WAL
+        // and exit cleanly, and the known sender PID is this process's own PID (#247/FR-008).
+        let sender_pid = std::process::id();
         send_sigterm(child.id());
 
         let status = wait_for_exit(&mut child, Duration::from_secs(10));
@@ -145,6 +173,13 @@ mod clean_shutdown_tests {
             status.code(),
             Some(0),
             "expected exit code 0 after SIGTERM, got: {status:?}"
+        );
+
+        let stderr_lines = stderr_handle.join().expect("stderr reader thread panicked");
+        let expected = format!("sender pid={sender_pid}");
+        assert!(
+            stderr_lines.iter().any(|line| line.contains(&expected)),
+            "expected stderr to contain {expected:?}, got: {stderr_lines:?}"
         );
 
         // Verify no WAL corruption: re-open the DB that the service just closed.
