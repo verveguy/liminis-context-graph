@@ -31,15 +31,24 @@ jobs:
       - name: build lcg-eval
         run: cargo build --release -p lcg-eval
 
+      - name: require ANTHROPIC_API_KEY
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "ANTHROPIC_API_KEY is required for the judged SC-004 smoke pass" >&2
+            exit 1
+          fi
+
       # SC-004: same backend as both "reference" and "candidate" — two independent
       # extract() calls against the same model, not a single reused result. Judged F1
-      # should land near the noise floor; strict-string F1 should be materially lower.
+      # should land near 1.0 (the judge sees past pure wording variance); strict-string
+      # F1 should be materially lower (it's the wording-variance noise floor itself).
       - name: run baseline-vs-itself smoke pass
         env:
           # Routed through an env var rather than interpolated directly into the script,
           # so a crafted workflow_dispatch input can't inject shell syntax.
           EVAL_LIMIT: ${{ inputs.limit || '5' }}
         run: |
+          set -o pipefail
           cargo run --release -p lcg-eval -- \
             --backend baseline=anthropic \
             --backend candidate=anthropic \
@@ -48,6 +57,27 @@ jobs:
             --judge-cache eval_judge_cache.jsonl \
             --output eval_report.json \
             2>&1 | tee eval_report.txt
+
+      - name: enforce SC-004 noise-floor property
+        run: |
+          candidate=$(jq -c '.candidates[] | select(.backend_name == "candidate")' eval_report.json)
+          judged=$(echo "$candidate" | jq -r '.judged_entity_f1')
+          strict=$(echo "$candidate" | jq -r '.strict_entity_f1')
+          echo "judged_entity_f1=$judged strict_entity_f1=$strict"
+          # Hard-fail only on a clearly broken judge path (missing score, or a judge score
+          # so low it can't be sampling noise) — a default 5-chunk smoke pass is too small
+          # a sample to hard-gate the "materially lower" comparison without risking flaky
+          # failures on a legitimate run, so that property is a warning annotation, not a
+          # blocking check.
+          if [ "$judged" = "null" ]; then
+            echo "judged_entity_f1 is null — ANTHROPIC_API_KEY wasn't picked up by the judge client" >&2
+            exit 1
+          fi
+          awk -v j="$judged" -v s="$strict" 'BEGIN {
+            if (j < 0.5) { print "judged_entity_f1 " j " is implausibly low for a baseline-vs-itself comparison"; exit 1 }
+            if (j - s < 0.05) { print "::warning::judged_entity_f1 " j " is not materially above strict_entity_f1 " s " on this smoke sample (expected on a small/noisy sample; re-run with a larger --limit if this persists)" }
+            exit 0
+          }'
 
       - name: upload eval report
         uses: actions/upload-artifact@v4
