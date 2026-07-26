@@ -797,6 +797,148 @@ fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure(
     );
 }
 
+/// Issue #238 review finding (blocking): caching the *settled* `use_probe` after a per-row
+/// probe-*execute* failure would make that row's degradation permanent for every later flush of
+/// the same template — silently disabling no-op detection (the ADR-0043 failure mode: a no-op
+/// counted as a successful write) and violating FR-003. `flush_batch` must distinguish a
+/// template-level probe-*prepare* rejection (a property of the template, safe to cache forever)
+/// from a row-level probe-*execute* failure (must NOT be cached — the next flush must re-probe
+/// fresh). This also pins FR-002 within a degraded batch itself: a second row hitting the same
+/// execute failure must reuse the already-prepared fallback statement, not re-prepare per row.
+///
+/// Uses two consecutive flushes of one MATCH-prefixed template that both fail at execute() (the
+/// "bad_val"-into-TIMESTAMP type mismatch from the test above, which lbug validates at bind
+/// time — independent of whether MATCH finds any rows, so a clean "no-op" signal isn't available
+/// here to distinguish fixed from unfixed behavior). What DOES distinguish them is
+/// `prepare_calls`: if flush 1's row-level degradation were wrongly cached (pre-fix), flush 2
+/// would reuse the stale unprobed statement with zero new `prepare()` calls; with the fix, the
+/// cache is dropped after flush 1 and flush 2 must re-probe from scratch.
+#[test]
+fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let create_line = r#"{"seq":0,"ts":"2026-05-19T00:00:00.000000+00:00","db":"","cypher":"CREATE (n:Entity {uuid: 'probe-cache-target', name: 'N', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-19 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 'initial', attributes: '{}'})","params":{}}"#;
+
+    // "bad_val" is deliberately not in TIMESTAMP_PARAM_NAMES (db.rs), so it always binds as a
+    // plain string; assigning it into the TIMESTAMP `created_at` column fails at bind/execute
+    // time regardless of the row's uuid — identically whether or not the probe's RETURN count(*)
+    // is appended (same mechanism as the test above), so both flushes fail deterministically.
+    // Flush 1 (rows 1,2): row 1 triggers the probe-execute fallback; row 2 must reuse that
+    // fallback statement rather than re-preparing (FR-002 within one degraded batch).
+    // Flush 2 (rows 3,4): same template — row 3 must trigger a FRESH probed prepare (proving the
+    // cache was dropped, not reused with a stale use_probe=false), and row 4 must again reuse
+    // its own fallback statement rather than re-preparing.
+    let bad_set_line = |seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {{uuid: $uuid}}) SET n.created_at = $bad_val","params":{{"uuid":"probe-cache-target","bad_val":"not-a-real-timestamp"}}}}"#
+        )
+    };
+
+    let content = format!(
+        "{create_line}\n{}\n{}\n{}\n{}\n",
+        bad_set_line(1),
+        bad_set_line(2),
+        bad_set_line(3),
+        bad_set_line(4),
+    );
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(2),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on execute-time failures");
+
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "only the CREATE must have replayed"
+    );
+    assert_eq!(
+        stats.failed_lines, 4,
+        "all four type-mismatched SET rows must be classified as failed, in both flushes"
+    );
+    assert_eq!(stats.match_prefixed_no_op, 0);
+    assert_eq!(stats.match_delete_no_op, 0);
+    assert_eq!(
+        stats.prepare_calls, 5,
+        "1 for the CREATE template, then: flush 1 — 1 initial probe + 1 fallback prepare for \
+         row 1 (row 2 must reuse it, not re-prepare); flush 2 — 1 FRESH re-probe (the cache must \
+         have been dropped after flush 1's row-level degradation, not reused with a stale \
+         use_probe=false) + 1 fallback prepare for row 3 (row 4 must reuse it). Reverting the \
+         cache-drop (finding 1) would make flush 2 a cache hit with zero new prepares, lowering \
+         this count; reverting the per-row fallback reuse (finding 2) would make rows 2 and 4 \
+         each trigger their own extra prepare, raising it."
+    );
+}
+
+/// Issue #238 review finding: the prepared-statement cache must survive multiple flushes of a
+/// MATCH-prefixed (probed) template without losing no-op accounting — pins the common case of
+/// FR-001/FR-002 for the probed path, not just the plain (non-MATCH) path already covered in
+/// `replay.rs`'s unit tests.
+#[test]
+fn test_match_delete_no_op_prepare_cache_across_flushes() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // 12 no-op DETACH-DELETEs (target never existed), all sharing one MATCH-prefixed template —
+    // the uuid varies via a bound $uuid param (not a literal baked into the cypher text) so all
+    // 12 lines are the SAME template and batch_size: Some(3) forcing four flushes exercises
+    // reuse across them, rather than accidentally creating 12 distinct templates.
+    let no_op_line = |seq: u64| -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"MATCH (ep:Episodic {{uuid: $uuid}}) DETACH DELETE ep","params":{{"uuid":"cache-missing-{seq}"}}}}"#
+        )
+    };
+    let content: String = (0..12u64).map(no_op_line).collect::<Vec<_>>().join("\n") + "\n";
+    fs::write(
+        wal_dir
+            .path()
+            .join("20260522_000000_delnoopcache_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(3),
+                ..Default::default()
+            },
+        )
+        .expect("replay must succeed");
+
+    assert_eq!(
+        stats.prepare_calls, 1,
+        "all four flushes share one template — after the first probed prepare, every later \
+         flush must be a cache hit"
+    );
+    assert_eq!(
+        stats.match_delete_no_op, 12,
+        "no-op detection must survive being served from the cache, not just the first prepare"
+    );
+    assert_eq!(stats.lines_replayed, 0);
+}
+
 /// Review finding: `first_seq_in_file` must not abandon an entire file's ordering just because
 /// its first line is corrupt/unparseable — it should keep scanning for the first line that DOES
 /// parse, mirroring `wal::read_last_seq`'s tolerance. A file relegated to filename-order fallback
