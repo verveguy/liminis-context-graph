@@ -168,6 +168,19 @@ impl<'db> Conn<'db> {
         Ok(self.inner.prepare(cypher)?)
     }
 
+    /// Issues a transaction-control statement (`BEGIN TRANSACTION` / `COMMIT` / `ROLLBACK`) via
+    /// `Connection::query`, without recording anything into `executed_mutations`.
+    ///
+    /// Deliberately distinct from [`Conn::raw_query`]: `raw_query` records every call into
+    /// `executed_mutations`, a buffer meant for live-write WAL logging that nothing drains for a
+    /// replay connection — using it here would accumulate one entry per transaction for the life
+    /// of a multi-hour replay, an unbounded-memory regression this issue exists to avoid (User
+    /// Story 4), not to introduce in a different place. Used only by WAL replay's `flush_batch`.
+    pub(crate) fn exec_transaction_control(&self, sql: &str) -> Result<(), Error> {
+        let _ = self.inner.query(sql)?;
+        Ok(())
+    }
+
     /// Binds `params` and executes an already-prepared statement. Does **not** record to the
     /// WAL — used by WAL replay (which is rebuilding *from* the WAL and must not re-log) and
     /// internally by [`Conn::exec_params`] (which records separately on success).
@@ -2455,6 +2468,193 @@ mod create_vector_indexes_tests {
             !crate::error::is_already_exists_error(&err),
             "missing-table error must not be misclassified as already-exists: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod exec_transaction_control_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// `exec_transaction_control` must not accumulate into `executed_mutations` — that buffer is
+    /// drained for live-write WAL logging, and a replay connection's transaction-control calls
+    /// (BEGIN/COMMIT/ROLLBACK, one pair per flushed batch) must not grow it unboundedly over a
+    /// multi-hour replay (issue #240, User Story 4).
+    #[test]
+    fn does_not_accumulate_in_executed_mutations() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.drain_mutations(); // discard init_schema's own recorded DDL
+
+        for _ in 0..5 {
+            conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+            conn.exec_transaction_control("COMMIT").unwrap();
+        }
+
+        assert!(
+            conn.drain_mutations().is_empty(),
+            "exec_transaction_control must never record into executed_mutations"
+        );
+    }
+
+    /// A statement executed inside the open transaction still records normally via
+    /// `exec_params`/`raw_query` — only the transaction-control calls themselves are exempt.
+    #[test]
+    fn does_not_suppress_recording_of_statements_inside_the_transaction() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.drain_mutations(); // discard init_schema's own recorded DDL
+
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        conn.raw_query("CREATE (:Episodic {uuid: 'txn-record-probe', name: 'n', group_id: 'g', created_at: timestamp('2026-01-01'), source: 'text', source_description: '', content: 'c', valid_at: timestamp('2026-01-01')})").unwrap();
+        conn.exec_transaction_control("COMMIT").unwrap();
+
+        assert_eq!(
+            conn.drain_mutations().len(),
+            1,
+            "the one statement executed between BEGIN and COMMIT must still be recorded"
+        );
+    }
+}
+
+/// Pins lbug 0.17.0 engine behavior (verified against the vendored C++ source, not documented in
+/// the Rust crate's own API surface or exercised by its own test suite — see issue #240's Research
+/// findings) that the replay transaction-boundary design in `replay.rs::flush_batch` depends on.
+/// If a future lbug version changes either behavior pinned here, these tests must fail loudly
+/// rather than let `flush_batch`'s assumptions silently go stale.
+#[cfg(test)]
+mod lbug_transaction_semantics_pinning_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn open_db_with_schema() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        {
+            let conn = db.connect().unwrap();
+            conn.init_schema(4).unwrap();
+        }
+        (dir, db)
+    }
+
+    /// A statement that throws an execute-time exception inside an open explicit transaction
+    /// rolls back EVERY statement already applied earlier in that same transaction — not just
+    /// the failing one — and the engine has already cleared its transaction state by the time
+    /// the exception is caught, so a subsequent explicit `ROLLBACK` then itself errors ("no
+    /// active transaction"). This is the constraint `flush_batch` is built around: once `BEGIN`
+    /// has been issued, a per-row execute failure must NOT be followed by an explicit `ROLLBACK`
+    /// call.
+    #[test]
+    fn execute_exception_rolls_back_whole_transaction_and_leaves_no_active_transaction() {
+        let (_dir, db) = open_db_with_schema();
+        let conn = db.connect().unwrap();
+
+        conn.insert_entity(&crate::EntityRow {
+            uuid: "pin-rollback-target".to_string(),
+            name: "N".to_string(),
+            group_id: "g".to_string(),
+            labels: vec![],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0f32; 4],
+            summary: "initial".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+
+        // A statement that succeeds earlier in the transaction.
+        conn.raw_query(
+            "CREATE (:Episodic {uuid: 'pin-rollback-episode', name: 'n', group_id: 'g', \
+             created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+             content: 'c', valid_at: timestamp('2026-01-01')})",
+        )
+        .unwrap();
+
+        // "bad_val" is not in TIMESTAMP_PARAM_NAMES, so it binds as a plain string; assigning it
+        // into the TIMESTAMP `created_at` column fails at execute() — a genuine exception, not a
+        // zero-row no-op.
+        let exec_err = conn
+            .exec_params(
+                "MATCH (n:Entity {uuid: $uuid}) SET n.created_at = $bad_val",
+                serde_json::json!({"uuid": "pin-rollback-target", "bad_val": "not-a-real-timestamp"}),
+            )
+            .expect_err("type-mismatched SET must fail at execute time");
+        eprintln!("(expected) execute exception: {exec_err}");
+
+        // The engine has already rolled back and cleared its transaction state — an explicit
+        // ROLLBACK at this point must itself error.
+        let rollback_err = conn
+            .exec_transaction_control("ROLLBACK")
+            .expect_err("ROLLBACK after an engine auto-rollback must error");
+        assert!(
+            rollback_err
+                .to_string()
+                .to_lowercase()
+                .contains("active transaction"),
+            "expected a 'no active transaction' style error, got: {rollback_err}"
+        );
+
+        // The earlier-successful CREATE inside the same transaction must also have been rolled
+        // back — not just the failing SET.
+        let rows = conn
+            .query_params(
+                "MATCH (ep:Episodic {uuid: $uuid}) RETURN ep.uuid",
+                serde_json::json!({"uuid": "pin-rollback-episode"}),
+            )
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "the earlier CREATE in the same transaction must have been rolled back too"
+        );
+    }
+
+    /// A `PreparedStatement` prepared once outside any transaction continues to execute
+    /// correctly when invoked inside two separate, later `BEGIN`/`COMMIT` transactions — this is
+    /// what makes `flush_batch`'s cross-flush `PreparedCache` (issue #238/ADR-0045) safe to keep
+    /// using unmodified once each flush wraps its row loop in an explicit transaction.
+    #[test]
+    fn prepared_statement_reused_safely_across_separate_transactions() {
+        let (_dir, db) = open_db_with_schema();
+        let conn = db.connect().unwrap();
+
+        let mut prepared = conn
+            .prepare(
+                "CREATE (:Episodic {uuid: $uuid, name: 'n', group_id: 'g', \
+                 created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+                 content: 'c', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        conn.execute_prepared(&mut prepared, &serde_json::json!({"uuid": "cross-txn-a"}))
+            .unwrap();
+        conn.exec_transaction_control("COMMIT").unwrap();
+
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        conn.execute_prepared(&mut prepared, &serde_json::json!({"uuid": "cross-txn-b"}))
+            .unwrap();
+        conn.exec_transaction_control("COMMIT").unwrap();
+
+        for uuid in ["cross-txn-a", "cross-txn-b"] {
+            let rows = conn
+                .query_params(
+                    "MATCH (ep:Episodic {uuid: $uuid}) RETURN ep.uuid",
+                    serde_json::json!({"uuid": uuid}),
+                )
+                .unwrap();
+            assert_eq!(
+                rows.len(),
+                1,
+                "node {uuid} must exist — the reused prepared statement must have executed \
+                 correctly in both transactions"
+            );
+        }
     }
 }
 

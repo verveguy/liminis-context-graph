@@ -740,13 +740,12 @@ fn test_match_set_with_existing_return_clause_falls_back_and_still_applies() {
 }
 
 /// Review finding: the probe-prepare fallback only covers a probe that fails to *prepare*, not
-/// one that prepares fine but fails to *execute*. Exercises the execute-failure fallback branch
-/// in `flush_batch` with a genuine execute-time error (binding a plain string, under a param
-/// name outside `TIMESTAMP_PARAM_NAMES`, into a `TIMESTAMP` column via a bare `SET` — lbug does
-/// not implicitly cast `STRING`→`TIMESTAMP` there) that fails identically whether or not the
-/// probe's `RETURN count(*)` is appended, so the fallback's retry against the unmodified
-/// template must also fail and the row must land in `failed_lines` exactly once — not silently
-/// dropped, and not double-counted.
+/// one that prepares fine but fails to *execute*. Exercises the execute-failure path in
+/// `flush_batch` with a genuine execute-time error (binding a plain string, under a param name
+/// outside `TIMESTAMP_PARAM_NAMES`, into a `TIMESTAMP` column via a bare `SET` — lbug does not
+/// implicitly cast `STRING`→`TIMESTAMP` there). This is a single-row batch, so issue #240's
+/// whole-transaction-rollback semantics have no other row to discard — the row must land in
+/// `failed_lines` exactly once, not silently dropped, and not double-counted.
 #[test]
 fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure() {
     let wal_dir = TempDir::new().unwrap();
@@ -797,22 +796,23 @@ fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure(
     );
 }
 
-/// Issue #238 review finding (blocking): caching the *settled* `use_probe` after a per-row
-/// probe-*execute* failure would make that row's degradation permanent for every later flush of
-/// the same template — silently disabling no-op detection (the ADR-0043 failure mode: a no-op
-/// counted as a successful write) and violating FR-003. `flush_batch` must distinguish a
-/// template-level probe-*prepare* rejection (a property of the template, safe to cache forever)
-/// from a row-level probe-*execute* failure (must NOT be cached — the next flush must re-probe
-/// fresh). This also pins FR-002 within a degraded batch itself: a second row hitting the same
-/// execute failure must reuse the already-prepared fallback statement, not re-prepare per row.
+/// Issue #240 superseded the old probe-execute-failure retry-in-place mechanism this test used
+/// to pin: lbug's engine rolls back the *whole* transaction on any row's execute exception (see
+/// `db::lbug_transaction_semantics_pinning_tests` and ADR-0047), so retrying a failed row inline
+/// and continuing the batch is no longer possible — the moment row 1 throws, the engine has
+/// already discarded the transaction, and row 2 is never attempted at all. This test now pins
+/// that replacement behavior: a probe-execute failure (a) classifies exactly the triggering row
+/// as failed, (b) counts every other row in the same (now-rolled-back) batch into
+/// `rolled_back_lines` rather than `lines_replayed`, and (c) drops the prepared-statement cache
+/// so the next flush of the same template re-probes fresh rather than reusing a statement whose
+/// last use ended in a rolled-back transaction.
 ///
-/// Uses two consecutive flushes of one MATCH-prefixed template that both fail at execute() (the
-/// "bad_val"-into-TIMESTAMP type mismatch from the test above, which lbug validates at bind
-/// time — independent of whether MATCH finds any rows, so a clean "no-op" signal isn't available
-/// here to distinguish fixed from unfixed behavior). What DOES distinguish them is
-/// `prepare_calls`: if flush 1's row-level degradation were wrongly cached (pre-fix), flush 2
-/// would reuse the stale unprobed statement with zero new `prepare()` calls; with the fix, the
-/// cache is dropped after flush 1 and flush 2 must re-probe from scratch.
+/// Uses two consecutive flushes (batch_size: 2) of one MATCH-prefixed template that both fail at
+/// execute() (the "bad_val"-into-TIMESTAMP type mismatch from the test above, which lbug
+/// validates at bind time — independent of whether MATCH finds any rows). `prepare_calls`
+/// distinguishes a dropped cache from a reused one: if flush 1's failure left a stale cache
+/// entry behind, flush 2 would be a cache hit with zero new `prepare()` calls; with the cache
+/// correctly dropped, flush 2 must re-probe from scratch.
 #[test]
 fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
     let wal_dir = TempDir::new().unwrap();
@@ -823,12 +823,11 @@ fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
     // "bad_val" is deliberately not in TIMESTAMP_PARAM_NAMES (db.rs), so it always binds as a
     // plain string; assigning it into the TIMESTAMP `created_at` column fails at bind/execute
     // time regardless of the row's uuid — identically whether or not the probe's RETURN count(*)
-    // is appended (same mechanism as the test above), so both flushes fail deterministically.
-    // Flush 1 (rows 1,2): row 1 triggers the probe-execute fallback; row 2 must reuse that
-    // fallback statement rather than re-preparing (FR-002 within one degraded batch).
+    // is appended, so both flushes fail deterministically on their first row.
+    // Flush 1 (rows 1,2): row 1 fails at execute, rolling back the whole 2-row transaction; row
+    // 2 is never attempted — it must land in rolled_back_lines, not lines_replayed or failed_lines.
     // Flush 2 (rows 3,4): same template — row 3 must trigger a FRESH probed prepare (proving the
-    // cache was dropped, not reused with a stale use_probe=false), and row 4 must again reuse
-    // its own fallback statement rather than re-preparing.
+    // cache was dropped after flush 1's rollback, not reused), and row 4 is again never attempted.
     let bad_set_line = |seq: u64| -> String {
         format!(
             r#"{{"seq":{seq},"ts":"2026-05-19T00:00:01.000000+00:00","db":"","cypher":"MATCH (n:Entity {{uuid: $uuid}}) SET n.created_at = $bad_val","params":{{"uuid":"probe-cache-target","bad_val":"not-a-real-timestamp"}}}}"#
@@ -868,20 +867,29 @@ fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
         "only the CREATE must have replayed"
     );
     assert_eq!(
-        stats.failed_lines, 4,
-        "all four type-mismatched SET rows must be classified as failed, in both flushes"
+        stats.failed_lines, 2,
+        "exactly the triggering row of each of the two flushes must be classified as failed"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 2,
+        "the never-attempted second row of each rolled-back flush must be counted here, not \
+         in lines_replayed or failed_lines"
+    );
+    assert_eq!(
+        stats.transactions_committed, 1,
+        "only the CREATE's transaction committed"
+    );
+    assert_eq!(
+        stats.transactions_rolled_back, 2,
+        "both bad_set_line flushes rolled back"
     );
     assert_eq!(stats.match_prefixed_no_op, 0);
     assert_eq!(stats.match_delete_no_op, 0);
     assert_eq!(
-        stats.prepare_calls, 5,
-        "1 for the CREATE template, then: flush 1 — 1 initial probe + 1 fallback prepare for \
-         row 1 (row 2 must reuse it, not re-prepare); flush 2 — 1 FRESH re-probe (the cache must \
-         have been dropped after flush 1's row-level degradation, not reused with a stale \
-         use_probe=false) + 1 fallback prepare for row 3 (row 4 must reuse it). Reverting the \
-         cache-drop (finding 1) would make flush 2 a cache hit with zero new prepares, lowering \
-         this count; reverting the per-row fallback reuse (finding 2) would make rows 2 and 4 \
-         each trigger their own extra prepare, raising it."
+        stats.prepare_calls, 3,
+        "1 for the CREATE template, then 1 probed prepare for flush 1 and 1 FRESH probed \
+         prepare for flush 2 — the cache must have been dropped after flush 1's rollback, not \
+         reused. If the cache were wrongly kept, flush 2 would be a cache hit and this would be 2."
     );
 }
 
@@ -1677,6 +1685,12 @@ fn sample_cap_respected() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(3),
+                // batch_size: 1 makes each row its own transaction (issue #240) — since all 10
+                // rows share one template, a larger batch would roll back after the first
+                // failure and classify only that one row, never attempting the rest. This test
+                // is about classify_replay_failure's dedup-by-category logic (#239), not batch
+                // atomicity, so isolate one mechanism from the other.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1734,6 +1748,10 @@ fn sample_dedup_counts_rows_beyond_cap() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
+                // batch_size: 1 makes each row its own transaction (issue #240) — all 15 rows
+                // share one identical literal template, so a larger batch would roll back after
+                // the first failure and classify only that one row. See sample_cap_respected.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1785,6 +1803,10 @@ fn sample_dedup_same_template_different_error_are_distinct() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
+                // batch_size: 1 makes each row its own transaction (issue #240) — both rows
+                // share one template, so a larger batch would roll back after the first failure
+                // and never attempt the second, classifying only one sample instead of two.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1938,6 +1960,10 @@ fn test_fidelity_warning_fires_above_threshold() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(0),
+                // batch_size: 1 makes each row its own transaction (issue #240) — the 11 failing
+                // lines share one identical literal template, so a larger batch would roll back
+                // after the first failure and classify only that one row instead of all 11.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -2493,10 +2519,14 @@ fn batch_same_template_groups_into_unwind() {
     assert_eq!(count, 10, "all 10 Entity nodes must exist in DB");
 }
 
-/// One bad row in a batch causes UNWIND failure; fallback per-row keeps valid rows.
-/// Asserts mutations_replayed == 4, failed_lines == 1 (SC-003, FR-008).
+/// Issue #240: one bad row in a batch now rolls back the ENTIRE batch's transaction, not just
+/// the bad row — this is the core fix (previously each row was its own auto-commit, so 4 of the
+/// 5 rows here would have persisted despite the 5th failing; that "isolation" was the very
+/// absence of transaction boundaries this issue exists to eliminate). Asserts lines_replayed ==
+/// 0, failed_lines == 1, rolled_back_lines == 4, and none of the 5 rows' entities exist in the
+/// DB afterward (SC-001).
 #[test]
-fn batch_fallback_isolates_bad_row() {
+fn batch_fallback_rolls_back_whole_batch_on_bad_row() {
     let wal_dir = TempDir::new().unwrap();
     let db_dir = TempDir::new().unwrap();
 
@@ -2521,7 +2551,9 @@ fn batch_fallback_isolates_bad_row() {
     .unwrap();
 
     let emb = [1.0f32, 0.0, 0.0, 0.0];
-    // 5 lines: mutation #3 (seq=2) uses the pre-existing uuid → fails on CREATE.
+    // 5 lines, one batch/transaction (batch_size: 5): mutation #3 (seq=2) uses the pre-existing
+    // uuid → fails on CREATE, rolling back the whole transaction — including the 2 rows that
+    // executed successfully earlier in it.
     let uuids = ["fb-1", "fb-2", "fb-pre", "fb-4", "fb-5"];
     let mut lines = String::new();
     for (i, &uuid) in uuids.iter().enumerate() {
@@ -2551,24 +2583,37 @@ fn batch_fallback_isolates_bad_row() {
         .expect("replay must not abort on batch failure");
 
     assert_eq!(
-        stats.lines_replayed, 4,
-        "4 valid mutations must succeed after fallback"
+        stats.lines_replayed, 0,
+        "none of this transaction's rows persisted — the whole batch was rolled back"
     );
-    assert_eq!(stats.failed_lines, 1, "exactly 1 mutation must fail");
+    assert_eq!(
+        stats.failed_lines, 1,
+        "exactly 1 mutation classified as the trigger"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 4,
+        "the other 4 rows in the same transaction (2 that ran earlier, 2 never attempted) \
+         must be counted as rolled back, not replayed"
+    );
+    assert_eq!(stats.transactions_rolled_back, 1);
+    assert_eq!(stats.transactions_committed, 0);
     assert_eq!(
         stats.failed_samples.len(),
         1,
         "exactly 1 failure sample must be captured"
     );
 
-    // Verify the 4 valid entities exist.
+    // None of the 5 rows' entities must exist — the whole transaction rolled back.
     for uuid in &["fb-1", "fb-2", "fb-4", "fb-5"] {
         let rows = conn
             .cypher_query(&format!(
                 "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
             ))
             .unwrap();
-        assert!(!rows.is_empty(), "entity {uuid} must exist after fallback");
+        assert!(
+            rows.is_empty(),
+            "entity {uuid} must NOT exist — its transaction was rolled back"
+        );
     }
 }
 
@@ -3075,6 +3120,280 @@ fn wal_replay_progress_throttle_default_interval() {
         assert!(
             first.starts_with("[WAL PROGRESS]"),
             "log line must start with [WAL PROGRESS]; got: {first}"
+        );
+    }
+}
+
+// ── Issue #240: transaction-boundary atomicity and cancellation (SC-001/SC-002) ──────────────
+
+/// SC-001: a WAL whose replay applies two transactions successfully before a third fails must
+/// leave the database reflecting exactly the first two transactions' effects — no partial
+/// effects of the third. Three same-template rows would normally batch together, but this test
+/// separates the three groups with an intervening different-template group (Episodic MERGE) so
+/// each group of Entity CREATEs becomes its OWN transaction, proving prior *committed*
+/// transactions survive a later, unrelated transaction's rollback — not just that a single
+/// transaction is atomic in isolation (already covered by
+/// `batch_fallback_rolls_back_whole_batch_on_bad_row`).
+#[test]
+fn sc001_prior_committed_transactions_survive_a_later_rollback() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert the conflicting entity so the third group's middle row fails on CREATE.
+    conn.insert_entity(&EntityRow {
+        uuid: "sc001-conflict".to_string(),
+        name: "Pre".to_string(),
+        group_id: "g".to_string(),
+        labels: vec!["tag".to_string()],
+        created_at: "2026-05-19 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: "s".to_string(),
+        attributes: "{}".to_string(),
+        episode_uuids: vec![],
+        source_descriptions: vec![],
+    })
+    .unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    // Transaction 1 (seq 0-2): 3 Entity CREATEs, all succeed.
+    let mut lines = String::new();
+    for (i, uuid) in ["sc001-e1", "sc001-e2", "sc001-e3"].iter().enumerate() {
+        lines.push_str(&entity_create_wal_line(i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    // Transaction 2 (seq 3-5): 3 Episodic MERGEs, different template, all succeed.
+    for (i, uuid) in ["sc001-ep1", "sc001-ep2", "sc001-ep3"].iter().enumerate() {
+        lines.push_str(&episodic_merge_wal_line(3 + i as u64, uuid, uuid));
+        lines.push('\n');
+    }
+    // Transaction 3 (seq 6-8): 3 Entity CREATEs (same template as transaction 1, but not
+    // adjacent to it) — the middle row conflicts with the pre-inserted entity and fails,
+    // rolling back the whole transaction, including "sc001-e4" which executed successfully
+    // just before the failure.
+    for (i, uuid) in ["sc001-e4", "sc001-conflict", "sc001-e5"]
+        .iter()
+        .enumerate()
+    {
+        lines.push_str(&entity_create_wal_line(6 + i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(3),
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on a later transaction's failure");
+
+    assert_eq!(
+        stats.lines_replayed, 6,
+        "transactions 1 and 2's 6 rows must have committed"
+    );
+    assert_eq!(
+        stats.failed_lines, 1,
+        "the conflicting row in transaction 3"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 2,
+        "sc001-e4 (executed, then discarded) and sc001-e5 (never attempted) from transaction 3"
+    );
+    assert_eq!(stats.transactions_committed, 2);
+    assert_eq!(stats.transactions_rolled_back, 1);
+    assert_eq!(
+        stats.last_committed_seq,
+        Some(5),
+        "must be the max seq of the last COMMITTED transaction (transaction 2), not \
+         transaction 3's rolled-back rows"
+    );
+
+    // Transactions 1 and 2's rows must be fully present.
+    for uuid in &["sc001-e1", "sc001-e2", "sc001-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "entity {uuid} from transaction 1 must exist"
+        );
+    }
+    for uuid in &["sc001-ep1", "sc001-ep2", "sc001-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "episode {uuid} from transaction 2 must exist"
+        );
+    }
+    // Transaction 3's rows must be fully absent — including sc001-e4, which executed
+    // successfully before the failure but was rolled back with the rest of its transaction.
+    for uuid in &["sc001-e4", "sc001-e5"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "entity {uuid} from the rolled-back transaction 3 must NOT exist"
+        );
+    }
+}
+
+/// SC-002: a `cancel_fn` that fires partway through a transaction's row loop must roll back that
+/// whole transaction (not just stop applying further rows) while leaving prior *committed*
+/// transactions intact, and resuming replay from the derived `last_committed_seq` must reproduce
+/// the same end state as an uninterrupted replay.
+///
+/// Uses batch_size: 3 with two same-size groups so the exact `cancel_fn` call sequence is
+/// deterministic: group 1 (3 Entity CREATEs) fully commits (2 outer per-line checks for rows 1-2,
+/// then 3 inner per-row checks inside the size-triggered flush, then 1 outer check for row 3 —
+/// 6 calls total, all before cancellation should fire), then group 2 (3 Episodic MERGEs, a
+/// different template) begins: 2 more outer checks (calls 7-8) for its first two rows, then its
+/// own size-triggered flush's inner loop starts — call 9 (row 1 of group 2, executes), call 10
+/// (row 2 of group 2 — the cancel_fn is armed to fire here).
+#[test]
+fn sc002_cancel_mid_transaction_rolls_back_and_resume_matches_uninterrupted_replay() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    // Group 1 (seq 0-2): 3 Entity CREATEs.
+    for (i, uuid) in ["sc002-e1", "sc002-e2", "sc002-e3"].iter().enumerate() {
+        lines.push_str(&entity_create_wal_line(i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    // Group 2 (seq 3-5): 3 Episodic MERGEs (idempotent — safe to resume/re-apply).
+    for (i, uuid) in ["sc002-ep1", "sc002-ep2", "sc002-ep3"].iter().enumerate() {
+        lines.push_str(&episodic_merge_wal_line(3 + i as u64, uuid, uuid));
+        lines.push('\n');
+    }
+    let content = lines;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_cb = Arc::clone(&call_count);
+    let cancel_fn: lcg_core::replay::CancelFn = Box::new(move || {
+        let n = call_count_cb.fetch_add(1, Ordering::SeqCst) + 1;
+        n >= 10
+    });
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(3),
+                cancel_fn: Some(cancel_fn),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on cancellation");
+
+    assert_eq!(
+        stats.lines_replayed, 3,
+        "group 1 (3 Entity CREATEs) must have fully committed"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 3,
+        "all 3 rows of group 2 must be rolled back — including sc002-ep1, which executed \
+         successfully inside the transaction before cancellation fired on row 2"
+    );
+    assert_eq!(stats.failed_lines, 0, "cancellation is not a failure");
+    assert_eq!(stats.transactions_committed, 1);
+    assert_eq!(stats.transactions_rolled_back, 1);
+    let last_committed_seq = stats
+        .last_committed_seq
+        .expect("group 1's transaction must have committed and recorded a resume point");
+    assert_eq!(last_committed_seq, 2, "max seq of group 1's 3 rows");
+
+    // Group 1 exists; group 2 does not.
+    for uuid in &["sc002-e1", "sc002-e2", "sc002-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(!rows.is_empty(), "entity {uuid} from group 1 must exist");
+    }
+    for uuid in &["sc002-ep1", "sc002-ep2", "sc002-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "episode {uuid} from the cancelled group 2 must NOT exist yet"
+        );
+    }
+
+    // Resume from last_committed_seq + 1 — must reproduce the same end state as an
+    // uninterrupted replay (i.e. group 2 now fully present, group 1 unchanged).
+    let resume_stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: last_committed_seq + 1,
+                batch_size: Some(3),
+                ..Default::default()
+            },
+        )
+        .expect("resumed replay must succeed");
+    assert_eq!(
+        resume_stats.lines_replayed, 3,
+        "the resumed replay must apply exactly group 2's 3 rows"
+    );
+    assert_eq!(resume_stats.failed_lines, 0);
+    assert_eq!(resume_stats.rolled_back_lines, 0);
+
+    for uuid in &["sc002-e1", "sc002-e2", "sc002-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{uuid} must exist after resume — matching an uninterrupted replay's end state"
+        );
+    }
+    for uuid in &["sc002-ep1", "sc002-ep2", "sc002-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{uuid} must exist after resume — matching an uninterrupted replay's end state"
         );
     }
 }

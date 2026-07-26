@@ -50,6 +50,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0044](0044-llm-cassette-record-replay-seam.md) | LLM Cassette Record/Replay Seam | 2026-07-26 |
 | [0045](0045-wal-replay-prepared-statement-cache-scope.md) | WAL Replay Prepared-Statement Cache — LRU-1 Scope and Deferred Connection Recycling | 2026-07-26 |
 | [0046](0046-wal-replay-failure-dedup-and-rebuild-idempotency.md) | WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency | 2026-07-26 |
+| [0047](0047-wal-replay-transaction-boundaries.md) | WAL Replay Transaction Boundaries — Batch-Aligned, Not Chunk-Aligned | 2026-07-26 |
 
 ## Historical numbering
 
