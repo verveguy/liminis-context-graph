@@ -478,6 +478,76 @@ Because cassettes are plain JSONL with no credential material, they're safe to c
 fixtures — see `crates/core/tests/fixtures/README.md` for this repo's fixture-capture
 conventions.
 
+## Extraction-quality eval harness
+
+The `lcg-eval` binary (`crates/eval`) measures extraction quality directly against this
+engine's own prompts and extractor clients — no captured/copied prompts, so a prompt change
+either updates the eval or breaks its build. It closes the gap noted in [ADR
+0041](docs/adr/0041-local-openai-compatible-extraction-adapter.md): the local extraction
+adapter's quality claim used to rest on a manual-testing caveat instead of anything
+measurable. See [docs/extraction-quality-evaluation.md](docs/extraction-quality-evaluation.md)
+for the prior research findings this harness re-baselines, and #248 for the maintainer-run
+full-corpus model comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it.
+
+### Running the harness
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # hosted baseline + LLM-as-judge scoring
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \
+  --reference baseline
+```
+
+This runs both backends over the default corpus subset (the first 50 chunks of the #217
+public Simple English Wikipedia fixture, `crates/core/tests/fixtures/real_corpus_wal/
+corpus_prose.jsonl`) and prints a report with, per backend: strict-string and LLM-as-judge F1
+for entities/edges/summaries, latency percentiles, error rate, and structured-output
+reliability (clean/recovered/malformed JSON parse counts — FR-007). Pass `--output
+report.json` to also write the report as JSON. Run `cargo run -p lcg-eval -- --help` for the
+full flag reference.
+
+To validate the judge itself rather than compare backends, point `--reference` and a second
+`--backend` at the *same* spec (a baseline-vs-itself run): the judged score should land near
+1.0 (pure wording-variance noise floor) while the strict-string score is materially lower —
+this is what the `eval.yml` workflow's on-demand smoke pass checks.
+
+### Adding a candidate backend
+
+`--backend NAME=SPEC` is repeatable. `SPEC` is one of:
+
+- `anthropic[:model=<MODEL>]` — the hosted baseline, via `AnthropicExtractor`. Reads
+  `ANTHROPIC_API_KEY`.
+- `oai-http:url=<URL>[,model=<MODEL>]` — an OpenAI-compatible local endpoint over HTTP, via
+  `OaiExtractor`.
+- `oai-uds:path=<SOCKET_PATH>[,model=<MODEL>]` — the same, over a Unix domain socket (e.g. a
+  local `mlx_lm.server` instance).
+
+No new backend *kind* should be needed for a new model — point an `oai-http`/`oai-uds` spec
+at any OpenAI-compatible server. Adding a genuinely new provider means extending
+`crates/eval/src/backend.rs`'s `BackendKind`/`build_extractor` the same way `OaiExtractor` was
+added to `crates/core/src/extractor.rs` — reuse an existing `Extractor` implementation rather
+than writing new HTTP/JSON client logic in the harness (FR-003).
+
+Add `--record-cassette NAME=PATH` to wrap a configured backend in a cassette recorder
+(see "Record/replay cassettes" above) so a single corpus pass yields both the eval report and
+a recorded cassette — the mechanism #248's full-corpus comparison run relies on.
+
+### Cost implications
+
+Every corpus chunk costs two extraction calls (entities, then edges) per configured backend,
+plus one LLM-as-judge call per scored comparison (entities/edges/summaries) against the
+`--reference` backend. Judge calls are the expensive part — they hit a hosted model
+(`claude-sonnet-4-6` by default, `--judge-model` to override) regardless of which backends are
+under test. The **on-disk judge cache is mandatory, not optional**: pass `--judge-cache
+<path>` (default `judge_cache.jsonl` in the current directory) and re-runs against the same
+corpus and backends make zero new judge calls (SC-003) — always reuse the same cache path
+across repeated runs rather than deleting it. The default corpus subset (50 chunks, override
+with `--limit N` / `--all`) is sized to keep a default run affordable; widening it multiplies
+cost roughly linearly in chunk count. Without `ANTHROPIC_API_KEY` set, the harness still runs
+and reports strict-string F1, but skips judge scoring entirely (no cost, no judged F1 in the
+report).
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
