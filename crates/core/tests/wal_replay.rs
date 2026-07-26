@@ -3123,3 +3123,277 @@ fn wal_replay_progress_throttle_default_interval() {
         );
     }
 }
+
+// ── Issue #240: transaction-boundary atomicity and cancellation (SC-001/SC-002) ──────────────
+
+/// SC-001: a WAL whose replay applies two transactions successfully before a third fails must
+/// leave the database reflecting exactly the first two transactions' effects — no partial
+/// effects of the third. Three same-template rows would normally batch together, but this test
+/// separates the three groups with an intervening different-template group (Episodic MERGE) so
+/// each group of Entity CREATEs becomes its OWN transaction, proving prior *committed*
+/// transactions survive a later, unrelated transaction's rollback — not just that a single
+/// transaction is atomic in isolation (already covered by
+/// `batch_fallback_rolls_back_whole_batch_on_bad_row`).
+#[test]
+fn sc001_prior_committed_transactions_survive_a_later_rollback() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Pre-insert the conflicting entity so the third group's middle row fails on CREATE.
+    conn.insert_entity(&EntityRow {
+        uuid: "sc001-conflict".to_string(),
+        name: "Pre".to_string(),
+        group_id: "g".to_string(),
+        labels: vec!["tag".to_string()],
+        created_at: "2026-05-19 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: "s".to_string(),
+        attributes: "{}".to_string(),
+        episode_uuids: vec![],
+        source_descriptions: vec![],
+    })
+    .unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    // Transaction 1 (seq 0-2): 3 Entity CREATEs, all succeed.
+    let mut lines = String::new();
+    for (i, uuid) in ["sc001-e1", "sc001-e2", "sc001-e3"].iter().enumerate() {
+        lines.push_str(&entity_create_wal_line(i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    // Transaction 2 (seq 3-5): 3 Episodic MERGEs, different template, all succeed.
+    for (i, uuid) in ["sc001-ep1", "sc001-ep2", "sc001-ep3"].iter().enumerate() {
+        lines.push_str(&episodic_merge_wal_line(3 + i as u64, uuid, uuid));
+        lines.push('\n');
+    }
+    // Transaction 3 (seq 6-8): 3 Entity CREATEs (same template as transaction 1, but not
+    // adjacent to it) — the middle row conflicts with the pre-inserted entity and fails,
+    // rolling back the whole transaction, including "sc001-e4" which executed successfully
+    // just before the failure.
+    for (i, uuid) in ["sc001-e4", "sc001-conflict", "sc001-e5"]
+        .iter()
+        .enumerate()
+    {
+        lines.push_str(&entity_create_wal_line(6 + i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &lines,
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(3),
+                failure_sample_cap: Some(10),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on a later transaction's failure");
+
+    assert_eq!(
+        stats.lines_replayed, 6,
+        "transactions 1 and 2's 6 rows must have committed"
+    );
+    assert_eq!(
+        stats.failed_lines, 1,
+        "the conflicting row in transaction 3"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 2,
+        "sc001-e4 (executed, then discarded) and sc001-e5 (never attempted) from transaction 3"
+    );
+    assert_eq!(stats.transactions_committed, 2);
+    assert_eq!(stats.transactions_rolled_back, 1);
+    assert_eq!(
+        stats.last_committed_seq,
+        Some(5),
+        "must be the max seq of the last COMMITTED transaction (transaction 2), not \
+         transaction 3's rolled-back rows"
+    );
+
+    // Transactions 1 and 2's rows must be fully present.
+    for uuid in &["sc001-e1", "sc001-e2", "sc001-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "entity {uuid} from transaction 1 must exist"
+        );
+    }
+    for uuid in &["sc001-ep1", "sc001-ep2", "sc001-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "episode {uuid} from transaction 2 must exist"
+        );
+    }
+    // Transaction 3's rows must be fully absent — including sc001-e4, which executed
+    // successfully before the failure but was rolled back with the rest of its transaction.
+    for uuid in &["sc001-e4", "sc001-e5"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "entity {uuid} from the rolled-back transaction 3 must NOT exist"
+        );
+    }
+}
+
+/// SC-002: a `cancel_fn` that fires partway through a transaction's row loop must roll back that
+/// whole transaction (not just stop applying further rows) while leaving prior *committed*
+/// transactions intact, and resuming replay from the derived `last_committed_seq` must reproduce
+/// the same end state as an uninterrupted replay.
+///
+/// Uses batch_size: 3 with two same-size groups so the exact `cancel_fn` call sequence is
+/// deterministic: group 1 (3 Entity CREATEs) fully commits (2 outer per-line checks for rows 1-2,
+/// then 3 inner per-row checks inside the size-triggered flush, then 1 outer check for row 3 —
+/// 6 calls total, all before cancellation should fire), then group 2 (3 Episodic MERGEs, a
+/// different template) begins: 2 more outer checks (calls 7-8) for its first two rows, then its
+/// own size-triggered flush's inner loop starts — call 9 (row 1 of group 2, executes), call 10
+/// (row 2 of group 2 — the cancel_fn is armed to fire here).
+#[test]
+fn sc002_cancel_mid_transaction_rolls_back_and_resume_matches_uninterrupted_replay() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let emb = [1.0f32, 0.0, 0.0, 0.0];
+    let mut lines = String::new();
+    // Group 1 (seq 0-2): 3 Entity CREATEs.
+    for (i, uuid) in ["sc002-e1", "sc002-e2", "sc002-e3"].iter().enumerate() {
+        lines.push_str(&entity_create_wal_line(i as u64, uuid, uuid, emb));
+        lines.push('\n');
+    }
+    // Group 2 (seq 3-5): 3 Episodic MERGEs (idempotent — safe to resume/re-apply).
+    for (i, uuid) in ["sc002-ep1", "sc002-ep2", "sc002-ep3"].iter().enumerate() {
+        lines.push_str(&episodic_merge_wal_line(3 + i as u64, uuid, uuid));
+        lines.push('\n');
+    }
+    let content = lines;
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count_cb = Arc::clone(&call_count);
+    let cancel_fn: lcg_core::replay::CancelFn = Box::new(move || {
+        let n = call_count_cb.fetch_add(1, Ordering::SeqCst) + 1;
+        n >= 10
+    });
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                batch_size: Some(3),
+                cancel_fn: Some(cancel_fn),
+                ..Default::default()
+            },
+        )
+        .expect("replay must not abort on cancellation");
+
+    assert_eq!(
+        stats.lines_replayed, 3,
+        "group 1 (3 Entity CREATEs) must have fully committed"
+    );
+    assert_eq!(
+        stats.rolled_back_lines, 3,
+        "all 3 rows of group 2 must be rolled back — including sc002-ep1, which executed \
+         successfully inside the transaction before cancellation fired on row 2"
+    );
+    assert_eq!(stats.failed_lines, 0, "cancellation is not a failure");
+    assert_eq!(stats.transactions_committed, 1);
+    assert_eq!(stats.transactions_rolled_back, 1);
+    let last_committed_seq = stats
+        .last_committed_seq
+        .expect("group 1's transaction must have committed and recorded a resume point");
+    assert_eq!(last_committed_seq, 2, "max seq of group 1's 3 rows");
+
+    // Group 1 exists; group 2 does not.
+    for uuid in &["sc002-e1", "sc002-e2", "sc002-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(!rows.is_empty(), "entity {uuid} from group 1 must exist");
+    }
+    for uuid in &["sc002-ep1", "sc002-ep2", "sc002-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "episode {uuid} from the cancelled group 2 must NOT exist yet"
+        );
+    }
+
+    // Resume from last_committed_seq + 1 — must reproduce the same end state as an
+    // uninterrupted replay (i.e. group 2 now fully present, group 1 unchanged).
+    let resume_stats = WalReplayer::new(wal_dir.path())
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: last_committed_seq + 1,
+                batch_size: Some(3),
+                ..Default::default()
+            },
+        )
+        .expect("resumed replay must succeed");
+    assert_eq!(
+        resume_stats.lines_replayed, 3,
+        "the resumed replay must apply exactly group 2's 3 rows"
+    );
+    assert_eq!(resume_stats.failed_lines, 0);
+    assert_eq!(resume_stats.rolled_back_lines, 0);
+
+    for uuid in &["sc002-e1", "sc002-e2", "sc002-e3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{uuid} must exist after resume — matching an uninterrupted replay's end state"
+        );
+    }
+    for uuid in &["sc002-ep1", "sc002-ep2", "sc002-ep3"] {
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (ep:Episodic {{uuid: '{uuid}'}}) RETURN ep.uuid"
+            ))
+            .unwrap();
+        assert!(
+            !rows.is_empty(),
+            "{uuid} must exist after resume — matching an uninterrupted replay's end state"
+        );
+    }
+}
