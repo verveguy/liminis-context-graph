@@ -7,6 +7,8 @@
 
 ## Background
 
+*(Line numbers below reflect the codebase state at the time this issue was filed, describing the pre-fix defect; they are not maintained as the implementation evolves. See `docs/adr/0045-wal-replay-prepared-statement-cache-scope.md` for the as-implemented design.)*
+
 WAL replay accumulates cached query plans without bound, so a large rebuild grows RSS monotonically and can exhaust memory mid-replay.
 
 `Conn::prepare` (`crates/core/src/db.rs:153-155`) reaches lbug's `ClientContext::prepare`, which registers the statement in `CachedPreparedStatementManager` (`client_context.cpp:309-312`). That manager has **no eviction policy and no removal API** — its `statementMap` only ever grows (`prepared_statement_manager.cpp:13-20`). Dropping the Rust `PreparedStatement` frees the FFI handle but **not** the cached parsed statement and logical plan held by the connection.
@@ -59,7 +61,7 @@ A WAL whose mutation templates alternate on (nearly) every line degrades batchin
 
 - A batch flush triggered by hitting `batch_size` mid-run of an otherwise-identical template (as opposed to a flush triggered by the template changing) must still be recognized as "same template" and must reuse the existing prepared statement rather than re-preparing.
 - A `prepare()` failure on a template change (the existing error path in `flush_batch`, which currently classifies every buffered row as failed) must continue to behave as it does today — retaining a prepared statement across flushes must not change error handling for a template that fails to prepare.
-- Client cancellation (checked once per mutation inside the replay loop, `replay.rs:362-366`) must continue to be honored; the mechanism used to carry a prepared statement across flushes must not create a borrow or lifetime conflict with the cancellation check.
+- Client cancellation (checked once per mutation inside the replay loop, pre-fix location `replay.rs:362-366`) must continue to be honored; the mechanism used to carry a prepared statement across flushes must not create a borrow or lifetime conflict with the cancellation check.
 - A WAL file boundary (the existing per-file flush of any partial batch) does not need special handling beyond what's already required for consecutive same-template flushes — this issue does not require preserving a prepared statement across a file boundary if the next file starts with a different template, but neither does it prohibit reuse if the template happens to match.
 - A completely empty WAL, or a WAL with no repeated templates at all (every line a distinct template), must continue to replay correctly — the fix must not change *what* gets replayed, only how prepared statements are cached and reused.
 
@@ -108,6 +110,8 @@ A WAL whose mutation templates alternate on (nearly) every line degrades batchin
 - Mandatory implementation of periodic connection recycling — only its evaluation and a recorded decision are required (see FR-004).
 
 ## Source References
+
+*(All line numbers below are pre-fix locations, as they were when this issue was filed — several have shifted post-implementation. See `docs/adr/0045-wal-replay-prepared-statement-cache-scope.md`'s References section for as-implemented symbol locations.)*
 
 - `crates/core/src/db.rs:153-155` (`Conn::prepare`) — reaches lbug's `ClientContext::prepare`, which caches into `CachedPreparedStatementManager` with no eviction.
 - `crates/core/src/replay.rs:341-351` — adjacency-based batching: a template change flushes the current batch.

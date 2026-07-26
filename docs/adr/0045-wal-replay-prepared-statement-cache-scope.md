@@ -107,9 +107,14 @@ against the API-shape cost noted above.
 ## Consequences
 
 - Homogeneous and mostly-homogeneous WALs (the common case) no longer accumulate one
-  prepared-statement cache entry per batch; the LRU-1 cache bounds this to one entry per distinct
-  template *encountered since the last template change*, which in practice bounds lbug's internal
-  cache growth to the distinct-template count for the whole run.
+  prepared-statement cache entry per batch; the LRU-1 cache reuses the single last-prepared
+  statement whenever a flush's template matches the immediately preceding flush's, bounding
+  `prepare()` calls to one per *contiguous run* of the same template rather than one per batch.
+  For a fully homogeneous or non-interleaved WAL, that in turn bounds lbug's internal cache growth
+  to the distinct-template count for the whole run — but a WAL where a template recurs in
+  separated, non-adjacent runs (e.g. template A, then B, then A again) still re-prepares on each
+  such return, even for a template seen earlier in the run; that residual case is the interleaved
+  scenario covered below.
 - Pathological, highly-interleaved WALs retain the unbounded-growth risk this ADR documents; no
   code change in this issue mitigates that case. It remains a known, accepted limitation until
   revisited per the trigger conditions above.
