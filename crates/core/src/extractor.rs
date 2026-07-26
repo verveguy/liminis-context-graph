@@ -1171,7 +1171,21 @@ impl OaiExtractor {
             self.emit_token_usage(&resp);
 
             match parse_oai_entity_response(&resp) {
-                OaiChatOutcome::Success(entities) => {
+                OaiChatOutcome::Success {
+                    value: entities,
+                    defensive_parse,
+                } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: if defensive_parse {
+                            "recovered"
+                        } else {
+                            "clean"
+                        }
+                        .to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -1200,7 +1214,15 @@ impl OaiExtractor {
                         "entity extraction budget exhausted after retry".to_string(),
                     ));
                 }
-                OaiChatOutcome::ParseError(e) => return Err(e),
+                OaiChatOutcome::ParseError(e) => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: "malformed".to_string(),
+                    });
+                    return Err(e);
+                }
             }
         }
     }
@@ -1232,7 +1254,21 @@ impl OaiExtractor {
             self.emit_token_usage(&resp);
 
             match parse_oai_edge_response(&resp) {
-                OaiChatOutcome::Success(mut edges) => {
+                OaiChatOutcome::Success {
+                    value: mut edges,
+                    defensive_parse,
+                } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: if defensive_parse {
+                            "recovered"
+                        } else {
+                            "clean"
+                        }
+                        .to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -1282,7 +1318,15 @@ impl OaiExtractor {
                     eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
                     return Ok(vec![]);
                 }
-                OaiChatOutcome::ParseError(e) => return Err(e),
+                OaiChatOutcome::ParseError(e) => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: "malformed".to_string(),
+                    });
+                    return Err(e);
+                }
             }
         }
     }
@@ -1465,7 +1509,13 @@ impl Extractor for OaiExtractor {
 // ── OaiChatOutcome / response parsing ─────────────────────────────────────────
 
 enum OaiChatOutcome<T> {
-    Success(T),
+    /// `defensive_parse` is `true` when `extract_json_block`'s fence/prefix stripping was
+    /// needed to isolate the JSON payload (i.e. the raw content wasn't already valid JSON
+    /// on its own), `false` when the raw content parsed as-is.
+    Success {
+        value: T,
+        defensive_parse: bool,
+    },
     BudgetExhausted,
     ParseError(Error),
 }
@@ -1489,12 +1539,16 @@ fn parse_oai_entity_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEntity
     };
 
     let json_str = extract_json_block(content);
+    let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EntityPayload {
         entities: Vec<ExtractedEntity>,
     }
     match serde_json::from_str::<EntityPayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success(payload.entities),
+        Ok(payload) => OaiChatOutcome::Success {
+            value: payload.entities,
+            defensive_parse,
+        },
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -1510,12 +1564,16 @@ fn parse_oai_edge_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEdge>> {
     };
 
     let json_str = extract_json_block(content);
+    let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EdgePayload {
         edges: Vec<ExtractedEdge>,
     }
     match serde_json::from_str::<EdgePayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success(payload.edges),
+        Ok(payload) => OaiChatOutcome::Success {
+            value: payload.edges,
+            defensive_parse,
+        },
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -1943,9 +2001,39 @@ mod tests {
             }]
         });
         match parse_oai_entity_response(&resp) {
-            OaiChatOutcome::Success(entities) => {
+            OaiChatOutcome::Success {
+                value: entities,
+                defensive_parse,
+            } => {
                 assert_eq!(entities.len(), 1);
                 assert_eq!(entities[0].name, "Alice");
+                assert!(!defensive_parse, "raw content was already valid JSON");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    #[test]
+    fn parse_oai_entity_response_fenced_json_is_recovered() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "```json\n{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}]}\n```"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success {
+                value: entities,
+                defensive_parse,
+            } => {
+                assert_eq!(entities.len(), 1);
+                assert!(
+                    defensive_parse,
+                    "fenced content required extract_json_block stripping"
+                );
             }
             OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -1999,10 +2087,14 @@ mod tests {
             }]
         });
         match parse_oai_edge_response(&resp) {
-            OaiChatOutcome::Success(edges) => {
+            OaiChatOutcome::Success {
+                value: edges,
+                defensive_parse,
+            } => {
                 assert_eq!(edges.len(), 1);
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
+                assert!(!defensive_parse, "raw content was already valid JSON");
             }
             OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2032,5 +2124,149 @@ mod tests {
             parse_oai_edge_response(&resp),
             OaiChatOutcome::BudgetExhausted
         ));
+    }
+
+    // ── StructuredOutputParse telemetry: end-to-end via a stub HTTP server ────
+
+    fn oai_response_body(content: &str) -> String {
+        json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": content}
+            }]
+        })
+        .to_string()
+    }
+
+    /// Spawns a one-shot stub HTTP server on an ephemeral localhost port that
+    /// replies with `body` to a single request, then shuts down. Returns the
+    /// `/v1/chat/completions`-style URL to point an `OaiExtractor` at.
+    async fn spawn_stub_http_server(body: String) -> (String, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).await.unwrap_or(0);
+                    if n == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    let lower = line.to_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                if content_length > 0 {
+                    let mut buf = vec![0u8; content_length];
+                    reader.read_exact(&mut buf).await.ok();
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                write_half.write_all(response.as_bytes()).await.ok();
+            }
+        });
+        (format!("http://{addr}/v1/chat/completions"), handle)
+    }
+
+    fn test_extract_options() -> ExtractOptions<'static> {
+        ExtractOptions {
+            episode_body: "Alice works at Acme Corp.",
+            group_id: "test-group",
+            source_type: SourceType::Text,
+            custom_instructions: None,
+            reference_time: "2026-01-01T00:00:00Z",
+            ontology: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn do_extract_entities_emits_clean_structured_output_parse() {
+        let content =
+            r#"{"entities": [{"name": "Alice", "entity_type": "Person", "summary": "A person"}]}"#;
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let entities = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 1);
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "entities" && outcome == "clean"
+        )));
+    }
+
+    #[tokio::test]
+    async fn do_extract_entities_emits_recovered_structured_output_parse() {
+        let content = "```json\n{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}]}\n```";
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let entities = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 1);
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "entities" && outcome == "recovered"
+        )));
+    }
+
+    #[tokio::test]
+    async fn do_extract_entities_emits_malformed_structured_output_parse() {
+        let (url, _server) = spawn_stub_http_server(oai_response_body("not json at all")).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let result = extractor.do_extract_entities(&test_extract_options()).await;
+        assert!(result.is_err());
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "entities" && outcome == "malformed"
+        )));
+    }
+
+    #[tokio::test]
+    async fn do_extract_edges_emits_clean_structured_output_parse_with_edges_call_type() {
+        let content = r#"{"edges": [{"source_name": "Alice", "target_name": "Acme", "fact": "Alice works at Acme", "relation_type": "works_at"}]}"#;
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let edges = extractor
+            .do_extract_edges(&test_extract_options(), &["Alice".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(edges.len(), 1);
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "edges" && outcome == "clean"
+        )));
     }
 }

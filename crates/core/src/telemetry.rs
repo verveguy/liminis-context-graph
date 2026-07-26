@@ -62,6 +62,16 @@ pub enum TelemetryEvent {
         initial_max_tokens: u32,
         retry_succeeded: bool,
     },
+    /// Emitted by `OaiExtractor` for every entity/edge extraction response, distinguishing
+    /// whether the structured-output JSON was well-formed as-is (`"clean"`), required
+    /// `extract_json_block`'s fence/prefix stripping to parse (`"recovered"`), or was
+    /// unparseable (`"malformed"`). `call_type` is `"entities"` or `"edges"`.
+    StructuredOutputParse {
+        ts_ms: u64,
+        model: String,
+        call_type: String,
+        outcome: String,
+    },
     WalRotated {
         ts_ms: u64,
         from_file_seq: u32,
