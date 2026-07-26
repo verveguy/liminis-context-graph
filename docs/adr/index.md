@@ -51,6 +51,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0045](0045-wal-replay-prepared-statement-cache-scope.md) | WAL Replay Prepared-Statement Cache — LRU-1 Scope and Deferred Connection Recycling | 2026-07-26 |
 | [0046](0046-wal-replay-failure-dedup-and-rebuild-idempotency.md) | WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency | 2026-07-26 |
 | [0047](0047-wal-replay-transaction-boundaries.md) | WAL Replay Transaction Boundaries — Batch-Aligned, Not Chunk-Aligned | 2026-07-26 |
+| [0048](0048-rust-extraction-quality-eval-harness.md) | Rust Extraction-Quality Eval Harness — Architecture and Judge Design | 2026-07-26 |
 
 ## Historical numbering
 
