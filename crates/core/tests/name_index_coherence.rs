@@ -302,7 +302,7 @@ fn open_or_rebuild_populates_name_index_from_replayed_wal() {
     .unwrap();
 
     let db_path = db_dir.path().join("test.db");
-    let db = Db::open_or_rebuild(
+    let (db, _stats) = Db::open_or_rebuild(
         db_path.to_str().unwrap(),
         wal_dir.path().to_str().unwrap(),
         DIM,
