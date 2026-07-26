@@ -130,6 +130,13 @@ pub struct ReplayStats {
     /// still drop some at the (unchanged) default cap of 10 — this counter makes that truncation
     /// visible (e.g. "10 of 14 categories shown") instead of silent.
     pub failed_sample_categories_dropped: u64,
+    /// Count of real `Conn::prepare()` calls made by `flush_batch` over this run — cache misses
+    /// only; a flush that reuses the single-entry `PreparedCache` (see that type's doc comment)
+    /// does not increment this. This is the basis for issue #238's FR-002/FR-007 bound: for a WAL
+    /// where the same template recurs across consecutive flushes, this count stays proportional
+    /// to the number of distinct templates encountered rather than growing with the number of
+    /// batches flushed or lines replayed.
+    pub prepare_calls: u64,
 }
 
 impl ReplayStats {
@@ -252,6 +259,7 @@ impl WalReplayer {
             match_delete_no_op: 0,
             seq_regressions: 0,
             failed_sample_categories_dropped: 0,
+            prepare_calls: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -297,6 +305,9 @@ impl WalReplayer {
         let files_total = files.len() as u64;
 
         let mut batch = ReplayBatch::new();
+        // Single-entry prepared-statement cache carried across `flush_batch` calls for this
+        // whole run — see `PreparedCache`'s doc comment for the LRU-1 scope decision (#238).
+        let mut prepared_cache: Option<PreparedCache> = None;
         // Running max `seq` across the whole call, for FR-004's monotonicity check.
         let mut max_seq_seen: Option<u64> = None;
         // Caps individual `[WAL WARN] seq regression` lines — a WAL dir with two interleaved
@@ -470,7 +481,13 @@ impl WalReplayer {
 
                     // Flush the current batch when the template changes (FR-001).
                     if !batch.is_empty() && batch.template != norm_cypher {
-                        flush_batch(&mut batch, conn, &mut stats, sample_cap);
+                        flush_batch(
+                            &mut batch,
+                            conn,
+                            &mut stats,
+                            sample_cap,
+                            &mut prepared_cache,
+                        );
                     }
 
                     // Push this mutation into the batch.
@@ -480,9 +497,17 @@ impl WalReplayer {
                     batch.rows.push(params_map);
                     batch.match_prefixed.push(is_match_prefixed);
 
-                    // Flush when the batch reaches the size limit (FR-002, FR-003).
+                    // Flush when the batch reaches the size limit (FR-002, FR-003). Same
+                    // template as the just-flushed batch reuses the cached prepared statement
+                    // (issue #238) instead of re-preparing.
                     if batch.len() >= batch_size {
-                        flush_batch(&mut batch, conn, &mut stats, sample_cap);
+                        flush_batch(
+                            &mut batch,
+                            conn,
+                            &mut stats,
+                            sample_cap,
+                            &mut prepared_cache,
+                        );
                     }
                 }
 
@@ -539,13 +564,25 @@ impl WalReplayer {
 
             // WAL file boundary: flush any partial batch before advancing (FR-011).
             if !opts.dry_run {
-                flush_batch(&mut batch, conn, &mut stats, sample_cap);
+                flush_batch(
+                    &mut batch,
+                    conn,
+                    &mut stats,
+                    sample_cap,
+                    &mut prepared_cache,
+                );
             }
         }
 
         // Flush any remaining batch after cancel/abort or EOF (FR-007, FR-011).
         if !opts.dry_run {
-            flush_batch(&mut batch, conn, &mut stats, sample_cap);
+            flush_batch(
+                &mut batch,
+                conn,
+                &mut stats,
+                sample_cap,
+                &mut prepared_cache,
+            );
         }
 
         // Summary for the seq-regression detail logging capped above — the true total is
@@ -685,6 +722,30 @@ impl ReplayBatch {
     }
 }
 
+/// Single-entry ("LRU-1") prepared-statement cache carried across consecutive `flush_batch`
+/// calls within one `replay_opts` run, keyed by the post-normalization Cypher template.
+///
+/// This is a deliberate scope choice, not an oversight: FR-002 (issue #238) only requires
+/// bounding `prepare()` calls for a template that recurs across *consecutive* flushes — the
+/// common, homogeneous-WAL case (repeated `Entity` MERGE, repeated `Edge` MERGE, etc., batched
+/// at `batch_size`). A cache keyed by every distinct template ever seen would itself grow
+/// without bound on a pathological, highly-interleaved WAL where the distinct-template count is
+/// unbounded relative to run length — reintroducing the exact unbounded-growth failure mode this
+/// issue exists to fix, in a different shape. That residual risk is accepted and documented
+/// (FR-004/SC-005) rather than "solved" here — see `docs/adr/0045-wal-replay-prepared-statement-cache-scope.md`
+/// for the evaluation and the decision to defer periodic replay-connection recycling as its
+/// mitigation. LRU-1 gives the homogeneous case (User Story 1) full benefit and the interleaved
+/// case (User Story 2) none, which is the accepted trade-off.
+struct PreparedCache {
+    /// The post-normalization template this prepared statement was built from.
+    template: String,
+    /// Whether `statement` is the `RETURN count(*)`-probed variant (see
+    /// `with_match_count_probe`) or the plain template — carried alongside the statement itself
+    /// so a cache hit doesn't need to re-derive it.
+    use_probe: bool,
+    statement: lbug::PreparedStatement,
+}
+
 /// Reads a WAL file and returns the `seq` value of its first line that parses successfully —
 /// the ordering key used to sort files in `replay_opts` (FR-003). Returns `None` only if the
 /// file can't be opened, or no line in it parses before EOF; callers fall back to filename order
@@ -790,11 +851,21 @@ fn is_delete_form(template: &str) -> bool {
 /// template once, retry the current row against it, and switch the rest of the batch to unprobed
 /// mode — instead of classifying the row as `failed_lines` and losing a write the no-op-detection
 /// mechanism itself is responsible for.
+///
+/// `cache` (issue #238) carries a prepared statement across consecutive calls to this function
+/// within one `replay_opts` run. When the batch's template matches `cache`'s, the cached
+/// statement is reused and no `conn.prepare()` call is made at all — this is what bounds
+/// `stats.prepare_calls` to the distinct-template count for a homogeneous WAL (FR-001/FR-002).
+/// On a cache miss, the existing prepare logic runs unchanged (including error classification,
+/// FR-005) and, on success, the *settled* `(template, use_probe, statement)` — reflecting any
+/// mid-batch probe→unprobed fallback below, not the initial attempt — is written back into
+/// `cache` after the row loop so the next flush of the same template can reuse it.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
     stats: &mut ReplayStats,
     sample_cap: usize,
+    cache: &mut Option<PreparedCache>,
 ) {
     if batch.is_empty() {
         return;
@@ -805,8 +876,14 @@ fn flush_batch(
     let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
     let is_delete_form_batch = is_match_prefixed_batch && is_delete_form(&batch.template);
 
-    let (mut prepared, mut use_probe) = if is_match_prefixed_batch {
+    let cache_hit = cache.as_ref().is_some_and(|c| c.template == batch.template);
+
+    let (mut prepared, mut use_probe) = if cache_hit {
+        let c = cache.take().expect("cache_hit implies cache is Some");
+        (c.statement, c.use_probe)
+    } else if is_match_prefixed_batch {
         let probed_template = with_match_count_probe(&batch.template);
+        stats.prepare_calls += 1;
         match conn.prepare(&probed_template) {
             Ok(p) => (p, true),
             Err(probe_err) => {
@@ -815,6 +892,7 @@ fn flush_batch(
                      falling back to unprobed replay for this batch (no-op detection \
                      unavailable for these rows) — probed template: {probed_template:?}"
                 );
+                stats.prepare_calls += 1;
                 match conn.prepare(&batch.template) {
                     Ok(p) => (p, false),
                     Err(e) => {
@@ -829,6 +907,7 @@ fn flush_batch(
             }
         }
     } else {
+        stats.prepare_calls += 1;
         match conn.prepare(&batch.template) {
             Ok(p) => (p, false),
             Err(e) => {
@@ -867,6 +946,7 @@ fn flush_batch(
                         "[WAL WARN] RETURN count(*) probe failed to execute ({probe_exec_err}); \
                          retrying this row against the unmodified template"
                     );
+                    stats.prepare_calls += 1;
                     match conn.prepare(&batch.template) {
                         Ok(mut fallback) => match conn.execute_prepared(&mut fallback, &params) {
                             Ok(_) => {
@@ -905,6 +985,14 @@ fn flush_batch(
             }
         }
     }
+    // Carry the settled (template, use_probe, statement) forward for the next flush of the same
+    // template to reuse — settled, not the initial attempt, so a mid-batch probe→unprobed
+    // fallback above is what gets cached (see this function's doc comment).
+    *cache = Some(PreparedCache {
+        template: batch.template.clone(),
+        use_probe,
+        statement: prepared,
+    });
     batch.clear();
 }
 
@@ -1036,6 +1124,7 @@ mod replay_tests {
             match_delete_no_op: 0,
             seq_regressions: 0,
             failed_sample_categories_dropped: 0,
+            prepare_calls: 0,
         }
     }
 
@@ -1109,5 +1198,132 @@ mod replay_tests {
             ..zero_stats()
         };
         assert!(compute_fidelity_warning(&stats, 0.10).is_none());
+    }
+
+    // ── Prepared-statement cache tests (issue #238) ─────────────────────────
+
+    use std::io::Write;
+
+    use crate::db::Db;
+
+    fn make_db_with_schema(dir: &tempfile::TempDir) -> Db {
+        let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+        let db = Db::open(&db_path).unwrap();
+        {
+            let conn = db.connect().unwrap();
+            conn.init_schema(4).unwrap();
+        }
+        db
+    }
+
+    /// Appends one WAL line to `wal_dir/filename` using a caller-chosen `cypher` template so
+    /// tests can control how many distinct templates a run sees.
+    fn write_wal_cypher_line(
+        wal_dir: &std::path::Path,
+        filename: &str,
+        seq: u64,
+        cypher: &str,
+        uuid: &str,
+    ) {
+        let content = format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-01-01T00:00:00Z\",\"db\":\"test\",\
+             \"cypher\":{cypher_json},\"params\":{{\"uuid\":\"{uuid}\"}}}}\n",
+            cypher_json = serde_json::to_string(cypher).unwrap(),
+        );
+        let path = wal_dir.join(filename);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+    }
+
+    // FR-002/FR-007/SC-001: a single template repeated across many lines — enough to trigger
+    // several batch_size-driven flushes — must reuse the same prepared statement across those
+    // flushes instead of re-preparing on each one.
+    #[test]
+    fn prepare_calls_bounded_for_homogeneous_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        let total_lines = 10;
+        for i in 0..total_lines {
+            write_wal_cypher_line(
+                &wal_dir,
+                "0001.jsonl",
+                i + 1,
+                "CREATE (:Episodic {uuid: $uuid})",
+                &format!("ep-{i}"),
+            );
+        }
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    batch_size: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // batch_size=3 over 10 lines forces 4 flushes (3, 3, 3, 1) of the same template — all
+        // but the first must be a cache hit.
+        assert_eq!(stats.prepare_calls, 1);
+        assert_eq!(stats.lines_replayed, total_lines);
+        assert_eq!(stats.failed_lines, 0);
+    }
+
+    // FR-002/FR-007/SC-001: several distinct templates, each repeating in its own long
+    // consecutive (non-interleaved) run, must bound prepare_calls by the distinct-template
+    // count, not by the number of batches or lines.
+    #[test]
+    fn prepare_calls_proportional_to_distinct_templates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        let templates = [
+            "CREATE (:Episodic {uuid: $uuid})",
+            "CREATE (:Episodic {uuid: $uuid, name: 'a'})",
+            "CREATE (:Episodic {uuid: $uuid, name: 'b'})",
+        ];
+        let lines_per_template = 7;
+        let mut seq = 0u64;
+        for (t_idx, template) in templates.iter().enumerate() {
+            for i in 0..lines_per_template {
+                seq += 1;
+                write_wal_cypher_line(
+                    &wal_dir,
+                    "0001.jsonl",
+                    seq,
+                    template,
+                    &format!("ep-{t_idx}-{i}"),
+                );
+            }
+        }
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    batch_size: Some(3),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(stats.prepare_calls, templates.len() as u64);
+        assert_eq!(
+            stats.lines_replayed,
+            templates.len() as u64 * lines_per_template
+        );
+        assert_eq!(stats.failed_lines, 0);
     }
 }
