@@ -1677,6 +1677,12 @@ fn sample_cap_respected() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(3),
+                // batch_size: 1 makes each row its own transaction (issue #240) — since all 10
+                // rows share one template, a larger batch would roll back after the first
+                // failure and classify only that one row, never attempting the rest. This test
+                // is about classify_replay_failure's dedup-by-category logic (#239), not batch
+                // atomicity, so isolate one mechanism from the other.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1734,6 +1740,10 @@ fn sample_dedup_counts_rows_beyond_cap() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
+                // batch_size: 1 makes each row its own transaction (issue #240) — all 15 rows
+                // share one identical literal template, so a larger batch would roll back after
+                // the first failure and classify only that one row. See sample_cap_respected.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1785,6 +1795,10 @@ fn sample_dedup_same_template_different_error_are_distinct() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
+                // batch_size: 1 makes each row its own transaction (issue #240) — both rows
+                // share one template, so a larger batch would roll back after the first failure
+                // and never attempt the second, classifying only one sample instead of two.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -1938,6 +1952,10 @@ fn test_fidelity_warning_fires_above_threshold() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(0),
+                // batch_size: 1 makes each row its own transaction (issue #240) — the 11 failing
+                // lines share one identical literal template, so a larger batch would roll back
+                // after the first failure and classify only that one row instead of all 11.
+                batch_size: Some(1),
                 ..Default::default()
             },
         )
@@ -2493,10 +2511,14 @@ fn batch_same_template_groups_into_unwind() {
     assert_eq!(count, 10, "all 10 Entity nodes must exist in DB");
 }
 
-/// One bad row in a batch causes UNWIND failure; fallback per-row keeps valid rows.
-/// Asserts mutations_replayed == 4, failed_lines == 1 (SC-003, FR-008).
+/// Issue #240: one bad row in a batch now rolls back the ENTIRE batch's transaction, not just
+/// the bad row — this is the core fix (previously each row was its own auto-commit, so 4 of the
+/// 5 rows here would have persisted despite the 5th failing; that "isolation" was the very
+/// absence of transaction boundaries this issue exists to eliminate). Asserts lines_replayed ==
+/// 0, failed_lines == 1, rolled_back_lines == 4, and none of the 5 rows' entities exist in the
+/// DB afterward (SC-001).
 #[test]
-fn batch_fallback_isolates_bad_row() {
+fn batch_fallback_rolls_back_whole_batch_on_bad_row() {
     let wal_dir = TempDir::new().unwrap();
     let db_dir = TempDir::new().unwrap();
 
@@ -2521,7 +2543,9 @@ fn batch_fallback_isolates_bad_row() {
     .unwrap();
 
     let emb = [1.0f32, 0.0, 0.0, 0.0];
-    // 5 lines: mutation #3 (seq=2) uses the pre-existing uuid → fails on CREATE.
+    // 5 lines, one batch/transaction (batch_size: 5): mutation #3 (seq=2) uses the pre-existing
+    // uuid → fails on CREATE, rolling back the whole transaction — including the 2 rows that
+    // executed successfully earlier in it.
     let uuids = ["fb-1", "fb-2", "fb-pre", "fb-4", "fb-5"];
     let mut lines = String::new();
     for (i, &uuid) in uuids.iter().enumerate() {
@@ -2551,24 +2575,34 @@ fn batch_fallback_isolates_bad_row() {
         .expect("replay must not abort on batch failure");
 
     assert_eq!(
-        stats.lines_replayed, 4,
-        "4 valid mutations must succeed after fallback"
+        stats.lines_replayed, 0,
+        "none of this transaction's rows persisted — the whole batch was rolled back"
     );
-    assert_eq!(stats.failed_lines, 1, "exactly 1 mutation must fail");
+    assert_eq!(stats.failed_lines, 1, "exactly 1 mutation classified as the trigger");
+    assert_eq!(
+        stats.rolled_back_lines, 4,
+        "the other 4 rows in the same transaction (2 that ran earlier, 2 never attempted) \
+         must be counted as rolled back, not replayed"
+    );
+    assert_eq!(stats.transactions_rolled_back, 1);
+    assert_eq!(stats.transactions_committed, 0);
     assert_eq!(
         stats.failed_samples.len(),
         1,
         "exactly 1 failure sample must be captured"
     );
 
-    // Verify the 4 valid entities exist.
+    // None of the 5 rows' entities must exist — the whole transaction rolled back.
     for uuid in &["fb-1", "fb-2", "fb-4", "fb-5"] {
         let rows = conn
             .cypher_query(&format!(
                 "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.uuid"
             ))
             .unwrap();
-        assert!(!rows.is_empty(), "entity {uuid} must exist after fallback");
+        assert!(
+            rows.is_empty(),
+            "entity {uuid} must NOT exist — its transaction was rolled back"
+        );
     }
 }
 

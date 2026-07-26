@@ -137,6 +137,27 @@ pub struct ReplayStats {
     /// to the number of distinct templates encountered rather than growing with the number of
     /// batches flushed or lines replayed.
     pub prepare_calls: u64,
+    /// Rows that belonged to a `flush_batch` transaction that was rolled back — either because
+    /// another row in the same transaction threw an execute-time exception (lbug rolls back the
+    /// *whole* transaction on any such exception, not just the failing statement — see ADR-0047)
+    /// or because `cancel_fn` fired mid-transaction. Excludes the one row that actually triggered
+    /// the failure (that row is classified into `failed_lines`/`legacy_skipped_lines` via
+    /// `classify_replay_failure` as before) and excludes rows in a batch that committed
+    /// successfully. A row counted here must never also be counted in `lines_replayed` — see
+    /// `flush_batch`'s doc comment (issue #240, FR-002/FR-009).
+    pub rolled_back_lines: u64,
+    /// The highest WAL `seq` among rows in the most recent `flush_batch` transaction that
+    /// actually committed (FR-006, issue #240). `None` until at least one transaction commits.
+    /// This is the resume point a caller can derive after a failure or cancellation — it
+    /// corresponds exactly to the last committed transaction boundary, not an approximation.
+    /// Additive only in this issue: existing callers (`recovery.rs`'s episode-cursor resume,
+    /// ADR-0026) are unchanged; a future issue may choose to consume this instead.
+    pub last_committed_seq: Option<u64>,
+    /// Count of `flush_batch` transactions that committed successfully (issue #240).
+    pub transactions_committed: u64,
+    /// Count of `flush_batch` transactions that were rolled back — either by the lbug engine's
+    /// auto-rollback-on-exception or by an explicit `ROLLBACK` on cancellation (issue #240).
+    pub transactions_rolled_back: u64,
 }
 
 impl ReplayStats {
@@ -260,6 +281,10 @@ impl WalReplayer {
             seq_regressions: 0,
             failed_sample_categories_dropped: 0,
             prepare_calls: 0,
+            rolled_back_lines: 0,
+            last_committed_seq: None,
+            transactions_committed: 0,
+            transactions_rolled_back: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -481,13 +506,17 @@ impl WalReplayer {
 
                     // Flush the current batch when the template changes (FR-001).
                     if !batch.is_empty() && batch.template != norm_cypher {
-                        flush_batch(
+                        let outcome = flush_batch(
                             &mut batch,
                             conn,
                             &mut stats,
                             sample_cap,
                             &mut prepared_cache,
-                        );
+                            opts.cancel_fn.as_ref(),
+                        )?;
+                        if outcome.cancelled {
+                            break 'files;
+                        }
                     }
 
                     // Push this mutation into the batch.
@@ -496,18 +525,23 @@ impl WalReplayer {
                     }
                     batch.rows.push(params_map);
                     batch.match_prefixed.push(is_match_prefixed);
+                    batch.seqs.push(wal_line.seq);
 
                     // Flush when the batch reaches the size limit (FR-002, FR-003). Same
                     // template as the just-flushed batch reuses the cached prepared statement
                     // (issue #238) instead of re-preparing.
                     if batch.len() >= batch_size {
-                        flush_batch(
+                        let outcome = flush_batch(
                             &mut batch,
                             conn,
                             &mut stats,
                             sample_cap,
                             &mut prepared_cache,
-                        );
+                            opts.cancel_fn.as_ref(),
+                        )?;
+                        if outcome.cancelled {
+                            break 'files;
+                        }
                     }
                 }
 
@@ -564,13 +598,17 @@ impl WalReplayer {
 
             // WAL file boundary: flush any partial batch before advancing (FR-011).
             if !opts.dry_run {
-                flush_batch(
+                let outcome = flush_batch(
                     &mut batch,
                     conn,
                     &mut stats,
                     sample_cap,
                     &mut prepared_cache,
-                );
+                    opts.cancel_fn.as_ref(),
+                )?;
+                if outcome.cancelled {
+                    break 'files;
+                }
             }
         }
 
@@ -582,7 +620,8 @@ impl WalReplayer {
                 &mut stats,
                 sample_cap,
                 &mut prepared_cache,
-            );
+                opts.cancel_fn.as_ref(),
+            )?;
         }
 
         // Summary for the seq-regression detail logging capped above — the true total is
@@ -696,6 +735,10 @@ struct ReplayBatch {
     template: String,
     rows: Vec<serde_json::Map<String, serde_json::Value>>,
     match_prefixed: Vec<bool>,
+    /// Each row's WAL `seq`, positionally aligned with `rows`/`match_prefixed` — used to derive
+    /// `ReplayStats::last_committed_seq` (FR-006, issue #240) when this batch's transaction
+    /// commits.
+    seqs: Vec<u64>,
 }
 
 impl ReplayBatch {
@@ -704,6 +747,7 @@ impl ReplayBatch {
             template: String::new(),
             rows: Vec::new(),
             match_prefixed: Vec::new(),
+            seqs: Vec::new(),
         }
     }
 
@@ -719,6 +763,7 @@ impl ReplayBatch {
         self.template.clear();
         self.rows.clear();
         self.match_prefixed.clear();
+        self.seqs.clear();
     }
 }
 
@@ -818,80 +863,79 @@ fn is_delete_form(template: &str) -> bool {
         .any(|t| t == "DELETE")
 }
 
-/// Executes accumulated batch mutations against `conn` via prepared-statement binding.
+/// Outcome of a `flush_batch` call. `replay_opts` only needs to know whether `cancel_fn` fired
+/// mid-batch (causing an explicit rollback) so it can stop reading further WAL lines — a
+/// committed or ordinarily-failed batch requires no special handling by the caller, since
+/// `stats` already reflects the outcome.
+struct FlushOutcome {
+    cancelled: bool,
+}
+
+/// Executes accumulated batch mutations against `conn` inside one explicit transaction (issue
+/// #240) — `BEGIN TRANSACTION`, then bind-and-execute each row against a template prepared ONCE,
+/// then `COMMIT`. No string interpolation, no inline `UNWIND` literal, so no oversized query
+/// strings (the cause of lbug `db.wal` corruption in the prior inline-UNWIND design, #139).
+/// Values are bound as typed lbug `Value`s and coerced to their column types.
 ///
-/// Prepares the batch's shared (post-normalization) template ONCE, then binds and executes
-/// each row's params against it — no string interpolation, no inline `UNWIND` literal, so no
-/// oversized query strings (the cause of lbug `db.wal` corruption in the prior inline-UNWIND
-/// design, #139). Values are bound as typed lbug `Value`s and coerced to their column types.
+/// A *prepare* failure (e.g. a legacy construct or missing column that survived normalization)
+/// makes the template unusable — no transaction is opened, every row sharing it is classified
+/// from that single error via `classify_replay_failure`, same as before this issue.
 ///
-/// A *prepare* failure (e.g. a legacy construct or missing column that survived
-/// normalization) makes the template unusable, so every row sharing it is classified from
-/// that single error. A per-row *execute* failure is classified for that row only, so one
-/// bad row cannot suppress its siblings.
+/// Once a transaction is open, a per-row *execute* failure is a different matter: lbug's engine
+/// rolls back the **whole transaction** on any execute-time exception, not just the failing
+/// statement (verified against the vendored C++ source — see
+/// `db::lbug_transaction_semantics_pinning_tests` and `docs/adr/0047-wal-replay-transaction-boundaries.md`).
+/// So a per-row execute failure here stops the row loop entirely: the triggering row is
+/// classified via `classify_replay_failure` exactly as before, every *other* row in the batch —
+/// whether it executed successfully earlier in this same transaction (now discarded) or was
+/// never attempted — is counted into `stats.rolled_back_lines`, and no explicit `ROLLBACK` is
+/// issued (the engine has already rolled back and cleared its transaction state; an explicit
+/// `ROLLBACK` at that point would itself error — see the pinning test). This retires the old
+/// per-row probe-execute-failure retry-in-place mechanism: that mechanism depended on being able
+/// to keep executing later rows in the same batch after an earlier one failed, which whole-
+/// transaction rollback makes impossible to do safely. The prepare-time probe-rejection fallback
+/// below (tried before `BEGIN` is issued) is unaffected — it's about which template gets prepared,
+/// not about recovering from an execute-time failure inside an open transaction.
 ///
-/// A batch only ever contains rows sharing one post-normalization template, and
-/// `is_match_prefixed` is derived purely from that template's shape — so every row in a batch
-/// carries the same flag value, and checking the batch's shape once (via the first row) is
-/// sufficient to decide whether to apply the `RETURN count(*)` probe (FR-005), not an
-/// approximation.
-///
-/// For a `MATCH`-prefixed batch, the probe template is tried first; if `prepare()` rejects it,
-/// replay falls back to the unmodified template with pre-FR-005 accounting (no no-op
-/// distinction, but no data loss either). This matters because WAL lines are not limited to
-/// this codebase's own hand-written templates — `knowledge_query_cypher` WAL-logs arbitrary
-/// user Cypher verbatim (`handlers.rs::handle_query_cypher`), so a MATCH-prefixed line can
-/// already end in its own `RETURN` clause. Appending a second `RETURN count(*)` to such a line
-/// makes it fail to prepare; without this fallback every row sharing that template would be
-/// misclassified as `failed_lines` — new data loss introduced by the no-op-detection fix itself.
-///
-/// The same arbitrary-Cypher source means a probed statement can also fail at *execute* time
-/// (having prepared successfully) for a reason specific to the appended `RETURN` rather than the
-/// underlying write. On that error the loop falls back the same way — prepare the unmodified
-/// template once, retry the current row against it, and switch the rest of the batch to unprobed
-/// mode — instead of classifying the row as `failed_lines` and losing a write the no-op-detection
-/// mechanism itself is responsible for.
+/// `cancel_fn` is checked once per row, before executing it (issue #240, User Story 2). A
+/// mid-batch cancellation issues an explicit `ROLLBACK` (there is no engine-side auto-rollback
+/// for cancellation, since it isn't an exception), counts the *entire* batch — including any
+/// rows that already executed successfully earlier in this same transaction — into
+/// `stats.rolled_back_lines`, and returns a `cancelled` outcome so `replay_opts` stops reading
+/// further WAL lines.
 ///
 /// `cache` (issue #238) carries a prepared statement across consecutive calls to this function
 /// within one `replay_opts` run. When the batch's template matches `cache`'s, the cached
 /// statement is reused and no `conn.prepare()` call is made at all — this is what bounds
 /// `stats.prepare_calls` to the distinct-template count for a homogeneous WAL (FR-001/FR-002).
 /// On a cache miss, the existing prepare logic runs unchanged (including error classification,
-/// FR-005) and, on success, the *settled* `(template, use_probe, statement)` is written back
-/// into `cache` after the row loop so the next flush of the same template can reuse it —
-/// *unless* `use_probe` was downgraded by a per-row execute failure rather than a template-level
-/// prepare failure, in which case the cache is dropped instead (see `probe_downgraded_by_row`
-/// below): the prepare-time probe rejection at the top of this function is a property of the
-/// template and safe to persist forever, but the execute-time fallback inside the row loop can
-/// be caused by one row's params, not the template's shape, and persisting it into the
-/// cross-flush cache would silently disable no-op detection (`match_prefixed_no_op` /
-/// `match_delete_no_op`) for every later flush of that template — an accounting change FR-003
-/// forbids. Dropping the cache instead restores the pre-cache behavior of re-probing fresh at
-/// the next flush.
+/// FR-005). The *settled* `(template, use_probe, statement)` is written back into `cache` only
+/// when this batch's transaction actually commits; on any failure or cancellation the cache is
+/// dropped instead, so the next flush of the same template re-probes fresh rather than
+/// potentially reusing a statement whose most recent use ended in a rolled-back transaction.
 fn flush_batch(
     batch: &mut ReplayBatch,
     conn: &Conn<'_>,
     stats: &mut ReplayStats,
     sample_cap: usize,
     cache: &mut Option<PreparedCache>,
-) {
+    cancel_fn: Option<&CancelFn>,
+) -> Result<FlushOutcome, Error> {
     if batch.is_empty() {
-        return;
+        return Ok(FlushOutcome { cancelled: false });
     }
     let rows = std::mem::take(&mut batch.rows);
     let match_prefixed = std::mem::take(&mut batch.match_prefixed);
+    let seqs = std::mem::take(&mut batch.seqs);
+    let batch_len = rows.len();
+    let max_seq_in_batch = seqs.iter().max().copied();
 
     let is_match_prefixed_batch = match_prefixed.first().copied().unwrap_or(false);
     let is_delete_form_batch = is_match_prefixed_batch && is_delete_form(&batch.template);
 
     let cached = cache.take().filter(|c| c.template == batch.template);
 
-    // Set only when `use_probe` is downgraded by a per-row execute failure inside the loop
-    // below, never by the template-level prepare rejection above — see this function's doc
-    // comment for why the two must be treated differently at cache write-back time.
-    let mut probe_downgraded_by_row = false;
-
-    let (mut prepared, mut use_probe) = if let Some(c) = cached {
+    let (mut prepared, use_probe) = if let Some(c) = cached {
         (c.statement, c.use_probe)
     } else if is_match_prefixed_batch {
         let probed_template = with_match_count_probe(&batch.template);
@@ -913,7 +957,7 @@ fn flush_batch(
                             classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
                         }
                         batch.clear();
-                        return;
+                        return Ok(FlushOutcome { cancelled: false });
                     }
                 }
             }
@@ -928,99 +972,92 @@ fn flush_batch(
                     classify_replay_failure(&err_str, &batch.template, stats, sample_cap);
                 }
                 batch.clear();
-                return;
+                return Ok(FlushOutcome { cancelled: false });
             }
         }
     };
 
+    conn.exec_transaction_control("BEGIN TRANSACTION")?;
+
+    let mut local_lines_replayed: u64 = 0;
+    let mut local_match_prefixed_replayed: u64 = 0;
+    let mut local_match_prefixed_no_op: u64 = 0;
+    let mut local_match_delete_no_op: u64 = 0;
+
     for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
+        if let Some(cancel) = cancel_fn {
+            if cancel() {
+                conn.exec_transaction_control("ROLLBACK")?;
+                stats.rolled_back_lines += batch_len as u64;
+                stats.transactions_rolled_back += 1;
+                *cache = None;
+                batch.clear();
+                return Ok(FlushOutcome { cancelled: true });
+            }
+        }
+
         let params = serde_json::Value::Object(row);
-        if is_match_prefixed && use_probe {
-            match conn.execute_prepared_returning_count(&mut prepared, &params) {
-                Ok(count) if count > 0 => {
-                    stats.lines_replayed += 1;
-                    stats.match_prefixed_replayed += 1;
-                }
-                Ok(_) => {
-                    if is_delete_form_batch {
-                        stats.match_delete_no_op += 1;
-                    } else {
-                        stats.match_prefixed_no_op += 1;
-                    }
-                }
-                Err(probe_exec_err) => {
-                    // The probed statement prepared fine but failed to execute — since the
-                    // probe rewrites arbitrary user Cypher, this can be caused by the appended
-                    // RETURN rather than the underlying write. Retry this row against the
-                    // unmodified template and, on success, switch the rest of the batch to
-                    // unprobed mode so remaining rows don't repeat the same failure.
-                    eprintln!(
-                        "[WAL WARN] RETURN count(*) probe failed to execute ({probe_exec_err}); \
-                         retrying this row against the unmodified template"
-                    );
-                    stats.prepare_calls += 1;
-                    match conn.prepare(&batch.template) {
-                        Ok(mut fallback) => {
-                            // Adopt the fallback regardless of this row's own outcome below:
-                            // the failure is a params problem, not a template problem, and
-                            // re-preparing per row is exactly the unbounded growth FR-002
-                            // exists to bound.
-                            let exec_result = conn.execute_prepared(&mut fallback, &params);
-                            prepared = fallback;
-                            use_probe = false;
-                            probe_downgraded_by_row = true;
-                            match exec_result {
-                                Ok(_) => {
-                                    stats.lines_replayed += 1;
-                                    stats.match_prefixed_replayed += 1;
-                                }
-                                Err(e) => classify_replay_failure(
-                                    &e.to_string(),
-                                    &batch.template,
-                                    stats,
-                                    sample_cap,
-                                ),
-                            }
-                        }
-                        Err(e) => classify_replay_failure(
-                            &e.to_string(),
-                            &batch.template,
-                            stats,
-                            sample_cap,
-                        ),
-                    }
+        let exec_result = if is_match_prefixed && use_probe {
+            conn.execute_prepared_returning_count(&mut prepared, &params)
+                .map(Some)
+        } else {
+            conn.execute_prepared(&mut prepared, &params).map(|()| None)
+        };
+
+        match exec_result {
+            Ok(Some(count)) if count > 0 => {
+                local_lines_replayed += 1;
+                local_match_prefixed_replayed += 1;
+            }
+            Ok(Some(_)) => {
+                if is_delete_form_batch {
+                    local_match_delete_no_op += 1;
+                } else {
+                    local_match_prefixed_no_op += 1;
                 }
             }
-        } else {
-            match conn.execute_prepared(&mut prepared, &params) {
-                Ok(_) => {
-                    stats.lines_replayed += 1;
-                    if is_match_prefixed {
-                        stats.match_prefixed_replayed += 1;
-                    }
+            Ok(None) => {
+                local_lines_replayed += 1;
+                if is_match_prefixed {
+                    local_match_prefixed_replayed += 1;
                 }
-                Err(e) => {
-                    classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap)
-                }
+            }
+            Err(e) => {
+                // The engine has already rolled back the whole transaction — no explicit
+                // ROLLBACK here (it would itself error; see this function's doc comment).
+                classify_replay_failure(&e.to_string(), &batch.template, stats, sample_cap);
+                stats.rolled_back_lines += (batch_len - 1) as u64;
+                stats.transactions_rolled_back += 1;
+                *cache = None;
+                batch.clear();
+                return Ok(FlushOutcome { cancelled: false });
             }
         }
     }
-    if probe_downgraded_by_row {
-        // A per-row execute failure downgraded this batch to unprobed mode — that's about this
-        // row's params, not this template, so it must not become the template's permanent
-        // cached state (see this function's doc comment). Drop the cache; the next flush of
-        // this template re-probes fresh, matching pre-cache (batch-scoped) behavior.
-        *cache = None;
-    } else {
-        // Carry the settled (template, use_probe, statement) forward for the next flush of the
-        // same template to reuse (see this function's doc comment).
-        *cache = Some(PreparedCache {
-            template: std::mem::take(&mut batch.template),
-            use_probe,
-            statement: prepared,
-        });
+
+    conn.exec_transaction_control("COMMIT")?;
+    stats.lines_replayed += local_lines_replayed;
+    stats.match_prefixed_replayed += local_match_prefixed_replayed;
+    stats.match_prefixed_no_op += local_match_prefixed_no_op;
+    stats.match_delete_no_op += local_match_delete_no_op;
+    stats.transactions_committed += 1;
+    if let Some(max_seq) = max_seq_in_batch {
+        stats.last_committed_seq = Some(
+            stats
+                .last_committed_seq
+                .map_or(max_seq, |m| m.max(max_seq)),
+        );
     }
+
+    // Carry the settled (template, use_probe, statement) forward for the next flush of the
+    // same template to reuse (see this function's doc comment) — only on a committed batch.
+    *cache = Some(PreparedCache {
+        template: std::mem::take(&mut batch.template),
+        use_probe,
+        statement: prepared,
+    });
     batch.clear();
+    Ok(FlushOutcome { cancelled: false })
 }
 
 /// Classifies a replay failure (from prepare or execute) as legacy-skipped vs. genuine
@@ -1152,6 +1189,10 @@ mod replay_tests {
             seq_regressions: 0,
             failed_sample_categories_dropped: 0,
             prepare_calls: 0,
+            rolled_back_lines: 0,
+            last_committed_seq: None,
+            transactions_committed: 0,
+            transactions_rolled_back: 0,
         }
     }
 
