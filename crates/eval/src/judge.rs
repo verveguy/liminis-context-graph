@@ -8,9 +8,12 @@
 //! whichever backends are under test (including when comparing two non-Anthropic
 //! candidates against each other).
 
+use std::time::Duration;
+
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::time::sleep;
 
 /// Verbatim from the ported Python source, `JUDGE_PROMPT` in `judge.py` — the `{prompt_name}`/
 /// `{ref}`/`{cand}` placeholders are substituted via `str::replace` (not `format!`, so the
@@ -137,21 +140,37 @@ impl JudgeClient for AnthropicJudgeClient {
                 "messages": [{"role": "user", "content": prompt}]
             });
 
-            let resp: Value = self
-                .client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("judge request failed: {e}"))?
-                .error_for_status()
-                .map_err(|e| format!("judge request failed: {e}"))?
-                .json()
-                .await
-                .map_err(|e| format!("judge response not JSON: {e}"))?;
+            // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
+            // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
+            // the whole harness run.
+            let mut attempt = 0u32;
+            let resp: Value = loop {
+                let http_resp = self
+                    .client
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("judge request failed: {e}"))?;
+
+                let status = http_resp.status();
+                if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
+                    let delay = Duration::from_secs(1u64 << attempt);
+                    sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+
+                break http_resp
+                    .error_for_status()
+                    .map_err(|e| format!("judge request failed: {e}"))?
+                    .json()
+                    .await
+                    .map_err(|e| format!("judge response not JSON: {e}"))?;
+            };
 
             let text = resp["content"][0]["text"]
                 .as_str()

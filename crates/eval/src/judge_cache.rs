@@ -123,12 +123,12 @@ impl JudgeCache {
     }
 
     /// Records a freshly-judged verdict both in memory and durably on disk (append-only,
-    /// matching `CassetteWriter`'s convention — re-opening never truncates).
+    /// matching `CassetteWriter`'s convention — re-opening never truncates). The lock is
+    /// held across the file write too, not just the in-memory insert, so concurrent
+    /// callers can't interleave partial JSONL lines on disk.
     pub fn insert(&self, key: String, verdict: JudgeVerdict) -> Result<(), String> {
-        {
-            let mut entries = self.entries.lock().unwrap();
-            entries.insert(key.clone(), verdict.clone());
-        }
+        let mut entries = self.entries.lock().unwrap();
+        entries.insert(key.clone(), verdict.clone());
 
         let entry = CacheEntry {
             key,
