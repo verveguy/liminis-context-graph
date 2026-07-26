@@ -215,6 +215,8 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_EXTRACTION_LLM` | No | Anthropic model for entity extraction, optional `primary:fallback` format. Only consulted on the Anthropic path (see `ANTHROPIC_API_KEY` below); ignored when a local extraction endpoint is selected. |
 | `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed and `ANTHROPIC_API_KEY` is unset. If this var is also unset in that situation, the binary exits with an error identifying the missing extraction configuration — extraction has no default-socket auto-detection (unlike the embedder), so a running sidecar alone is not enough. |
 | `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
+| `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
+| `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](#recordreplay-cassettes). |
 | `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
 | `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
 | `LCG_WAL_DIR` | No | Directory for write-ahead log JSONL files (default `.lcg/wal`) |
@@ -415,6 +417,64 @@ so an unreachable local endpoint surfaces as an error on the first extraction ca
 startup. See [ADR 0041](docs/adr/0041-local-openai-compatible-extraction-adapter.md) for the full
 design, including why the local adapter uses `response_format: json_object` rather than
 function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
+
+## Record/replay cassettes
+
+Every test that exercises the real extraction pipeline used to face a choice: pay for a live
+LLM call, or fall back to `MockExtractor`'s fixed `Alice`/`Acme Corp` output regardless of input.
+Neither lets you regression-test a prompt change, a response-parsing change, or the ingest
+pipeline's real entity/edge yield without spending money on every run. **LLM cassettes** close
+that gap: record one real extraction pass to a file, then replay it deterministically and for
+free — with no network access — for as long as the recorded calls still match.
+
+### Recording
+
+Set `LCG_RECORD_LLM=<path>` and run a real ingest (`ANTHROPIC_API_KEY` or a local extractor must
+still be configured normally — recording wraps whichever provider is resolved). Every extraction
+call — `knowledge_add_episode`'s entity/edge extraction, and the `knowledge_reprocess_*` type
+classification calls — appends one line to `<path>`. Re-running recording against an existing
+path always **appends**, never truncates, matching the WAL's convention.
+
+### Replaying
+
+Set `LCG_REPLAY_LLM=<path>` and run the identical ingest again. Extraction is served entirely
+from the cassette: no provider is resolved, no `ANTHROPIC_API_KEY`/`--extractor-*` flag is
+needed, and no network call is ever made. `LCG_RECORD_LLM` and `LCG_REPLAY_LLM` are mutually
+exclusive — setting both is a startup error.
+
+A replay request that doesn't match any recorded entry — because the episode text differs, or
+because a prompt/parsing change altered what's semantically being asked — fails immediately with
+an identifiable cassette-miss error rather than silently falling through to a live call or
+producing divergent output. **To re-record after a cassette miss**: delete or move aside the
+stale cassette (or point `LCG_RECORD_LLM` at a fresh path), re-run the affected ingest with
+recording enabled against a live provider, then switch back to `LCG_REPLAY_LLM` to confirm the
+new cassette replays cleanly.
+
+### Format
+
+A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record
+carries a `key` (a SHA-256 hex digest used for matching), `call_type` (`extract`,
+`classify_entities`, or `classify_relations`), `provider`, `model`, an RFC 3339 `timestamp`,
+the human-readable `request` content, and the call's `response`. Records are matched by `key`
+alone, independent of file order — a cassette assembled from multiple recording runs (or, for
+`LlmRouter`, from more than one primary/fallback leaf) replays correctly as a single flat file.
+Two calls with identical semantic content are served FIFO, in the order they were recorded.
+
+**What's in the matching key, precisely** (and what isn't): for `extract`, the rendered entity
+and edge system/user prompts plus `episode_body`/`group_id`/`reference_time`/
+`custom_instructions`/`source_type` — rendering the prompts (not just hashing the raw options)
+means editing a prompt template or the injected ontology correctly invalidates stale cassette
+entries. For `classify_entities`/`classify_relations`, the raw call arguments only. Timestamps,
+request nonces, and anything transport-specific (headers, API keys, URLs) are never part of the
+key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
+boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
+to see or need to scrub. See the `crates/core/src/cassette.rs` module doc for the full,
+authoritative scope (including one documented, narrow gap around the edge extraction user
+prompt).
+
+Because cassettes are plain JSONL with no credential material, they're safe to commit as test
+fixtures — see `crates/core/tests/fixtures/README.md` for this repo's fixture-capture
+conventions.
 
 ## MCP-over-stdio transport
 
