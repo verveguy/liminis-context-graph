@@ -1,0 +1,57 @@
+name: Extraction-Quality Eval
+
+# workflow_dispatch-only (FR-011): this harness is not run on every PR — it costs real
+# money (LLM-as-judge calls against a hosted model) and isn't part of the correctness
+# gate. This job runs a small baseline-vs-itself smoke pass to keep SC-004's noise-floor
+# property (judged F1 near-perfect, strict F1 materially lower on pure wording variance)
+# checked on demand. The full hosted-vs-local model comparison is #248's scope, a
+# maintainer-run operation requiring a local model server and real spend — not this job.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Number of corpus chunks for the smoke pass'
+        required: false
+        default: '5'
+
+jobs:
+  eval-smoke:
+    name: eval (baseline-vs-itself smoke pass)
+    runs-on: ubuntu-latest
+    env:
+      LBUG_BUILD_FROM_SOURCE: "1"
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: build lcg-eval
+        run: cargo build --release -p lcg-eval
+
+      # SC-004: same backend as both "reference" and "candidate" — two independent
+      # extract() calls against the same model, not a single reused result. Judged F1
+      # should land near the noise floor; strict-string F1 should be materially lower.
+      - name: run baseline-vs-itself smoke pass
+        run: |
+          cargo run --release -p lcg-eval -- \
+            --backend baseline=anthropic \
+            --backend candidate=anthropic \
+            --reference baseline \
+            --limit "${{ inputs.limit || '5' }}" \
+            --judge-cache eval_judge_cache.jsonl \
+            --output eval_report.json \
+            2>&1 | tee eval_report.txt
+
+      - name: upload eval report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report-${{ github.sha }}
+          path: |
+            eval_report.txt
+            eval_report.json
+            eval_judge_cache.jsonl
+          retention-days: 30
