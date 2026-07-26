@@ -168,7 +168,7 @@ async fn judged_f1_with_cache(
     reference: &Value,
     candidate: &Value,
 ) -> (f64, f64, f64) {
-    let key = cache_key(prompt_name, reference, candidate);
+    let key = cache_key(prompt_name, "claude-sonnet-4-6", reference, candidate);
     let verdict = match cache.get(&key) {
         Some(v) => v,
         None => {

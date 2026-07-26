@@ -45,6 +45,11 @@ pub struct StructuredOutputReliability {
 pub struct CandidateReport {
     pub backend_name: String,
     pub chunks_run: usize,
+    /// Chunks where both the reference and this candidate's extraction succeeded — the
+    /// actual denominator `strict_*_f1`/`judged_*_f1` are computed over. Can be smaller
+    /// than `chunks_run` when either side errored on some chunks, so two candidates'
+    /// F1 scores aren't necessarily computed over the same number of samples.
+    pub chunks_scored: usize,
     pub errors: usize,
     pub error_rate: f64,
     pub latency: LatencyPercentiles,
@@ -73,18 +78,23 @@ impl Report {
             "Extraction-quality eval report — corpus size: {}, reference backend: {}\n\n",
             self.corpus_size, self.reference_backend
         );
+        // `None` judged F1 can mean either "no judge client configured" (no
+        // ANTHROPIC_API_KEY) or "zero chunk pairs succeeded on both sides to score" —
+        // report `chunks_scored` alongside rather than guessing which one applied.
         let fmt_opt = |v: Option<f64>| {
             v.map(|x| format!("{x:.3}"))
-                .unwrap_or_else(|| "n/a (no ANTHROPIC_API_KEY)".to_string())
+                .unwrap_or_else(|| "n/a".to_string())
         };
         for c in &self.candidates {
             out.push_str(&format!(
-                "== {} ==\n  chunks run: {}  errors: {} ({:.1}%)\n  latency p50/p95/p99 (ms): {}/{}/{}\n  \
+                "== {} ==\n  chunks run: {}  chunks scored: {}  errors: {} ({:.1}%)\n  \
+                 latency p50/p95/p99 (ms): {}/{}/{}\n  \
                  structured output: clean={} recovered={} malformed={} (malformed rate {:.1}%)\n  \
                  strict F1 — entities: {:.3}  edges: {:.3}\n  \
                  judged F1 — entities: {}  edges: {}  summaries: {}\n\n",
                 c.backend_name,
                 c.chunks_run,
+                c.chunks_scored,
                 c.errors,
                 c.error_rate * 100.0,
                 c.latency.p50_ms,
@@ -151,6 +161,7 @@ mod tests {
             candidates: vec![CandidateReport {
                 backend_name: "baseline".to_string(),
                 chunks_run: 2,
+                chunks_scored: 2,
                 errors: 0,
                 error_rate: 0.0,
                 latency: LatencyPercentiles {
@@ -189,6 +200,7 @@ mod tests {
         assert!(out.contains("baseline"));
         assert!(out.contains("0.771"));
         assert!(out.contains("0.978"));
-        assert!(out.contains("n/a (no ANTHROPIC_API_KEY)"));
+        assert!(out.contains("n/a"));
+        assert!(out.contains("chunks scored"));
     }
 }

@@ -116,6 +116,7 @@ async fn run(cli: Args) -> Result<(), String> {
                 &reference_result,
                 judge_client.as_deref(),
                 &judge_cache,
+                &cli.judge_model,
             )
             .await?,
         );
@@ -142,6 +143,7 @@ async fn score_candidate(
     reference_result: &BackendRunResult,
     judge_client: Option<&dyn JudgeClient>,
     judge_cache: &JudgeCache,
+    judge_model: &str,
 ) -> Result<CandidateReport, String> {
     let latencies: Vec<u64> = run_result
         .chunk_results
@@ -166,6 +168,10 @@ async fn score_candidate(
     let mut judged_entity_f1s = Vec::new();
     let mut judged_edge_f1s = Vec::new();
     let mut judged_summary_f1s = Vec::new();
+    // Chunks where both reference and candidate extraction succeeded — the denominator
+    // strict/judged F1 are actually computed over. Distinct from `chunks_run`, which
+    // counts every chunk the harness attempted regardless of whether either side errored.
+    let mut chunks_scored = 0usize;
 
     for (ref_chunk, cand_chunk) in reference_result
         .chunk_results
@@ -176,6 +182,7 @@ async fn score_candidate(
         else {
             continue;
         };
+        chunks_scored += 1;
         ref_entities_all.extend(ref_extraction.entities.iter().cloned());
         cand_entities_all.extend(cand_extraction.entities.iter().cloned());
         ref_edges_all.extend(ref_extraction.edges.iter().cloned());
@@ -188,6 +195,7 @@ async fn score_candidate(
         let (_, _, f1) = judged_f1(
             judge,
             judge_cache,
+            judge_model,
             "extract_nodes.extract_text",
             &ref_entities_val,
             &cand_entities_val,
@@ -200,6 +208,7 @@ async fn score_candidate(
         let (_, _, f1) = judged_f1(
             judge,
             judge_cache,
+            judge_model,
             "extract_edges.default",
             &ref_edges_val,
             &cand_edges_val,
@@ -222,6 +231,7 @@ async fn score_candidate(
         let (_, _, f1) = judged_f1(
             judge,
             judge_cache,
+            judge_model,
             "extract_nodes.extract_summaries_batch",
             &ref_summaries_val,
             &cand_summaries_val,
@@ -242,6 +252,7 @@ async fn score_candidate(
     Ok(CandidateReport {
         backend_name: run_result.backend_name.clone(),
         chunks_run: run_result.chunk_results.len(),
+        chunks_scored,
         errors,
         error_rate,
         latency: percentiles(latencies),
@@ -258,11 +269,12 @@ async fn score_candidate(
 async fn judged_f1(
     judge: &dyn JudgeClient,
     judge_cache: &JudgeCache,
+    judge_model: &str,
     prompt_name: &str,
     reference: &serde_json::Value,
     candidate: &serde_json::Value,
 ) -> Result<(f64, f64, f64), String> {
-    let key = cache_key(prompt_name, reference, candidate);
+    let key = cache_key(prompt_name, judge_model, reference, candidate);
     let verdict: JudgeVerdict = match judge_cache.get(&key) {
         Some(v) => v,
         None => {
