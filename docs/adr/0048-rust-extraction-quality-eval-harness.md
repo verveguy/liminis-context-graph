@@ -91,30 +91,46 @@ at 0.978; SC-004 exists to reproduce that property).
 
 `crates/eval/src/judge.rs`'s `JUDGE_PROMPT` constant, and the precision/recall/F1 derivation
 (`precision_recall_f1`, with the ported 1.0/0.0 empty-denominator defaults) are copied verbatim
-from the Python source. `crates/eval/src/failure_taxonomy.rs`'s bucket *rules* (`article_dropped`,
+from the Python source. `crates/eval/src/failure_taxonomy.rs`'s bucket rules (`article_dropped`,
 `modifier_dropped`, `granularity_merged`, `case_or_format`, `missing_entity` for entity misses;
 their extra-side counterparts; `inverted_edge`, `synonym_relation`, `missing_edge`, `extra_edge`
-for edges) are ported from the rule descriptions the source repository's research produced —
-the Python implementation itself lives in a separate private repo
-(`verveguy/liminis-framework`) not reachable by every future contributor, so the bucket logic
-here is a from-scratch Rust implementation of the documented rules, not a line-for-line
-translation.
+for edges) are ported against the actual `failure_taxonomy.py` source
+(`verveguy/liminis-framework@main:eval/extraction-quality/failure_taxonomy.py`, fetched directly
+via `gh api repos/verveguy/liminis-framework/contents/...` — the private repo is read-accessible
+via `gh`, not just describable from research notes), not re-derived from a prose summary of its
+rules. Two normalization details only surface by reading the actual source rather than a
+description of its behavior, and are called out explicitly in `failure_taxonomy.rs`'s module
+doc: the article check only strips a leading `"the "` (not `"a "`/`"an "` — those cases still
+get classified correctly, just via the generic token-subset check rather than a dedicated
+article bucket), and the modifier/granularity token-subset check splits on whitespace only,
+without folding `-`/`_` to spaces or stripping punctuation (that folding is scoped to the
+separate `case_or_format` check only). Getting these two details wrong wouldn't have broken
+tests written against an intuitive reading of the rules, only silently diverged bucket
+assignments from the ported source on hyphenated/punctuated names — exactly the class of gap
+FR-008 exists to prevent.
 
-### 5. Judge cache key scheme is ported verbatim, not redesigned
+### 5. Judge cache key scheme is ported from the source, extended with `judge_model`
 
 FR-005/SC-003 require re-runs against the same corpus and backends to make zero new judge
 calls. Getting the cache key's *scope* right is load-bearing: too narrow and re-runs pay
 repeatedly; too broad and stale entries silently reuse verdicts across semantically different
 comparisons.
 
-**We reused the exact scheme**: `sha256(json({"cand": ..., "prompt": ..., "ref": ...},
-sort_keys=True))[:24]`. `crates/eval/src/judge_cache.rs`'s `canonical_json` recursively sorts
-object keys before serializing — `serde_json` here is built with the workspace's
-`preserve_order` feature, so a `Map` serializes in insertion order, and inserting
-already-alphabetically-sorted key/value pairs reproduces Python's `sort_keys=True` output
-exactly, including nested objects. The cache itself is an on-disk, append-only JSONL file
-(mirroring `CassetteWriter`'s convention — re-opening an existing path never truncates),
-loaded fully into memory at startup so a cache hit never touches disk on the read path.
+**We reused the source's scheme with one addition**: `sha256(json({"cand": ..., "judge_model":
+..., "prompt": ..., "ref": ...}, sort_keys=True))[:24]`. The ported original pinned a single
+fixed judge model and so never needed the model in its key; this harness exposes
+`--judge-model` as a run-time choice (Decision 4 doesn't apply that same constraint to the
+judge, unlike backend selection), so without `judge_model` in the key, switching judge models
+against an existing cache file would silently return another model's verdicts instead of
+re-judging. `crates/eval/src/judge_cache.rs`'s `canonical_json` recursively sorts object keys
+before serializing — `serde_json` here is built with the workspace's `preserve_order` feature,
+so a `Map` serializes in insertion order, and inserting already-alphabetically-sorted key/value
+pairs reproduces Python's `sort_keys=True` output exactly, including nested objects. The cache
+itself is an on-disk, append-only JSONL file (mirroring `CassetteWriter`'s convention —
+re-opening an existing path never truncates), loaded fully into memory at startup so a cache
+hit never touches disk on the read path; a disk write is durable before the in-memory map is
+updated, so a failed write can never leave a verdict visible in-process without also being
+persisted.
 
 ### 6. Default corpus subset is the first 50 chunks of the #217 fixture, not all 228
 

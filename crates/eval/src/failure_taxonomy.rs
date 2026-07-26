@@ -1,30 +1,41 @@
-//! Failure-taxonomy bucketing (ported from the prior Python harness's
-//! `failure_taxonomy.py`), applied to a judge's `unmatched_reference` (misses) and
-//! `unmatched_candidate` (extras) after judging — not to raw string mismatches.
+//! Failure-taxonomy bucketing, ported verbatim (down to normalization details) from the
+//! prior Python harness's `failure_taxonomy.py`
+//! (`verveguy/liminis-framework@main:eval/extraction-quality/failure_taxonomy.py`), applied
+//! to a judge's `unmatched_reference` (misses) and `unmatched_candidate` (extras) after
+//! judging — not to raw string mismatches.
+//!
+//! Two normalization details matter for parity and are easy to over-generalize by
+//! accident: the source's article check only strips a leading `"the "` (not `"a "`/`"an "`),
+//! and its modifier/granularity token-subset check splits on whitespace only — it does
+//! *not* strip punctuation or fold `-`/`_` to spaces (that folding is specific to the
+//! separate `case_or_format` check).
 
 use std::collections::HashSet;
 
+fn normalize(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+/// Plain whitespace-split tokens of the trimmed/lowercased string — matches the Python
+/// source's `set(n.split())` exactly (no punctuation stripping, no `-`/`_` folding; that
+/// folding is scoped to `is_case_or_format_variant` only, per the source's own comment
+/// that case/format variance is "very minor" and handled separately).
 fn tokenize(s: &str) -> HashSet<String> {
-    s.to_lowercase()
-        .replace(['-', '_'], " ")
+    normalize(s)
         .split_whitespace()
-        .map(|t| t.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-        .filter(|t| !t.is_empty())
+        .map(str::to_string)
         .collect()
 }
 
-fn strip_article(s: &str) -> String {
-    let lower = s.trim().to_lowercase();
-    for article in ["the ", "a ", "an "] {
-        if let Some(rest) = lower.strip_prefix(article) {
-            return rest.to_string();
-        }
-    }
-    lower
+/// Source only special-cases a leading `"the "` (not `"a "`/`"an "`).
+fn strip_the(s: &str) -> &str {
+    s.strip_prefix("the ").unwrap_or(s)
 }
 
 fn is_article_variant(a: &str, b: &str) -> bool {
-    a.to_lowercase() != b.to_lowercase() && strip_article(a) == strip_article(b)
+    let na = normalize(a);
+    let nb = normalize(b);
+    na != nb && strip_the(&na) == strip_the(&nb)
 }
 
 /// True when `subset`'s tokens are a non-empty, proper subset of `superset`'s tokens.
@@ -35,8 +46,8 @@ fn is_token_subset(subset: &str, superset: &str) -> bool {
 }
 
 fn is_case_or_format_variant(a: &str, b: &str) -> bool {
-    let na = a.to_lowercase().replace(['-', '_'], " ");
-    let nb = b.to_lowercase().replace(['-', '_'], " ");
+    let na = normalize(a).replace(['-', '_'], " ");
+    let nb = normalize(b).replace(['-', '_'], " ");
     a != b && na == nb
 }
 
@@ -146,6 +157,18 @@ mod tests {
     }
 
     #[test]
+    fn entity_miss_article_scope_excludes_a_and_an() {
+        // The ported source only special-cases "the ", not "a "/"an ". An "a X"/"X" pair
+        // still falls through to the generic token-subset check (X's tokens are a strict
+        // subset of "A X"'s), landing on modifier_dropped rather than being misclassified
+        // as article_dropped the way an over-generalized "a"/"an"/"the" article check would.
+        assert_eq!(
+            classify_entity_miss("A White House", &names(&["White House"])),
+            "modifier_dropped"
+        );
+    }
+
+    #[test]
     fn entity_miss_modifier_dropped() {
         // Candidate "Alice" is a token subset of reference "Alice Smith".
         assert_eq!(
@@ -168,6 +191,19 @@ mod tests {
         assert_eq!(
             classify_entity_miss("New-York", &names(&["new york"])),
             "case_or_format"
+        );
+    }
+
+    #[test]
+    fn entity_miss_modifier_check_does_not_fold_hyphens() {
+        // The ported source's modifier/granularity check splits on whitespace only — it
+        // must not treat "New-York" and "New York" as token-equal the way the dedicated
+        // case_or_format check does. "New-York-City" has no whitespace-token subset
+        // relationship with "New York", so this falls through to missing_entity rather
+        // than modifier_dropped/granularity_merged.
+        assert_eq!(
+            classify_entity_miss("New-York-City", &names(&["New York"])),
+            "missing_entity"
         );
     }
 
