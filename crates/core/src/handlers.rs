@@ -1559,6 +1559,10 @@ async fn handle_rebuild_from_wal(
                     "unparseable_lines": stats.unparseable_lines,
                     "lines_skipped": stats.lines_skipped(),
                     "failed_samples": stats.failed_samples,
+                    "rolled_back_lines": stats.rolled_back_lines,
+                    "last_committed_seq": stats.last_committed_seq,
+                    "transactions_committed": stats.transactions_committed,
+                    "transactions_rolled_back": stats.transactions_rolled_back,
                 }));
             }
         }
@@ -1577,6 +1581,10 @@ async fn handle_rebuild_from_wal(
             "failed_samples": stats.failed_samples,
             "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
+            "rolled_back_lines": stats.rolled_back_lines,
+            "last_committed_seq": stats.last_committed_seq,
+            "transactions_committed": stats.transactions_committed,
+            "transactions_rolled_back": stats.transactions_rolled_back,
         });
         if dry_run {
             // Dry-run never touches indices (FR-007) — omit the field rather than report
@@ -1652,6 +1660,10 @@ async fn handle_rebuild_from_wal(
             "failed_samples": stats.failed_samples,
             "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
             "fidelity_warning": stats.fidelity_warning,
+            "rolled_back_lines": stats.rolled_back_lines,
+            "last_committed_seq": stats.last_committed_seq,
+            "transactions_committed": stats.transactions_committed,
+            "transactions_rolled_back": stats.transactions_rolled_back,
         }));
     }
 
@@ -1808,6 +1820,10 @@ async fn handle_rebuild_from_wal(
                             "failed_samples": stats.failed_samples,
                             "failed_sample_categories_dropped": stats.failed_sample_categories_dropped,
                             "fidelity_warning": stats.fidelity_warning,
+                            "rolled_back_lines": stats.rolled_back_lines,
+                            "last_committed_seq": stats.last_committed_seq,
+                            "transactions_committed": stats.transactions_committed,
+                            "transactions_rolled_back": stats.transactions_rolled_back,
                         });
                         // Dry-run never touches indices (FR-007) — omit the field.
                         if !dry_run {
