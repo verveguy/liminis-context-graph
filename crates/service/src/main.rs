@@ -1,6 +1,8 @@
 mod cli;
 mod mcp;
 mod migration;
+#[cfg(unix)]
+mod sigterm_diag;
 mod sink;
 
 use std::path::Path;
@@ -548,7 +550,10 @@ async fn run_socket_service(
         let notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
             sigterm_stream.recv().await;
-            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            eprintln!(
+                "liminis-context-graph: received SIGTERM, shutting down (sender pid={})",
+                sigterm_diag::sender_pid_display()
+            );
             notify.notify_one();
         });
     }
@@ -697,7 +702,10 @@ async fn run_mcp_standalone(
         let ct = shutdown_ct.clone();
         tokio::spawn(async move {
             sigterm_stream.recv().await;
-            eprintln!("liminis-context-graph: received SIGTERM, shutting down");
+            eprintln!(
+                "liminis-context-graph: received SIGTERM, shutting down (sender pid={})",
+                sigterm_diag::sender_pid_display()
+            );
             ct.cancel();
         });
     }
@@ -972,6 +980,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(2);
         }
     };
+
+    // Registered once, before the runtime is built, so the sender-PID atomic it populates is
+    // process-wide state visible to both run_socket_service and run_mcp_standalone (#247). This
+    // is purely observe-only and runs alongside — never in place of — tokio's own SIGTERM
+    // handling registered inside each of those functions.
+    #[cfg(unix)]
+    if let Err(e) = sigterm_diag::register() {
+        eprintln!(
+            "liminis-context-graph: failed to register SIGTERM sender-PID diagnostic handler: {e}"
+        );
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
