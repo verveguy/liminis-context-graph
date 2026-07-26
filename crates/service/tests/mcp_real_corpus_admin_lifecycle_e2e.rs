@@ -78,12 +78,25 @@ fn spawn_at(db_path: &Path, wal_dir: &Path, embedder_url: &str, extra_args: &[&s
     McpClient::spawn(cmd)
 }
 
+/// Restores a chmod'd-read-only directory to writable on drop — a safety net so a test panic
+/// between `corrupt_via_readonly_dir` and its explicit `restore_writable` call doesn't leave a
+/// permission-denied directory behind for the backing `TempDir` to fail to clean up on drop.
+struct PermissionGuard {
+    path: PathBuf,
+}
+
+impl Drop for PermissionGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 /// Relocates `fork`'s `db_path` (and any `.wal`/`.lock` siblings) into a dedicated subdirectory
 /// of `fork`'s own temp dir, chmod's that subdirectory read-only (`0o555`), and returns the new
-/// db_path. `fork.wal_dir` (the application WAL) is left completely untouched. See this file's
-/// module doc comment for why a permission-based mechanism is used instead of a garbage-byte
-/// write.
-fn corrupt_via_readonly_dir(fork: &SeededWorkspace) -> PathBuf {
+/// db_path plus a guard that restores write permissions when it drops. `fork.wal_dir` (the
+/// application WAL) is left completely untouched. See this file's module doc comment for why a
+/// permission-based mechanism is used instead of a garbage-byte write.
+fn corrupt_via_readonly_dir(fork: &SeededWorkspace) -> (PathBuf, PermissionGuard) {
     let db_subdir = fork.dir.path().join("dbdir");
     std::fs::create_dir_all(&db_subdir).expect("create db subdir");
     let new_db_path = db_subdir.join(fork.db_path.file_name().unwrap());
@@ -97,13 +110,12 @@ fn corrupt_via_readonly_dir(fork: &SeededWorkspace) -> PathBuf {
     }
     std::fs::set_permissions(&db_subdir, std::fs::Permissions::from_mode(0o555))
         .expect("chmod db subdir read-only");
-    new_db_path
+    (new_db_path, PermissionGuard { path: db_subdir })
 }
 
 /// Restores write access to the directory `corrupt_via_readonly_dir` chmod'd read-only —
 /// simulates the underlying condition clearing, a prerequisite before any recovery strategy
-/// (which itself needs to rename/recreate files in that directory) can succeed. Also required so
-/// the backing `TempDir` can be cleaned up on drop.
+/// (which itself needs to rename/recreate files in that directory) can succeed.
 fn restore_writable(db_subdir: &Path) {
     std::fs::set_permissions(db_subdir, std::fs::Permissions::from_mode(0o755))
         .expect("chmod db subdir back to writable");
@@ -140,6 +152,31 @@ fn wait_for_process_exit(child: &mut Child, timeout: Duration) -> Option<std::pr
     None
 }
 
+/// Kills and reaps the wrapped socket-service child on drop — a safety net so a test panic
+/// while a remote service is up in User Story 7's attached-mode scenarios doesn't leave an
+/// orphaned process holding the socket file open.
+struct ChildGuard(Child);
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// Spawns the socket (non-MCP) service against an existing `SeededWorkspace`'s already-rebuilt
 /// `db_path`/`wal_dir` — the "already-running app instance" attached-mode MCP coexists with.
 /// Mirrors `mcp_attached.rs`'s `spawn_socket_service`, but pointed at real-corpus-seeded files
@@ -150,7 +187,7 @@ fn spawn_socket_service_for(
     wal_dir: &Path,
     socket_path: &Path,
     embedder_url: &str,
-) -> Child {
+) -> ChildGuard {
     let child = Command::new(binary_path())
         .env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
@@ -164,7 +201,7 @@ fn spawn_socket_service_for(
         wait_for_socket(socket_path, Duration::from_secs(15)),
         "socket service backing the real-corpus fixture did not become ready"
     );
-    child
+    ChildGuard(child)
 }
 
 fn socket_request(socket_path: &Path, method: &str, params: Value) -> Value {
@@ -249,7 +286,7 @@ fn mcp_admin_lifecycle_operations_over_real_corpus_fixture() {
     {
         let fork = base.fork();
         let db_subdir = fork.dir.path().join("dbdir");
-        let corrupted_db_path = corrupt_via_readonly_dir(&fork);
+        let (corrupted_db_path, _guard) = corrupt_via_readonly_dir(&fork);
 
         let mut client = spawn_at(
             &corrupted_db_path,
@@ -350,7 +387,7 @@ fn mcp_admin_lifecycle_operations_over_real_corpus_fixture() {
     {
         let fork = base.fork();
         let db_subdir = fork.dir.path().join("dbdir");
-        let corrupted_db_path = corrupt_via_readonly_dir(&fork);
+        let (corrupted_db_path, _guard) = corrupt_via_readonly_dir(&fork);
 
         let mut client = spawn_at(
             &corrupted_db_path,
