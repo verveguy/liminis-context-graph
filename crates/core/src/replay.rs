@@ -877,6 +877,18 @@ struct FlushOutcome {
 /// strings (the cause of lbug `db.wal` corruption in the prior inline-UNWIND design, #139).
 /// Values are bound as typed lbug `Value`s and coerced to their column types.
 ///
+/// Unlike the cancellation path's `ROLLBACK` (whose failure is deliberately absorbed — see
+/// below), a `BEGIN`/`COMMIT` failure here propagates via `?` and aborts the entire
+/// `replay_opts` run, including for `Db::open_or_rebuild`'s from-scratch rebuild and
+/// `recovery.rs`'s startup auto-recovery. This is intentional, not an oversight: a `COMMIT`
+/// failure leaves the actual on-disk commit state ambiguous (did it commit or not?), so
+/// silently continuing and recording the batch as committed in `stats` would risk exactly the
+/// undefined-state problem this issue exists to eliminate — the DB-open/recovery flows failing
+/// loudly on such a (should-never-happen) engine error is preferable to proceeding on an
+/// uncertain foundation. The cancellation-`ROLLBACK` case is safe to absorb specifically because
+/// the batch is already being discarded either way regardless of whether the `ROLLBACK` itself
+/// succeeds — there's no equivalent ambiguity to protect against.
+///
 /// A *prepare* failure (e.g. a legacy construct or missing column that survived normalization)
 /// makes the template unusable — no transaction is opened, every row sharing it is classified
 /// from that single error via `classify_replay_failure`, same as before this issue.

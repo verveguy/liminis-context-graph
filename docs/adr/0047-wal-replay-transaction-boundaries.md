@@ -122,6 +122,27 @@ outcome that `replay_opts` uses to stop reading further WAL lines. This keeps th
 uncommitted-then-discarded window bounded by `batch_size`, not by however long cancellation takes
 to propagate through the whole file loop.
 
+**Post-merge refinement**: a review finding on PR #255 noted that this `ROLLBACK`'s own `Result`
+originally propagated via `?`, so a rollback failure would abort the whole `replay_opts` run and
+discard every `ReplayStats` field accumulated so far — including `last_committed_seq`, the very
+resume point FR-006 exists to provide — for what is a normal, expected outcome. Fixed to log and
+continue instead: the batch is being discarded either way regardless of whether the `ROLLBACK`
+itself succeeds, so there's no ambiguity to protect by aborting. `BEGIN`/`COMMIT` are deliberately
+*not* given the same treatment — see the next paragraph.
+
+### `BEGIN`/`COMMIT` failures are hard errors, by design
+
+Unlike the cancellation `ROLLBACK` above, a `BEGIN` or `COMMIT` failure inside `flush_batch`
+propagates via `?` and aborts the entire `replay_opts` run — including for `Db::open_or_rebuild`'s
+from-scratch rebuild and `recovery.rs`'s startup auto-recovery path. This was raised as a question
+during PR #255's review (would a transient hiccup there be more destructive than intended?) and
+is confirmed intentional: a `COMMIT` failure leaves the actual on-disk commit state ambiguous —
+unlike the `ROLLBACK` case, there is no "the outcome is the same either way" argument available,
+since we cannot tell whether the transaction committed or not. Silently continuing and recording
+the batch as committed in `stats` would risk exactly the undefined-state problem this issue exists
+to eliminate, so DB-open and recovery flows failing loudly on such a (should-never-happen) engine
+error is preferable to proceeding on an uncertain foundation.
+
 ### New `ReplayStats` fields, additive only
 
 - `rolled_back_lines: u64` — see above.
