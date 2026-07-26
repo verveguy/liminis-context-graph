@@ -104,7 +104,7 @@ Judged F1 (nodes / edges / summaries), read against the 0.990 / 0.978 / 0.900 no
 
 | Candidate | nodes | edges | summaries | Notes |
 |---|---:|---:|---:|---|
-| `qwen3.6-27b` | **0.894** | **0.852** | **0.900** | Local winner. ~7 points off the noise floor on nodes/edges. |
+| `qwen3.6-27b` | **0.894** | **0.852** | **0.900** | Local winner. ~7 points off the noise floor on average (nodes and edges individually trail by more; summaries ties). |
 | `qwen3.6-35b-a3b` (MoE) | 0.879 | 0.764 | 0.800 | ~14 points off the noise floor, but roughly **4x faster** than `qwen3.6-27b` — a mixture-of-experts model with a much smaller active-parameter count per token. |
 | `qwen3.6-27b-thinking` (thinking-mode variant of the winner) | *lower than non-thinking, same model* | — | — | Scored **worse on nodes** than the non-thinking baseline above, at roughly **10x the latency**. Included as a "more compute did not help" data point; no precise figure is reproduced here since the original result predates this doc and shouldn't be treated as a re-verified number. |
 
