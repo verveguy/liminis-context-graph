@@ -35,6 +35,12 @@ pub enum Error {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    /// Replay found no cassette record matching the request's semantic-content hash (FR-003).
+    /// Distinct from `Error::Ipc` so callers/tests can match on it directly rather than
+    /// string-sniffing an error message. See `crate::cassette` for the record/replay design.
+    #[error("cassette miss: {0}")]
+    CassetteMiss(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
