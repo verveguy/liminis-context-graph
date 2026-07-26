@@ -2,10 +2,13 @@
 
 This directory contains the real-data fixture consumed by
 `crates/core/tests/real_corpus_e2e.rs` (#217, direct in-process `handlers::dispatch`) and, as
-of #234, also by `crates/service/tests/mcp_real_corpus_e2e.rs` (MCP-over-stdio against the real
-compiled binary, via the seeding helper in `crates/service/tests/common/real_corpus.rs`) — the
-same fixture backs both a direct-dispatch harness and an MCP-transport harness, so a schema/WAL-
-format change affects the blast radius of both suites (see "Identifying a stale fixture" below).
+of #234/#235/#236, also by the MCP-over-stdio suites in `crates/service/tests/` —
+`mcp_real_corpus_e2e.rs` (read path, #234), `mcp_real_corpus_mutation_e2e.rs` (write/mutation
+path, #235), and `mcp_real_corpus_admin_data_e2e.rs` / `mcp_real_corpus_admin_lifecycle_e2e.rs`
+(admin/lifecycle surface — dump/rebuild, recovery, checkpoint, shutdown, #236) — all four via the
+shared seeding helper in `crates/service/tests/common/real_corpus.rs`. The same fixture backs a
+direct-dispatch harness and four MCP-transport harnesses, so a schema/WAL-format change affects
+the blast radius of all five suites (see "Identifying a stale fixture" below).
 Unlike `crates/core/tests/fixtures/wal/`
 (small, hand-crafted `.jsonl` files exercising WAL *format* edge cases), this fixture is a
 **real ingest run** — real `AnthropicExtractor` + real `OaiEmbedder` — over a real public
@@ -262,3 +265,55 @@ An unrun test rots silently, so being excluded from the PR gate does not mean un
 `workflow_dispatch` runs. This mirrors the existing `bench.yml` precedent in this repo of
 gating an expensive-but-important check out of the PR path while still running it
 automatically somewhere.
+
+## MCP admin/lifecycle test suite (#236)
+
+Two further `#[ignore]`d suites in `crates/service/tests/` complete the MCP e2e trilogy started
+by #234 (read path) and #235 (write/mutation path), covering the admin/lifecycle tool surface —
+`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`,
+`knowledge_recover`, `knowledge_recover_full`, `knowledge_build_indices`, `knowledge_close` —
+through real `tools/call` against the real compiled binary, at this fixture's full scale, with
+`--scope=admin` active. Split into two files so a failure in one story doesn't mask the other and
+both get their own CI job/parallelism slot:
+
+- `mcp_real_corpus_admin_data_e2e.rs` — data-plane operations: `knowledge_dump_wal` →
+  rebuild-into-a-new-database round trip (including `group_id` scoping), a full
+  `knowledge_rebuild_from_wal` driven with a progress token (asserting both `indices_built: true`
+  with no intervening index-build call, and that progress notifications are observed only when a
+  token is supplied), `knowledge_prepare_checkpoint` coherence, and `knowledge_build_indices`
+  restoring search on a graph with indices made absent via a reversible
+  `ALTER TABLE Entity RENAME TO ...` round trip (there is no way to produce an
+  index-genuinely-absent-but-otherwise-healthy real-scale graph via process respawn — `main.rs`
+  eagerly rebuilds indices at every startup, ADR-0036 — so this induces a genuine, tracked
+  `knowledge_build_indices` failure within a single already-running process instead).
+- `mcp_real_corpus_admin_lifecycle_e2e.rs` — process-lifecycle operations: degraded-mode startup
+  and recovery (the direct regression guard for #207 — a real recovery attempt that couldn't be
+  completed because the relevant tools weren't discoverable), exercising both `knowledge_recover`
+  (`drop_lbug_wal` strategy) and `knowledge_recover_full` (including its documented idempotent
+  no-op on a second call) against independently-induced degraded copies; `knowledge_close`
+  checkpoint semantics (ADR-0017); attached-mode `--allow-remote-close` gating; and admin-scope
+  tool-visibility gating (mirroring #234's/#235's read/write scope-gating coverage, but for the
+  highest-consequence tool bucket in the registry). Corruption is induced by chmod'ing the
+  directory containing a forked copy's database file read-only — not a garbage-byte WAL write,
+  which lbug's own checkpoint-drop step would silently self-heal before degraded mode is ever
+  observed — while the *application* WAL stays fully intact, per FR-007's requirement. Because
+  this never touches on-disk bytes, both recovery strategies resolve via their cheap
+  checkpoint-reopen path rather than a full WAL replay, keeping this file's added runtime to well
+  under a minute of real work beyond the one-time seed.
+
+Both reuse `seed_real_corpus_workspace`/`SeededWorkspace` (`common/real_corpus.rs`) unmodified,
+and both fork an independent copy of the seeded workspace per user-story block via
+`SeededWorkspace::fork()` — a cheap recursive filesystem copy, not a re-seed — so no story's
+mutation, corruption, or shutdown can leak into another's assertions, and no test ever targets a
+real (non-temp) `.lcg/` workspace.
+
+### Running the admin/lifecycle tests
+
+```bash
+cargo test -p lcg-service --release --test mcp_real_corpus_admin_data_e2e -- --ignored
+cargo test -p lcg-service --release --test mcp_real_corpus_admin_lifecycle_e2e -- --ignored
+```
+
+Both are wired into `.github/workflows/real-corpus-e2e.yml` on push-to-main /
+`workflow_dispatch`, alongside the `real_corpus_e2e`, `mcp_real_corpus_e2e`, and
+`mcp_real_corpus_mutation_e2e` jobs.
