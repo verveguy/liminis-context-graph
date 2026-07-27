@@ -271,9 +271,11 @@ Every pair/axis result also carries an `order_inconsistency_rate` — never trus
 without checking it alongside (FR-007). Above **20%**
 (`ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`, ADR-0050), the judge is flipping its answer often
 enough when the slot order reverses that the win rate isn't distinguishable from position-bias
-noise; a loud stderr warning fires for this too. The #248 cassettes' 226/223 coverage (a 221
-overlap) means every pair also reports a nonzero `chunks_skipped` — chunks present on only one
-side are excluded from that pair's tally, never counted as a loss (FR-010).
+noise; a loud stderr warning fires for this too. `chunks_skipped` depends on each pair's actual
+cassette coverage — chunks present on only one side are excluded from that pair's tally, never
+counted as a loss (FR-010). The known `baseline`/`qwen` coverage (226/223, a 221 overlap) means
+that pair is expected to report a nonzero skip count; `candidate` is freshly recorded per this
+runbook, so its overlap with the other two isn't known ahead of a run and may be zero.
 
 Re-running the exact command above against the same `--judge-cache` path makes zero new judge
 calls (SC-005) — free to re-run after tweaking the report format or investigating a surprising
