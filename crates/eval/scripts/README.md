@@ -9,7 +9,7 @@ one of those traps has now been hit at least once.
 | `01-start-server.sh` | Starts `mlx_lm.server` **with thinking disabled** and verifies it | free |
 | `02-timing-check.sh` | Measures tok/s and projects full-corpus runtime | free |
 | `03-capture-qwen.sh` | Captures the qwen cassette, no hosted spend | local compute only |
-| `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money** |
+| `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
 
 ```bash
 crates/eval/scripts/01-start-server.sh
@@ -17,7 +17,7 @@ crates/eval/scripts/02-timing-check.sh          # do not skip
 crates/eval/scripts/03-capture-qwen.sh 25       # validate on 25 chunks first
 crates/eval/scripts/03-capture-qwen.sh          # then the full corpus
 export ANTHROPIC_API_KEY=...
-crates/eval/scripts/04-full-run.sh
+crates/eval/scripts/04-full-run.sh              # replays 03's cassette; no local server needed
 ```
 
 ## The traps these encode
@@ -46,10 +46,22 @@ cassette aside automatically.
 (`main.rs:98-105`), which is what makes `03` free. `03` unsets it defensively —
 otherwise a leftover export would bill judge calls to score qwen against itself.
 
-**Never replay a cassette into both hosted legs.** `baseline` and `candidate` are
-deliberately two *independent* live Anthropic runs; their disagreement **is** the
-noise floor. Feeding one cassette to both makes them byte-identical and judged F1
-becomes 1.000 by construction. See #263 for the replay backend.
+**Replay the reference, never the noise floor.** Since #263 landed the
+`cassette:path=<PATH>` backend, `04` replays `baseline` and `qwen` from recorded
+cassettes and runs only **one** live hosted leg — `candidate`. That leg has to stay
+live: its disagreement with `baseline` **is** the noise floor, two independent Haiku
+samples of the same corpus. Point it at a cassette and both legs become byte-identical,
+judged F1 is 1.000 by construction, and the measurement destroys itself while still
+producing a plausible-looking report. A cassette miss is a per-chunk error
+(`Error::CassetteMiss`), not a crash, so partial coverage shows up honestly in
+`error_rate`.
+
+**Cassettes are not reusable across ontology modes.** `opts.ontology` feeds both
+`entity_system_prompt` and `edge_system_prompt`, and those are hashed into the cassette
+key (`cassette.rs:69-88`). Adding `--ontology` therefore changes *every* key, and a
+freeform cassette misses on all of them. The ontology axis of #266 needs its own
+capture — including another full local qwen pass. Budget the hours; do not assume the
+freeform capture carries over.
 
 **Quiesce the machine before any timing run.** MLX inference on Apple Silicon is bound
 by *memory bandwidth x active parameters per token*
@@ -61,10 +73,14 @@ inflates measured per-chunk latency. Recorded cassette *content* is unaffected, 
 `02` now reports load average and names any process over 100% CPU, and warns when the
 machine is not quiet.
 
-**Expect a long tail, and read the mean carefully.** Per-chunk latency on the real
-corpus ranges from ~9s to ~730s — a single hard chunk can drag a cumulative average
-by 10s or more. Judge a run by its trailing window, not its running mean: a rising
-cumulative average with a flat trailing window is outliers, not degradation.
+**Expect a long tail, and never quote the mean.** Per-chunk latency on the real corpus
+ranges from ~9s to ~730s — a single hard chunk can drag a cumulative average by 10s or
+more. The completed 228-chunk qwen capture measured **p50 39.8s, p95 212.6s, p99 377.9s
+against a 62.4s mean**: the mean overstates the typical chunk by more than half, and
+sits between p50 and p95 where it describes nothing. Report p50 with p95/p99 alongside.
+
+While a run is in flight, judge it by its trailing window rather than its running mean —
+a rising cumulative average with a flat trailing window is outliers, not degradation.
 
 **Always run `02` before `03` or `04`.** It is the 30-second check that would have
 caught thinking mode before a 15-hour capture, and it fails loudly if reasoning
