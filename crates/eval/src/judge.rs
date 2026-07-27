@@ -127,9 +127,11 @@ Respond with ONLY this JSON (no preamble, no commentary):
 /// tries to carry all three axes at once.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PairwiseWinner {
+    #[serde(alias = "a")]
     A,
+    #[serde(alias = "b")]
     B,
-    #[serde(rename = "tie")]
+    #[serde(rename = "tie", alias = "Tie", alias = "TIE")]
     Tie,
 }
 
@@ -496,6 +498,23 @@ mod tests {
         let v: PairwiseVerdict =
             serde_json::from_str(r#"{"winner": "tie", "rationale": "equivalent"}"#).unwrap();
         assert_eq!(v.winner, PairwiseWinner::Tie);
+    }
+
+    #[test]
+    fn pairwise_verdict_accepts_case_variant_winners() {
+        // The prompt asks for "A" | "B" | "tie", but a judge model's reply casing isn't
+        // guaranteed — a mismatch here aborts the whole pairwise pass via `?`, so these
+        // aliases are cheap insurance against a plausible off-spec reply.
+        for (raw, expected) in [
+            ("a", PairwiseWinner::A),
+            ("b", PairwiseWinner::B),
+            ("Tie", PairwiseWinner::Tie),
+            ("TIE", PairwiseWinner::Tie),
+        ] {
+            let json = format!(r#"{{"winner": "{raw}", "rationale": ""}}"#);
+            let v: PairwiseVerdict = serde_json::from_str(&json).unwrap();
+            assert_eq!(v.winner, expected, "for winner value '{raw}'");
+        }
     }
 
     #[test]
