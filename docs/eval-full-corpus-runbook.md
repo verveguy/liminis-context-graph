@@ -215,3 +215,110 @@ with `qwen3.6-27b.jsonl` to verify the second cassette the same way. This replac
 that sketch was written to anticipate now exists directly, so no separate integration test file is
 needed here (`crates/eval/tests/harness_integration.rs` already covers the pipeline's correctness
 as an integration test, with a hand-built cassette).
+
+## Running the ontology mode matrix (#266)
+
+Everything above measures **freeform extraction only** — `ExtractOptions.ontology` was always
+`None`. `lcg-eval` also accepts `--ontology <PATH>`/`--ontology-mode <open|strict>` (#266), so the
+same corpus and backends can be re-run under `Open` and `Strict` and compared against the
+freeform baseline above. **No maintainer has executed this matrix yet** — this section documents
+the exact procedure, following #248's own precedent of shipping mechanism-plus-runbook rather
+than the paid run itself (see the spec's Background/User Story 2 at
+`specs/266-extraction-eval-measures-only/spec.md`).
+
+### Prerequisites
+
+Same as the combined run above (a reachable local OpenAI-compatible server,
+`ANTHROPIC_API_KEY` set unconditionally, run from the repo root) plus:
+
+4. **The FR-005 ontology fixture**, committed at
+   `crates/core/tests/fixtures/real_corpus_wal/ontology.yaml` alongside the corpus fixture — its
+   header documents how its entity/relation-type distribution was derived from this exact
+   corpus's freeform extraction output, so `Open`/`Strict` runs are never a degenerate comparison
+   against types that don't actually occur in the text (this issue's own Edge Case). The same
+   file drives both `Open` and `Strict`: `--ontology-mode` on the CLI always overrides the
+   file's own `mode: strict` declaration (FR-002), so there is no separate `ontology-open.yaml`.
+
+### The three commands
+
+`crates/eval/scripts/run_mode_matrix.sh` runs all three below in sequence (see the script's own
+header comment for its env-var overrides: `LOCAL_BACKEND_SPEC` is required, everything else has
+a default matching the commands here). Each mode records `baseline`'s hosted leg to its own
+cassette file — a cassette recorded under one mode's rendered system prompts never matches
+another mode's replay (see Edge Cases in the spec), so `anthropic-freeform-*.jsonl`,
+`anthropic-open-*.jsonl`, and `anthropic-strict-*.jsonl` are three genuinely distinct captures,
+not the same file reused:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+FIXTURE=crates/core/tests/fixtures/real_corpus_wal/ontology.yaml
+
+# 1. Freeform baseline — no --ontology flag, unchanged from every prior run.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --reference baseline \
+  --all \
+  --record-cassette baseline=anthropic-freeform-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_freeform.json
+
+# 2. Open — declared types preferred; the model may still invent others.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --reference baseline \
+  --all \
+  --ontology "$FIXTURE" --ontology-mode open \
+  --record-cassette baseline=anthropic-open-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_open.json
+
+# 3. Strict — only declared types are ever accepted.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --reference baseline \
+  --all \
+  --ontology "$FIXTURE" --ontology-mode strict \
+  --record-cassette baseline=anthropic-strict-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_strict.json
+```
+
+The three commands triple the cost of the single combined run described above — plan for three
+full-corpus passes' worth of extraction and judge spend, not one, before running this. The
+`--judge-cache` path is shared across all three invocations deliberately: the cache key already
+incorporates the rendered prompt content (which differs by mode), so freeform/`Open`/`Strict`
+judge verdicts for the same underlying comparison never collide in one cache file, and reusing
+it just means a fourth re-run of any single mode makes zero new judge calls, exactly as the
+combined run above does.
+
+### Reading the three reports
+
+Each report's top-level `ontology_mode` field (FR-003) is `"freeform"`, `"open"`, or `"strict"` —
+read that field first, don't infer the mode from the filename alone, since reports are meant to
+be archived and compared side by side. Per FR-004, `structured_output.{clean,recovered,malformed}`
+is reported identically to the freeform run's own figures — this is the metric most likely to
+improve once a closed vocabulary removes open-ended type naming from the model's task, per this
+issue's own hypothesis that a closed vocabulary should narrow the local/hosted structured-output
+gap (ADR-0041).
+
+Only the two ontology-constrained reports carry a `vocabulary_compliance` field per candidate
+(FR-007) — `null`/absent on the freeform report, since the metric isn't applicable outside
+`Strict`. It counts, separately from JSON-syntax validity, how often a candidate emitted an
+entity or relation type outside the fixture's declared vocabulary — a model can produce
+perfectly valid JSON that simply ignores the closed type list, and that failure mode would
+otherwise be invisible if folded into `structured_output`.
+
+Diff the three reports' per-backend `judged_entity_f1`/`judged_edge_f1`/`strict_entity_f1`/
+`strict_edge_f1` figures directly — any reordering of the model ranking between modes is now
+visible without re-running anything (SC-002). Per FR-005 fixture's own derivation notes: entity
+typing already converged under freeform extraction on this corpus (a closed vocabulary should
+move entity F1 relatively little), while relation naming did not converge at all (heavy synonym
+clustering across hundreds of distinct freeform relation names) — so edge F1 is the figure most
+likely to move materially between freeform and `Strict`, and is worth writing up explicitly
+whether or not it actually does.

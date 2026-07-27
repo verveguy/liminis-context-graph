@@ -25,13 +25,30 @@ pipeline. Until then, this is the best evidence available, and it's why
 [ADR-0041](adr/0041-local-openai-compatible-extraction-adapter.md) does not auto-select the bundled
 sidecar's model for extraction.
 
+**Every figure below and in the next section describes freeform extraction only** — the model
+inventing its own entity/relation type vocabulary. Issue
+[#266](https://github.com/verveguy/liminis-context-graph/issues/266) added `--ontology`/
+`--ontology-mode` to `lcg-eval` plus a corpus-derived fixture so the same corpus and backends can
+also be measured under `Open`/`Strict`, but **no maintainer has run that mode matrix yet** — see
+the runbook's ["Running the ontology mode matrix"](eval-full-corpus-runbook.md#running-the-ontology-mode-matrix-266)
+section for the procedure. Do not read the rankings below as applying to an ontology-constrained
+workspace until that matrix has actually been run; #266's own fixture derivation notes observed
+that freeform entity typing already converges to a small set on this corpus (so a closed
+vocabulary may move entity F1 relatively little) while freeform relation naming does not converge
+at all (heavy synonym clustering), making edge F1 the figure most likely to move once a closed
+vocabulary is applied — but that is a hypothesis to verify by running the matrix, not a measured
+result.
+
 ## Measured results (this engine) — Status: Pending, not yet measured
 
 This section is reserved for #248's measured figures once a maintainer runs the
 [full-corpus runbook](eval-full-corpus-runbook.md) and supplies its report and cassettes. **No
 run has been executed yet as of this section being added** — the numbers below are deliberately
 absent rather than estimated or copied from the historical section above, per the spec's Edge
-Cases ("must say so explicitly rather than fabricate placeholder numbers").
+Cases ("must say so explicitly rather than fabricate placeholder numbers"). Whatever #248
+eventually measures here will itself be a **freeform-only** result, per the same caveat above —
+it does not by itself say anything about `Open`/`Strict` extraction, which needs the separate
+mode-matrix run #266 documents.
 
 Once a run completes, this section is replaced (not the historical section below, which stays as
 labeled prior art) with:
@@ -45,6 +62,27 @@ labeled prior art) with:
 - A direct statement of whether this engine's local-vs-hosted gap is in line with, narrower
   than, or wider than the inherited ~7 percentage-point gap — and, per FR-007, whether that
   changes the README's "quality-verified" framing.
+
+## Ontology-constrained results (`Open`/`Strict`) — Status: Pending, not yet measured
+
+This section is reserved for the freeform/`Open`/`Strict` mode-matrix figures (#266) once a
+maintainer runs `crates/eval/scripts/run_mode_matrix.sh` (or the equivalent hand-typed commands
+in the runbook) and supplies the three resulting reports. **No mode-matrix run has been executed
+yet** — same discipline as the section above: no placeholder or estimated numbers here until a
+real run produces them.
+
+Once a run completes, this section is replaced with:
+
+- Per-backend judged/strict F1 for entities and edges under `Open` and `Strict`, compared
+  directly against the freeform figures in the section above — specifically, whether the
+  freeform model ranking holds or reorders under a closed vocabulary (this issue's central
+  question — see the spec's User Story 2).
+- The `Strict`-mode vocabulary-compliance rate (FR-007) per backend — how often each candidate
+  emitted a type outside the ontology's declared vocabulary, distinct from JSON-syntax
+  structured-output reliability.
+- A direct statement of whether entity F1 moved materially less than edge F1 under `Strict`, per
+  the hypothesis in "Read this first" above, and whether that changes any local-model
+  recommendation stated elsewhere in this document.
 
 ## Methodology: replay against frozen inputs, not a fresh pipeline run per candidate
 

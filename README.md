@@ -404,7 +404,11 @@ before it will use a local endpoint at all.
 > entity/relationship extraction (see
 > [docs/extraction-quality-evaluation.md](docs/extraction-quality-evaluation.md) for the full
 > evaluation, methodology, and model rankings, and #228 for the in-repo eval harness that will keep
-> this guidance current). For local extraction that meets a reasonable quality bar, run a model
+> this guidance current). **All figures in that document, historical and #248's alike, describe
+> freeform extraction only** — the same corpus/backends run under an ontology (`Open`/`Strict`,
+> #266) are not yet measured; see the "Running the ontology mode matrix" section of
+> [docs/eval-full-corpus-runbook.md](docs/eval-full-corpus-runbook.md) if you want to produce
+> those figures yourself. For local extraction that meets a reasonable quality bar, run a model
 > such as `qwen3.6-27b` behind an OpenAI-compatible server
 > (e.g. `mlx_lm.server`) and point `--extractor-http`/`--extractor-uds` at it, or set
 > `ANTHROPIC_API_KEY` to use the hosted baseline. The bundled sidecar's `/v1/chat/completions`
@@ -540,6 +544,38 @@ a recorded cassette — the mechanism #248's full-corpus comparison run relies o
 cassette recorded this way on a later run without paying for the extraction calls again, use a
 `cassette:path=<PATH>` backend spec instead — see `docs/eval-full-corpus-runbook.md`'s
 "Resuming a partial run" section for a worked example.
+
+### Running under an ontology (`Open`/`Strict`)
+
+By default every run above is **freeform**: the model invents its own entity/relation type
+vocabulary, and `ExtractOptions.ontology` is `None`. Pass `--ontology <PATH>` to load an
+`Ontology` from a bare YAML file (not necessarily inside a `.lcg`-rooted workspace — this is a
+standalone eval fixture) and thread it through every extraction call instead, exercising the
+same `Open`/`Strict` prompt-injection regimes production ingestion uses:
+
+- `--ontology <PATH>` — load the ontology. Omit for the unchanged freeform behavior.
+- `--ontology-mode <open|strict>` — which regime to apply; defaults to `strict` when
+  `--ontology` is given without it, and overrides any `mode:` the file itself declares. Rejected
+  as a usage error if given without `--ontology` (there's nothing to apply the mode to).
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \
+  --reference baseline \
+  --ontology crates/core/tests/fixtures/real_corpus_wal/ontology.yaml \
+  --ontology-mode strict
+```
+
+The report's top-level `ontology_mode` field records which regime produced it
+(`"freeform"`/`"open"`/`"strict"`), and — `Strict` only — each candidate also carries a
+`vocabulary_compliance` metric: how often that backend emitted an entity or relation type
+outside the ontology's declared vocabulary, tracked separately from
+`structured_output.{clean,recovered,malformed}` so a model producing syntactically valid JSON
+that simply ignores the closed type list isn't scored as if its structured-output reliability
+were perfect. See `docs/eval-full-corpus-runbook.md`'s "Running the ontology mode matrix"
+section for the full freeform/`Open`/`Strict` three-command comparison procedure and
+`crates/eval/scripts/run_mode_matrix.sh` for a runnable version of it.
 
 ### Cost implications
 
