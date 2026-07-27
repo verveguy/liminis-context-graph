@@ -71,6 +71,13 @@ impl VocabularyComplianceCounts {
     }
 
     fn record_entities(&mut self, entities: &[lcg_core::ExtractedEntity], vocab: &Ontology) {
+        // Mirror episode.rs's Strict-mode gate: an ontology declaring only relation_types
+        // (no entity_types) does not filter entities in production at all, so the harness
+        // must not tally every entity as a violation here — that would report a 100%
+        // violation rate for an axis production never applies Strict-mode to.
+        if !vocab.has_entity_types() {
+            return;
+        }
         let names = vocab.entity_type_names();
         for e in entities {
             self.entities_checked += 1;
@@ -81,12 +88,23 @@ impl VocabularyComplianceCounts {
     }
 
     fn record_edges(&mut self, edges: &[lcg_core::ExtractedEdge], vocab: &Ontology) {
+        // Same per-axis gate as record_entities, mirroring episode.rs's
+        // `has_relation_types()` check.
+        if !vocab.has_relation_types() {
+            return;
+        }
         let names = vocab.relation_type_names();
         for e in edges {
             self.edges_checked += 1;
             // A missing relation_type is itself a vocabulary-compliance violation under
             // Strict mode — production (episode.rs) drops such edges outright, treating
-            // "no type" the same as "not in the declared set".
+            // "no type" the same as "not in the declared set". Note this harness metric
+            // normalizes the candidate's relation_type before the vocabulary check
+            // (normalize_relation_type), which is deliberately *stricter fidelity* than
+            // episode.rs's own raw-string comparison at that call site — a documented,
+            // intentional departure (see the Plan stage's Key Decisions for #266), not an
+            // oversight: it keeps this measurement from confusing a casing/formatting
+            // difference with a genuine vocabulary violation.
             let compliant = e
                 .relation_type
                 .as_deref()
@@ -467,5 +485,72 @@ mod tests {
         let vocab = result.vocabulary_compliance.unwrap();
         assert_eq!(vocab.edges_checked, 1);
         assert_eq!(vocab.edges_out_of_vocab, 1);
+    }
+
+    fn ontology_fixture_relation_types_only(dir: &tempfile::TempDir) -> Ontology {
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "relation_types:\n  - name: AUTHORED\n").unwrap();
+        load_ontology_from_path(&path, OntologyMode::Strict).expect("fixture ontology should load")
+    }
+
+    fn ontology_fixture_entity_types_only(dir: &tempfile::TempDir) -> Ontology {
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "entity_types:\n  - name: Person\n").unwrap();
+        load_ontology_from_path(&path, OntologyMode::Strict).expect("fixture ontology should load")
+    }
+
+    // Mirrors episode.rs's Strict-mode gate: an ontology declaring only relation_types must
+    // not filter (or tally violations for) entities at all — production's `has_entity_types()`
+    // check skips the whole entity-filtering block in that case, so every entity is kept
+    // untouched rather than dropped/counted as a 100% violation.
+    #[tokio::test]
+    async fn ontology_with_only_relation_types_does_not_tally_entities() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ontology = ontology_fixture_relation_types_only(&dir);
+
+        let extractor: Arc<dyn Extractor> =
+            Arc::new(ConfigurableExtractor::new(vec![mixed_vocab_extraction()]));
+        let sink = Arc::new(CountingSink::new());
+        let chunks = vec![chunk("A", "prose a")];
+
+        let result = run_backend("mock", extractor, sink, &chunks, Some(&ontology)).await;
+
+        let vocab = result.vocabulary_compliance.unwrap();
+        assert_eq!(
+            vocab.entities_checked, 0,
+            "no entity_types declared: entities must not be tallied at all"
+        );
+        assert_eq!(vocab.entities_out_of_vocab, 0);
+        assert_eq!(
+            vocab.edges_checked, 2,
+            "relation_types is declared: edges are tallied"
+        );
+        assert_eq!(vocab.edges_out_of_vocab, 1, "WORKS_AT is not in vocab");
+    }
+
+    // Same gate, opposite axis: an ontology declaring only entity_types must not tally edges.
+    #[tokio::test]
+    async fn ontology_with_only_entity_types_does_not_tally_edges() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let ontology = ontology_fixture_entity_types_only(&dir);
+
+        let extractor: Arc<dyn Extractor> =
+            Arc::new(ConfigurableExtractor::new(vec![mixed_vocab_extraction()]));
+        let sink = Arc::new(CountingSink::new());
+        let chunks = vec![chunk("A", "prose a")];
+
+        let result = run_backend("mock", extractor, sink, &chunks, Some(&ontology)).await;
+
+        let vocab = result.vocabulary_compliance.unwrap();
+        assert_eq!(
+            vocab.entities_checked, 2,
+            "entity_types is declared: entities are tallied"
+        );
+        assert_eq!(vocab.entities_out_of_vocab, 1, "Company is not in vocab");
+        assert_eq!(
+            vocab.edges_checked, 0,
+            "no relation_types declared: edges must not be tallied at all"
+        );
+        assert_eq!(vocab.edges_out_of_vocab, 0);
     }
 }
