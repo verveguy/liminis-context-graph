@@ -407,13 +407,26 @@ fn to_report_entry(r: lcg_eval::pairwise::PairwiseAxisResult) -> PairwiseReportE
 /// SC-001/SC-002: loud stderr warnings — never block the run, the report artifact itself
 /// stays pure data — when a pair/axis's win rate falls outside the calibration band or its
 /// order-inconsistency rate exceeds the untrusted threshold.
+///
+/// The calibration-band check (SC-001) fires for every pair, not just the designated
+/// calibration control: which pair *is* the calibration control (reference vs. its own
+/// independent sample) is operator knowledge, not something derivable from `Args` in
+/// general — the most common pattern (two independently-recorded `cassette:path=` files of
+/// the same model, e.g. the #248 runbook's `baseline`/`candidate`) has no shared spec string
+/// to detect it by, so a same-spec-only heuristic would silently fail to warn on exactly the
+/// pair SC-001 cares about. The wording below therefore doesn't assert bias outright for a
+/// non-calibration pair — a win rate outside 45-55% between two genuinely different backends
+/// is the expected, desired signal (the whole point of pairwise judging), not a defect.
 fn warn_on_calibration_and_inconsistency(entries: &[PairwiseReportEntry]) {
     for e in entries {
         if !(CALIBRATION_BAND_LOW..=CALIBRATION_BAND_HIGH).contains(&e.win_rate) {
             eprintln!(
-                "lcg-eval: WARNING judge-bias — {} vs {} [{}]: win rate {:.1}% falls outside \
-                 the {:.0}-{:.0}% calibration band (SC-001); this may indicate judge position \
-                 bias rather than a genuine quality difference",
+                "lcg-eval: NOTE — {} vs {} [{}]: win rate {:.1}% falls outside the {:.0}-{:.0}% \
+                 calibration band (SC-001). If this is your reference-vs-its-own-independent-\
+                 sample calibration pair, this deviation likely indicates judge position bias — \
+                 investigate before trusting any pairwise result from this run. If this is a \
+                 genuine candidate-vs-candidate comparison, a win rate outside the band is the \
+                 expected, desired signal, not evidence of bias.",
                 e.backend_a,
                 e.backend_b,
                 e.axis,

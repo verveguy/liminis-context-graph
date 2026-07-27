@@ -619,15 +619,20 @@ cargo run --release -p lcg-eval -- \
 - **Judge calibration control**: configure the same model as two independently-recorded
   cassettes under different backend names (the pairwise analogue of the reference-mode
   noise-floor pattern above) and judge that pair too. Two independent samples of the same
-  model should split near 50/50 on every axis; a run emits a loud stderr warning naming the
-  observed rate and the axis whenever any pair/axis's win rate falls outside **45–55%**
-  (`pairwise::CALIBRATION_BAND_LOW`/`_HIGH`) — this is the only signal that distinguishes "the
-  candidate is genuinely different" from "the judge has a position bias," so treat this pair
-  as mandatory, not optional. A similar warning fires whenever a pair/axis's
-  order-inconsistency rate exceeds **20%**
+  model should split near 50/50 on every axis. A run prints a stderr note for **every** pair
+  whose win rate falls outside **45–55%** (`pairwise::CALIBRATION_BAND_LOW`/`_HIGH`) — which
+  pair is *the* calibration control is operator knowledge the harness can't derive from
+  `--backend` specs alone (two independently-recorded `cassette:path=` files of the same
+  model, the pattern above, share no spec string to detect it by), so the note doesn't assert
+  bias outright: if the flagged pair is your calibration control, the deviation likely means
+  judge position bias and every pairwise result in the run should be treated with suspicion;
+  if it's a genuine candidate-vs-candidate pair, landing outside the band is the expected,
+  desired signal (the whole point of pairwise judging), not evidence of bias. A separate
+  warning fires for every pair whenever its order-inconsistency rate exceeds **20%**
   (`pairwise::ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`) — above that, the judge is flipping
-  its answer often enough that the win rate isn't distinguishable from noise. Neither warning
-  blocks the run; both are stderr-only, so the report artifact itself stays pure data. See
+  its answer often enough that the win rate isn't distinguishable from noise; this one is not
+  conditional on which pair is the calibration control. Neither warning blocks the run; both
+  are stderr-only, so the report artifact itself stays pure data. See
   [ADR-0050](docs/adr/0050-blind-pairwise-judging.md) for the rationale behind both numbers.
 - A degenerate pair — two backends whose specs resolve to the *identical* `cassette:path=`
   — is rejected at CLI parse time, before any judge call, naming the offending backend names

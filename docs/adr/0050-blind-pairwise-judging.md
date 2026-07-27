@@ -89,9 +89,9 @@ when there are zero decisive (non-tied) comparisons, rather than `0.0`/`NaN`.
 Neither existed anywhere in the repo before this issue.
 
 - **`CALIBRATION_BAND = 0.45..=0.55`** (SC-001's literal text): two independent samples of the
-  same model, judged pairwise, should split near 50/50; a win rate outside this band is
-  reported as a loud stderr warning naming the observed rate and axis, since it more likely
-  reflects judge position bias than a genuine quality difference between the two samples.
+  same model, judged pairwise, should split near 50/50; a win rate outside this band, *for the
+  calibration pair specifically*, more likely reflects judge position bias than a genuine
+  quality difference between the two samples.
 - **`ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD = 0.20`**: above a 1-in-5 flip rate when the slot
   order reverses, the judge's position bias is comparable in magnitude to whatever quality
   signal the win rate carries, so the aggregate result is not distinguishable from noise. Also a
@@ -101,6 +101,20 @@ Both live as public consts in `crates/eval/src/pairwise.rs`. Neither warning blo
 consistent with the existing missing-`ANTHROPIC_API_KEY` warning precedent — so the report
 artifact itself stays pure data; a caller that wants to enforce the thresholds does so by
 reading the warnings or the raw `order_inconsistency_rate`/`win_rate` fields itself.
+
+**The calibration-band note fires for every pair, not just the calibration control, and is
+worded conditionally rather than asserting bias.** `main.rs::warn_on_calibration_and_inconsistency`
+cannot determine *which* configured pair is the calibration control in general: the most
+common pattern — two independently-recorded `cassette:path=` files of the same model (e.g. the
+#248 runbook's `baseline`/`candidate`) — shares no spec string between the two backends, so a
+same-spec-equality heuristic (which *would* catch the same-live-spec-twice noise-floor pattern)
+silently fails to fire on exactly the pair SC-001 cares about, which would leave the primary
+documented scenario without its required warning. Rather than ship a heuristic that is wrong
+for the scenario the ADR itself walks through, the note fires unconditionally and states both
+readings: "if this is your calibration pair, suspect judge bias; if it's a genuine
+candidate-vs-candidate pair, a win rate outside the band is the expected, desired signal." The
+order-inconsistency warning has no such ambiguity — position bias is position bias regardless
+of which pair exhibits it — so it remains an unconditional, unqualified warning for every pair.
 
 ### 7. FR-011 degenerate-pair rejection scoped narrowly to `cassette:path=` equality
 
