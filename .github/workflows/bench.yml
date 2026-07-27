@@ -16,8 +16,8 @@ jobs:
   bench:
     name: bench (ubuntu-latest)
     runs-on: ubuntu-latest
-    env:
-      LBUG_BUILD_FROM_SOURCE: "1"
+    # LBUG_BUILD_FROM_SOURCE removed: lbug 0.17.0+ prebuilt is a self-contained fat bundle.
+    # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
     steps:
       - uses: actions/checkout@v4
 
