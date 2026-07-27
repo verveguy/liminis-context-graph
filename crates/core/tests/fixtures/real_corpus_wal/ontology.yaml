@@ -1,0 +1,181 @@
+# Ontology fixture for the #217 real-corpus benchmark (Wikipedia spaceflight/Apollo).
+#
+# DERIVED FROM MEASUREMENT, NOT INVENTED. Every type below was produced by the
+# extraction pipeline running *freeform* over this exact corpus, and the counts are
+# from the 226-record `claude-haiku-4-5` cassette captured for #248. An ontology whose
+# types don't occur in the corpus produces a degenerate comparison (see #266), so this
+# one is built from what the corpus actually yields.
+#
+# Regenerate with:
+#   python3 -c "
+#   import json,collections
+#   e=collections.Counter(); r=collections.Counter()
+#   for l in open('anthropic-claude-haiku-4-5-20251001.jsonl'):
+#       resp=(json.loads(l).get('response') or {})
+#       for x in resp.get('entities') or []: e[x.get('entity_type')]+=1
+#       for x in resp.get('edges') or []: r[x.get('relation_type')]+=1
+#   print(e.most_common()); print(r.most_common(40))"
+#
+# Freeform yield over the corpus:
+#   entity types    21 distinct over 2515 entities -- top 6 cover 91.2%, top 12 cover 98.9%
+#   relation types 752 distinct over 2289 edges   -- top 30 cover only 39.2%
+#
+# That asymmetry is the point. Entity typing already converges freeform (qwen and haiku
+# independently agreed on the same head), so constraining it should barely move entity
+# F1. Relation naming does not converge at all -- roughly one new name every three edges,
+# with heavy synonym clustering (LAUNCHED_BY / LAUNCHED_FROM / LAUNCHED / LAUNCHED_WITH /
+# LAUNCHED_ON / LAUNCHED_SATELLITE = 163 edges across 6 spellings). Collapsing those is
+# what `aliases` and `keywords` are for, and it is where an ontology should show its value.
+
+mode: strict
+
+entity_types:
+  - name: Product
+    description: A manufactured artifact or vehicle - rockets, spacecraft, launch vehicles, engines, instruments.
+  - name: Organization
+    description: An agency, company, institution, or other formal body - NASA, Blue Origin, universities, contractors.
+  - name: Person
+    description: An individual human - astronauts, engineers, executives, officials.
+  - name: Location
+    description: A geographic or celestial place - launch sites, cities, countries, the Moon, orbits.
+  - name: Project
+    description: A named programme, mission, or campaign - Apollo 11, Artemis, a specific flight.
+  - name: Event
+    description: A bounded occurrence in time - a launch, a landing, an explosion, an anniversary.
+  - name: System
+    description: A named subsystem or assembly within a larger vehicle or facility.
+  - name: Concept
+    description: An abstract idea, method, or principle referenced by name.
+  - name: Technology
+    description: A named technique or class of engineering capability, distinct from a specific product.
+  - name: Award
+    description: A prize, medal, decoration, or formal honour.
+  - name: Document
+    description: A report, specification, paper, or other named written artifact.
+  - name: Facility
+    description: A building, complex, or installation - launch pads, control centres, test stands.
+
+relation_types:
+  - name: PART_OF
+    description: Structural or organizational containment.
+    keywords: [part_of, component, contains, consists, split_into]
+    aliases: [PART_OF_MISSION, PART_OF_NASA_PROGRAM, COMPONENT_OF, COMPONENT_LAUNCHED, COMPONENT_ADDED]
+
+  - name: LAUNCHED
+    description: A launch relationship between a vehicle, operator, site, or payload.
+    keywords: [launch, sent_to_space]
+    aliases: [LAUNCHED_BY, LAUNCHED_FROM, LAUNCHED_WITH, LAUNCHED_ON, LAUNCHED_SATELLITE]
+
+  - name: FLEW_ON
+    description: A person or payload flew aboard a specific vehicle or mission.
+    keywords: [flew, flight_of, aboard]
+    aliases: [FLEW, FLEW_IN, FLEW_BY, FLEW_ABOARD, FLEW_MISSION]
+
+  - name: CREWED
+    description: A person served as crew on a mission or spacecraft.
+    keywords: [crew]
+    aliases: [CREWED_BY, CREWED_WITH, CREWED_MISSION, CREWED_MISSION_OF, CREWED_SPACECRAFT,
+              CREW_MEMBER_OF, CREW_MEMBER, CREW_MEMBER_ON, CREW_MEMBER_WITH]
+
+  - name: COMMANDED
+    description: A person commanded or piloted a mission or vehicle.
+    keywords: [pilot, command]
+    aliases: [PILOTED, PILOTED_BY, PILOTED_MISSION, PILOTED_AND_COMMANDED]
+
+  - name: WORKED_FOR
+    description: Employment or professional affiliation with an organization.
+    keywords: [work, employ, hired]
+    aliases: [WORKED_AT, WORKED_IN, WORKED_ON, WORKED_WITH]
+
+  - name: MEMBER_OF
+    description: Formal membership of a group, corps, or body.
+    keywords: [member]
+    aliases: [MEMBER]
+
+  - name: SERVED_IN
+    description: Service in a military branch, role, or official position.
+    keywords: [serv]
+    aliases: [SERVED_ON, SERVED_UNDER, SERVED_AS]
+
+  - name: BORN_IN
+    description: A person was born in a place.
+    keywords: [born, raised_in, native_of]
+
+  - name: DIED_IN
+    description: A person died in a place or event.
+    keywords: [died, death, killed, perished]
+    aliases: [DIED_AT, DIED_ON, DIED_WITH, DIED_DURING_TEST_OF, DIED_IN_MISSION]
+
+  - name: MARRIED_TO
+    description: Marriage between two people.
+    keywords: [married, spouse]
+
+  - name: ATTENDED
+    description: A person attended or graduated from an institution.
+    keywords: [attend, graduat, studi, degree, educat]
+    aliases: [GRADUATED_FROM, STUDIED_AT]
+
+  - name: LOCATED_IN
+    description: Physical or geographic containment.
+    keywords: [locat, situated, based_in, headquarter]
+    aliases: [LOCATED_AT, LOCATED_ON, LOCATED_NEAR]
+
+  - name: OPERATED_BY
+    description: An organization operates or maintains a vehicle, facility, or system.
+    keywords: [operat]
+    aliases: [OPERATED, OPERATED_ON, OPERATED_UNTIL]
+
+  - name: BUILT_BY
+    description: An organization manufactured or constructed an artifact.
+    keywords: [built, build, manufactur, develop, design, produc]
+    aliases: [BUILT, MANUFACTURED_BY, DEVELOPED_BY]
+
+  - name: USES
+    description: One artifact or system makes use of another.
+    keywords: [use, equipped, powered_by]
+    aliases: [USED, USED_IN, USED_BY, USED_ON, USED_FOR, USES_COMPONENT, USES_ENGINE]
+
+  - name: CARRIED
+    description: A vehicle carried a payload, crew, or cargo.
+    keywords: [carri, deliver, transport]
+    aliases: [CARRIES, CARRIED_PAYLOAD]
+
+  - name: LANDED_ON
+    description: A vehicle or crew landed on a body or at a site.
+    keywords: [land]
+    aliases: [LANDED_AT, LANDED_IN, LANDED_ON_MOON_DURING]
+
+  - name: ARRIVED_AT
+    description: A vehicle or person arrived at a destination.
+    keywords: [arriv, dock, reach]
+    aliases: [DOCKED_WITH, DOCKED_AT]
+
+  - name: PARTICIPATED_IN
+    description: A person or organization took part in a mission, programme, or event.
+    keywords: [participat, involved_in, took_part]
+    aliases: [PARTICIPATED_IN_MISSION]
+
+  - name: PLANNED_FOR
+    description: A future or intended mission, delivery, or capability.
+    keywords: [plann, schedul, intend, propos]
+    aliases: [PLANNED_BY, PLANNED_TO_ORBIT, PLANNED_LANDING_AT, SCHEDULED_FOR]
+
+  - name: AWARDED
+    description: A person or organization received an award or honour.
+    keywords: [award, receiv, honor, honour, medal]
+    aliases: [AWARDED_TO, RECEIVED_AWARD, RECEIVED]
+
+  - name: SUCCEEDED_BY
+    description: Temporal or programmatic succession between missions, vehicles, or roles.
+    keywords: [succeed, replac, follow, preced, superseded]
+    aliases: [REPLACED_BY, FOLLOWED_BY, PRECEDED_BY]
+
+  - name: CAUSED
+    description: One event or condition caused another outcome, delay, or failure.
+    keywords: [caus, delay, destroy, fail, explod]
+    aliases: [CAUSED_DELAY_FOR, DESTROYED, DESTROYED_IN_TEST, DELAYED]
+
+  - name: TESTED
+    description: A test, trial, or qualification activity performed on an artifact or system.
+    keywords: [test, trial, qualif]
+    aliases: [TESTED_BY, TESTED_ON, UNDERWENT_TEST, TEST_FLIGHT_OF, IS_TEST_FLIGHT_OF]

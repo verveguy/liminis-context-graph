@@ -252,9 +252,58 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         }
     };
 
-    let mode = match file.mode {
-        Some(OntologyModeRaw::Strict) => OntologyMode::Strict,
-        _ => OntologyMode::Open,
+    let ontology = build_ontology(file, None)?;
+    eprintln!(
+        "liminis-context-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={} from {:?}",
+        ontology.entity_types.len(),
+        ontology.relation_types.len(),
+        ontology.mode,
+        path
+    );
+    Some(ontology)
+}
+
+/// Loads and parses an ontology from a bare file path, independent of any workspace root.
+///
+/// Unlike [`load_ontology`], this is intended for tooling (e.g. `lcg-eval`) that needs to load
+/// a standalone ontology fixture and must be told loudly, via `Err`, when the file is missing,
+/// unreadable, malformed, or declares no entity types and no relation types — it never falls
+/// back to "no ontology" silently.
+///
+/// `mode` is authoritative and always overrides any `mode:` key declared inside the file, so a
+/// single fixture file can drive `Open` and `Strict` runs without being rewritten between them.
+pub fn load_ontology_from_path(path: &Path, mode: OntologyMode) -> Result<Ontology, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read ontology file {:?}: {}", path, e))?;
+
+    if text.trim().is_empty() {
+        return Err(format!("ontology file {:?} is empty", path));
+    }
+
+    let file: OntologyFile = serde_yaml::from_str(&text)
+        .map_err(|e| format!("YAML parse error in ontology file {:?}: {}", path, e))?;
+
+    build_ontology(file, Some(mode)).ok_or_else(|| {
+        format!(
+            "ontology file {:?} declares no entity types and no relation types",
+            path
+        )
+    })
+}
+
+/// Builds an [`Ontology`] from a parsed [`OntologyFile`]: resolves mode, normalizes and
+/// validates entity/relation type names, cleans up parent references, and computes the
+/// ancestor map. Returns `None` if the resulting ontology has no entity types and no relation
+/// types (an empty ontology is treated as "no ontology" by both loading entry points).
+///
+/// `mode_override`, when given, always wins over the file's own declared `mode:` key.
+fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Option<Ontology> {
+    let mode = match mode_override {
+        Some(m) => m,
+        None => match file.mode {
+            Some(OntologyModeRaw::Strict) => OntologyMode::Strict,
+            _ => OntologyMode::Open,
+        },
     };
 
     let mut entity_types: Vec<EntityTypeDef> = file
@@ -338,14 +387,6 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
     if entity_types.is_empty() && relation_types.is_empty() {
         return None;
     }
-
-    eprintln!(
-        "liminis-context-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={} from {:?}",
-        entity_types.len(),
-        relation_types.len(),
-        mode,
-        path
-    );
 
     Some(Ontology {
         mode,
@@ -702,6 +743,88 @@ relation_types:
         .unwrap();
         let ontology = load_ontology(Some(dir.path())).expect("should load from .graphiti");
         assert_eq!(ontology.entity_types.len(), 1);
+    }
+
+    // ── load_ontology_from_path ───────────────────────────────────────────────
+
+    #[test]
+    fn load_ontology_from_path_happy_path() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(
+            &path,
+            "entity_types:\n  - name: Person\nrelation_types:\n  - name: authored\n",
+        )
+        .unwrap();
+        let ontology =
+            load_ontology_from_path(&path, OntologyMode::Open).expect("should load from bare path");
+        assert_eq!(ontology.mode, OntologyMode::Open);
+        assert_eq!(ontology.entity_types.len(), 1);
+        assert_eq!(ontology.relation_types.len(), 1);
+    }
+
+    #[test]
+    fn load_ontology_from_path_missing_file_is_err() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("does-not-exist.yaml");
+        let result = load_ontology_from_path(&path, OntologyMode::Strict);
+        assert!(result.is_err(), "missing file must be a loud error");
+    }
+
+    #[test]
+    fn load_ontology_from_path_malformed_yaml_is_err() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "not: valid: yaml: [{{\n").unwrap();
+        let result = load_ontology_from_path(&path, OntologyMode::Strict);
+        assert!(result.is_err(), "malformed YAML must be a loud error");
+    }
+
+    #[test]
+    fn load_ontology_from_path_empty_types_is_err() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "mode: open\nentity_types: []\nrelation_types: []\n").unwrap();
+        let result = load_ontology_from_path(&path, OntologyMode::Strict);
+        assert!(
+            result.is_err(),
+            "an ontology with no entity or relation types must be a loud error"
+        );
+    }
+
+    #[test]
+    fn load_ontology_from_path_mode_overrides_file_declared_open() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "mode: open\nentity_types:\n  - name: Person\n").unwrap();
+        let ontology = load_ontology_from_path(&path, OntologyMode::Strict).expect("should load");
+        assert_eq!(
+            ontology.mode,
+            OntologyMode::Strict,
+            "CLI-supplied mode must override the file's declared mode"
+        );
+    }
+
+    #[test]
+    fn load_ontology_from_path_mode_overrides_file_declared_strict() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "mode: strict\nentity_types:\n  - name: Person\n").unwrap();
+        let ontology = load_ontology_from_path(&path, OntologyMode::Open).expect("should load");
+        assert_eq!(
+            ontology.mode,
+            OntologyMode::Open,
+            "CLI-supplied mode must override the file's declared mode"
+        );
+    }
+
+    #[test]
+    fn load_ontology_from_path_mode_applies_even_without_file_declared_mode() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(&path, "entity_types:\n  - name: Person\n").unwrap();
+        let ontology = load_ontology_from_path(&path, OntologyMode::Strict).expect("should load");
+        assert_eq!(ontology.mode, OntologyMode::Strict);
     }
 
     // ── content_hash ─────────────────────────────────────────────────────────
