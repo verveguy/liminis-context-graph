@@ -42,7 +42,7 @@ pub use extractor::{
 };
 pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;
-pub use ontology::Ontology;
+pub use ontology::{Ontology, OntologyMode};
 pub use rebuild_job::{JobStatus, RebuildJob};
 pub use replay::{FailureSample, ReplayOptions, ReplayProgress, ReplayStats, WalReplayer};
 pub use schema::init as init_schema;
