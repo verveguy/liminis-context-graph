@@ -377,6 +377,13 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     // working under pairwise mode; that pair is User Story 2's mandatory calibration
     // control, not a case to reject.
     if judge_mode != JudgeMode::Reference {
+        if backends.len() < 2 {
+            return Err(
+                "--judge-mode pairwise/both requires at least two --backend entries; there is \
+                 no pair to compare"
+                    .to_string(),
+            );
+        }
         for i in 0..backends.len() {
             for j in (i + 1)..backends.len() {
                 if let (Some(path_i), Some(path_j)) = (
@@ -752,6 +759,8 @@ mod tests {
             match parse_args(&args(&[
                 "--backend",
                 "baseline=anthropic",
+                "--backend",
+                "candidate=anthropic",
                 "--judge-mode",
                 flag_value,
             ]))
@@ -792,6 +801,34 @@ mod tests {
         assert!(err.contains('a'));
         assert!(err.contains('b'));
         assert!(err.contains("/tmp/shared.jsonl"));
+    }
+
+    #[test]
+    fn pairwise_mode_rejects_a_single_backend() {
+        // A lone --backend has no pair to compare — score_all_pairs would silently
+        // produce zero results while reference-mode judging is also suppressed, so this
+        // must fail fast at CLI validation time rather than run and report nothing.
+        let err = parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/only.jsonl",
+            "--judge-mode",
+            "pairwise",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--judge-mode"));
+        assert!(err.contains("at least two"));
+    }
+
+    #[test]
+    fn both_mode_rejects_a_single_backend() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/only.jsonl",
+            "--judge-mode",
+            "both",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("at least two"));
     }
 
     #[test]
