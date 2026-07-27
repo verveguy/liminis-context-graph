@@ -342,6 +342,22 @@ mod tests {
         }
     }
 
+    /// An `Ok` extraction with no entities/edges at all — a chunk where the backend
+    /// extracted nothing, not one that failed to run (see `err_chunk_result` for the
+    /// latter). Distinct scenarios: an empty extraction is still compared (FR-005's "both
+    /// being empty" is a defined tie case, per `PAIRWISE_JUDGE_PROMPT`), whereas an `Err`
+    /// chunk is skipped entirely (FR-010).
+    fn empty_chunk_result(title: &str) -> ChunkResult {
+        ChunkResult {
+            chunk_title: title.to_string(),
+            latency_ms: 0,
+            result: Ok(ExtractionResult {
+                entities: vec![],
+                edges: vec![],
+            }),
+        }
+    }
+
     fn run(name: &str, chunk_results: Vec<ChunkResult>) -> BackendRunResult {
         BackendRunResult {
             backend_name: name.to_string(),
@@ -542,6 +558,58 @@ mod tests {
             1,
             "the skipped chunk must never contribute a win/loss/tie"
         );
+    }
+
+    /// Edge Case (spec): "One or both extractions empty for a chunk → a defined verdict per
+    /// axis, not a panic." A judge that always ties (mirroring `PAIRWISE_JUDGE_PROMPT`'s
+    /// explicit "both being empty ... it is a tie" instruction) must be exercised over
+    /// empty-on-both-sides, empty-on-one-side, and non-empty chunks without panicking, with
+    /// every chunk counted as compared (not skipped — an empty extraction is a valid `Ok`
+    /// result, distinct from a cassette miss).
+    #[tokio::test]
+    async fn empty_extractions_produce_a_defined_verdict_not_a_panic() {
+        let chunks = vec![
+            chunk("both-empty"),
+            chunk("one-empty"),
+            chunk("neither-empty"),
+        ];
+        let run_x = run(
+            "x",
+            vec![
+                empty_chunk_result("both-empty"),
+                empty_chunk_result("one-empty"),
+                ok_chunk_result("neither-empty", "e1"),
+            ],
+        );
+        let run_y = run(
+            "y",
+            vec![
+                empty_chunk_result("both-empty"),
+                ok_chunk_result("one-empty", "e2"),
+                ok_chunk_result("neither-empty", "e2"),
+            ],
+        );
+        let (_dir, cache) = empty_cache();
+
+        for axis in PairwiseAxis::ALL {
+            let tally = score_pair_axis(
+                &AlwaysSlotAJudge,
+                &cache,
+                "judge-model",
+                axis,
+                &chunks,
+                &run_x,
+                &run_y,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                tally.chunks_compared, 3,
+                "empty extractions are still Ok results, not skips, for axis {axis:?}"
+            );
+            assert_eq!(tally.chunks_skipped, 0);
+        }
     }
 
     #[tokio::test]
