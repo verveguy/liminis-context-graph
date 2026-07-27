@@ -107,12 +107,9 @@ so re-running the exact same command after a partial failure makes **zero new ju
 any chunk/backend pair already scored — only genuinely new work is paid for again.
 
 If only one leg needs re-running (e.g. the local server dropped mid-run but the hosted leg
-completed), split into two invocations instead of re-running all three backends. Note this still
-re-pays for the `baseline` extraction calls in the second invocation, since `--reference` must
-name a `--backend` that's actually run in the same invocation as the leg being scored — there's
-no way to score the local leg on this run using cassette-replayed results from your prior
-attempt's cassette (`lcg-eval`'s `BackendKind` only builds live `anthropic`/`oai-http`/`oai-uds`
-extractors, not a replay-from-cassette kind).
+completed), split into two invocations instead of re-running all three backends. If the hosted
+`baseline` leg already completed and its cassette is on disk, replay it instead of re-running it
+live — see "Resuming a partial run" below. Otherwise, re-run it live as shown here.
 
 ```bash
 # Noise-floor leg alone (FR-001):
@@ -143,6 +140,48 @@ Both commands above append to the same `anthropic-claude-haiku-4-5-20251001.json
 (`CassetteWriter::open` always appends, matching the WAL's own convention) — running them one
 after another, or re-running one after a failure, does not corrupt or truncate it.
 
+## Resuming a partial run
+
+If the `baseline` leg already completed and captured a cassette (e.g. `#248`'s run, where
+`baseline` finished but the `qwen` leg died on an unrelated fault later in the same invocation),
+replay that cassette instead of re-paying for the `baseline` extraction calls. `lcg-eval` accepts
+a `cassette:path=<PATH>` backend spec (#263) that builds `lcg_core::cassette::ReplayingExtractor`
+— it makes zero outbound LLM requests, matching each call by content hash against the recorded
+cassette and failing loudly with `Error::CassetteMiss` on any chunk it can't match.
+
+```bash
+# Resume: replay baseline from its captured cassette, run only qwen live.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --reference baseline \
+  --all \
+  --record-cassette qwen=qwen3.6-27b.jsonl \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_resumed.json
+```
+
+**Replay applies to `baseline` only — never point `candidate` at a `cassette:` spec.**
+`baseline` and `candidate` are deliberately two *independent* live samples of the same spec; their
+disagreement is the noise-floor measurement itself (FR-001 above). Replaying the same cassette
+into both makes them byte-identical, so judged F1 becomes 1.000 by construction and the noise
+floor stops meaning anything. Only ever run `candidate` live.
+
+Do not add `--record-cassette` for a backend whose spec is `cassette:...` — `lcg-eval` rejects
+this combination at startup (recording a replay is meaningless: there's no live call to capture).
+
+**The #248 capture is 226 records against the 228-chunk fixture.** Two chunks will
+`Error::CassetteMiss` on every replay of that file, permanently. This is not corpus drift or a
+replay bug: `RecordingExtractor::extract` (`crates/core/src/cassette.rs`) propagates any `Err`
+from the wrapped extractor via `?` *before* it appends a cassette record, so a chunk whose live
+extraction call failed during the original recording run (rate limit, transient network error, an
+unrecoverable malformed response) is counted as an error in that run's own report but produces
+zero cassette entry — there is nothing to replay for it, by construction. The specific two
+chunks/cause can't be reconstructed after the fact from the cassette file alone (only the
+original run's own logs would show that); `Error::CassetteMiss` on those two chunks on every
+future replay is the expected, correct outcome, not a bug to chase.
+
 ## Committing the cassettes
 
 Once both cassette files exist, commit them as plain, uncompressed JSONL — the same convention
@@ -155,59 +194,24 @@ re-captures) rather than introducing a new convention.
 
 ## Verifying deterministic replay (SC-005)
 
-`lcg-eval` itself has no "replay" backend kind — its `BackendKind` only builds live
-`anthropic`/`oai-http`/`oai-uds` extractors. Verifying that a committed cassette replays
-deterministically with zero live calls goes through the same primitive
-`crates/core/tests/cassette_record_replay.rs` already exercises,
-`lcg_core::cassette::ReplayingExtractor::load`. There's nothing to load yet in this Fabrik run
-(no cassette exists), so this is left as a code sketch for a follow-up `#[ignore]`d integration
-test, once the cassettes are committed — following the existing precedent set by
-`crates/core/tests/real_corpus_replay_perf.rs` for slow, explicitly-invoked-only tests. SC-005
-covers **both** committed cassettes, so the sketch below verifies each one:
+Run the cassette directly through `lcg-eval`'s real `--backend NAME=cassette:path=<PATH>` spec
+(#263) — no separate test harness or bespoke code is needed; the ordinary CLI invocation itself is
+the verification, since a `cassette:` backend makes zero outbound requests by construction
+(`ReplayingExtractor` holds no HTTP client) and fails loudly on any unmatched chunk:
 
-```rust
-// crates/eval/tests/cassette_replay_determinism.rs (sketch — write once cassettes exist)
-use lcg_core::cassette::ReplayingExtractor;
-use lcg_core::extractor::{ExtractOptions, Extractor};
-use lcg_core::types::SourceType;
-use lcg_eval::corpus::{default_corpus_path, load_corpus};
-
-const REFERENCE_TIME: &str = "2026-01-01T00:00:00Z"; // match runner.rs's constant exactly
-
-async fn assert_cassette_replays_every_corpus_chunk(cassette_path: &str) {
-    let corpus = load_corpus(default_corpus_path()).unwrap();
-    let replayer = ReplayingExtractor::load(cassette_path).unwrap();
-
-    for chunk in &corpus {
-        // Same ExtractOptions shape `run_backend` (crates/eval/src/runner.rs) used to
-        // produce the recording — matching it exactly is what makes the request hash
-        // match the cassette's recorded key. A successful `Ok(_)` for every chunk, with
-        // zero outbound HTTP calls (ReplayingExtractor never dials out, by construction),
-        // is the SC-005 property.
-        let opts = ExtractOptions {
-            episode_body: &chunk.prose,
-            group_id: "eval",
-            source_type: SourceType::Text,
-            custom_instructions: None,
-            reference_time: REFERENCE_TIME,
-            ontology: None,
-        };
-        replayer.extract(opts).await.expect("cassette entry for this chunk");
-    }
-}
-
-#[tokio::test]
-#[ignore]
-async fn qwen_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
-    assert_cassette_replays_every_corpus_chunk("qwen3.6-27b.jsonl").await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn anthropic_cassette_replays_every_corpus_chunk_with_zero_live_calls() {
-    assert_cassette_replays_every_corpus_chunk("anthropic-claude-haiku-4-5-20251001.jsonl").await;
-}
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --reference baseline \
+  --all \
+  --output eval_report_248_replay_check.json
 ```
 
-Run both with `cargo test -p lcg-eval --release --test cassette_replay_determinism -- --ignored`
-once written, mirroring how `real_corpus_replay_perf.rs`'s tests are run today.
+A clean run (aside from the two known `Error::CassetteMiss` chunks documented above) with no
+`ANTHROPIC_API_KEY` set and no network access confirms both the zero-live-calls property (FR-002)
+and that the cassette replays deterministically against the full 228-chunk corpus (SC-005). Repeat
+with `qwen3.6-27b.jsonl` to verify the second cassette the same way. This replaces the
+`#[ignore]`d code-sketch approach an earlier draft of this runbook described — the CLI wiring
+that sketch was written to anticipate now exists directly, so no separate integration test file is
+needed here (`crates/eval/tests/harness_integration.rs` already covers the pipeline's correctness
+as an integration test, with a hand-built cassette).

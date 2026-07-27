@@ -523,6 +523,10 @@ this is what the `eval.yml` workflow's on-demand smoke pass checks.
   `OaiExtractor`.
 - `oai-uds:path=<SOCKET_PATH>[,model=<MODEL>]` — the same, over a Unix domain socket (e.g. a
   local `mlx_lm.server` instance).
+- `cassette:path=<PATH>` — replay a previously recorded cassette instead of making live LLM
+  calls, via `ReplayingExtractor`. Makes zero outbound requests; a cassette miss fails loudly
+  with `Error::CassetteMiss` rather than falling through to a live call. Cannot be combined
+  with `--record-cassette` for the same backend name (recording a replay is meaningless).
 
 No new backend *kind* should be needed for a new model — point an `oai-http`/`oai-uds` spec
 at any OpenAI-compatible server. Adding a genuinely new provider means extending
@@ -532,7 +536,10 @@ than writing new HTTP/JSON client logic in the harness (FR-003).
 
 Add `--record-cassette NAME=PATH` to wrap a configured backend in a cassette recorder
 (see "Record/replay cassettes" above) so a single corpus pass yields both the eval report and
-a recorded cassette — the mechanism #248's full-corpus comparison run relies on.
+a recorded cassette — the mechanism #248's full-corpus comparison run relies on. To replay a
+cassette recorded this way on a later run without paying for the extraction calls again, use a
+`cassette:path=<PATH>` backend spec instead — see `docs/eval-full-corpus-runbook.md`'s
+"Resuming a partial run" section for a worked example.
 
 ### Cost implications
 

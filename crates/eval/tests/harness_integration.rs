@@ -12,8 +12,10 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 use lcg_core::{
-    ConfigurableExtractor, Error, ExtractOptions, ExtractedEntity, ExtractionResult, Extractor,
+    CassetteWriter, ConfigurableExtractor, Error, ExtractOptions, ExtractedEntity,
+    ExtractionResult, Extractor, RecordingExtractor, TelemetrySink,
 };
+use lcg_eval::backend::{build_extractor, parse_backend_spec};
 use lcg_eval::corpus::{load_corpus, select_subset, CorpusChunk};
 use lcg_eval::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
@@ -323,5 +325,122 @@ async fn structured_output_reliability_is_independent_of_extraction_f1() {
     assert!(
         structured.recovered > 0,
         "recovery must be visible even when F1 is perfect"
+    );
+}
+
+// ── cassette record→replay round trip via the real backend pipeline (#263) ────
+// User Story 1 / SC-001: replaying a `cassette:path=<PATH>` backend through the same
+// `parse_backend_spec`/`build_extractor` pipeline `main.rs` uses must reproduce the
+// original recorded run's entities/edges, with zero network access (the constructed
+// `ReplayingExtractor` never holds an HTTP client).
+
+#[tokio::test]
+async fn cassette_replay_reproduces_recorded_run_via_backend_pipeline() {
+    let dir = TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+
+    let chunks = vec![
+        chunk("A", "Alice works at Acme."),
+        chunk("B", "Bob founded Beta Corp."),
+    ];
+
+    let inner: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "a person".to_string(),
+            }],
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "a person".to_string(),
+            }],
+            edges: vec![],
+        },
+    ]));
+    let writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+    let recorder: Arc<dyn Extractor> = Arc::new(RecordingExtractor::new(
+        inner,
+        "anthropic",
+        "claude-haiku-4-5-20251001",
+        writer,
+    ));
+    let record_sink = Arc::new(CountingSink::new());
+    let recorded_run = run_backend("baseline", recorder, record_sink, &chunks).await;
+    assert!(
+        recorded_run.chunk_results.iter().all(|c| c.result.is_ok()),
+        "recording leg must succeed for every chunk"
+    );
+
+    // Replay: build a `cassette:path=<file>` backend through the exact
+    // parse_backend_spec/build_extractor pipeline lcg-eval's CLI uses.
+    let spec = format!("cassette:path={}", cassette_path.display());
+    let kind = parse_backend_spec(&spec).unwrap();
+    let replay_sink = Arc::new(CountingSink::new());
+    let replayer =
+        build_extractor(&kind, Arc::clone(&replay_sink) as Arc<dyn TelemetrySink>).unwrap();
+    let replayed_run = run_backend("baseline", replayer, replay_sink, &chunks).await;
+
+    assert_eq!(
+        recorded_run.chunk_results.len(),
+        replayed_run.chunk_results.len()
+    );
+    for (recorded, replayed) in recorded_run
+        .chunk_results
+        .iter()
+        .zip(replayed_run.chunk_results.iter())
+    {
+        let recorded_extraction = recorded.result.as_ref().unwrap();
+        let replayed_extraction = replayed.result.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(recorded_extraction).unwrap(),
+            serde_json::to_value(replayed_extraction).unwrap(),
+            "replayed extraction must be identical to the original recorded run"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cassette_replay_miss_surfaces_as_cassette_miss_error() {
+    let dir = TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    // A cassette recorded against different content than what replay is asked for.
+    let inner: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+        entities: vec![],
+        edges: vec![],
+    }]));
+    let writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+    let recorder: Arc<dyn Extractor> =
+        Arc::new(RecordingExtractor::new(inner, "anthropic", "haiku", writer));
+    let record_sink = Arc::new(CountingSink::new());
+    run_backend(
+        "baseline",
+        recorder,
+        record_sink,
+        &[chunk("A", "Alice works at Acme.")],
+    )
+    .await;
+
+    let spec = format!("cassette:path={}", cassette_path.display());
+    let kind = parse_backend_spec(&spec).unwrap();
+    let replay_sink = Arc::new(CountingSink::new());
+    let replayer =
+        build_extractor(&kind, Arc::clone(&replay_sink) as Arc<dyn TelemetrySink>).unwrap();
+    let replayed_run = run_backend(
+        "baseline",
+        replayer,
+        replay_sink,
+        &[chunk("B", "an entirely different, never-recorded chunk")],
+    )
+    .await;
+
+    let err = replayed_run.chunk_results[0].result.as_ref().unwrap_err();
+    assert!(
+        err.contains("CassetteMiss") || err.contains("no cassette record"),
+        "expected a CassetteMiss error, got: {err}"
     );
 }
