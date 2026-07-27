@@ -5,17 +5,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lcg_core::{AnthropicExtractor, Extractor, OaiExtractor, TelemetrySink};
+use lcg_core::{AnthropicExtractor, Extractor, OaiExtractor, ReplayingExtractor, TelemetrySink};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendKind {
     Anthropic { model: Option<String> },
     OaiHttp { url: String, model: Option<String> },
     OaiUds { path: String, model: Option<String> },
+    Cassette { path: String },
 }
 
 /// Parses a backend spec of the form `anthropic[:model=<M>]`,
-/// `oai-http:url=<URL>[,model=<M>]`, or `oai-uds:path=<PATH>[,model=<M>]`.
+/// `oai-http:url=<URL>[,model=<M>]`, `oai-uds:path=<PATH>[,model=<M>]`, or
+/// `cassette:path=<PATH>`.
 pub fn parse_backend_spec(spec: &str) -> Result<BackendKind, String> {
     let (kind, rest) = match spec.split_once(':') {
         Some((k, r)) => (k, Some(r)),
@@ -55,8 +57,15 @@ pub fn parse_backend_spec(spec: &str) -> Result<BackendKind, String> {
                 model: params.get("model").cloned(),
             })
         }
+        "cassette" => {
+            let path = params
+                .get("path")
+                .cloned()
+                .ok_or_else(|| "cassette backend requires path=<PATH>".to_string())?;
+            Ok(BackendKind::Cassette { path })
+        }
         other => Err(format!(
-            "unknown backend kind '{other}' (expected anthropic, oai-http, or oai-uds)"
+            "unknown backend kind '{other}' (expected anthropic, oai-http, oai-uds, or cassette)"
         )),
     }
 }
@@ -102,6 +111,40 @@ pub fn build_extractor(
                 Err("oai-uds backend is only supported on unix platforms".to_string())
             }
         }
+        BackendKind::Cassette { path } => {
+            let _ = sink;
+            ReplayingExtractor::load(path)
+                .map(|r| Arc::new(r) as Arc<dyn Extractor>)
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// The provider label recorded on a `RecordingExtractor`'s cassette entries (FR-004) —
+/// derived from `kind`, not the `--backend` name. `Cassette` is unreachable in practice
+/// (FR-005 rejects recording a replay backend) but is handled for match exhaustiveness.
+pub fn provider_label(kind: &BackendKind) -> &'static str {
+    match kind {
+        BackendKind::Anthropic { .. } => "anthropic",
+        BackendKind::OaiHttp { .. } => "oai-http",
+        BackendKind::OaiUds { .. } => "oai-uds",
+        BackendKind::Cassette { .. } => "cassette",
+    }
+}
+
+/// The resolved model id recorded on a `RecordingExtractor`'s cassette entries (FR-004) —
+/// the same default resolution `build_extractor` applies internally, surfaced here since
+/// `build_extractor` doesn't return it. `Cassette` is unreachable in practice (see
+/// `provider_label`) but is handled for match exhaustiveness.
+pub fn resolved_model(kind: &BackendKind) -> String {
+    match kind {
+        BackendKind::Anthropic { model } => model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ANTHROPIC_MODEL.to_string()),
+        BackendKind::OaiHttp { model, .. } | BackendKind::OaiUds { model, .. } => model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LOCAL_MODEL.to_string()),
+        BackendKind::Cassette { .. } => "cassette".to_string(),
     }
 }
 
@@ -187,5 +230,100 @@ mod tests {
             model: Some("local".to_string()),
         };
         assert!(build_extractor(&kind, Arc::new(NoopSink)).is_ok());
+    }
+
+    #[test]
+    fn parses_cassette_with_path() {
+        assert_eq!(
+            parse_backend_spec("cassette:path=/tmp/cassette.jsonl").unwrap(),
+            BackendKind::Cassette {
+                path: "/tmp/cassette.jsonl".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn cassette_without_path_is_rejected() {
+        let err = parse_backend_spec("cassette").unwrap_err();
+        assert!(err.contains("path="));
+    }
+
+    #[test]
+    fn build_cassette_succeeds_from_hand_written_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let line = serde_json::json!({
+            "key": "abc123",
+            "call_type": "extract",
+            "provider": "anthropic",
+            "model": "claude-haiku-4-5-20251001",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "request": {},
+            "response": {"entities": [], "edges": []},
+        });
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let kind = BackendKind::Cassette {
+            path: path.to_string_lossy().to_string(),
+        };
+        assert!(build_extractor(&kind, Arc::new(NoopSink)).is_ok());
+    }
+
+    #[test]
+    fn build_cassette_rejects_missing_file() {
+        let kind = BackendKind::Cassette {
+            path: "/nonexistent/path/cassette.jsonl".to_string(),
+        };
+        assert!(build_extractor(&kind, Arc::new(NoopSink)).is_err());
+    }
+
+    #[test]
+    fn provider_label_matches_backend_kind() {
+        assert_eq!(
+            provider_label(&BackendKind::Anthropic { model: None }),
+            "anthropic"
+        );
+        assert_eq!(
+            provider_label(&BackendKind::OaiHttp {
+                url: "http://x".to_string(),
+                model: None
+            }),
+            "oai-http"
+        );
+        assert_eq!(
+            provider_label(&BackendKind::OaiUds {
+                path: "/tmp/x.sock".to_string(),
+                model: None
+            }),
+            "oai-uds"
+        );
+    }
+
+    #[test]
+    fn resolved_model_applies_defaults_and_overrides() {
+        assert_eq!(
+            resolved_model(&BackendKind::Anthropic { model: None }),
+            DEFAULT_ANTHROPIC_MODEL
+        );
+        assert_eq!(
+            resolved_model(&BackendKind::Anthropic {
+                model: Some("claude-sonnet-4-6".to_string())
+            }),
+            "claude-sonnet-4-6"
+        );
+        assert_eq!(
+            resolved_model(&BackendKind::OaiHttp {
+                url: "http://x".to_string(),
+                model: None
+            }),
+            DEFAULT_LOCAL_MODEL
+        );
+        assert_eq!(
+            resolved_model(&BackendKind::OaiUds {
+                path: "/tmp/x.sock".to_string(),
+                model: Some("qwen".to_string())
+            }),
+            "qwen"
+        );
     }
 }
