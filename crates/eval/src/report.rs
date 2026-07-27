@@ -76,6 +76,30 @@ pub struct CandidateReport {
     pub judged_summary_f1: Option<f64>,
 }
 
+/// FR-007/FR-010: one backend pair's aggregated result on one axis (entities/edges/
+/// summary — never folded together, matching `CandidateReport`'s convention). `wins`/
+/// `losses` are from `backend_a`'s perspective: `wins` is how often `backend_a` won,
+/// `losses` is how often `backend_b` won. A win rate is never reported without its
+/// order-inconsistency rate alongside it (FR-007) — both live on this same struct.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PairwiseReportEntry {
+    pub backend_a: String,
+    pub backend_b: String,
+    pub axis: String,
+    pub wins: usize,
+    pub losses: usize,
+    pub ties: usize,
+    /// Excludes ties from the denominator — see `pairwise::AxisTally::win_rate_a`'s doc for
+    /// why (an unbiased judge's tie rate would otherwise depress a genuinely 50/50
+    /// noise-floor pair below the SC-001 calibration band for no bias-related reason).
+    pub win_rate: f64,
+    pub order_inconsistency_rate: f64,
+    pub chunks_compared: usize,
+    /// FR-010: chunks present on only one side of the pair — never silently folded into
+    /// `losses`.
+    pub chunks_skipped: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub corpus_size: usize,
@@ -85,6 +109,12 @@ pub struct Report {
     /// archived side by side.
     pub ontology_mode: String,
     pub candidates: Vec<CandidateReport>,
+    /// `None` when `--judge-mode` is omitted or set to `reference` (SC-004: this keeps
+    /// `to_json()`'s output byte-identical to the pre-#269 shape — `skip_serializing_if`
+    /// means the key is entirely absent, not present-but-null, whenever pairwise mode
+    /// wasn't requested).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairwise: Option<Vec<PairwiseReportEntry>>,
 }
 
 impl Report {
@@ -147,6 +177,33 @@ impl Report {
                 fmt_opt(c.judged_summary_f1),
             ));
         }
+
+        // FR-007: rendered only when pairwise mode actually ran — omitted entirely (not
+        // an empty section header) when `--judge-mode` is `reference` or omitted, so
+        // reference-mode output stays unchanged (SC-004).
+        if let Some(pairwise) = &self.pairwise {
+            if !pairwise.is_empty() {
+                out.push_str("== pairwise judging ==\n");
+                for e in pairwise {
+                    out.push_str(&format!(
+                        "  {} vs {} [{}]: wins {} losses {} ties {}  win rate {:.1}%  \
+                         order-inconsistency rate {:.1}%  chunks compared {}  skipped {}\n",
+                        e.backend_a,
+                        e.backend_b,
+                        e.axis,
+                        e.wins,
+                        e.losses,
+                        e.ties,
+                        e.win_rate * 100.0,
+                        e.order_inconsistency_rate * 100.0,
+                        e.chunks_compared,
+                        e.chunks_skipped,
+                    ));
+                }
+                out.push('\n');
+            }
+        }
+
         out
     }
 }
@@ -219,6 +276,7 @@ mod tests {
                 judged_edge_f1: Some(0.978),
                 judged_summary_f1: None,
             }],
+            pairwise: None,
         }
     }
 
@@ -234,6 +292,33 @@ mod tests {
             edge_violation_rate: 0.2,
         });
         report
+    }
+
+    fn sample_pairwise_report() -> Report {
+        let mut report = sample_report();
+        report.pairwise = Some(vec![PairwiseReportEntry {
+            backend_a: "baseline".to_string(),
+            backend_b: "candidate".to_string(),
+            axis: "entities".to_string(),
+            wins: 6,
+            losses: 5,
+            ties: 9,
+            win_rate: 0.545,
+            order_inconsistency_rate: 0.05,
+            chunks_compared: 20,
+            chunks_skipped: 2,
+        }]);
+        report
+    }
+
+    /// SC-004: with `--judge-mode` omitted (the `pairwise` field always `None`), the JSON
+    /// report must be byte-identical to the pre-#269 shape. This golden string was captured
+    /// from `sample_report().to_json()` *before* the `pairwise` field was added to `Report`,
+    /// so any accidental key addition/reordering/nulling here is caught immediately.
+    #[test]
+    fn json_report_is_byte_identical_to_pre_pairwise_golden_sc004() {
+        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_edge_f1\": 0.978,\n      \"judged_summary_f1\": null\n    }\n  ]\n}";
+        assert_eq!(sample_report().to_json(), golden);
     }
 
     #[test]
@@ -301,5 +386,51 @@ mod tests {
     fn human_readable_report_omits_vocab_compliance_line_when_not_applicable() {
         let out = sample_report().render_human_readable();
         assert!(!out.contains("vocabulary compliance"));
+    }
+
+    // ── pairwise report section (FR-007, SC-004) ───────────────────────────────────
+
+    #[test]
+    fn pairwise_field_absent_from_json_when_none() {
+        let json = sample_report().to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("pairwise").is_none(),
+            "the pairwise key must be entirely absent (not present-but-null) when \
+             --judge-mode is omitted, per SC-004"
+        );
+    }
+
+    #[test]
+    fn pairwise_field_present_and_populated_in_json_when_some() {
+        let json = sample_pairwise_report().to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["pairwise"][0]["backend_a"], "baseline");
+        assert_eq!(value["pairwise"][0]["backend_b"], "candidate");
+        assert_eq!(value["pairwise"][0]["axis"], "entities");
+        assert_eq!(value["pairwise"][0]["wins"], 6);
+        assert_eq!(value["pairwise"][0]["losses"], 5);
+        assert_eq!(value["pairwise"][0]["ties"], 9);
+        assert_eq!(value["pairwise"][0]["chunks_compared"], 20);
+        assert_eq!(value["pairwise"][0]["chunks_skipped"], 2);
+    }
+
+    #[test]
+    fn human_readable_report_omits_pairwise_section_when_none() {
+        let out = sample_report().render_human_readable();
+        assert!(!out.contains("pairwise judging"));
+    }
+
+    #[test]
+    fn human_readable_report_renders_pairwise_section_with_inconsistency_rate() {
+        let out = sample_pairwise_report().render_human_readable();
+        assert!(out.contains("pairwise judging"));
+        assert!(out.contains("baseline vs candidate"));
+        assert!(out.contains("[entities]"));
+        // FR-007: a win rate is never reported without its order-inconsistency rate.
+        assert!(out.contains("win rate"));
+        assert!(out.contains("order-inconsistency rate"));
+        assert!(out.contains("chunks compared"));
+        assert!(out.contains("skipped"));
     }
 }

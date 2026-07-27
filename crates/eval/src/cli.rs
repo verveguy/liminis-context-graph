@@ -25,6 +25,44 @@ fn parse_ontology_mode(v: &str) -> Result<OntologyMode, String> {
     }
 }
 
+/// FR-001: which judging pass(es) `lcg-eval` runs. Defaults to `Reference` so omitting
+/// `--judge-mode` leaves existing output byte-identical (SC-004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeMode {
+    Reference,
+    Pairwise,
+    Both,
+}
+
+pub const DEFAULT_JUDGE_MODE: JudgeMode = JudgeMode::Reference;
+
+fn parse_judge_mode(v: &str) -> Result<JudgeMode, String> {
+    match v {
+        "reference" => Ok(JudgeMode::Reference),
+        "pairwise" => Ok(JudgeMode::Pairwise),
+        "both" => Ok(JudgeMode::Both),
+        other => Err(format!(
+            "--judge-mode must be 'reference', 'pairwise', or 'both', got '{other}'"
+        )),
+    }
+}
+
+/// Extracts the `path=` value out of a `cassette:path=<PATH>[,...]` backend spec, or
+/// `None` for any other backend kind. Hand-parsed rather than depending on
+/// `backend::parse_backend_spec` (Plan's Key Decision: keeps `cli.rs` free of a new
+/// dependency on `backend.rs`), mirroring this file's existing kind-prefix extraction
+/// convention used by the `--record-cassette` validation below.
+fn cassette_path(spec: &str) -> Option<&str> {
+    let (kind, rest) = spec.split_once(':')?;
+    if kind != "cassette" {
+        return None;
+    }
+    rest.split(',').find_map(|kv| {
+        let (k, v) = kv.split_once('=')?;
+        (k == "path").then_some(v)
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendArg {
     pub name: String,
@@ -50,6 +88,7 @@ pub struct Args {
     pub corpus: Option<String>,
     pub ontology: Option<String>,
     pub ontology_mode: OntologyMode,
+    pub judge_mode: JudgeMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,6 +135,20 @@ OPTIONS:
                                  declared inside the file. Defaults to 'strict' when --ontology
                                  is given. Requires --ontology; rejected as a usage error
                                  otherwise.
+    --judge-mode <reference|pairwise|both>
+                                 Which judging pass(es) to run (default: reference).
+                                 'reference' (default): every candidate is judged against
+                                 --reference only — unchanged pre-#269 behavior.
+                                 'pairwise': every unordered pair of configured backends is
+                                 blindly judged against each other (#269) — makes zero
+                                 additional extraction calls, reuses recorded cassettes.
+                                 Reference-mode judge calls are skipped entirely in this
+                                 mode (use 'both' to get both).
+                                 'both': runs both passes.
+                                 Under pairwise/both, two backends whose specs resolve to
+                                 the identical cassette:path=<PATH> are rejected at parse
+                                 time — a self-comparison is a degenerate, trivial 100%-tie
+                                 result, not a meaningful pairwise result.
     --record-cassette <NAME>=<PATH>
                                  Wrap the named backend in a cassette recorder (#232),
                                  writing to PATH, so this run also captures a cassette.
@@ -128,6 +181,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut corpus = None;
     let mut ontology: Option<String> = None;
     let mut ontology_mode: Option<OntologyMode> = None;
+    let mut judge_mode: Option<JudgeMode> = None;
     let mut want_help = false;
 
     let mut i = 0;
@@ -227,6 +281,14 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                     .ok_or("--ontology-mode requires an 'open' or 'strict' argument")?;
                 ontology_mode = Some(parse_ontology_mode(&v)?);
             }
+            "--judge-mode" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .cloned()
+                    .ok_or("--judge-mode requires a 'reference', 'pairwise', or 'both' argument")?;
+                judge_mode = Some(parse_judge_mode(&v)?);
+            }
             arg => {
                 return Err(format!("unknown argument: '{arg}'\n\n{}", usage()));
             }
@@ -304,6 +366,36 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         }
     }
 
+    let judge_mode = judge_mode.unwrap_or(DEFAULT_JUDGE_MODE);
+
+    // FR-011: a pairwise pass over two backends that resolve to the identical cassette
+    // path is degenerate — a guaranteed 100%-tie result computed and buried in the report
+    // rather than caught up front. Scoped narrowly to `cassette:path=` equality (not "any
+    // two backends sharing a spec string") so the existing --reference noise-floor pattern
+    // — the same *live* spec (e.g. `anthropic:model=X`) configured twice under different
+    // names, which produces two independently-sampled, non-degenerate outputs — keeps
+    // working under pairwise mode; that pair is User Story 2's mandatory calibration
+    // control, not a case to reject.
+    if judge_mode != JudgeMode::Reference {
+        for i in 0..backends.len() {
+            for j in (i + 1)..backends.len() {
+                if let (Some(path_i), Some(path_j)) = (
+                    cassette_path(&backends[i].spec),
+                    cassette_path(&backends[j].spec),
+                ) {
+                    if path_i == path_j {
+                        return Err(format!(
+                            "--judge-mode pairwise/both cannot compare backend '{}' with \
+                             backend '{}': both resolve to the identical cassette path \
+                             '{}', which is a degenerate self-comparison",
+                            backends[i].name, backends[j].name, path_i
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     Ok(CliMode::Run(Box::new(Args {
         backends,
         reference: Some(reference_name),
@@ -316,6 +408,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         corpus,
         ontology,
         ontology_mode,
+        judge_mode,
     })))
 }
 
