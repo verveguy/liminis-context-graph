@@ -56,6 +56,11 @@ BACKEND SPEC (--backend NAME=SPEC, repeatable, at least one required):
         OpenAI-compatible local endpoint reached over HTTP.
     oai-uds:path=<SOCKET_PATH>[,model=<MODEL>]
         OpenAI-compatible local endpoint reached over a Unix domain socket.
+    cassette:path=<PATH>
+        Replay a previously recorded cassette (#232/#263) instead of making live LLM
+        calls. Makes zero outbound requests; a cassette miss fails loudly with
+        Error::CassetteMiss. Cannot be combined with --record-cassette for the same
+        backend name.
 
 OPTIONS:
     --reference <NAME>          Backend name to use as the scoring reference/baseline.
@@ -211,9 +216,26 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     }
 
     for c in &record_cassette {
-        if !backends.iter().any(|b| b.name == c.backend) {
+        let backend = backends
+            .iter()
+            .find(|b| b.name == c.backend)
+            .ok_or_else(|| {
+                format!(
+                    "--record-cassette backend '{}' does not match any configured --backend name",
+                    c.backend
+                )
+            })?;
+        // Mirrors backend::parse_backend_spec's kind-prefix extraction (kept in sync by
+        // hand — see crates/eval/src/backend.rs).
+        let kind = backend
+            .spec
+            .split_once(':')
+            .map(|(k, _)| k)
+            .unwrap_or(backend.spec.as_str());
+        if kind == "cassette" {
             return Err(format!(
-                "--record-cassette backend '{}' does not match any configured --backend name",
+                "--record-cassette backend '{}' is a cassette: replay backend; recording a \
+                 replay is meaningless",
                 c.backend
             ));
         }
@@ -341,6 +363,19 @@ mod tests {
     }
 
     #[test]
+    fn record_cassette_rejects_cassette_backend() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=cassette:path=/tmp/cassette.jsonl",
+            "--record-cassette",
+            "baseline=/tmp/other.jsonl",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("baseline"));
+        assert!(err.contains("cassette"));
+    }
+
+    #[test]
     fn record_cassette_parses_name_and_path() {
         match parse_args(&args(&[
             "--backend",
@@ -421,5 +456,10 @@ mod tests {
         ] {
             assert!(u.contains(flag), "usage missing {flag}");
         }
+    }
+
+    #[test]
+    fn usage_text_documents_cassette_backend_kind() {
+        assert!(usage().contains("cassette:path="));
     }
 }

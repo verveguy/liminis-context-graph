@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use lcg_core::{CassetteWriter, Extractor, RecordingExtractor, TelemetrySink};
 
-use lcg_eval::backend::{build_extractor, parse_backend_spec};
+use lcg_eval::backend::{build_extractor, parse_backend_spec, provider_label, resolved_model};
 use lcg_eval::cli::{parse_args, usage, Args, CliMode};
 use lcg_eval::corpus::{default_corpus_path, load_corpus, select_subset};
 use lcg_eval::judge::{precision_recall_f1, AnthropicJudgeClient, JudgeClient, JudgeVerdict};
@@ -73,8 +73,8 @@ async fn run(cli: Args) -> Result<(), String> {
             let writer = Arc::new(CassetteWriter::open(&cassette.path).map_err(|e| e.to_string())?);
             extractor = Arc::new(RecordingExtractor::new(
                 extractor,
-                b.name.clone(),
-                b.name.clone(),
+                provider_label(&kind),
+                resolved_model(&kind),
                 writer,
             ));
         }
