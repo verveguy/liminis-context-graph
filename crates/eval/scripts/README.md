@@ -51,6 +51,21 @@ deliberately two *independent* live Anthropic runs; their disagreement **is** th
 noise floor. Feeding one cassette to both makes them byte-identical and judged F1
 becomes 1.000 by construction. See #263 for the replay backend.
 
+**Quiesce the machine before any timing run.** MLX inference on Apple Silicon is bound
+by *memory bandwidth x active parameters per token*
+(`docs/history/extraction-eval-2026-04.md`), and a concurrent compile-and-test job
+contends for exactly that bandwidth — not just CPU. During the #248 capture a Fabrik
+worker running `wal_replay` tests sat at ~460% CPU alongside the benchmark, which
+inflates measured per-chunk latency. Recorded cassette *content* is unaffected, but
+**latency percentiles taken under load must not be quoted as the model's throughput**.
+`02` now reports load average and names any process over 100% CPU, and warns when the
+machine is not quiet.
+
+**Expect a long tail, and read the mean carefully.** Per-chunk latency on the real
+corpus ranges from ~9s to ~730s — a single hard chunk can drag a cumulative average
+by 10s or more. Judge a run by its trailing window, not its running mean: a rising
+cumulative average with a flat trailing window is outliers, not degradation.
+
 **Always run `02` before `03` or `04`.** It is the 30-second check that would have
 caught thinking mode before a 15-hour capture, and it fails loudly if reasoning
 tokens are present or the projected runtime is out of line with the April baseline.

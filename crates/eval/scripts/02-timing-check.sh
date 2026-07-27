@@ -13,6 +13,23 @@ mkdir -p /tmp/eval248
 MODEL="mlx-community/Qwen3.6-27B-4bit"
 URL="http://127.0.0.1:8765/v1/chat/completions"
 
+echo "==> checking the machine is quiet"
+# MLX inference on Apple Silicon is bound by memory bandwidth x active params per
+# token (see docs/history/extraction-eval-2026-04.md). A concurrent compile/test job
+# contends for exactly that bandwidth, so timings taken under load read pessimistic.
+# Fabrik workers running cargo test have been measured at ~460% CPU during a capture.
+LOAD=$(uptime | sed 's/.*averages*: //' | awk '{print $1}' | tr -d ',')
+BUSY=$(ps -Ao pcpu,comm -r | awk 'NR>1 && $1>100 {printf "%s(%s%%) ", $2, $1}' | head -c 200)
+echo "    load average: $LOAD"
+if [ -n "$BUSY" ]; then
+  echo "    BUSY PROCESSES: $BUSY"
+  echo "    WARNING: timings below will read pessimistic. For a benchmark-quality"
+  echo "             number, quiesce Fabrik and other heavy jobs first."
+else
+  echo "    no heavy competing processes"
+fi
+echo
+
 echo "==> raw generation speed (500 tokens, small prompt)"
 S=$(python3 -c 'import time;print(time.time())')
 curl -s --max-time 600 "$URL" -H 'content-type: application/json' \
