@@ -644,6 +644,7 @@ mod tests {
             "--output",
             "--ontology",
             "--ontology-mode",
+            "--judge-mode",
             "--help",
         ] {
             assert!(u.contains(flag), "usage missing {flag}");
@@ -729,5 +730,136 @@ mod tests {
     #[test]
     fn usage_text_documents_cassette_backend_kind() {
         assert!(usage().contains("cassette:path="));
+    }
+
+    // ── --judge-mode (FR-001) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn judge_mode_defaults_to_reference() {
+        match parse_args(&args(&["--backend", "baseline=anthropic"])).unwrap() {
+            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Reference),
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn judge_mode_accepts_each_explicit_value() {
+        for (flag_value, expected) in [
+            ("reference", JudgeMode::Reference),
+            ("pairwise", JudgeMode::Pairwise),
+            ("both", JudgeMode::Both),
+        ] {
+            match parse_args(&args(&[
+                "--backend",
+                "baseline=anthropic",
+                "--judge-mode",
+                flag_value,
+            ]))
+            .unwrap()
+            {
+                CliMode::Run(a) => assert_eq!(a.judge_mode, expected, "for '{flag_value}'"),
+                other => panic!("expected Run mode, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_judge_mode_value_is_rejected() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--judge-mode",
+            "bogus",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--judge-mode"));
+        assert!(err.contains("bogus"));
+    }
+
+    // ── FR-011: degenerate same-cassette-path pair rejection ────────────────────────
+
+    #[test]
+    fn pairwise_mode_rejects_duplicate_cassette_path() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/shared.jsonl",
+            "--backend",
+            "b=cassette:path=/tmp/shared.jsonl",
+            "--judge-mode",
+            "pairwise",
+        ]))
+        .unwrap_err();
+        assert!(err.contains('a'));
+        assert!(err.contains('b'));
+        assert!(err.contains("/tmp/shared.jsonl"));
+    }
+
+    #[test]
+    fn both_mode_rejects_duplicate_cassette_path() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/shared.jsonl",
+            "--backend",
+            "b=cassette:path=/tmp/shared.jsonl",
+            "--judge-mode",
+            "both",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("/tmp/shared.jsonl"));
+    }
+
+    #[test]
+    fn reference_mode_accepts_duplicate_cassette_path_check_is_gated() {
+        // The default (reference) mode never runs pairwise judging, so this same
+        // configuration that FR-011 rejects under pairwise/both must be accepted here —
+        // the check is gated on judge_mode, not a global backend-configuration rule.
+        match parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/shared.jsonl",
+            "--backend",
+            "b=cassette:path=/tmp/shared.jsonl",
+        ]))
+        .unwrap()
+        {
+            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Reference),
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pairwise_mode_accepts_same_live_spec_under_two_names_noise_floor_pattern() {
+        // User Story 2's mandatory calibration control: the same *live* spec configured
+        // twice under different names produces two independently-sampled, non-degenerate
+        // outputs — FR-011 must not reject this, only identical cassette: paths.
+        match parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic:model=claude-haiku-4-5-20251001",
+            "--backend",
+            "candidate=anthropic:model=claude-haiku-4-5-20251001",
+            "--judge-mode",
+            "pairwise",
+        ]))
+        .unwrap()
+        {
+            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Pairwise),
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pairwise_mode_accepts_distinct_cassette_paths() {
+        match parse_args(&args(&[
+            "--backend",
+            "a=cassette:path=/tmp/one.jsonl",
+            "--backend",
+            "b=cassette:path=/tmp/two.jsonl",
+            "--judge-mode",
+            "pairwise",
+        ]))
+        .unwrap()
+        {
+            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Pairwise),
+            other => panic!("expected Run mode, got {other:?}"),
+        }
     }
 }
