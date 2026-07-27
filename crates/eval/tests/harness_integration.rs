@@ -11,9 +11,10 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 use tempfile::TempDir;
 
+use lcg_core::ontology::load_ontology_from_path;
 use lcg_core::{
-    CassetteWriter, ConfigurableExtractor, Error, ExtractOptions, ExtractedEntity,
-    ExtractionResult, Extractor, RecordingExtractor, TelemetrySink,
+    CassetteWriter, ConfigurableExtractor, Error, ExtractOptions, ExtractedEdge, ExtractedEntity,
+    ExtractionResult, Extractor, OntologyMode, RecordingExtractor, TelemetrySink,
 };
 use lcg_eval::backend::{build_extractor, parse_backend_spec};
 use lcg_eval::corpus::{load_corpus, select_subset, CorpusChunk};
@@ -21,6 +22,12 @@ use lcg_eval::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
 use lcg_eval::metrics::entity_strict_prf1;
 use lcg_eval::runner::{run_backend, CountingSink};
+
+/// FR-005's committed ontology fixture, alongside the #217 corpus fixture.
+fn ontology_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../core/tests/fixtures/real_corpus_wal/ontology.yaml")
+}
 
 fn chunk(title: &str, prose: &str) -> CorpusChunk {
     CorpusChunk {
@@ -444,5 +451,123 @@ async fn cassette_replay_miss_surfaces_as_cassette_miss_error() {
     assert!(
         err.contains("CassetteMiss") || err.contains("no cassette record"),
         "expected a CassetteMiss error, got: {err}"
+    );
+}
+
+// ── ontology-constrained extraction (#266) ─────────────────────────────────────
+
+// User Story 1 / FR-001: the FR-005 fixture loads from a bare file path and threads
+// through run_backend's ExtractOptions.ontology on every call.
+#[tokio::test]
+async fn ontology_fixture_loads_and_drives_strict_vocabulary_compliance() {
+    let ontology = load_ontology_from_path(&ontology_fixture_path(), OntologyMode::Strict)
+        .expect("FR-005 fixture must load from a bare file path");
+    assert!(ontology.has_entity_types());
+    assert!(ontology.has_relation_types());
+
+    // One in-vocabulary entity/edge pair (Person/LAUNCHED... well, CREWED_BY) and one
+    // out-of-vocabulary pair, mirroring User Story 3's independent test: FR-007's
+    // vocabulary-compliance metric must reflect the violation while
+    // structured_output.{clean,recovered,malformed} — a JSON-syntax-only signal — stays
+    // untouched (FR-004).
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities: vec![
+                ExtractedEntity {
+                    name: "Alan Bean".to_string(),
+                    entity_type: "Person".to_string(),
+                    summary: "an astronaut".to_string(),
+                },
+                ExtractedEntity {
+                    name: "Some Widget".to_string(),
+                    entity_type: "Gadget".to_string(),
+                    summary: "not in the declared vocabulary".to_string(),
+                },
+            ],
+            edges: vec![
+                ExtractedEdge {
+                    source_name: "Alan Bean".to_string(),
+                    target_name: "Apollo 12".to_string(),
+                    fact: "Alan Bean was crew on Apollo 12".to_string(),
+                    relation_type: Some("CREWED_BY".to_string()),
+                    ..Default::default()
+                },
+                ExtractedEdge {
+                    source_name: "Alan Bean".to_string(),
+                    target_name: "Some Widget".to_string(),
+                    fact: "an out-of-vocabulary relation".to_string(),
+                    relation_type: Some("TINKERED_WITH".to_string()),
+                    ..Default::default()
+                },
+            ],
+        }]));
+    let sink = Arc::new(CountingSink::new());
+    let chunks = vec![chunk("A", "Alan Bean was an astronaut on Apollo 12.")];
+
+    let result = run_backend("mock", extractor, sink, &chunks, Some(&ontology)).await;
+
+    let vocab = result
+        .vocabulary_compliance
+        .expect("Strict mode must produce the FR-007 tally");
+    assert_eq!(vocab.entities_checked, 2);
+    assert_eq!(vocab.entities_out_of_vocab, 1);
+    assert_eq!(vocab.edges_checked, 2);
+    assert_eq!(vocab.edges_out_of_vocab, 1);
+    assert_eq!(
+        result.structured_output,
+        lcg_eval::runner::StructuredOutputCounts::default(),
+        "FR-004: vocabulary violations must never affect structured-output reliability"
+    );
+}
+
+// Edge Cases: a cassette recorded freeform (ontology: None) must miss — not silently
+// replay — against a Strict-mode run over the exact same chunk content, because
+// ontology participates in the cassette key via the rendered system prompts
+// (crates/core/src/cassette.rs). This is the regression the spec calls out as needing
+// verification through the real ExtractOptions.ontology wiring, not just unit coverage
+// of extract_request_value in isolation.
+#[tokio::test]
+async fn cassette_recorded_freeform_misses_against_strict_ontology_replay() {
+    let ontology = load_ontology_from_path(&ontology_fixture_path(), OntologyMode::Strict)
+        .expect("FR-005 fixture must load");
+
+    let dir = TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let chunks = vec![chunk("A", "Alan Bean was an astronaut on Apollo 12.")];
+
+    let inner: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+        entities: vec![ExtractedEntity {
+            name: "Alan Bean".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "an astronaut".to_string(),
+        }],
+        edges: vec![],
+    }]));
+    let writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+    let recorder: Arc<dyn Extractor> = Arc::new(RecordingExtractor::new(
+        inner,
+        "anthropic",
+        "claude-haiku-4-5-20251001",
+        writer,
+    ));
+    let record_sink = Arc::new(CountingSink::new());
+    // Recorded freeform — no ontology passed to run_backend.
+    let recorded_run = run_backend("baseline", recorder, record_sink, &chunks, None).await;
+    assert!(recorded_run.chunk_results[0].result.is_ok());
+
+    let spec = format!("cassette:path={}", cassette_path.display());
+    let kind = parse_backend_spec(&spec).unwrap();
+    let replay_sink = Arc::new(CountingSink::new());
+    let replayer =
+        build_extractor(&kind, Arc::clone(&replay_sink) as Arc<dyn TelemetrySink>).unwrap();
+    // Replayed under a Strict ontology, over the *same* chunk content — must still miss.
+    let replayed_run =
+        run_backend("baseline", replayer, replay_sink, &chunks, Some(&ontology)).await;
+
+    let err = replayed_run.chunk_results[0].result.as_ref().unwrap_err();
+    assert!(
+        err.contains("CassetteMiss") || err.contains("no cassette record"),
+        "a freeform-recorded cassette must miss against a Strict-mode replay of the same \
+         chunk, since ontology participates in the cassette key — got: {err}"
     );
 }

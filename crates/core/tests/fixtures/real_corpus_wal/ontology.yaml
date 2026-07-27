@@ -1,0 +1,72 @@
+# Ontology fixture for the #217 real-corpus WAL fixture (Apollo program / spaceflight
+# domain — see corpus_manifest.json's category_seeds). Committed for issue #266's
+# freeform/Open/Strict mode-matrix runs: `--ontology-mode` on the CLI always overrides
+# this file's own `mode:` key, so this single fixture drives all three regimes.
+#
+# Types below were chosen against actual corpus_prose.jsonl content (e.g. "AS-202",
+# "New Glenn rocket", "Jeff Bezos", "Blue Origin", "NASA", "Aditya-L1", "Indian Space
+# Research Organization", "Saturn IB launch vehicle", "Kennedy Space Center"), not
+# written generically — see docs/eval-full-corpus-runbook.md's "Running the ontology
+# mode matrix" section.
+mode: strict
+
+entity_types:
+  - name: Person
+    description: >
+      A named human individual — an astronaut, engineer, founder, or other person
+      mentioned in the article (e.g. "Jeff Bezos", "Alan Bean").
+
+  - name: Organization
+    description: >
+      A company, space agency, or research institution (e.g. "NASA", "Blue Origin",
+      "Indian Space Research Organization").
+
+  - name: Spacecraft
+    description: >
+      A crewed or uncrewed vehicle designed to operate in space, including capsules,
+      probes, and satellites (e.g. "Aditya-L1", "Apollo command and service module").
+
+  - name: Rocket
+    description: >
+      A launch vehicle or rocket stage used to reach orbit or space (e.g. "New Glenn
+      rocket", "Saturn IB launch vehicle").
+
+  - name: Mission
+    description: >
+      A named spaceflight mission or test flight (e.g. "AS-202", "AS-204").
+
+  - name: Location
+    description: >
+      A launch site, space center, or other named place relevant to spaceflight
+      (e.g. "Kennedy Space Center", "Polar Satellite Launch Complex").
+
+relation_types:
+  - name: LAUNCHED
+    description: An organization or rocket launched a spacecraft or mission.
+    source_type: Rocket
+    target_type: Spacecraft
+
+  - name: DEVELOPED_BY
+    description: A spacecraft, rocket, or mission was developed by an organization.
+    source_type: Spacecraft
+    target_type: Organization
+
+  - name: CREWED_BY
+    description: A spacecraft or mission carried a person as crew.
+    source_type: Spacecraft
+    target_type: Person
+
+  - name: OPERATED_BY
+    description: A spacecraft or mission is or was operated by an organization.
+    source_type: Spacecraft
+    target_type: Organization
+
+  - name: LAUNCHED_FROM
+    description: A rocket or mission launched from a named location.
+    source_type: Rocket
+    target_type: Location
+
+  - name: PART_OF
+    description: A mission or spacecraft is part of a larger program or mission series.
+    source_type: Mission
+    target_type: Mission
