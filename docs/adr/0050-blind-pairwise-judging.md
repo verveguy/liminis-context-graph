@@ -105,9 +105,9 @@ reading the warnings or the raw `order_inconsistency_rate`/`win_rate` fields its
 **The calibration-band note fires for every pair, not just the calibration control, and is
 worded conditionally rather than asserting bias.** `main.rs::warn_on_calibration_and_inconsistency`
 cannot determine *which* configured pair is the calibration control in general: the most
-common pattern — two independently-recorded `cassette:path=` files of the same model (e.g. the
-#248 runbook's `baseline`/`candidate`) — shares no spec string between the two backends, so a
-same-spec-equality heuristic (which *would* catch the same-live-spec-twice noise-floor pattern)
+common pattern — two independently-recorded `cassette:path=` files of the same model (e.g.
+the #248 runbook's `baseline`/`candidate`) — shares no spec string between the two backends,
+so a same-spec-equality heuristic (which *would* catch the same-live-spec-twice noise-floor pattern)
 silently fails to fire on exactly the pair SC-001 cares about, which would leave the primary
 documented scenario without its required warning. Rather than ship a heuristic that is wrong
 for the scenario the ADR itself walks through, the note fires unconditionally and states both
