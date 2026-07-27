@@ -33,7 +33,7 @@ async fn main() {
             println!("{}", usage());
             return;
         }
-        CliMode::Run(a) => a,
+        CliMode::Run(a) => *a,
     };
 
     if let Err(e) = run(run_args).await {

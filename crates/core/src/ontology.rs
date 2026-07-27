@@ -298,10 +298,13 @@ pub fn load_ontology_from_path(path: &Path, mode: OntologyMode) -> Result<Ontolo
 ///
 /// `mode_override`, when given, always wins over the file's own declared `mode:` key.
 fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Option<Ontology> {
-    let mode = mode_override.unwrap_or_else(|| match file.mode {
-        Some(OntologyModeRaw::Strict) => OntologyMode::Strict,
-        _ => OntologyMode::Open,
-    });
+    let mode = match mode_override {
+        Some(m) => m,
+        None => match file.mode {
+            Some(OntologyModeRaw::Strict) => OntologyMode::Strict,
+            _ => OntologyMode::Open,
+        },
+    };
 
     let mut entity_types: Vec<EntityTypeDef> = file
         .entity_types

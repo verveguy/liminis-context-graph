@@ -54,7 +54,7 @@ pub struct Args {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliMode {
-    Run(Args),
+    Run(Box<Args>),
     Help,
 }
 
@@ -304,7 +304,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         }
     }
 
-    Ok(CliMode::Run(Args {
+    Ok(CliMode::Run(Box::new(Args {
         backends,
         reference: Some(reference_name),
         limit,
@@ -316,7 +316,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         corpus,
         ontology,
         ontology_mode,
-    }))
+    })))
 }
 
 #[cfg(test)]

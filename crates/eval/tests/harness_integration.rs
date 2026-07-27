@@ -465,8 +465,10 @@ async fn ontology_fixture_loads_and_drives_strict_vocabulary_compliance() {
     assert!(ontology.has_entity_types());
     assert!(ontology.has_relation_types());
 
-    // One in-vocabulary entity/edge pair (Person/LAUNCHED... well, CREWED_BY) and one
-    // out-of-vocabulary pair, mirroring User Story 3's independent test: FR-007's
+    // One in-vocabulary entity/edge pair (Person/CREWED — both are canonical `name`
+    // entries in the FR-005 fixture; CREWED_BY is only a declared *alias*, which the
+    // strict-mode gate does not consult, matching episode.rs's production behavior) and
+    // one out-of-vocabulary pair, mirroring User Story 3's independent test: FR-007's
     // vocabulary-compliance metric must reflect the violation while
     // structured_output.{clean,recovered,malformed} — a JSON-syntax-only signal — stays
     // untouched (FR-004).
@@ -489,7 +491,7 @@ async fn ontology_fixture_loads_and_drives_strict_vocabulary_compliance() {
                     source_name: "Alan Bean".to_string(),
                     target_name: "Apollo 12".to_string(),
                     fact: "Alan Bean was crew on Apollo 12".to_string(),
-                    relation_type: Some("CREWED_BY".to_string()),
+                    relation_type: Some("CREWED".to_string()),
                     ..Default::default()
                 },
                 ExtractedEdge {
