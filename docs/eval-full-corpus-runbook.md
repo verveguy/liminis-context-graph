@@ -307,12 +307,13 @@ improve once a closed vocabulary removes open-ended type naming from the model's
 issue's own hypothesis that a closed vocabulary should narrow the local/hosted structured-output
 gap (ADR-0041).
 
-Only the two ontology-constrained reports carry a `vocabulary_compliance` field per candidate
-(FR-007) — `null`/absent on the freeform report, since the metric isn't applicable outside
-`Strict`. It counts, separately from JSON-syntax validity, how often a candidate emitted an
-entity or relation type outside the fixture's declared vocabulary — a model can produce
-perfectly valid JSON that simply ignores the closed type list, and that failure mode would
-otherwise be invisible if folded into `structured_output`.
+Only the `Strict` report carries a `vocabulary_compliance` field per candidate (FR-007) —
+`null`/absent on both the freeform *and* the `Open` report, since the metric isn't applicable
+outside `Strict` (an `Open` ontology never rejects a type, so there is nothing to count). It
+counts, separately from JSON-syntax validity, how often a candidate emitted an entity or relation
+type outside the fixture's declared vocabulary — a model can produce perfectly valid JSON that
+simply ignores the closed type list, and that failure mode would otherwise be invisible if folded
+into `structured_output`.
 
 Diff the three reports' per-backend `judged_entity_f1`/`judged_edge_f1`/`strict_entity_f1`/
 `strict_edge_f1` figures directly — any reordering of the model ranking between modes is now

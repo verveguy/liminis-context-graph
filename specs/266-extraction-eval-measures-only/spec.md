@@ -232,9 +232,10 @@ reflects it.
 - **SC-002**: Once a maintainer has produced the three reports, any reordering of the model
   ranking between modes is visible in the reports (via FR-003's mode field) and can be written up
   without re-running anything or guessing which report is which.
-- **SC-003**: Structured-output reliability (FR-004) and vocabulary-compliance (FR-007) are both
-  reported per mode per backend, and are visibly distinct metrics in the report — not merged into
-  one number.
+- **SC-003**: Structured-output reliability (FR-004) is reported per mode per backend.
+  Vocabulary-compliance (FR-007) is reported per backend for `Strict`-mode runs only — the mode
+  it applies to, per FR-007 — and is absent (not zeroed) on freeform/`Open` reports. The two are
+  visibly distinct metrics in the report — never merged into one number.
 - **SC-004**: README local-extraction guidance is edited to state that its existing figures
   describe freeform extraction only, pending mode-matrix measurement (per User Story 2, Scenario
   2) — or, if a maintainer has already supplied measured mode-matrix figures by the time this
