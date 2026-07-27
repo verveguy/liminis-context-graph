@@ -72,8 +72,20 @@ pub struct CandidateReport {
     pub strict_entity_f1: f64,
     pub strict_edge_f1: f64,
     pub judged_entity_f1: Option<f64>,
+    /// Precision and recall are the diagnostic half of the judged score and F1 hides
+    /// them: a model extracting a third more items than the reference is penalised
+    /// identically to one missing a third, but the two mean opposite things. Both were
+    /// already computed by `precision_recall_f1` and discarded before reaching here.
+    pub judged_entity_precision: Option<f64>,
+    pub judged_entity_recall: Option<f64>,
     pub judged_edge_f1: Option<f64>,
+    pub judged_edge_precision: Option<f64>,
+    pub judged_edge_recall: Option<f64>,
     pub judged_summary_f1: Option<f64>,
+    /// Judge calls that failed after exhausting their retries. Non-fatal (see
+    /// `score_candidate`), so a nonzero value means some chunks are missing from the
+    /// judged averages — read it as a caveat on those numbers, not as a run failure.
+    pub judge_errors: usize,
 }
 
 /// FR-007/FR-010: one backend pair's aggregated result on one axis (entities/edges/
@@ -169,13 +181,26 @@ impl Report {
             }
             out.push_str(&format!(
                 "  strict F1 — entities: {:.3}  edges: {:.3}\n  \
-                 judged F1 — entities: {}  edges: {}  summaries: {}\n\n",
+                 judged F1 — entities: {}  edges: {}  summaries: {}\n  \
+                 judged entities — precision: {}  recall: {}\n  \
+                 judged edges    — precision: {}  recall: {}\n",
                 c.strict_entity_f1,
                 c.strict_edge_f1,
                 fmt_opt(c.judged_entity_f1),
                 fmt_opt(c.judged_edge_f1),
                 fmt_opt(c.judged_summary_f1),
+                fmt_opt(c.judged_entity_precision),
+                fmt_opt(c.judged_entity_recall),
+                fmt_opt(c.judged_edge_precision),
+                fmt_opt(c.judged_edge_recall),
             ));
+            if c.judge_errors > 0 {
+                out.push_str(&format!(
+                    "  judge errors: {} (those chunks are absent from the judged averages)\n",
+                    c.judge_errors
+                ));
+            }
+            out.push('\n');
         }
 
         // FR-007: rendered only when pairwise mode actually ran — omitted entirely (not
@@ -273,8 +298,13 @@ mod tests {
                 strict_entity_f1: 0.771,
                 strict_edge_f1: 0.771,
                 judged_entity_f1: Some(0.978),
+                judged_entity_precision: Some(0.981),
+                judged_entity_recall: Some(0.975),
                 judged_edge_f1: Some(0.978),
+                judged_edge_precision: Some(0.981),
+                judged_edge_recall: Some(0.975),
                 judged_summary_f1: None,
+                judge_errors: 0,
             }],
             pairwise: None,
         }

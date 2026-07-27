@@ -238,8 +238,17 @@ async fn score_candidate(
     let mut ref_edges_all = Vec::new();
     let mut cand_edges_all = Vec::new();
     let mut judged_entity_f1s = Vec::new();
+    let mut judged_entity_precisions = Vec::new();
+    let mut judged_entity_recalls = Vec::new();
     let mut judged_edge_f1s = Vec::new();
+    let mut judged_edge_precisions = Vec::new();
+    let mut judged_edge_recalls = Vec::new();
     let mut judged_summary_f1s = Vec::new();
+    // Judge calls that failed after their retry ladder. Counted and reported rather than
+    // propagated: extraction failures are already per-chunk, and a scoring phase is ~1340
+    // sequential judge calls, so making one bad response fatal means a single hiccup
+    // discards hours of work. It did exactly that to the #248 run.
+    let mut judge_errors = 0usize;
     // Chunks where both reference and candidate extraction succeeded — the denominator
     // strict/judged F1 are actually computed over. Distinct from `chunks_run`, which
     // counts every chunk the harness attempted regardless of whether either side errored.
@@ -264,7 +273,7 @@ async fn score_candidate(
 
         let ref_entities_val = serde_json::json!({"extracted_entities": ref_extraction.entities});
         let cand_entities_val = serde_json::json!({"extracted_entities": cand_extraction.entities});
-        let (_, _, f1) = judged_f1(
+        match judged_f1(
             judge,
             judge_cache,
             judge_model,
@@ -272,12 +281,22 @@ async fn score_candidate(
             &ref_entities_val,
             &cand_entities_val,
         )
-        .await?;
-        judged_entity_f1s.push(f1);
+        .await
+        {
+            Ok((p, r, f1)) => {
+                judged_entity_precisions.push(p);
+                judged_entity_recalls.push(r);
+                judged_entity_f1s.push(f1);
+            }
+            Err(e) => {
+                eprintln!("lcg-eval: judge error (entities): {e}");
+                judge_errors += 1;
+            }
+        }
 
         let ref_edges_val = serde_json::json!({"edges": ref_extraction.edges});
         let cand_edges_val = serde_json::json!({"edges": cand_extraction.edges});
-        let (_, _, f1) = judged_f1(
+        match judged_f1(
             judge,
             judge_cache,
             judge_model,
@@ -285,8 +304,18 @@ async fn score_candidate(
             &ref_edges_val,
             &cand_edges_val,
         )
-        .await?;
-        judged_edge_f1s.push(f1);
+        .await
+        {
+            Ok((p, r, f1)) => {
+                judged_edge_precisions.push(p);
+                judged_edge_recalls.push(r);
+                judged_edge_f1s.push(f1);
+            }
+            Err(e) => {
+                eprintln!("lcg-eval: judge error (edges): {e}");
+                judge_errors += 1;
+            }
+        }
 
         let ref_summaries: Vec<&str> = ref_extraction
             .entities
@@ -300,7 +329,7 @@ async fn score_candidate(
             .collect();
         let ref_summaries_val = serde_json::json!({"summaries": ref_summaries});
         let cand_summaries_val = serde_json::json!({"summaries": cand_summaries});
-        let (_, _, f1) = judged_f1(
+        match judged_f1(
             judge,
             judge_cache,
             judge_model,
@@ -308,8 +337,14 @@ async fn score_candidate(
             &ref_summaries_val,
             &cand_summaries_val,
         )
-        .await?;
-        judged_summary_f1s.push(f1);
+        .await
+        {
+            Ok((_, _, f1)) => judged_summary_f1s.push(f1),
+            Err(e) => {
+                eprintln!("lcg-eval: judge error (summaries): {e}");
+                judge_errors += 1;
+            }
+        }
     }
 
     let strict_entity = entity_strict_prf1(&ref_entities_all, &cand_entities_all);
@@ -333,8 +368,13 @@ async fn score_candidate(
         strict_entity_f1: strict_entity.f1,
         strict_edge_f1: strict_edge.f1,
         judged_entity_f1: average(&judged_entity_f1s),
+        judged_entity_precision: average(&judged_entity_precisions),
+        judged_entity_recall: average(&judged_entity_recalls),
         judged_edge_f1: average(&judged_edge_f1s),
+        judged_edge_precision: average(&judged_edge_precisions),
+        judged_edge_recall: average(&judged_edge_recalls),
         judged_summary_f1: average(&judged_summary_f1s),
+        judge_errors,
     })
 }
 
