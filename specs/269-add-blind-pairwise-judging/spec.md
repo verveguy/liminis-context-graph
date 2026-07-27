@@ -122,14 +122,19 @@ outbound extraction requests on both runs, and zero new judge calls on the secon
 - One or both extractions empty for a chunk → a defined verdict per axis, not a panic.
 - Judge returns malformed JSON → same recovery/error accounting as the existing
   reference-mode matching path.
-- A pair where both sides resolve to the *same* cassette backend (identical `--backend`
-  spec used under two different names, or the same name given as both sides of a
-  pairing) is degenerate and MUST be rejected at CLI validation time with a clear error
-  naming the offending backend — consistent with the existing convention in
-  `crates/eval/src/cli.rs` of rejecting nonsensical backend configurations up front
-  (duplicate backend names, `--record-cassette` paired with a `cassette:` backend, etc.)
-  rather than silently computing and burying a trivial 100%-tie result inside the
-  report.
+- A pair where both sides resolve to the identical `cassette:path=<PATH>` (the same
+  cassette file configured under two different backend names, or the same backend name
+  given as both sides of a pairing) is degenerate — a cassette replay is deterministic,
+  so this is guaranteed to be a trivial 100%-tie result — and MUST be rejected at CLI
+  validation time with a clear error naming the offending backend(s), consistent with
+  the existing convention in `crates/eval/src/cli.rs` of rejecting nonsensical backend
+  configurations up front (duplicate backend names, `--record-cassette` paired with a
+  `cassette:` backend, etc.) rather than silently computing and burying that trivial
+  result inside the report. This check is scoped narrowly to `cassette:path=` equality:
+  two backends configured with the identical *live* spec (e.g. `anthropic:model=X`)
+  under two different names are independently sampled and therefore NOT degenerate —
+  that pattern is User Story 2's mandatory calibration control and MUST remain
+  judgeable under `--judge-mode pairwise`.
 - Very large extractions pushing the pairwise prompt past the judge's context window —
   behavior matches whatever recovery the reference-mode judge path already has for
   oversized payloads; no new truncation behavior is introduced by this feature.
@@ -235,10 +240,12 @@ outbound extraction requests on both runs, and zero new judge calls on the secon
   from FR-005's explicit rationale for keeping axes distinct and from the existing
   `CandidateReport`'s convention of reporting judged entity/edge/summary F1 as separate
   fields, never combined.
-- A degenerate pair (both sides the identical backend) is rejected at CLI validation
-  time rather than computed and reported as a trivial 100% tie — consistent with
-  `crates/eval/src/cli.rs`'s existing pattern of rejecting nonsensical backend
-  configurations before any run starts.
+- A degenerate pair (both sides resolving to the identical `cassette:path=<PATH>`) is
+  rejected at CLI validation time rather than computed and reported as a trivial 100%
+  tie — consistent with `crates/eval/src/cli.rs`'s existing pattern of rejecting
+  nonsensical backend configurations before any run starts. The same *live* spec
+  configured twice under different names is not degenerate and is not rejected (see
+  Edge Cases).
 
 ## Out of Scope
 
