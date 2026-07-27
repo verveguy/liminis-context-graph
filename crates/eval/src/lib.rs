@@ -13,5 +13,6 @@ pub mod failure_taxonomy;
 pub mod judge;
 pub mod judge_cache;
 pub mod metrics;
+pub mod pairwise;
 pub mod report;
 pub mod runner;
