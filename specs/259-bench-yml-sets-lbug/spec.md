@@ -53,7 +53,7 @@ A contributor follows `CLAUDE.md`'s instructions and runs `gh workflow run bench
 
 ### Measurable Outcomes
 
-- **SC-001**: `.github/workflows/bench.yml` no longer contains `LBUG_BUILD_FROM_SOURCE` anywhere in the file.
+- **SC-001**: `.github/workflows/bench.yml` no longer sets `LBUG_BUILD_FROM_SOURCE` in the `bench` job.
 - **SC-002**: A `gh workflow run bench.yml` invocation, triggered after the fix, completes with a successful (green) run.
 - **SC-003**: That successful run's artifact list includes both `bench-results-<sha>` and `criterion-html-<sha>`.
 
