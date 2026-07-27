@@ -4,7 +4,8 @@
 
 use std::sync::Arc;
 
-use lcg_core::{CassetteWriter, Extractor, RecordingExtractor, TelemetrySink};
+use lcg_core::ontology::load_ontology_from_path;
+use lcg_core::{CassetteWriter, Extractor, Ontology, RecordingExtractor, TelemetrySink};
 
 use lcg_eval::backend::{build_extractor, parse_backend_spec, provider_label, resolved_model};
 use lcg_eval::cli::{parse_args, usage, Args, CliMode};
@@ -12,8 +13,10 @@ use lcg_eval::corpus::{default_corpus_path, load_corpus, select_subset};
 use lcg_eval::judge::{precision_recall_f1, AnthropicJudgeClient, JudgeClient, JudgeVerdict};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
 use lcg_eval::metrics::{edge_strict_prf1, entity_strict_prf1};
-use lcg_eval::report::{percentiles, CandidateReport, Report, StructuredOutputReliability};
-use lcg_eval::runner::{run_backend, BackendRunResult, CountingSink};
+use lcg_eval::report::{
+    percentiles, CandidateReport, Report, StructuredOutputReliability, VocabularyComplianceReport,
+};
+use lcg_eval::runner::{run_backend, BackendRunResult, CountingSink, VocabularyComplianceCounts};
 
 #[tokio::main]
 async fn main() {
@@ -64,6 +67,22 @@ async fn run(cli: Args) -> Result<(), String> {
         .clone()
         .expect("parse_args always sets reference");
 
+    // FR-001: load the ontology once (if given) and thread it through every backend's
+    // extraction calls. FR-002: a missing/malformed/empty ontology file is a loud usage
+    // error here, never a silent fallback to freeform.
+    let ontology: Option<Ontology> = match &cli.ontology {
+        Some(path) => Some(
+            load_ontology_from_path(std::path::Path::new(path), cli.ontology_mode.clone())
+                .map_err(|e| format!("--ontology {path}: {e}"))?,
+        ),
+        None => None,
+    };
+    // FR-003: record which regime produced this report.
+    let ontology_mode_label = match &ontology {
+        Some(o) => o.mode.to_string(),
+        None => "freeform".to_string(),
+    };
+
     let mut run_results: Vec<BackendRunResult> = Vec::new();
     for b in &cli.backends {
         let kind = parse_backend_spec(&b.spec)?;
@@ -85,8 +104,16 @@ async fn run(cli: Args) -> Result<(), String> {
             b.spec,
             chunks.len()
         );
-        run_results
-            .push(run_backend(&b.name, extractor as Arc<dyn Extractor>, sink, &chunks).await);
+        run_results.push(
+            run_backend(
+                &b.name,
+                extractor as Arc<dyn Extractor>,
+                sink,
+                &chunks,
+                ontology.as_ref(),
+            )
+            .await,
+        );
     }
 
     let reference_result = run_results
@@ -125,6 +152,7 @@ async fn run(cli: Args) -> Result<(), String> {
     let report = Report {
         corpus_size: chunks.len(),
         reference_backend: reference_name,
+        ontology_mode: ontology_mode_label,
         candidates,
     };
 
@@ -257,12 +285,25 @@ async fn score_candidate(
         error_rate,
         latency: percentiles(latencies),
         structured_output,
+        vocabulary_compliance: run_result.vocabulary_compliance.map(vocab_report),
         strict_entity_f1: strict_entity.f1,
         strict_edge_f1: strict_edge.f1,
         judged_entity_f1: average(&judged_entity_f1s),
         judged_edge_f1: average(&judged_edge_f1s),
         judged_summary_f1: average(&judged_summary_f1s),
     })
+}
+
+/// Maps the harness-internal FR-007 tally to the report's serializable shape.
+fn vocab_report(v: VocabularyComplianceCounts) -> VocabularyComplianceReport {
+    VocabularyComplianceReport {
+        entities_checked: v.entities_checked,
+        entities_out_of_vocab: v.entities_out_of_vocab,
+        entity_violation_rate: v.entity_violation_rate(),
+        edges_checked: v.edges_checked,
+        edges_out_of_vocab: v.edges_out_of_vocab,
+        edge_violation_rate: v.edge_violation_rate(),
+    }
 }
 
 /// Cache-first judge lookup (SC-003: a cache hit makes zero new judge calls).

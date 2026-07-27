@@ -94,7 +94,7 @@ async fn backend_failures_are_counted_in_error_rate_not_silently_dropped() {
     let sink = Arc::new(CountingSink::new());
     let chunks = vec![chunk("A", "prose a"), chunk("B", "prose b")];
 
-    let result = run_backend("failing-backend", extractor, sink, &chunks).await;
+    let result = run_backend("failing-backend", extractor, sink, &chunks, None).await;
 
     assert_eq!(result.chunk_results.len(), 2);
     let errors = result
@@ -126,7 +126,7 @@ async fn successful_backend_run_reports_zero_errors_and_captures_latency() {
     let sink = Arc::new(CountingSink::new());
     let chunks = vec![chunk("A", "prose a")];
 
-    let result = run_backend("ok-backend", extractor, sink, &chunks).await;
+    let result = run_backend("ok-backend", extractor, sink, &chunks, None).await;
 
     assert_eq!(result.chunk_results.len(), 1);
     assert!(result.chunk_results[0].result.is_ok());
@@ -310,7 +310,7 @@ async fn structured_output_reliability_is_independent_of_extraction_f1() {
     });
 
     let chunks = vec![chunk("A", "prose a")];
-    let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks).await;
+    let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks, None).await;
 
     // F1 side: a perfect match against itself.
     let entities = &result.chunk_results[0].result.as_ref().unwrap().entities;
@@ -370,7 +370,7 @@ async fn cassette_replay_reproduces_recorded_run_via_backend_pipeline() {
         writer,
     ));
     let record_sink = Arc::new(CountingSink::new());
-    let recorded_run = run_backend("baseline", recorder, record_sink, &chunks).await;
+    let recorded_run = run_backend("baseline", recorder, record_sink, &chunks, None).await;
     assert!(
         recorded_run.chunk_results.iter().all(|c| c.result.is_ok()),
         "recording leg must succeed for every chunk"
@@ -383,7 +383,7 @@ async fn cassette_replay_reproduces_recorded_run_via_backend_pipeline() {
     let replay_sink = Arc::new(CountingSink::new());
     let replayer =
         build_extractor(&kind, Arc::clone(&replay_sink) as Arc<dyn TelemetrySink>).unwrap();
-    let replayed_run = run_backend("baseline", replayer, replay_sink, &chunks).await;
+    let replayed_run = run_backend("baseline", replayer, replay_sink, &chunks, None).await;
 
     assert_eq!(
         recorded_run.chunk_results.len(),
@@ -422,6 +422,7 @@ async fn cassette_replay_miss_surfaces_as_cassette_miss_error() {
         recorder,
         record_sink,
         &[chunk("A", "Alice works at Acme.")],
+        None,
     )
     .await;
 
@@ -435,6 +436,7 @@ async fn cassette_replay_miss_surfaces_as_cassette_miss_error() {
         replayer,
         replay_sink,
         &[chunk("B", "an entirely different, never-recorded chunk")],
+        None,
     )
     .await;
 

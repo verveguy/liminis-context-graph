@@ -41,6 +41,19 @@ pub struct StructuredOutputReliability {
     pub malformed_rate: f64,
 }
 
+/// FR-007: how often a `Strict`-mode candidate emitted an entity or relation type outside
+/// the ontology's declared vocabulary — a distinct failure mode from JSON-syntax validity
+/// (`StructuredOutputReliability`), never folded into it (SC-003).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
+pub struct VocabularyComplianceReport {
+    pub entities_checked: u64,
+    pub entities_out_of_vocab: u64,
+    pub entity_violation_rate: f64,
+    pub edges_checked: u64,
+    pub edges_out_of_vocab: u64,
+    pub edge_violation_rate: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CandidateReport {
     pub backend_name: String,
@@ -54,6 +67,8 @@ pub struct CandidateReport {
     pub error_rate: f64,
     pub latency: LatencyPercentiles,
     pub structured_output: StructuredOutputReliability,
+    /// `Some` only for a `Strict`-mode run (FR-007); `None` for freeform/`Open` runs.
+    pub vocabulary_compliance: Option<VocabularyComplianceReport>,
     pub strict_entity_f1: f64,
     pub strict_edge_f1: f64,
     pub judged_entity_f1: Option<f64>,
@@ -65,6 +80,10 @@ pub struct CandidateReport {
 pub struct Report {
     pub corpus_size: usize,
     pub reference_backend: String,
+    /// FR-003: which regime produced this report — "freeform", "open", or "strict" — so
+    /// freeform and ontology-constrained reports are never confused when compared or
+    /// archived side by side.
+    pub ontology_mode: String,
     pub candidates: Vec<CandidateReport>,
 }
 
@@ -75,8 +94,9 @@ impl Report {
 
     pub fn render_human_readable(&self) -> String {
         let mut out = format!(
-            "Extraction-quality eval report — corpus size: {}, reference backend: {}\n\n",
-            self.corpus_size, self.reference_backend
+            "Extraction-quality eval report — corpus size: {}, reference backend: {}, \
+             ontology mode: {}\n\n",
+            self.corpus_size, self.reference_backend, self.ontology_mode
         );
         // `None` judged F1 can mean either "no judge client configured" (no
         // ANTHROPIC_API_KEY) or "zero chunk pairs succeeded on both sides to score" —
@@ -89,9 +109,7 @@ impl Report {
             out.push_str(&format!(
                 "== {} ==\n  chunks run: {}  chunks scored: {}  errors: {} ({:.1}%)\n  \
                  latency p50/p95/p99 (ms): {}/{}/{}\n  \
-                 structured output: clean={} recovered={} malformed={} (malformed rate {:.1}%)\n  \
-                 strict F1 — entities: {:.3}  edges: {:.3}\n  \
-                 judged F1 — entities: {}  edges: {}  summaries: {}\n\n",
+                 structured output: clean={} recovered={} malformed={} (malformed rate {:.1}%)\n",
                 c.backend_name,
                 c.chunks_run,
                 c.chunks_scored,
@@ -104,6 +122,24 @@ impl Report {
                 c.structured_output.recovered,
                 c.structured_output.malformed,
                 c.structured_output.malformed_rate * 100.0,
+            ));
+            // Vocabulary compliance (FR-007) is a distinct metric from structured-output
+            // reliability above — rendered as its own line, only when applicable (Strict).
+            if let Some(v) = &c.vocabulary_compliance {
+                out.push_str(&format!(
+                    "  vocabulary compliance: entities {}/{} out-of-vocab ({:.1}%)  \
+                     edges {}/{} out-of-vocab ({:.1}%)\n",
+                    v.entities_out_of_vocab,
+                    v.entities_checked,
+                    v.entity_violation_rate * 100.0,
+                    v.edges_out_of_vocab,
+                    v.edges_checked,
+                    v.edge_violation_rate * 100.0,
+                ));
+            }
+            out.push_str(&format!(
+                "  strict F1 — entities: {:.3}  edges: {:.3}\n  \
+                 judged F1 — entities: {}  edges: {}  summaries: {}\n\n",
                 c.strict_entity_f1,
                 c.strict_edge_f1,
                 fmt_opt(c.judged_entity_f1),
@@ -158,6 +194,7 @@ mod tests {
         Report {
             corpus_size: 2,
             reference_backend: "baseline".to_string(),
+            ontology_mode: "freeform".to_string(),
             candidates: vec![CandidateReport {
                 backend_name: "baseline".to_string(),
                 chunks_run: 2,
@@ -175,6 +212,7 @@ mod tests {
                     malformed: 0,
                     malformed_rate: 0.0,
                 },
+                vocabulary_compliance: None,
                 strict_entity_f1: 0.771,
                 strict_edge_f1: 0.771,
                 judged_entity_f1: Some(0.978),
@@ -182,6 +220,20 @@ mod tests {
                 judged_summary_f1: None,
             }],
         }
+    }
+
+    fn sample_strict_report() -> Report {
+        let mut report = sample_report();
+        report.ontology_mode = "strict".to_string();
+        report.candidates[0].vocabulary_compliance = Some(VocabularyComplianceReport {
+            entities_checked: 10,
+            entities_out_of_vocab: 2,
+            entity_violation_rate: 0.2,
+            edges_checked: 5,
+            edges_out_of_vocab: 1,
+            edge_violation_rate: 0.2,
+        });
+        report
     }
 
     #[test]
@@ -202,5 +254,52 @@ mod tests {
         assert!(out.contains("0.978"));
         assert!(out.contains("n/a"));
         assert!(out.contains("chunks scored"));
+    }
+
+    #[test]
+    fn json_report_records_ontology_mode() {
+        let report = sample_strict_report();
+        let json = report.to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ontology_mode"], "strict");
+        assert_eq!(
+            value["candidates"][0]["vocabulary_compliance"]["entities_out_of_vocab"],
+            2
+        );
+    }
+
+    #[test]
+    fn freeform_report_has_no_vocabulary_compliance_field_value() {
+        let report = sample_report();
+        let json = report.to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["ontology_mode"], "freeform");
+        assert!(value["candidates"][0]["vocabulary_compliance"].is_null());
+    }
+
+    #[test]
+    fn human_readable_report_renders_ontology_mode_and_vocab_compliance_distinctly() {
+        let out = sample_strict_report().render_human_readable();
+        assert!(out.contains("ontology mode: strict"));
+        assert!(out.contains("vocabulary compliance"));
+        assert!(out.contains("2/10"));
+        assert!(out.contains("1/5"));
+        // Vocabulary compliance must be a visibly separate line from structured output —
+        // not merged into it (SC-003).
+        let structured_line_idx = out.find("structured output:").unwrap();
+        let vocab_line_idx = out.find("vocabulary compliance:").unwrap();
+        assert!(vocab_line_idx > structured_line_idx);
+        let structured_line_end =
+            out[structured_line_idx..].find('\n').unwrap() + structured_line_idx;
+        assert!(
+            vocab_line_idx >= structured_line_end,
+            "vocabulary compliance must be on its own line, not appended to structured output's"
+        );
+    }
+
+    #[test]
+    fn human_readable_report_omits_vocab_compliance_line_when_not_applicable() {
+        let out = sample_report().render_human_readable();
+        assert!(!out.contains("vocabulary compliance"));
     }
 }

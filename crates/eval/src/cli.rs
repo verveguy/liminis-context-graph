@@ -4,12 +4,26 @@
 //! `crates/service/src/cli.rs` — a handful of flags doesn't clear the bar for a new
 //! dependency, and a pure `parse_args` function is just as testable.
 
+use lcg_core::OntologyMode;
+
 /// Default corpus subset when neither `--limit` nor `--all` is given (Plan: "Default
 /// corpus subset = first 50 chunks, not all 228" — keeps a default run affordable).
 pub const DEFAULT_LIMIT: usize = 50;
 pub const DEFAULT_JUDGE_CACHE: &str = "judge_cache.jsonl";
 /// Matches `assets/llm_pricing.json`'s Sonnet entry used elsewhere in this repo.
 pub const DEFAULT_JUDGE_MODEL: &str = "claude-sonnet-4-6";
+/// FR-002: when `--ontology` is given without `--ontology-mode`, the mode defaults to strict.
+pub const DEFAULT_ONTOLOGY_MODE: OntologyMode = OntologyMode::Strict;
+
+fn parse_ontology_mode(v: &str) -> Result<OntologyMode, String> {
+    match v {
+        "open" => Ok(OntologyMode::Open),
+        "strict" => Ok(OntologyMode::Strict),
+        other => Err(format!(
+            "--ontology-mode must be 'open' or 'strict', got '{other}'"
+        )),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendArg {
@@ -34,6 +48,8 @@ pub struct Args {
     pub judge_model: String,
     pub output: Option<String>,
     pub corpus: Option<String>,
+    pub ontology: Option<String>,
+    pub ontology_mode: OntologyMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -71,6 +87,15 @@ OPTIONS:
     --all                       Run over the full corpus (mutually exclusive with --limit).
     --corpus <PATH>              Path to a corpus_prose.jsonl file (default: the #217
                                  fixture at crates/core/tests/fixtures/real_corpus_wal/).
+    --ontology <PATH>            Load an Ontology from PATH and pass it through
+                                 ExtractOptions.ontology on every extraction call, exercising
+                                 the ontology-constrained (Open/Strict) prompt path instead of
+                                 freeform extraction. Omit for freeform (the default, unchanged
+                                 behavior).
+    --ontology-mode <open|strict> Mode to apply to the loaded --ontology, overriding any `mode:`
+                                 declared inside the file. Defaults to 'strict' when --ontology
+                                 is given. Requires --ontology; rejected as a usage error
+                                 otherwise.
     --record-cassette <NAME>=<PATH>
                                  Wrap the named backend in a cassette recorder (#232),
                                  writing to PATH, so this run also captures a cassette.
@@ -101,6 +126,8 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut judge_model = DEFAULT_JUDGE_MODEL.to_string();
     let mut output = None;
     let mut corpus = None;
+    let mut ontology: Option<String> = None;
+    let mut ontology_mode: Option<OntologyMode> = None;
     let mut want_help = false;
 
     let mut i = 0;
@@ -184,6 +211,22 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                         .ok_or("--corpus requires a path argument")?,
                 );
             }
+            "--ontology" => {
+                i += 1;
+                ontology = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--ontology requires a path argument")?,
+                );
+            }
+            "--ontology-mode" => {
+                i += 1;
+                let v = args
+                    .get(i)
+                    .cloned()
+                    .ok_or("--ontology-mode requires an 'open' or 'strict' argument")?;
+                ontology_mode = Some(parse_ontology_mode(&v)?);
+            }
             arg => {
                 return Err(format!("unknown argument: '{arg}'\n\n{}", usage()));
             }
@@ -217,6 +260,14 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     if all && limit.is_some() {
         return Err("--limit and --all are mutually exclusive; specify only one".to_string());
     }
+
+    if ontology.is_none() && ontology_mode.is_some() {
+        return Err(
+            "--ontology-mode requires --ontology; there is no ontology to apply the mode to"
+                .to_string(),
+        );
+    }
+    let ontology_mode = ontology_mode.unwrap_or(DEFAULT_ONTOLOGY_MODE);
 
     let reference_name = reference
         .clone()
@@ -263,6 +314,8 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         judge_model,
         output,
         corpus,
+        ontology,
+        ontology_mode,
     }))
 }
 
@@ -496,10 +549,88 @@ mod tests {
             "--judge-cache",
             "--judge-model",
             "--output",
+            "--ontology",
+            "--ontology-mode",
             "--help",
         ] {
             assert!(u.contains(flag), "usage missing {flag}");
         }
+    }
+
+    #[test]
+    fn no_ontology_flag_defaults_to_none_and_strict_placeholder() {
+        match parse_args(&args(&["--backend", "baseline=anthropic"])).unwrap() {
+            CliMode::Run(a) => {
+                assert_eq!(a.ontology, None);
+                assert_eq!(a.ontology_mode, OntologyMode::Strict);
+            }
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ontology_without_mode_defaults_to_strict() {
+        match parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--ontology",
+            "/tmp/ontology.yaml",
+        ]))
+        .unwrap()
+        {
+            CliMode::Run(a) => {
+                assert_eq!(a.ontology, Some("/tmp/ontology.yaml".to_string()));
+                assert_eq!(a.ontology_mode, OntologyMode::Strict);
+            }
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ontology_with_explicit_open_mode() {
+        match parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--ontology",
+            "/tmp/ontology.yaml",
+            "--ontology-mode",
+            "open",
+        ]))
+        .unwrap()
+        {
+            CliMode::Run(a) => {
+                assert_eq!(a.ontology_mode, OntologyMode::Open);
+            }
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ontology_mode_without_ontology_is_rejected() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--ontology-mode",
+            "strict",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--ontology-mode"));
+        assert!(err.contains("--ontology"));
+    }
+
+    #[test]
+    fn invalid_ontology_mode_value_is_rejected() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--ontology",
+            "/tmp/ontology.yaml",
+            "--ontology-mode",
+            "bogus",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--ontology-mode"));
+        assert!(err.contains("bogus"));
     }
 
     #[test]
