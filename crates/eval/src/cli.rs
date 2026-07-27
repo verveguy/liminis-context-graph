@@ -202,6 +202,18 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         ));
     }
 
+    {
+        let mut seen = std::collections::HashSet::new();
+        for b in &backends {
+            if !seen.insert(b.name.as_str()) {
+                return Err(format!(
+                    "--backend name '{}' is specified more than once; backend names must be unique",
+                    b.name
+                ));
+            }
+        }
+    }
+
     if all && limit.is_some() {
         return Err("--limit and --all are mutually exclusive; specify only one".to_string());
     }
@@ -315,6 +327,38 @@ mod tests {
     fn malformed_backend_arg_is_rejected() {
         let err = parse_args(&args(&["--backend", "no-equals-sign"])).unwrap_err();
         assert!(err.contains("NAME=SPEC"));
+    }
+
+    #[test]
+    fn duplicate_backend_name_is_rejected() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--backend",
+            "baseline=oai-http:url=http://127.0.0.1:8765/v1/chat/completions",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("baseline"));
+        assert!(err.contains("more than once"));
+    }
+
+    /// Regression test: a duplicate backend name where the second definition is a `cassette:`
+    /// spec used to slip past FR-005's `--record-cassette` rejection, because the check only
+    /// looked up the *first* backend matching the name. Now caught by the general duplicate-name
+    /// rejection above, before FR-005's check even runs.
+    #[test]
+    fn duplicate_backend_name_with_cassette_kind_is_rejected() {
+        let err = parse_args(&args(&[
+            "--backend",
+            "baseline=anthropic",
+            "--backend",
+            "baseline=cassette:path=/tmp/cassette.jsonl",
+            "--record-cassette",
+            "baseline=/tmp/other.jsonl",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("baseline"));
+        assert!(err.contains("more than once"));
     }
 
     #[test]

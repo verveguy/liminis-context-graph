@@ -213,5 +213,5 @@ and that the cassette replays deterministically against the full 228-chunk corpu
 with `qwen3.6-27b.jsonl` to verify the second cassette the same way. This replaces the
 `#[ignore]`d code-sketch approach an earlier draft of this runbook described — the CLI wiring
 that sketch was written to anticipate now exists directly, so no separate integration test file is
-needed here (`crates/eval/tests/harness_integration.rs` covers the pipeline's correctness at the
-unit level with a hand-built cassette).
+needed here (`crates/eval/tests/harness_integration.rs` already covers the pipeline's correctness
+as an integration test, with a hand-built cassette).
