@@ -216,6 +216,71 @@ that sketch was written to anticipate now exists directly, so no separate integr
 needed here (`crates/eval/tests/harness_integration.rs` already covers the pipeline's correctness
 as an integration test, with a hand-built cassette).
 
+## Pairwise judging pass (#269)
+
+Everything above measures **similarity to `baseline`** via judged precision/recall/F1 — a
+candidate that extracts something `baseline` missed is scored as a false positive for being
+right. `--judge-mode pairwise` adds a second, reference-agnostic pass over the same three
+cassettes: the judge sees the source chunk plus two *unlabelled* extractions and picks which
+better captures the content, per axis, with no backend privileged. It is a pure scoring-layer
+pass — zero extraction calls, re-runnable for free against cassettes already on disk (FR-009,
+SC-003).
+
+**This pass needs a `candidate` cassette that "The combined run" above does not currently
+capture.** The existing noise-floor leg intentionally never replays `candidate` from a cassette
+(see "Resuming a partial run" above — replaying it would make the two samples byte-identical and
+destroy the reference-mode noise-floor measurement), but it also never *records* one. To capture
+all three cassettes needed for the command below, add `--record-cassette
+candidate=anthropic-claude-haiku-4-5-20251001-candidate.jsonl` to "The combined run"'s command —
+recording `candidate`'s live calls doesn't change anything about how `candidate` is scored in
+reference mode, it just additionally captures the cassette this pairwise pass needs.
+
+Once all three cassettes exist (`baseline`, `candidate`, `qwen`), run:
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --backend candidate=cassette:path=anthropic-claude-haiku-4-5-20251001-candidate.jsonl \
+  --backend qwen=cassette:path=qwen3.6-27b.jsonl \
+  --reference baseline \
+  --all \
+  --judge-mode pairwise \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_pairwise.json
+```
+
+No `ANTHROPIC_API_KEY`-gated extraction backend is configured here — all three are `cassette:`
+replays — so the run makes zero outbound extraction requests regardless (FR-009); judge calls
+still require `ANTHROPIC_API_KEY` (the judge is a standalone client, ADR-0048 Decision 3,
+independent of the backends under test).
+
+This produces three backend pairs, each judged on all three axes (entities/edges/summary):
+
+- **`baseline` vs `candidate` is the mandatory calibration control** (User Story 2) — two
+  independent samples of the same model. Each axis's win rate should land within
+  **45–55%** (`CALIBRATION_BAND_LOW`/`_HIGH`, ADR-0050); a loud stderr warning fires naming the
+  observed rate and axis if not. Do not treat the other two pairs' results as trustworthy
+  without checking this one first.
+- **`baseline` vs `qwen`** and **`candidate` vs `qwen`** are the actual hosted-vs-local blind
+  comparisons — read the win rate as "how often the judge picked `qwen`'s extraction over the
+  hosted one when neither was labelled," a different question from reference-F1's "how much
+  would existing graph content shift if we swapped models."
+
+Every pair/axis result also carries an `order_inconsistency_rate` — never trust a win rate
+without checking it alongside (FR-007). Above **20%**
+(`ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`, ADR-0050), the judge is flipping its answer often
+enough when the slot order reverses that the win rate isn't distinguishable from position-bias
+noise; a loud stderr warning fires for this too. `chunks_skipped` depends on each pair's actual
+cassette coverage — chunks present on only one side are excluded from that pair's tally, never
+counted as a loss (FR-010). The known `baseline`/`qwen` coverage (226/223, a 221 overlap) means
+that pair is expected to report a nonzero skip count; `candidate` is freshly recorded per this
+runbook, so its overlap with the other two isn't known ahead of a run and may be zero.
+
+Re-running the exact command above against the same `--judge-cache` path makes zero new judge
+calls (SC-005) — free to re-run after tweaking the report format or investigating a surprising
+result.
+
 ## Running the ontology mode matrix (#266)
 
 Everything above measures **freeform extraction only** — `ExtractOptions.ontology` was always

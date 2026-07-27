@@ -20,14 +20,28 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::judge::JudgeVerdict;
+use crate::judge::{JudgeVerdict, PairwiseVerdict};
+
+/// The two verdict shapes a cache entry can hold, disambiguated by field set alone: a
+/// `JudgeVerdict` has `matched`/`unmatched_reference`/`unmatched_candidate`, a
+/// `PairwiseVerdict` has `winner`/`rationale` — fully disjoint, so `#[serde(untagged)]`
+/// deserialization is unambiguous and needs no discriminant field. This keeps any
+/// `JudgeVerdict` line already on a user's disk (written before pairwise mode existed,
+/// #269) loading unchanged: `#[serde(flatten)]` on `CacheEntry` below merges the matched
+/// variant's fields straight into the top-level JSON object, byte-for-byte identical to
+/// the pre-#269 shape (FR-006).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CachedVerdict {
+    Judge(JudgeVerdict),
+    Pairwise(PairwiseVerdict),
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CacheEntry {
     key: String,
-    matched: Vec<(usize, usize)>,
-    unmatched_reference: Vec<usize>,
-    unmatched_candidate: Vec<usize>,
+    #[serde(flatten)]
+    verdict: CachedVerdict,
 }
 
 /// Recursively sorts object keys alphabetically, mirroring Python's `json.dumps(...,
@@ -76,7 +90,7 @@ pub fn cache_key(
 
 pub struct JudgeCache {
     path: PathBuf,
-    entries: Mutex<HashMap<String, JudgeVerdict>>,
+    entries: Mutex<HashMap<String, CachedVerdict>>,
 }
 
 impl JudgeCache {
@@ -100,14 +114,7 @@ impl JudgeCache {
                             i + 1
                         )
                     })?;
-                    entries.insert(
-                        entry.key.clone(),
-                        JudgeVerdict {
-                            matched: entry.matched,
-                            unmatched_reference: entry.unmatched_reference,
-                            unmatched_candidate: entry.unmatched_candidate,
-                        },
-                    );
+                    entries.insert(entry.key, entry.verdict);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -125,27 +132,50 @@ impl JudgeCache {
         })
     }
 
-    /// Returns the cached verdict for `key`, if present — a hit here must short-circuit
-    /// before any judge call (SC-003).
+    /// Returns the cached matching-mode verdict for `key`, if present — a hit here must
+    /// short-circuit before any judge call (SC-003). Returns `None` if `key` is absent or
+    /// holds a pairwise-mode verdict (FR-006: the two prompt-name families never collide,
+    /// so this should not happen in practice, but a wrong-variant lookup fails closed
+    /// rather than panicking).
     pub fn get(&self, key: &str) -> Option<JudgeVerdict> {
-        self.entries.lock().unwrap().get(key).cloned()
+        match self.entries.lock().unwrap().get(key) {
+            Some(CachedVerdict::Judge(v)) => Some(v.clone()),
+            _ => None,
+        }
     }
 
-    /// Records a freshly-judged verdict both durably on disk and in memory (append-only,
+    /// Records a freshly-judged matching-mode verdict (FR-006 counterpart: `insert_pairwise`).
+    pub fn insert(&self, key: String, verdict: JudgeVerdict) -> Result<(), String> {
+        self.insert_internal(key, CachedVerdict::Judge(verdict))
+    }
+
+    /// Returns the cached pairwise-mode verdict for `key`, if present (FR-006). See `get`'s
+    /// wrong-variant note — the mirror case applies here.
+    pub fn get_pairwise(&self, key: &str) -> Option<PairwiseVerdict> {
+        match self.entries.lock().unwrap().get(key) {
+            Some(CachedVerdict::Pairwise(v)) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
+    /// Records a freshly-judged pairwise-mode verdict (FR-006).
+    pub fn insert_pairwise(&self, key: String, verdict: PairwiseVerdict) -> Result<(), String> {
+        self.insert_internal(key, CachedVerdict::Pairwise(verdict))
+    }
+
+    /// Shared disk-then-memory write path for `insert`/`insert_pairwise` (append-only,
     /// matching `CassetteWriter`'s convention — re-opening never truncates). The lock is
     /// held across the whole call, not just the in-memory insert, so concurrent callers
     /// can't interleave partial JSONL lines on disk. The disk write happens *before* the
-    /// in-memory insert: if the write fails, the verdict must not become visible to `get`,
-    /// or a later cache hit in this same process would report success for a comparison
-    /// that was never actually persisted.
-    pub fn insert(&self, key: String, verdict: JudgeVerdict) -> Result<(), String> {
+    /// in-memory insert: if the write fails, the verdict must not become visible to `get`/
+    /// `get_pairwise`, or a later cache hit in this same process would report success for a
+    /// comparison that was never actually persisted.
+    fn insert_internal(&self, key: String, verdict: CachedVerdict) -> Result<(), String> {
         let mut entries = self.entries.lock().unwrap();
 
         let entry = CacheEntry {
             key: key.clone(),
-            matched: verdict.matched.clone(),
-            unmatched_reference: verdict.unmatched_reference.clone(),
-            unmatched_candidate: verdict.unmatched_candidate.clone(),
+            verdict: verdict.clone(),
         };
         let line = serde_json::to_string(&entry).map_err(|e| e.to_string())?;
 
@@ -169,6 +199,7 @@ impl JudgeCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::judge::PairwiseWinner;
     use tempfile::TempDir;
 
     #[test]
@@ -289,5 +320,88 @@ mod tests {
             2,
             "re-opening must append, not truncate"
         );
+    }
+
+    // ── FR-006: pairwise-mode cache generalization ─────────────────────────────────
+
+    fn sample_pairwise_verdict() -> PairwiseVerdict {
+        PairwiseVerdict {
+            winner: PairwiseWinner::A,
+            rationale: "A is more complete".to_string(),
+        }
+    }
+
+    #[test]
+    fn pairwise_insert_then_get_pairwise_roundtrips() {
+        let dir = TempDir::new().unwrap();
+        let cache = JudgeCache::load(dir.path().join("cache.jsonl")).unwrap();
+        let verdict = sample_pairwise_verdict();
+        cache
+            .insert_pairwise("k1".to_string(), verdict.clone())
+            .unwrap();
+        assert_eq!(cache.get_pairwise("k1"), Some(verdict));
+    }
+
+    #[test]
+    fn old_format_matching_only_cache_line_still_loads_unchanged() {
+        // A cache file written before pairwise mode existed (#269) has lines shaped
+        // exactly like `CacheEntry`'s pre-generalization fields — no "winner"/"rationale"
+        // anywhere. FR-006 requires this to keep loading without any migration step.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.jsonl");
+        std::fs::write(
+            &path,
+            "{\"key\":\"k1\",\"matched\":[[0,0]],\"unmatched_reference\":[],\"unmatched_candidate\":[]}\n",
+        )
+        .unwrap();
+
+        let cache = JudgeCache::load(&path).unwrap();
+        assert_eq!(
+            cache.get("k1"),
+            Some(JudgeVerdict {
+                matched: vec![(0, 0)],
+                unmatched_reference: vec![],
+                unmatched_candidate: vec![],
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_matching_and_pairwise_entries_reload_correctly() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cache.jsonl");
+        let matching_verdict = JudgeVerdict {
+            matched: vec![(0, 0)],
+            unmatched_reference: vec![],
+            unmatched_candidate: vec![],
+        };
+        let pairwise_verdict = sample_pairwise_verdict();
+        {
+            let cache = JudgeCache::load(&path).unwrap();
+            cache
+                .insert("match-key".to_string(), matching_verdict.clone())
+                .unwrap();
+            cache
+                .insert_pairwise("pair-key".to_string(), pairwise_verdict.clone())
+                .unwrap();
+        }
+        let reloaded = JudgeCache::load(&path).unwrap();
+        assert_eq!(reloaded.get("match-key"), Some(matching_verdict));
+        assert_eq!(reloaded.get_pairwise("pair-key"), Some(pairwise_verdict));
+    }
+
+    #[test]
+    fn wrong_variant_lookup_returns_none_not_panic() {
+        let dir = TempDir::new().unwrap();
+        let cache = JudgeCache::load(dir.path().join("cache.jsonl")).unwrap();
+        cache
+            .insert("match-key".to_string(), JudgeVerdict::default())
+            .unwrap();
+        cache
+            .insert_pairwise("pair-key".to_string(), sample_pairwise_verdict())
+            .unwrap();
+
+        assert_eq!(cache.get_pairwise("match-key"), None);
+        assert_eq!(cache.get("pair-key"), None);
     }
 }

@@ -577,6 +577,74 @@ were perfect. See `docs/eval-full-corpus-runbook.md`'s "Running the ontology mod
 section for the full freeform/`Open`/`Strict` three-command comparison procedure and
 `crates/eval/scripts/run_mode_matrix.sh` for a runnable version of it.
 
+### Blind pairwise judging (`--judge-mode`)
+
+The reference-mode report above measures **similarity to `--reference`**, not quality — the
+reference is one more model's output, not ground truth, so a candidate that extracts something
+the reference missed is scored as a false positive for being right. `--judge-mode pairwise`
+(#269) adds a second, reference-agnostic signal: for every pair of configured backends, the
+judge sees the source chunk plus the two extractions *unlabelled* (slot A / slot B, no backend
+name, model id, or provider reachable by the judge) and picks which better captures the
+content, per axis (entities/edges/summary). No backend is privileged.
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=baseline.jsonl \
+  --backend candidate=cassette:path=candidate.jsonl \
+  --backend qwen=cassette:path=qwen.jsonl \
+  --reference baseline \
+  --judge-mode pairwise
+```
+
+- `--judge-mode <reference|pairwise|both>` (default `reference`) — `reference` is the
+  unchanged pre-#269 behavior (omitting the flag leaves output byte-identical). `pairwise`
+  runs only the blind pairwise pass above — the reference-mode judge calls above are skipped
+  entirely, not run-and-ignored, so a candidate that's only interested in the pairwise signal
+  doesn't pay for reference-mode judge calls it didn't ask for. `both` runs both passes.
+- Every chunk is judged in **both** slot orders (an extraction placed in slot A once, slot B
+  once), with slot assignment derived deterministically from a hash of the chunk key and the
+  two backend names — never wall-clock or RNG, so a re-run reproduces the same result exactly.
+  Agreeing verdicts count as a win for the agreed side; disagreeing verdicts count as a tie and
+  increment an **order-inconsistency** counter — a judge that flips its answer when the
+  operands swap is reporting position bias, not model quality, and that must surface as a
+  number rather than be averaged away.
+- The report's `pairwise` section (present only when `--judge-mode` requested it — absent
+  entirely, not null, under the default `reference` mode) lists, per backend pair and per
+  axis: wins, losses, ties, win rate (excluding ties from the denominator), the
+  order-inconsistency rate, chunks compared, and chunks skipped (present on only one side of
+  the pair — e.g. differing cassette coverage — never silently counted as a loss).
+- **The reference-vs-candidate pair is always included** — pairwise mode covers every
+  unordered pair among the configured `--backend`s, not just candidates against the
+  designated reference.
+- **Judge calibration control**: configure the same model as two independently-recorded
+  cassettes under different backend names (the pairwise analogue of the reference-mode
+  noise-floor pattern above) and judge that pair too. Two independent samples of the same
+  model should split near 50/50 on every axis. A run prints a stderr note for **every** pair
+  whose win rate falls outside **45–55%** (`pairwise::CALIBRATION_BAND_LOW`/`_HIGH`) — which
+  pair is *the* calibration control is operator knowledge the harness can't derive from
+  `--backend` specs alone (two independently-recorded `cassette:path=` files of the same
+  model, the pattern above, share no spec string to detect it by), so the note doesn't assert
+  bias outright: if the flagged pair is your calibration control, the deviation likely means
+  judge position bias and every pairwise result in the run should be treated with suspicion;
+  if it's a genuine candidate-vs-candidate pair, landing outside the band is the expected,
+  desired signal (the whole point of pairwise judging), not evidence of bias. A separate
+  warning fires for every pair whenever its order-inconsistency rate exceeds **20%**
+  (`pairwise::ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`) — above that, the judge is flipping
+  its answer often enough that the win rate isn't distinguishable from noise; this one is not
+  conditional on which pair is the calibration control. Neither warning blocks the run; both
+  are stderr-only, so the report artifact itself stays pure data. See
+  [ADR-0050](docs/adr/0050-blind-pairwise-judging.md) for the rationale behind both numbers.
+- A degenerate pair — two backends whose specs resolve to the *identical* `cassette:path=`
+  — is rejected at CLI parse time, before any judge call, naming the offending backend names
+  (FR-011). This does **not** reject the same *live* spec (e.g. `anthropic:model=X`)
+  configured twice under different names — that's the calibration pattern above, which
+  produces two independently-sampled, non-degenerate outputs and must keep working.
+- Pairwise mode reuses the same `run_results` reference mode already produced — it makes
+  **zero additional extraction calls**, whether the backends are live or `cassette:path=`
+  replays, and reuses `--judge-cache` under a disjoint `prompt_name` family so pairwise and
+  reference-mode cache entries can never collide. See "Cost implications" below for the
+  judge-call multiplier this adds.
+
 ### Cost implications
 
 Every corpus chunk costs two extraction calls (entities, then edges) per configured backend,
@@ -591,6 +659,13 @@ with `--limit N` / `--all`) is sized to keep a default run affordable; widening 
 cost roughly linearly in chunk count. Without `ANTHROPIC_API_KEY` set, the harness still runs
 and reports strict-string F1, but skips judge scoring entirely (no cost, no judged F1 in the
 report).
+
+`--judge-mode pairwise`/`both` multiplies judge-call volume further: every unordered backend
+pair (C(N,2), not N-1) is judged in both slot orders (FR-004) across all three axes — a
+3-backend `pairwise` run costs 3 pairs × 2 orders × 3 axes = 18 judge calls per chunk, versus
+reference mode's 2 candidates × 1 order × 3 axes = 6. Still **zero extraction calls** either
+way (FR-009) — the judge cache applies identically, so a re-run against the same
+`--judge-cache` path costs nothing (SC-005).
 
 ## MCP-over-stdio transport
 

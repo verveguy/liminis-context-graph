@@ -18,9 +18,12 @@ use lcg_core::{
 };
 use lcg_eval::backend::{build_extractor, parse_backend_spec};
 use lcg_eval::corpus::{load_corpus, select_subset, CorpusChunk};
-use lcg_eval::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
+use lcg_eval::judge::{
+    precision_recall_f1, JudgeClient, JudgeVerdict, PairwiseVerdict, PairwiseWinner,
+};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
 use lcg_eval::metrics::entity_strict_prf1;
+use lcg_eval::pairwise::{score_pair_axis, PairwiseAxis};
 use lcg_eval::runner::{run_backend, CountingSink};
 
 /// FR-005's committed ontology fixture, alongside the #217 corpus fixture.
@@ -146,6 +149,8 @@ async fn successful_backend_run_reports_zero_errors_and_captures_latency() {
 struct CountingJudgeClient {
     calls: AtomicUsize,
     verdict: JudgeVerdict,
+    pairwise_calls: AtomicUsize,
+    pairwise_verdict: PairwiseVerdict,
 }
 
 impl CountingJudgeClient {
@@ -153,6 +158,20 @@ impl CountingJudgeClient {
         Self {
             calls: AtomicUsize::new(0),
             verdict,
+            pairwise_calls: AtomicUsize::new(0),
+            pairwise_verdict: PairwiseVerdict {
+                winner: PairwiseWinner::Tie,
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn new_pairwise(pairwise_verdict: PairwiseVerdict) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            verdict: JudgeVerdict::default(),
+            pairwise_calls: AtomicUsize::new(0),
+            pairwise_verdict,
         }
     }
 }
@@ -166,6 +185,18 @@ impl JudgeClient for CountingJudgeClient {
     ) -> BoxFuture<'a, Result<JudgeVerdict, String>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let v = self.verdict.clone();
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn judge_pairwise<'a>(
+        &'a self,
+        _prompt_name: &'a str,
+        _chunk_text: &'a str,
+        _slot_a: &'a Value,
+        _slot_b: &'a Value,
+    ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+        self.pairwise_calls.fetch_add(1, Ordering::SeqCst);
+        let v = self.pairwise_verdict.clone();
         Box::pin(async move { Ok(v) })
     }
 }
@@ -571,5 +602,246 @@ async fn cassette_recorded_freeform_misses_against_strict_ontology_replay() {
         err.contains("CassetteMiss") || err.contains("no cassette record"),
         "a freeform-recorded cassette must miss against a Strict-mode replay of the same \
          chunk, since ontology participates in the cassette key — got: {err}"
+    );
+}
+
+// ── blind pairwise judging (#269) ───────────────────────────────────────────────
+
+/// Fails whenever the chunk's prose contains `fail_marker`, otherwise returns a canned
+/// success — lets a single test drive one chunk into an `Err` result (e.g. a simulated
+/// cassette miss) while the rest of the run succeeds, without needing a real cassette.
+struct SelectivelyFailingExtractor {
+    fail_marker: &'static str,
+}
+
+impl Extractor for SelectivelyFailingExtractor {
+    fn extract<'a>(
+        &'a self,
+        opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        let should_fail = opts.episode_body.contains(self.fail_marker);
+        Box::pin(async move {
+            if should_fail {
+                Err(Error::Ipc("simulated cassette miss".to_string()))
+            } else {
+                Ok(ExtractionResult {
+                    entities: vec![ExtractedEntity {
+                        name: "Fallback".to_string(),
+                        entity_type: "Thing".to_string(),
+                        summary: "a thing".to_string(),
+                    }],
+                    edges: vec![],
+                })
+            }
+        })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+}
+
+#[tokio::test]
+async fn pairwise_repeat_run_against_same_cache_makes_zero_new_judge_calls_sc005() {
+    let dir = TempDir::new().unwrap();
+    let cache_path = dir.path().join("pairwise_judge_cache.jsonl");
+    let chunks = vec![
+        chunk("A", "prose about Alice"),
+        chunk("B", "prose about Bob"),
+    ];
+
+    let extractor_x: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s1".to_string(),
+            }],
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s2".to_string(),
+            }],
+            edges: vec![],
+        },
+    ]));
+    let extractor_y: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Carol".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s3".to_string(),
+            }],
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Dave".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s4".to_string(),
+            }],
+            edges: vec![],
+        },
+    ]));
+    let run_x = run_backend(
+        "x",
+        extractor_x,
+        Arc::new(CountingSink::new()),
+        &chunks,
+        None,
+    )
+    .await;
+    let run_y = run_backend(
+        "y",
+        extractor_y,
+        Arc::new(CountingSink::new()),
+        &chunks,
+        None,
+    )
+    .await;
+
+    let judge = CountingJudgeClient::new_pairwise(PairwiseVerdict {
+        winner: PairwiseWinner::Tie,
+        rationale: String::new(),
+    });
+
+    // First run: cache is cold, so this must call the judge for every (chunk, order) pair —
+    // 2 chunks x 2 slot orders (FR-004).
+    let calls_after_first;
+    {
+        let cache = JudgeCache::load(&cache_path).unwrap();
+        score_pair_axis(
+            &judge,
+            &cache,
+            "claude-sonnet-4-6",
+            PairwiseAxis::Entities,
+            &chunks,
+            &run_x,
+            &run_y,
+        )
+        .await
+        .unwrap();
+        calls_after_first = judge.pairwise_calls.load(Ordering::SeqCst);
+    }
+    assert_eq!(calls_after_first, 4);
+
+    // Second "run" against the same corpus/backends and the same on-disk cache path: must
+    // be served entirely from cache (SC-005).
+    {
+        let cache = JudgeCache::load(&cache_path).unwrap();
+        score_pair_axis(
+            &judge,
+            &cache,
+            "claude-sonnet-4-6",
+            PairwiseAxis::Entities,
+            &chunks,
+            &run_x,
+            &run_y,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        judge.pairwise_calls.load(Ordering::SeqCst),
+        calls_after_first,
+        "a repeat pairwise run against the same cache must make zero new judge calls (SC-005)"
+    );
+}
+
+#[tokio::test]
+async fn pairwise_chunk_missing_on_one_side_is_skipped_not_scored_as_loss_fr010() {
+    let chunks = vec![
+        chunk("A", "prose about Alice"),
+        chunk("B", "prose containing MISSING_MARKER"),
+    ];
+
+    let extractor_x: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s1".to_string(),
+            }],
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "s2".to_string(),
+            }],
+            edges: vec![],
+        },
+    ]));
+    let extractor_y: Arc<dyn Extractor> = Arc::new(SelectivelyFailingExtractor {
+        fail_marker: "MISSING_MARKER",
+    });
+
+    let run_x = run_backend(
+        "x",
+        extractor_x,
+        Arc::new(CountingSink::new()),
+        &chunks,
+        None,
+    )
+    .await;
+    let run_y = run_backend(
+        "y",
+        extractor_y,
+        Arc::new(CountingSink::new()),
+        &chunks,
+        None,
+    )
+    .await;
+    assert!(
+        run_y.chunk_results[1].result.is_err(),
+        "chunk B must fail on side y for this test to be meaningful (FR-010's premise)"
+    );
+
+    let judge = CountingJudgeClient::new_pairwise(PairwiseVerdict {
+        winner: PairwiseWinner::A,
+        rationale: String::new(),
+    });
+    let dir = TempDir::new().unwrap();
+    let cache = JudgeCache::load(dir.path().join("pairwise_judge_cache.jsonl")).unwrap();
+
+    let tally = score_pair_axis(
+        &judge,
+        &cache,
+        "claude-sonnet-4-6",
+        PairwiseAxis::Entities,
+        &chunks,
+        &run_x,
+        &run_y,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(tally.chunks_compared, 1, "only chunk A had both sides Ok");
+    assert_eq!(
+        tally.chunks_skipped, 1,
+        "chunk B must be tallied as skipped, per FR-010 — never treated as a loss"
+    );
+    assert_eq!(
+        tally.wins_a + tally.wins_b + tally.ties,
+        1,
+        "the skipped chunk must never contribute to wins/losses/ties"
     );
 }
