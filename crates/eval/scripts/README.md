@@ -10,6 +10,7 @@ one of those traps has now been hit at least once.
 | `02-timing-check.sh` | Measures tok/s and projects full-corpus runtime | free |
 | `03-capture-qwen.sh` | Captures the qwen cassette, no hosted spend | local compute only |
 | `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
+| `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
 
 ```bash
 crates/eval/scripts/01-start-server.sh
@@ -55,6 +56,16 @@ judged F1 is 1.000 by construction, and the measurement destroys itself while st
 producing a plausible-looking report. A cassette miss is a per-chunk error
 (`Error::CassetteMiss`), not a crash, so partial coverage shows up honestly in
 `error_rate`.
+
+**A judge failure kills the whole run, and the retry ladder is short.** The judge retries
+429/529 three times with 1s/2s/4s backoff (`judge.rs:169-173`) — about 7 seconds of
+tolerance — then the error propagates through `judged_f1(...).await?` in
+`score_candidate` and aborts everything. The #248 run died 17 calls into a ~1340-call
+scoring phase this way, immediately after a 228-call extraction burst. Extraction losses
+are per-chunk and recorded in `error_rate`; judge losses are fatal to the run. Nothing is
+*lost* when it happens — cassettes are on disk and each verdict is appended to the judge
+cache the moment it arrives (`judge_cache.rs:157-162`) — but you must resume with `05`,
+not `04`, or you will pay for the live extraction leg a second time for no benefit.
 
 **Cassettes are not reusable across ontology modes.** `opts.ontology` feeds both
 `entity_system_prompt` and `edge_system_prompt`, and those are hashed into the cassette

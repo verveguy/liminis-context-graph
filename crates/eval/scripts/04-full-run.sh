@@ -9,12 +9,20 @@
 #   baseline  = cassette  -> the reference. Replaying the recorded Haiku run costs
 #                            nothing and is byte-stable across re-runs, which is
 #                            exactly what you want from a reference.
-#   candidate = anthropic -> LIVE, and it must stay live. Its disagreement with
-#                            baseline IS the noise floor: two independent Haiku
-#                            samples of the same corpus. Point this at a cassette and
-#                            judged F1 becomes 1.000 by construction -- the
-#                            measurement silently destroys itself. Do not "optimise"
-#                            this leg into a replay.
+#   candidate = anthropic -> LIVE, and it must stay live IN THIS SCRIPT. Its
+#                            disagreement with baseline IS the noise floor: two
+#                            independent Haiku samples of the same corpus. Replaying
+#                            the baseline cassette here makes the two legs identical,
+#                            judged F1 comes back 1.000 by construction, and the noise
+#                            floor silently reads as zero. Do not "optimise" this leg.
+#
+#                            The constraint is on the *sampling events* being
+#                            independent, not on how results reach the scorer. Once
+#                            this script has captured its own candidate cassette, that
+#                            independent sample exists permanently -- and
+#                            05-score-only.sh may then replay all three legs to
+#                            re-score at zero extraction cost. 04 makes the sample;
+#                            05 scores one that already exists.
 #   qwen      = cassette  -> the candidate under test, replayed from 03's capture.
 #
 # A cassette miss is a per-chunk error (Error::CassetteMiss), not a crash, and shows up
