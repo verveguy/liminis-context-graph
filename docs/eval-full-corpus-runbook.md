@@ -15,6 +15,32 @@ README's "quality-verified" wording should change to match whatever the numbers 
 — including walking that claim back if the local model scores materially worse than the
 inherited figures.
 
+## Scripted path (recommended)
+
+`crates/eval/scripts/` automates everything below and encodes several traps that have
+each cost a run. Prefer it over copy-pasting the commands in this document:
+
+```bash
+crates/eval/scripts/01-start-server.sh          # starts mlx with thinking DISABLED
+crates/eval/scripts/02-timing-check.sh          # projects runtime; do not skip
+crates/eval/scripts/03-capture-qwen.sh 25       # validate on 25 chunks, no hosted spend
+crates/eval/scripts/04-full-run.sh              # the real benchmark
+```
+
+> **Thinking mode must be disabled on the local server.** `qwen3.6` defaults to
+> emitting `<think>` reasoning, which is ~10x slower *and* scores worse on
+> enumeration tasks — `docs/history/extraction-eval-2026-04.md` measured
+> `qwen3.6-27b-thinking-only` at 112.7s p50 versus 10.9s without, and judged it
+> "operationally non-viable". Start the server with
+> `--chat-template-args '{"enable_thinking": false}'`, which `01-start-server.sh`
+> does and then verifies. A full-corpus capture in thinking mode projects to 15+
+> hours and yields a cassette of the known-bad configuration.
+
+> **Use the model id the server advertises**, i.e.
+> `model=mlx-community/Qwen3.6-27B-4bit`. `mlx_lm.server` treats an unrecognised id
+> as a HuggingFace repo to fetch, so `model=qwen3.6-27b` fails *every* call with
+> `Repository Not Found` and leaves an empty cassette with no other symptom.
+
 ## Prerequisites
 
 1. **A reachable local OpenAI-compatible server hosting `qwen3.6-27b`** — e.g. `mlx_lm.server`
