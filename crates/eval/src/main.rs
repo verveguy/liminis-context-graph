@@ -8,13 +8,18 @@ use lcg_core::ontology::load_ontology_from_path;
 use lcg_core::{CassetteWriter, Extractor, Ontology, RecordingExtractor, TelemetrySink};
 
 use lcg_eval::backend::{build_extractor, parse_backend_spec, provider_label, resolved_model};
-use lcg_eval::cli::{parse_args, usage, Args, CliMode};
+use lcg_eval::cli::{parse_args, usage, Args, CliMode, JudgeMode};
 use lcg_eval::corpus::{default_corpus_path, load_corpus, select_subset};
 use lcg_eval::judge::{precision_recall_f1, AnthropicJudgeClient, JudgeClient, JudgeVerdict};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
 use lcg_eval::metrics::{edge_strict_prf1, entity_strict_prf1};
+use lcg_eval::pairwise::{
+    score_all_pairs, CALIBRATION_BAND_HIGH, CALIBRATION_BAND_LOW,
+    ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD,
+};
 use lcg_eval::report::{
-    percentiles, CandidateReport, Report, StructuredOutputReliability, VocabularyComplianceReport,
+    percentiles, CandidateReport, PairwiseReportEntry, Report, StructuredOutputReliability,
+    VocabularyComplianceReport,
 };
 use lcg_eval::runner::{run_backend, BackendRunResult, CountingSink, VocabularyComplianceCounts};
 
@@ -135,13 +140,22 @@ async fn run(cli: Args) -> Result<(), String> {
     }
     let judge_cache = JudgeCache::load(&cli.judge_cache)?;
 
+    // Reference-mode judge calls are skipped entirely (not run-and-ignored) when the user
+    // asked for pairwise only — `--judge-mode both` is how to get both passes' judge spend.
+    let reference_judge_client: Option<&dyn JudgeClient> = if cli.judge_mode == JudgeMode::Pairwise
+    {
+        None
+    } else {
+        judge_client.as_deref()
+    };
+
     let mut candidates = Vec::new();
     for run_result in &run_results {
         candidates.push(
             score_candidate(
                 run_result,
                 &reference_result,
-                judge_client.as_deref(),
+                reference_judge_client,
                 &judge_cache,
                 &cli.judge_model,
             )
@@ -149,11 +163,41 @@ async fn run(cli: Args) -> Result<(), String> {
         );
     }
 
+    // FR-008/FR-009: pairwise mode covers every configured backend pair, reusing the same
+    // `run_results` already produced above — zero additional extraction calls. `None` (not
+    // an empty `Some(vec![])`) both when `--judge-mode` never asked for it (SC-004: the key
+    // is then absent from serialization) and when it did ask but no judge client is
+    // available (nothing was actually scored).
+    let pairwise = if cli.judge_mode == JudgeMode::Reference {
+        None
+    } else {
+        match judge_client.as_deref() {
+            Some(judge) => {
+                let axis_results =
+                    score_all_pairs(&chunks, &run_results, judge, &judge_cache, &cli.judge_model)
+                        .await?;
+                let entries: Vec<PairwiseReportEntry> =
+                    axis_results.into_iter().map(to_report_entry).collect();
+                warn_on_calibration_and_inconsistency(&entries);
+                Some(entries)
+            }
+            None => {
+                eprintln!(
+                    "lcg-eval: ANTHROPIC_API_KEY not set — skipping pairwise judging \
+                     (--judge-mode {})",
+                    judge_mode_label(cli.judge_mode)
+                );
+                None
+            }
+        }
+    };
+
     let report = Report {
         corpus_size: chunks.len(),
         reference_backend: reference_name,
         ontology_mode: ontology_mode_label,
         candidates,
+        pairwise,
     };
 
     println!("{}", report.render_human_readable());
@@ -332,5 +376,63 @@ fn average(values: &[f64]) -> Option<f64> {
         None
     } else {
         Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn judge_mode_label(mode: JudgeMode) -> &'static str {
+    match mode {
+        JudgeMode::Reference => "reference",
+        JudgeMode::Pairwise => "pairwise",
+        JudgeMode::Both => "both",
+    }
+}
+
+/// Translates one `pairwise::score_all_pairs` result into the report's serializable shape
+/// (FR-007). `wins`/`losses` are from `backend_a`'s perspective.
+fn to_report_entry(r: lcg_eval::pairwise::PairwiseAxisResult) -> PairwiseReportEntry {
+    PairwiseReportEntry {
+        backend_a: r.backend_a,
+        backend_b: r.backend_b,
+        axis: r.axis.label().to_string(),
+        wins: r.tally.wins_a,
+        losses: r.tally.wins_b,
+        ties: r.tally.ties,
+        win_rate: r.tally.win_rate_a(),
+        order_inconsistency_rate: r.tally.order_inconsistency_rate(),
+        chunks_compared: r.tally.chunks_compared,
+        chunks_skipped: r.tally.chunks_skipped,
+    }
+}
+
+/// SC-001/SC-002: loud stderr warnings — never block the run, the report artifact itself
+/// stays pure data — when a pair/axis's win rate falls outside the calibration band or its
+/// order-inconsistency rate exceeds the untrusted threshold.
+fn warn_on_calibration_and_inconsistency(entries: &[PairwiseReportEntry]) {
+    for e in entries {
+        if !(CALIBRATION_BAND_LOW..=CALIBRATION_BAND_HIGH).contains(&e.win_rate) {
+            eprintln!(
+                "lcg-eval: WARNING judge-bias — {} vs {} [{}]: win rate {:.1}% falls outside \
+                 the {:.0}-{:.0}% calibration band (SC-001); this may indicate judge position \
+                 bias rather than a genuine quality difference",
+                e.backend_a,
+                e.backend_b,
+                e.axis,
+                e.win_rate * 100.0,
+                CALIBRATION_BAND_LOW * 100.0,
+                CALIBRATION_BAND_HIGH * 100.0,
+            );
+        }
+        if e.order_inconsistency_rate > ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD {
+            eprintln!(
+                "lcg-eval: WARNING {} vs {} [{}]: order-inconsistency rate {:.1}% exceeds the \
+                 {:.0}% untrusted threshold (SC-002) — this pairwise result is not to be \
+                 trusted",
+                e.backend_a,
+                e.backend_b,
+                e.axis,
+                e.order_inconsistency_rate * 100.0,
+                ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD * 100.0,
+            );
+        }
     }
 }
