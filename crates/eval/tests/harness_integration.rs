@@ -18,7 +18,9 @@ use lcg_core::{
 };
 use lcg_eval::backend::{build_extractor, parse_backend_spec};
 use lcg_eval::corpus::{load_corpus, select_subset, CorpusChunk};
-use lcg_eval::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
+use lcg_eval::judge::{
+    precision_recall_f1, JudgeClient, JudgeVerdict, PairwiseVerdict, PairwiseWinner,
+};
 use lcg_eval::judge_cache::{cache_key, JudgeCache};
 use lcg_eval::metrics::entity_strict_prf1;
 use lcg_eval::runner::{run_backend, CountingSink};
@@ -146,6 +148,8 @@ async fn successful_backend_run_reports_zero_errors_and_captures_latency() {
 struct CountingJudgeClient {
     calls: AtomicUsize,
     verdict: JudgeVerdict,
+    pairwise_calls: AtomicUsize,
+    pairwise_verdict: PairwiseVerdict,
 }
 
 impl CountingJudgeClient {
@@ -153,6 +157,20 @@ impl CountingJudgeClient {
         Self {
             calls: AtomicUsize::new(0),
             verdict,
+            pairwise_calls: AtomicUsize::new(0),
+            pairwise_verdict: PairwiseVerdict {
+                winner: PairwiseWinner::Tie,
+                rationale: String::new(),
+            },
+        }
+    }
+
+    fn new_pairwise(pairwise_verdict: PairwiseVerdict) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            verdict: JudgeVerdict::default(),
+            pairwise_calls: AtomicUsize::new(0),
+            pairwise_verdict,
         }
     }
 }
@@ -166,6 +184,18 @@ impl JudgeClient for CountingJudgeClient {
     ) -> BoxFuture<'a, Result<JudgeVerdict, String>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let v = self.verdict.clone();
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn judge_pairwise<'a>(
+        &'a self,
+        _prompt_name: &'a str,
+        _chunk_text: &'a str,
+        _slot_a: &'a Value,
+        _slot_b: &'a Value,
+    ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+        self.pairwise_calls.fetch_add(1, Ordering::SeqCst);
+        let v = self.pairwise_verdict.clone();
         Box::pin(async move { Ok(v) })
     }
 }

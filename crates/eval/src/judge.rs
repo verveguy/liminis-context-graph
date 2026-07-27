@@ -83,6 +83,62 @@ pub fn precision_recall_f1(v: &JudgeVerdict) -> (f64, f64, f64) {
     (precision, recall, f1)
 }
 
+/// Blind pairwise judge prompt (FR-002/#269): unlike `JUDGE_PROMPT`, this one includes the
+/// source chunk text — deciding *which* of two extractions better captures a source is a
+/// different question from deciding whether two items are semantically equivalent, and
+/// answering it requires reading the source. The two extractions are presented as
+/// unlabelled `EXTRACTION A`/`EXTRACTION B` (FR-003) with no backend/model/provider
+/// identifier reachable by the judge.
+pub const PAIRWISE_JUDGE_PROMPT: &str = "You are comparing two structured extractions of the same source text, to judge which one better captures its content. Both extractions come from extraction systems under evaluation — neither is a trusted reference, and you are blind to which system produced which. Judge only what is in front of you.
+
+PROMPT TYPE: {prompt_name}
+
+SOURCE CHUNK:
+{chunk}
+
+EXTRACTION A:
+{slot_a}
+
+EXTRACTION B:
+{slot_b}
+
+Judge which extraction better captures the SOURCE CHUNK's content:
+- Entities: which list better identifies the real-world entities discussed in the source, with accurate types, and without inventing entities not present in the source.
+- Edges/relationships: which list better captures the relationships actually stated or clearly implied in the source, with correct source/target entities and relation meaning, without inventing relationships.
+- Summaries: which set of summaries more accurately and completely reflects what the source says about each entity, without fabrication.
+
+ITEM LISTS (use the appropriate field, matching PROMPT TYPE):
+- extract_nodes.extract_text → response[\"extracted_entities\"] (list)
+- extract_edges.* → response[\"edges\"] (list)
+- extract_nodes.extract_summaries_batch → response[\"summaries\"] (list)
+
+If one extraction is clearly more complete and accurate relative to the source, it wins. If both are roughly equivalent in quality (including both being empty, or both equally flawed), it is a tie. Do not prefer an extraction merely for being longer.
+
+Respond with ONLY this JSON (no preamble, no commentary):
+{
+  \"winner\": \"A\" | \"B\" | \"tie\",
+  \"rationale\": \"<one or two sentence justification>\"
+}
+";
+
+/// FR-005: the pairwise judge's per-axis, per-chunk verdict — winner in `{A, B, tie}` plus
+/// a brief rationale. One `judge_pairwise` call covers exactly one axis (mirroring how
+/// reference-mode issues three separate `judge()` calls, one per axis), so this type never
+/// tries to carry all three axes at once.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PairwiseWinner {
+    A,
+    B,
+    #[serde(rename = "tie")]
+    Tie,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairwiseVerdict {
+    pub winner: PairwiseWinner,
+    pub rationale: String,
+}
+
 /// A client capable of issuing one judge comparison. Trait-ified (rather than a bare
 /// function) so tests can substitute a canned/mocked judge instead of hitting the live
 /// Anthropic API — judge calls cost real money (Research: ~$5 over ~700 calls for the
@@ -94,6 +150,17 @@ pub trait JudgeClient: Send + Sync {
         reference: &'a Value,
         candidate: &'a Value,
     ) -> BoxFuture<'a, Result<JudgeVerdict, String>>;
+
+    /// FR-002: blind pairwise comparison. `chunk_text` is the source episode body;
+    /// `slot_a`/`slot_b` are the two extractions to compare for one axis, presented
+    /// unlabelled per FR-003.
+    fn judge_pairwise<'a>(
+        &'a self,
+        prompt_name: &'a str,
+        chunk_text: &'a str,
+        slot_a: &'a Value,
+        slot_b: &'a Value,
+    ) -> BoxFuture<'a, Result<PairwiseVerdict, String>>;
 }
 
 /// Minimal direct Anthropic Messages API client, independent of any `Extractor` backend
@@ -124,6 +191,56 @@ impl AnthropicJudgeClient {
     }
 }
 
+impl AnthropicJudgeClient {
+    /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`
+    /// — the only difference between the two is the prompt text and the response shape
+    /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
+    async fn request_judge_text(&self, prompt: String) -> Result<String, String> {
+        let body = json!({
+            "model": self.model,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}]
+        });
+
+        // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
+        // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
+        // the whole harness run.
+        let mut attempt = 0u32;
+        let resp: Value = loop {
+            let http_resp = self
+                .client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("judge request failed: {e}"))?;
+
+            let status = http_resp.status();
+            if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
+                let delay = Duration::from_secs(1u64 << attempt);
+                sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            break http_resp
+                .error_for_status()
+                .map_err(|e| format!("judge request failed: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("judge response not JSON: {e}"))?;
+        };
+
+        resp["content"][0]["text"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| "judge response missing content[0].text".to_string())
+    }
+}
+
 impl JudgeClient for AnthropicJudgeClient {
     fn judge<'a>(
         &'a self,
@@ -143,50 +260,37 @@ impl JudgeClient for AnthropicJudgeClient {
                     &serde_json::to_string_pretty(candidate).unwrap_or_default(),
                 );
 
-            let body = json!({
-                "model": self.model,
-                "max_tokens": 4096,
-                "messages": [{"role": "user", "content": prompt}]
-            });
-
-            // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
-            // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
-            // the whole harness run.
-            let mut attempt = 0u32;
-            let resp: Value = loop {
-                let http_resp = self
-                    .client
-                    .post("https://api.anthropic.com/v1/messages")
-                    .header("x-api-key", &self.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(|e| format!("judge request failed: {e}"))?;
-
-                let status = http_resp.status();
-                if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
-                    let delay = Duration::from_secs(1u64 << attempt);
-                    sleep(delay).await;
-                    attempt += 1;
-                    continue;
-                }
-
-                break http_resp
-                    .error_for_status()
-                    .map_err(|e| format!("judge request failed: {e}"))?
-                    .json()
-                    .await
-                    .map_err(|e| format!("judge response not JSON: {e}"))?;
-            };
-
-            let text = resp["content"][0]["text"]
-                .as_str()
-                .ok_or_else(|| "judge response missing content[0].text".to_string())?;
-            let json_str = extract_json_block(text);
+            let text = self.request_judge_text(prompt).await?;
+            let json_str = extract_json_block(&text);
             serde_json::from_str::<JudgeVerdict>(json_str)
                 .map_err(|e| format!("judge response not valid JSON ({e}): {text}"))
+        })
+    }
+
+    fn judge_pairwise<'a>(
+        &'a self,
+        prompt_name: &'a str,
+        chunk_text: &'a str,
+        slot_a: &'a Value,
+        slot_b: &'a Value,
+    ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+        Box::pin(async move {
+            let prompt = PAIRWISE_JUDGE_PROMPT
+                .replace("{prompt_name}", prompt_name)
+                .replace("{chunk}", chunk_text)
+                .replace(
+                    "{slot_a}",
+                    &serde_json::to_string_pretty(slot_a).unwrap_or_default(),
+                )
+                .replace(
+                    "{slot_b}",
+                    &serde_json::to_string_pretty(slot_b).unwrap_or_default(),
+                );
+
+            let text = self.request_judge_text(prompt).await?;
+            let json_str = extract_json_block(&text);
+            serde_json::from_str::<PairwiseVerdict>(json_str)
+                .map_err(|e| format!("pairwise judge response not valid JSON ({e}): {text}"))
         })
     }
 }
@@ -302,8 +406,32 @@ mod tests {
         assert_eq!(extract_json_block(s), s);
     }
 
-    /// Canned judge client for tests — never makes a network call.
-    struct StaticJudge(JudgeVerdict);
+    /// Canned judge client for tests — never makes a network call. Carries both a matching
+    /// verdict and a pairwise verdict so a single double can stand in for either method the
+    /// trait requires.
+    struct StaticJudge {
+        verdict: JudgeVerdict,
+        pairwise_verdict: PairwiseVerdict,
+    }
+
+    impl StaticJudge {
+        fn matching(verdict: JudgeVerdict) -> Self {
+            Self {
+                verdict,
+                pairwise_verdict: PairwiseVerdict {
+                    winner: PairwiseWinner::Tie,
+                    rationale: String::new(),
+                },
+            }
+        }
+
+        fn pairwise(pairwise_verdict: PairwiseVerdict) -> Self {
+            Self {
+                verdict: JudgeVerdict::default(),
+                pairwise_verdict,
+            }
+        }
+    }
 
     impl JudgeClient for StaticJudge {
         fn judge<'a>(
@@ -312,14 +440,25 @@ mod tests {
             _reference: &'a Value,
             _candidate: &'a Value,
         ) -> BoxFuture<'a, Result<JudgeVerdict, String>> {
-            let v = self.0.clone();
+            let v = self.verdict.clone();
+            Box::pin(async move { Ok(v) })
+        }
+
+        fn judge_pairwise<'a>(
+            &'a self,
+            _prompt_name: &'a str,
+            _chunk_text: &'a str,
+            _slot_a: &'a Value,
+            _slot_b: &'a Value,
+        ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+            let v = self.pairwise_verdict.clone();
             Box::pin(async move { Ok(v) })
         }
     }
 
     #[tokio::test]
     async fn judge_client_trait_is_mockable() {
-        let judge = StaticJudge(JudgeVerdict {
+        let judge = StaticJudge::matching(JudgeVerdict {
             matched: vec![(0, 0)],
             unmatched_reference: vec![],
             unmatched_candidate: vec![],
@@ -329,5 +468,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(verdict.matched.len(), 1);
+    }
+
+    #[test]
+    fn pairwise_judge_prompt_contains_expected_placeholders() {
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("{prompt_name}"));
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("{chunk}"));
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("{slot_a}"));
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("{slot_b}"));
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("\"winner\""));
+        assert!(PAIRWISE_JUDGE_PROMPT.contains("\"rationale\""));
+        // FR-003: no backend/model/provider identifier reachable by the judge — the prompt
+        // template itself must not name a concrete backend.
+        assert!(!PAIRWISE_JUDGE_PROMPT.to_lowercase().contains("anthropic"));
+    }
+
+    #[test]
+    fn pairwise_verdict_parses_valid_json() {
+        let v: PairwiseVerdict =
+            serde_json::from_str(r#"{"winner": "A", "rationale": "A is more complete"}"#).unwrap();
+        assert_eq!(v.winner, PairwiseWinner::A);
+        assert_eq!(v.rationale, "A is more complete");
+    }
+
+    #[test]
+    fn pairwise_verdict_accepts_lowercase_tie() {
+        let v: PairwiseVerdict =
+            serde_json::from_str(r#"{"winner": "tie", "rationale": "equivalent"}"#).unwrap();
+        assert_eq!(v.winner, PairwiseWinner::Tie);
+    }
+
+    #[test]
+    fn pairwise_verdict_rejects_malformed_json() {
+        let err = serde_json::from_str::<PairwiseVerdict>("not json at all").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn judge_pairwise_trait_is_mockable() {
+        let judge = StaticJudge::pairwise(PairwiseVerdict {
+            winner: PairwiseWinner::B,
+            rationale: "B captures more".to_string(),
+        });
+        let verdict = judge
+            .judge_pairwise(
+                "pairwise.extract_nodes.extract_text",
+                "some source chunk text",
+                &json!({"extracted_entities": []}),
+                &json!({"extracted_entities": []}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verdict.winner, PairwiseWinner::B);
     }
 }
