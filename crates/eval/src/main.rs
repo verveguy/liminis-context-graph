@@ -403,8 +403,19 @@ async fn judged_f1(
     let verdict: JudgeVerdict = match judge_cache.get(&key) {
         Some(v) => v,
         None => {
-            let v = judge.judge(prompt_name, reference, candidate).await?;
-            judge_cache.insert(key, v.clone())?;
+            let v = judge
+                .judge(prompt_name, reference, candidate)
+                .await
+                .map_err(|e| format!("judge call failed: {e}"))?;
+            // Labelled distinctly from the call failure above because the two are different
+            // failure classes and only one is transient. Now that judge errors are non-fatal,
+            // a systemic cache problem (bad --judge-cache path, permissions, disk full) would
+            // otherwise recur silently on every one of ~1340 calls, completing the run with a
+            // huge judge_errors count while persisting nothing — burning exactly the spend
+            // the non-fatal handling exists to protect.
+            judge_cache
+                .insert(key, v.clone())
+                .map_err(|e| format!("verdict received but caching it failed: {e}"))?;
             v
         }
     };

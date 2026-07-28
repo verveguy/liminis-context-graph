@@ -82,9 +82,11 @@ pub struct CandidateReport {
     pub judged_edge_precision: Option<f64>,
     pub judged_edge_recall: Option<f64>,
     pub judged_summary_f1: Option<f64>,
-    /// Judge calls that failed after exhausting their retries. Non-fatal (see
-    /// `score_candidate`), so a nonzero value means some chunks are missing from the
-    /// judged averages — read it as a caveat on those numbers, not as a run failure.
+    /// Judge **calls** that failed after exhausting their retries — not chunks. Entities,
+    /// edges and summaries are judged by three independent calls per chunk, so one failure
+    /// costs that chunk's data point on *one* axis while its other two axes still land in
+    /// their averages. Non-fatal (see `score_candidate`); read a nonzero value as a caveat
+    /// on the affected averages, not as a run failure or as whole chunks being dropped.
     pub judge_errors: usize,
 }
 
@@ -140,9 +142,11 @@ impl Report {
              ontology mode: {}\n\n",
             self.corpus_size, self.reference_backend, self.ontology_mode
         );
-        // `None` judged F1 can mean either "no judge client configured" (no
-        // ANTHROPIC_API_KEY) or "zero chunk pairs succeeded on both sides to score" —
-        // report `chunks_scored` alongside rather than guessing which one applied.
+        // `None` judged F1 can mean "no judge client configured" (no ANTHROPIC_API_KEY),
+        // "zero chunk pairs succeeded on both sides to score", or — since judge failures
+        // became non-fatal — "every judge call for this one axis errored", which is
+        // possible even with `chunks_scored > 0`. Report `chunks_scored` and `judge_errors`
+        // alongside rather than guessing which applied.
         let fmt_opt = |v: Option<f64>| {
             v.map(|x| format!("{x:.3}"))
                 .unwrap_or_else(|| "n/a".to_string())
@@ -196,7 +200,8 @@ impl Report {
             ));
             if c.judge_errors > 0 {
                 out.push_str(&format!(
-                    "  judge errors: {} (those chunks are absent from the judged averages)\n",
+                    "  judge errors: {} failed judge calls (each costs one chunk's data \
+                     point on one axis, not the whole chunk)\n",
                     c.judge_errors
                 ));
             }

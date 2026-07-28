@@ -301,19 +301,37 @@ impl JudgeClient for AnthropicJudgeClient {
 /// (and specific enough to the judge's own response shape) that duplicating it here beats
 /// exporting a private helper out of `extractor.rs` for one caller (Plan's key decision).
 fn extract_json_block(s: &str) -> &str {
-    if let Some(start) = s.rfind("```json") {
-        let after = &s[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
-        }
-    }
-    if let Some(start) = s.rfind("```") {
-        let after = &s[start + 3..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
+    // A fence narrows *where* to look; it never decides *what* to return. Returning fenced
+    // content verbatim reintroduces the bug this function exists to fix whenever the judge
+    // wraps its whole reply -- first verdict, reconsideration prose, corrected verdict --
+    // in a single fence, which is at least as likely as the two-fence form actually
+    // observed. So the object scan runs over the fenced content too.
+    if let Some(fenced) = last_fenced_content(s) {
+        if let Some(obj) = last_top_level_json_object(fenced) {
+            return obj;
         }
     }
     last_top_level_json_object(s).unwrap_or_else(|| s.trim())
+}
+
+/// Content of the **last** fenced block in `s`, with an optional `json` language tag
+/// stripped, or `None` when there is no complete fence.
+///
+/// Fences are collected as a flat list of ```` ``` ```` positions and the final pair is
+/// taken, because openers and closers are indistinguishable by search: an earlier
+/// implementation used `rfind("```")` to locate the *opening* fence, but for any
+/// well-formed block that finds the *closing* marker, leaving nothing after it to match
+/// and rendering the branch dead. (Caught in review on #271; it was harmless only because
+/// the fallback scan recovers the right object anyway.)
+fn last_fenced_content(s: &str) -> Option<&str> {
+    let fences: Vec<usize> = s.match_indices("```").map(|(i, _)| i).collect();
+    if fences.len() < 2 {
+        return None;
+    }
+    let open = fences[fences.len() - 2];
+    let close = fences[fences.len() - 1];
+    let inner = &s[open + 3..close];
+    Some(inner.strip_prefix("json").unwrap_or(inner).trim())
 }
 
 /// Returns the **last** top-level `{...}` span in `s` that parses as JSON, or `None`.
@@ -454,6 +472,33 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
             verdict.unmatched_candidate.is_empty(),
             "must take the second verdict, not the first"
         );
+    }
+
+    /// Finding #1 from #271's review: the fenced variant of the observed failure. If the
+    /// judge puts its whole reply -- both verdicts and the reconsideration prose -- inside
+    /// ONE fence, returning fenced content verbatim fails to parse exactly as the unfenced
+    /// case did. The scan must run over fenced content too.
+    #[test]
+    fn extract_json_block_handles_a_self_correction_inside_a_single_fence() {
+        let s = "```json\n{\"matched\": [[0, 0]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": [4]}\n\nWait, that mismatches the birthplace. \
+                 Correcting:\n\n{\"matched\": [[0, 1]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": []}\n```";
+        let verdict: JudgeVerdict = serde_json::from_str(extract_json_block(s))
+            .expect("must recover the corrected object from inside one fence");
+        assert_eq!(verdict.matched, vec![(0, 1)]);
+        assert!(verdict.unmatched_candidate.is_empty());
+    }
+
+    /// The bare-fence (no language tag) path, which review found was dead code: `rfind` on
+    /// "```" locates the *closing* marker, so the old branch never fired.
+    #[test]
+    fn extract_json_block_reads_a_bare_fence() {
+        let s = "here:\n```\n{\"matched\": [[1, 1]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": []}\n```";
+        let verdict: JudgeVerdict =
+            serde_json::from_str(extract_json_block(s)).expect("bare fences must parse");
+        assert_eq!(verdict.matched, vec![(1, 1)]);
     }
 
     #[test]
