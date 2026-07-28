@@ -174,7 +174,7 @@ pub struct AnthropicJudgeClient {
     model: String,
     client: reqwest::Client,
     /// Consecutive failures, reset by any success. See `CONSECUTIVE_FAILURE_LIMIT`.
-    consecutive_failures: AtomicUsize,
+    breaker: CircuitBreaker,
 }
 
 /// How many judge calls may fail back-to-back before the client stops making requests.
@@ -187,11 +187,61 @@ pub struct AnthropicJudgeClient {
 /// legitimately produce ten failures in a row.
 pub const CONSECUTIVE_FAILURE_LIMIT: usize = 10;
 
+/// The consecutive-failure breaker, split out from the HTTP path so its state transitions
+/// are testable without a network round trip or a mock transport: every rule that matters
+/// (closed below the limit, opens at it, any success resets) lives here and nowhere else.
+#[derive(Debug)]
+pub struct CircuitBreaker {
+    consecutive: AtomicUsize,
+    limit: usize,
+}
+
+impl CircuitBreaker {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            consecutive: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    /// `Err` once the breaker is open — the caller must not issue the request.
+    pub fn check(&self) -> Result<(), String> {
+        let failures = self.consecutive.load(Ordering::Relaxed);
+        if failures >= self.limit {
+            return Err(format!(
+                "judge circuit breaker open after {failures} consecutive failures — \
+                 not issuing further requests. Fix the underlying cause and re-run; \
+                 verdicts already cached will be re-served for free."
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resets on success rather than decaying: an isolated transient fault in a
+    /// multi-thousand-call run must not accumulate toward the limit over hours.
+    pub fn record<T, E>(&self, result: &Result<T, E>) {
+        match result {
+            Ok(_) => self.consecutive.store(0, Ordering::Relaxed),
+            Err(_) => {
+                self.consecutive.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn consecutive_failures(&self) -> usize {
+        self.consecutive.load(Ordering::Relaxed)
+    }
+}
+
 /// A stalled/unresponsive judge call would otherwise block the whole harness run
 /// indefinitely (there's no other progress signal or retry budget above this client);
 /// bound it generously since a large reference/candidate payload can legitimately take
 /// a while to judge.
 const JUDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Cap on the raw-body fallback when the API's error JSON cannot be parsed. Bytes, not
+/// chars — enough to identify the failure without dumping an HTML error page into stderr.
+const ERROR_BODY_FALLBACK_BYTES: usize = 500;
 
 impl AnthropicJudgeClient {
     pub fn new(api_key: String, model: String) -> Self {
@@ -202,7 +252,7 @@ impl AnthropicJudgeClient {
                 .timeout(JUDGE_REQUEST_TIMEOUT)
                 .build()
                 .expect("reqwest client with a fixed timeout is infallible to build"),
-            consecutive_failures: AtomicUsize::new(0),
+            breaker: CircuitBreaker::new(CONSECUTIVE_FAILURE_LIMIT),
         }
     }
 }
@@ -212,21 +262,9 @@ impl AnthropicJudgeClient {
     /// — the only difference between the two is the prompt text and the response shape
     /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
     async fn request_judge_text(&self, prompt: String) -> Result<String, String> {
-        let failures = self.consecutive_failures.load(Ordering::Relaxed);
-        if failures >= CONSECUTIVE_FAILURE_LIMIT {
-            return Err(format!(
-                "judge circuit breaker open after {failures} consecutive failures — \
-                 not issuing further requests. Fix the underlying cause and re-run; \
-                 verdicts already cached will be re-served for free."
-            ));
-        }
+        self.breaker.check()?;
         let result = self.request_judge_text_inner(prompt).await;
-        match &result {
-            Ok(_) => self.consecutive_failures.store(0, Ordering::Relaxed),
-            Err(_) => {
-                self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        self.breaker.record(&result);
         result
     }
 
@@ -271,7 +309,15 @@ impl AnthropicJudgeClient {
                 let detail = serde_json::from_str::<Value>(&body)
                     .ok()
                     .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                    .unwrap_or_else(|| body.chars().take(500).collect());
+                    .unwrap_or_else(|| {
+                        // Truncate by BYTES at a char boundary: `chars().take(500)` can
+                        // yield ~2 KB of UTF-8 and contradict the documented cap.
+                        let mut end = body.len().min(ERROR_BODY_FALLBACK_BYTES);
+                        while end > 0 && !body.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        body[..end].to_owned()
+                    });
                 return Err(format!("judge request failed ({status}): {detail}"));
             }
 
@@ -619,14 +665,14 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
         }
     }
 
-    /// The breaker must short-circuit *before* issuing a request, so this makes no network
-    /// call despite the obviously invalid key — that is the whole point of it.
+    /// The breaker must short-circuit *before* the request is built, so this makes no
+    /// network call despite the obviously invalid key — that is the whole point of it.
     #[tokio::test]
     async fn judge_circuit_breaker_stops_issuing_requests_after_repeated_failures() {
         let client = AnthropicJudgeClient::new("not-a-real-key".into(), "some-model".into());
-        client
-            .consecutive_failures
-            .store(CONSECUTIVE_FAILURE_LIMIT, Ordering::Relaxed);
+        for _ in 0..CONSECUTIVE_FAILURE_LIMIT {
+            client.breaker.record::<(), ()>(&Err(()));
+        }
 
         let err = client
             .request_judge_text("anything".into())
@@ -638,21 +684,41 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
         );
     }
 
-    /// Below the limit the breaker must stay closed, so an isolated transient failure in a
-    /// multi-thousand-call run never blocks the calls after it. Asserted on the breaker's
-    /// own state rather than by issuing a request, which would need a network round trip.
     #[test]
-    fn judge_circuit_breaker_stays_closed_below_the_limit() {
-        let client = AnthropicJudgeClient::new("k".into(), "m".into());
-        assert_eq!(
-            client.consecutive_failures.load(Ordering::Relaxed),
-            0,
-            "a fresh client must start closed"
+    fn circuit_breaker_starts_closed_and_stays_closed_below_the_limit() {
+        let b = CircuitBreaker::new(3);
+        assert!(b.check().is_ok(), "a fresh breaker must be closed");
+        b.record::<(), ()>(&Err(()));
+        b.record::<(), ()>(&Err(()));
+        assert_eq!(b.consecutive_failures(), 2);
+        assert!(b.check().is_ok(), "must stay closed one below the limit");
+    }
+
+    #[test]
+    fn circuit_breaker_opens_exactly_at_the_limit() {
+        let b = CircuitBreaker::new(3);
+        for _ in 0..3 {
+            b.record::<(), ()>(&Err(()));
+        }
+        let err = b.check().expect_err("must be open at the limit");
+        assert!(err.contains("3 consecutive failures"), "got: {err}");
+    }
+
+    /// The property that makes a long run survivable: an isolated failure must not
+    /// accumulate toward the limit over thousands of calls.
+    #[test]
+    fn circuit_breaker_resets_on_any_success() {
+        let b = CircuitBreaker::new(3);
+        b.record::<(), ()>(&Err(()));
+        b.record::<(), ()>(&Err(()));
+        b.record::<(), ()>(&Ok(()));
+        assert_eq!(b.consecutive_failures(), 0);
+        b.record::<(), ()>(&Err(()));
+        b.record::<(), ()>(&Err(()));
+        assert!(
+            b.check().is_ok(),
+            "two failures after a success must not trip a limit of 3"
         );
-        client
-            .consecutive_failures
-            .store(CONSECUTIVE_FAILURE_LIMIT - 1, Ordering::Relaxed);
-        assert!(client.consecutive_failures.load(Ordering::Relaxed) < CONSECUTIVE_FAILURE_LIMIT);
     }
 
     #[tokio::test]
