@@ -76,6 +76,7 @@ pub struct JudgeVerdict {
 /// matching unmatched list in case the judge only reported it in one place. Dropping
 /// matters for accuracy as well as parsing — a retained `[5, null]` would inflate
 /// `matched.len()`, and precision and recall are both computed from it.
+///
 /// `matched` is deliberately REQUIRED while the two unmatched lists default.
 ///
 /// `JudgeCache` stores matching and pairwise verdicts in one file discriminated by
@@ -259,6 +260,54 @@ pub struct AnthropicJudgeClient {
     breaker: CircuitBreaker,
 }
 
+/// Response schema for a matching verdict, enforced by the API via
+/// `output_config.format` rather than merely requested in prose.
+///
+/// The prompt already says "respond with ONLY this JSON (no preamble, no commentary)" and
+/// the judge ignored it three separate ways during the #248 run: prose around the JSON, a
+/// second corrected object after reconsidering, and `null`/`-1` sentinels inside `matched`.
+/// A schema makes all three unrepresentable rather than merely discouraged —
+/// `"type": "integer"` excludes `null`, `"minimum": 0` excludes `-1`, and a constrained
+/// response cannot carry commentary at all.
+///
+/// `extract_json_block` and the sentinel normalisation stay in place as a backstop: schema
+/// support can vary by model and deployment, and a run that costs money should not depend
+/// on a single mechanism holding.
+fn matching_verdict_schema() -> Value {
+    let index = json!({"type": "integer", "minimum": 0});
+    json!({
+        "type": "object",
+        "properties": {
+            "matched": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": index,
+                    "minItems": 2,
+                    "maxItems": 2
+                }
+            },
+            "unmatched_reference": {"type": "array", "items": index},
+            "unmatched_candidate": {"type": "array", "items": index},
+        },
+        "required": ["matched", "unmatched_reference", "unmatched_candidate"],
+        "additionalProperties": false
+    })
+}
+
+/// Response schema for a blind pairwise verdict (#269).
+fn pairwise_verdict_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "winner": {"type": "string", "enum": ["A", "B", "tie"]},
+            "rationale": {"type": "string"},
+        },
+        "required": ["winner", "rationale"],
+        "additionalProperties": false
+    })
+}
+
 /// How many judge calls may fail back-to-back before the client stops making requests.
 ///
 /// Judge failures are deliberately non-fatal per call, because one bad response should not
@@ -343,18 +392,35 @@ impl AnthropicJudgeClient {
     /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`
     /// — the only difference between the two is the prompt text and the response shape
     /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
-    async fn request_judge_text(&self, prompt: String) -> Result<String, String> {
+    async fn request_judge_text(&self, prompt: String, schema: Value) -> Result<String, String> {
         self.breaker.check()?;
-        let result = self.request_judge_text_inner(prompt).await;
+        let result = self.request_judge_text_inner(prompt, schema).await;
         self.breaker.record(&result);
         result
     }
 
-    async fn request_judge_text_inner(&self, prompt: String) -> Result<String, String> {
+    async fn request_judge_text_inner(
+        &self,
+        prompt: String,
+        schema: Value,
+    ) -> Result<String, String> {
         let body = json!({
             "model": self.model,
             "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": prompt}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}},
+            // Explicit, not inherited from the model's default. Sonnet 4.6 runs
+            // thinking-off when `thinking` is omitted, but Sonnet 5 runs adaptive thinking
+            // by default — so `--judge-model claude-sonnet-5` would silently switch it on
+            // across every call of a ~6000-call scoring phase, changing cost, latency and
+            // verdicts at once, with nothing in the output saying so.
+            //
+            // Disabled rather than adaptive on purpose. Judging is index enumeration, which
+            // is exactly where thinking measured *worse* on this corpus:
+            // docs/history/extraction-eval-2026-04.md has qwen3.6-27b at 0.894 entity F1
+            // without thinking and 0.772 with. A judge is a measuring instrument — cheap,
+            // fast and repeatable beats deliberative.
+            "thinking": {"type": "disabled"}
         });
 
         // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
@@ -435,7 +501,9 @@ impl JudgeClient for AnthropicJudgeClient {
                     &serde_json::to_string_pretty(candidate).unwrap_or_default(),
                 );
 
-            let text = self.request_judge_text(prompt).await?;
+            let text = self
+                .request_judge_text(prompt, matching_verdict_schema())
+                .await?;
             let json_str = extract_json_block(&text);
             serde_json::from_str::<JudgeVerdict>(json_str)
                 .map_err(|e| format!("judge response not valid JSON ({e}): {text}"))
@@ -462,7 +530,9 @@ impl JudgeClient for AnthropicJudgeClient {
                     &serde_json::to_string_pretty(slot_b).unwrap_or_default(),
                 );
 
-            let text = self.request_judge_text(prompt).await?;
+            let text = self
+                .request_judge_text(prompt, pairwise_verdict_schema())
+                .await?;
             let json_str = extract_json_block(&text);
             serde_json::from_str::<PairwiseVerdict>(json_str)
                 .map_err(|e| format!("pairwise judge response not valid JSON ({e}): {text}"))
@@ -616,6 +686,41 @@ mod tests {
     fn extract_json_block_finds_braces_without_fences() {
         let s = "sure, here you go: {\"matched\": []} thanks";
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
+    }
+
+    /// The schema must forbid exactly the two things the judge actually emitted:
+    /// `"type": "integer"` excludes `null`, `"minimum": 0` excludes `-1`. Asserted rather
+    /// than assumed, because losing either keyword silently reopens the failure mode.
+    #[test]
+    fn matching_schema_forbids_the_observed_sentinels() {
+        let s = matching_verdict_schema();
+        let idx = &s["properties"]["matched"]["items"]["items"];
+        assert_eq!(idx["type"], "integer", "null must be unrepresentable");
+        assert_eq!(idx["minimum"], 0, "-1 must be unrepresentable");
+        for field in ["unmatched_reference", "unmatched_candidate"] {
+            assert_eq!(s["properties"][field]["items"]["type"], "integer");
+            assert_eq!(s["properties"][field]["items"]["minimum"], 0);
+        }
+        assert_eq!(s["properties"]["matched"]["items"]["minItems"], 2);
+        assert_eq!(s["properties"]["matched"]["items"]["maxItems"], 2);
+        assert_eq!(s["additionalProperties"], false);
+    }
+
+    /// The pairwise schema's enum must match `PairwiseWinner`'s serde representation, or
+    /// every constrained response would parse-fail on arrival.
+    #[test]
+    fn pairwise_schema_enum_matches_the_winner_type() {
+        let s = pairwise_verdict_schema();
+        let variants = s["properties"]["winner"]["enum"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for v in variants {
+            let as_json = format!(r#"{{"winner": {v}, "rationale": "x"}}"#);
+            serde_json::from_str::<PairwiseVerdict>(&as_json).unwrap_or_else(|e| {
+                panic!("schema allows {v} but PairwiseVerdict rejects it: {e}")
+            });
+        }
     }
 
     /// Verbatim from the #248 run: a `null` sentinel in the candidate slot, with the index
@@ -850,7 +955,7 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
         }
 
         let err = client
-            .request_judge_text("anything".into())
+            .request_judge_text("anything".into(), matching_verdict_schema())
             .await
             .expect_err("breaker must be open");
         assert!(
