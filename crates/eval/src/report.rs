@@ -341,14 +341,30 @@ mod tests {
         report
     }
 
-    /// SC-004: with `--judge-mode` omitted (the `pairwise` field always `None`), the JSON
-    /// report must be byte-identical to the pre-#269 shape. This golden string was captured
-    /// from `sample_report().to_json()` *before* the `pairwise` field was added to `Report`,
-    /// so any accidental key addition/reordering/nulling here is caught immediately.
+    /// SC-004 (#269): with `--judge-mode` omitted, pairwise must leave reference-mode output
+    /// alone. The golden below catches accidental key addition/reordering/nulling.
+    ///
+    /// The golden moved once, deliberately, in #271: `judged_*_precision`, `judged_*_recall`
+    /// and `judge_errors` were added to `CandidateReport`. That is an intentional schema
+    /// addition, not the regression this guards — SC-004 is about *pairwise* not perturbing
+    /// reference-mode output, and those fields are unrelated to pairwise. Update this golden
+    /// when you mean to change the schema; never to make a red test go away.
     #[test]
     fn json_report_is_byte_identical_to_pre_pairwise_golden_sc004() {
-        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_edge_f1\": 0.978,\n      \"judged_summary_f1\": null\n    }\n  ]\n}";
+        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
         assert_eq!(sample_report().to_json(), golden);
+    }
+
+    /// The property SC-004 actually protects, asserted directly so it survives any future
+    /// intentional field addition that forces the golden above to be re-captured: with
+    /// `pairwise: None` the key must be *absent*, not present-and-null.
+    #[test]
+    fn json_report_omits_pairwise_key_entirely_when_not_requested_sc004() {
+        let json = sample_report().to_json();
+        assert!(
+            !json.contains("pairwise"),
+            "reference-mode report must not mention pairwise at all, got: {json}"
+        );
     }
 
     #[test]
