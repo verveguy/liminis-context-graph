@@ -95,12 +95,29 @@ struct RawJudgeVerdict {
     unmatched_candidate: Vec<i64>,
 }
 
-/// A slot holds a usable index only when it is present and non-negative.
+/// A `matched`-pair slot holds a usable index only when present and non-negative.
+/// `None` here means the judge wrote a sentinel (`null` or a negative number).
 fn valid_index(slot: Option<i64>) -> Option<usize> {
     match slot {
         Some(i) if i >= 0 => Some(i as usize),
         _ => None,
     }
+}
+
+/// A bare entry in `unmatched_reference`/`unmatched_candidate`, which are plain lists and
+/// never contain `null` slots.
+///
+/// A negative value here is **dropped**, not an error. That is a deliberate choice with a
+/// real cost: before this type existed the field was `Vec<usize>` and a stray negative
+/// failed the whole response loudly. Dropping trades a loud total loss of the axis for a
+/// quiet partial one — the index vanishes and `ref_total`/`cand_total` shrink by one.
+///
+/// It is chosen because a negative index has no recoverable meaning (unlike a sentinel
+/// inside `matched`, where the paired slot still names a real item), so failing the entire
+/// verdict over one nonsense entry discards good data to no benefit. Pinned by a test so
+/// the behaviour is a decision rather than an accident.
+fn valid_bare_index(i: i64) -> Option<usize> {
+    (i >= 0).then_some(i as usize)
 }
 
 fn push_unique(v: &mut Vec<usize>, x: usize) {
@@ -113,16 +130,18 @@ impl<'de> Deserialize<'de> for JudgeVerdict {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = RawJudgeVerdict::deserialize(d)?;
 
-        let mut unmatched_reference: Vec<usize> = raw
-            .unmatched_reference
-            .into_iter()
-            .filter_map(|i| valid_index(Some(i)))
-            .collect();
-        let mut unmatched_candidate: Vec<usize> = raw
-            .unmatched_candidate
-            .into_iter()
-            .filter_map(|i| valid_index(Some(i)))
-            .collect();
+        let mut unmatched_reference: Vec<usize> = Vec::new();
+        for i in raw.unmatched_reference {
+            if let Some(i) = valid_bare_index(i) {
+                push_unique(&mut unmatched_reference, i);
+            }
+        }
+        let mut unmatched_candidate: Vec<usize> = Vec::new();
+        for i in raw.unmatched_candidate {
+            if let Some(i) = valid_bare_index(i) {
+                push_unique(&mut unmatched_candidate, i);
+            }
+        }
 
         let mut matched = Vec::with_capacity(raw.matched.len());
         for pair in raw.matched {
@@ -139,6 +158,16 @@ impl<'de> Deserialize<'de> for JudgeVerdict {
                 (None, None) => {}
             }
         }
+
+        // A real match is authoritative over any claim that the same index is unmatched,
+        // however that claim arrived — a sentinel pair like `[[0,0],[0,null]]`, or the judge
+        // simply listing 0 in `unmatched_reference` while also matching it. Both were left
+        // standing before, so the index counted once via `matched.len()` and again via the
+        // unmatched list, inflating the denominator in `precision_recall_f1` and
+        // understating recall. That is precisely the inflation this type exists to prevent,
+        // so it must be reconciled after `matched` is final rather than during collection.
+        unmatched_reference.retain(|r| !matched.iter().any(|(mr, _)| mr == r));
+        unmatched_candidate.retain(|c| !matched.iter().any(|(_, mc)| mc == c));
 
         Ok(JudgeVerdict {
             matched,
@@ -739,6 +768,86 @@ mod tests {
                 panic!("schema allows {v} but PairwiseVerdict rejects it: {e}")
             });
         }
+    }
+
+    /// CodeRabbit's finding on #276: a sentinel pair whose real index ALSO appears in a
+    /// genuine match. `[[0,0],[0,null]]` used to yield both `matched=[(0,0)]` and
+    /// `unmatched_reference=[0]`, counting index 0 twice toward `ref_total` — the very
+    /// inflation this type exists to prevent, arriving by a path the original fix missed.
+    #[test]
+    fn a_real_match_wins_over_a_sentinel_claiming_the_same_index() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0],[0,null]], "unmatched_reference": [], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert!(
+            v.unmatched_reference.is_empty(),
+            "0 is matched; it cannot also be unmatched"
+        );
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!((p, r), (1.0, 1.0), "denominators must not be inflated");
+    }
+
+    /// The Claude reviewer's variant of the same gap: no sentinel involved — the judge
+    /// simply lists an index as unmatched while also matching it. Same double count.
+    #[test]
+    fn a_real_match_wins_over_a_declared_unmatched_entry() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[5,3]], "unmatched_reference": [5], "unmatched_candidate": [3]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(5, 3)]);
+        assert!(v.unmatched_reference.is_empty());
+        assert!(v.unmatched_candidate.is_empty());
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!((p, r), (1.0, 1.0));
+    }
+
+    /// Reconciliation must not over-reach: an index unmatched on one axis can legitimately
+    /// be matched on the other, since the two lists index different item lists.
+    #[test]
+    fn reconciliation_is_per_axis_not_global() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,1]], "unmatched_reference": [1], "unmatched_candidate": [0]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(0, 1)]);
+        assert_eq!(
+            v.unmatched_reference,
+            vec![1],
+            "reference 1 is genuinely unmatched"
+        );
+        assert_eq!(
+            v.unmatched_candidate,
+            vec![0],
+            "candidate 0 is genuinely unmatched"
+        );
+    }
+
+    /// Pins the documented decision that a bare negative in an unmatched list is dropped
+    /// rather than failing the response. Before this type it errored loudly; dropping
+    /// trades a loud total loss of the axis for a quiet partial one, which is a choice and
+    /// should read as one.
+    #[test]
+    fn bare_negative_indices_in_unmatched_lists_are_dropped_not_fatal() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0]], "unmatched_reference": [-1, 2], "unmatched_candidate": [-7]}"#,
+        )
+        .expect("a nonsense index must not discard the whole verdict");
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert_eq!(v.unmatched_reference, vec![2], "-1 dropped, 2 kept");
+        assert!(v.unmatched_candidate.is_empty());
+    }
+
+    /// Duplicates within a declared list must not inflate the denominator either.
+    #[test]
+    fn duplicate_declared_unmatched_indices_are_collapsed() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [], "unmatched_reference": [3, 3, 3], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        assert_eq!(v.unmatched_reference, vec![3]);
     }
 
     /// The schema cannot constrain inner-array arity, so a pair that is not a pair must
