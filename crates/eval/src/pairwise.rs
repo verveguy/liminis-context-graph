@@ -57,7 +57,7 @@ impl PairwiseAxis {
     }
 
     /// The judge-facing payload for this axis, mirroring the shape the reference-mode
-    /// judge prompt already uses for the same axis (`main.rs::score_candidate`).
+    /// judge prompt already uses for the same axis (`scoring::score_candidate`).
     pub fn payload(&self, extraction: &ExtractionResult) -> Value {
         match self {
             Self::Entities => json!({ "extracted_entities": extraction.entities }),
