@@ -53,11 +53,93 @@ Respond with ONLY this JSON (no preamble, no commentary):
 ";
 
 /// The judge's per-comparison verdict — matches the JSON shape `JUDGE_PROMPT` asks for.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+///
+/// `Deserialize` is hand-written rather than derived: see [`RawJudgeVerdict`].
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct JudgeVerdict {
     pub matched: Vec<(usize, usize)>,
     pub unmatched_reference: Vec<usize>,
     pub unmatched_candidate: Vec<usize>,
+}
+
+/// The verdict exactly as the judge writes it, before normalisation.
+///
+/// The prompt asks for `matched` to hold pairs of indices, but the judge routinely uses a
+/// *sentinel* in one slot to say "this item matched nothing" — `[5, null]` and `[9, -1]`
+/// were both observed during the #248 run — while also listing that index in
+/// `unmatched_reference`. Against `Vec<(usize, usize)>` serde rejects the whole response
+/// ("invalid type: null, expected usize"), so a verdict that is *complete and correct*
+/// is discarded and the chunk loses that axis.
+///
+/// The sentinel encoding is redundant with the unmatched lists in every observed case, so
+/// normalising costs nothing: drop the sentinel pairs, and union their real index into the
+/// matching unmatched list in case the judge only reported it in one place. Dropping
+/// matters for accuracy as well as parsing — a retained `[5, null]` would inflate
+/// `matched.len()`, and precision and recall are both computed from it.
+/// `matched` is deliberately REQUIRED while the two unmatched lists default.
+///
+/// `JudgeCache` stores matching and pairwise verdicts in one file discriminated by
+/// `#[serde(untagged)]` (`judge_cache.rs`), which relies on the two shapes being disjoint.
+/// Defaulting every field here would make *any* JSON object — including a
+/// `{"winner", "rationale"}` pairwise verdict — parse as an all-empty `JudgeVerdict`, so
+/// every cached pairwise verdict would silently fail to reload and be re-purchased on the
+/// next run. Requiring `matched`, which `PairwiseVerdict` does not have, keeps them
+/// disjoint while still tolerating a judge that omits an empty unmatched list.
+#[derive(Deserialize)]
+struct RawJudgeVerdict {
+    matched: Vec<(Option<i64>, Option<i64>)>,
+    #[serde(default)]
+    unmatched_reference: Vec<i64>,
+    #[serde(default)]
+    unmatched_candidate: Vec<i64>,
+}
+
+/// A slot holds a usable index only when it is present and non-negative.
+fn valid_index(slot: Option<i64>) -> Option<usize> {
+    match slot {
+        Some(i) if i >= 0 => Some(i as usize),
+        _ => None,
+    }
+}
+
+fn push_unique(v: &mut Vec<usize>, x: usize) {
+    if !v.contains(&x) {
+        v.push(x);
+    }
+}
+
+impl<'de> Deserialize<'de> for JudgeVerdict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = RawJudgeVerdict::deserialize(d)?;
+
+        let mut unmatched_reference: Vec<usize> = raw
+            .unmatched_reference
+            .into_iter()
+            .filter_map(|i| valid_index(Some(i)))
+            .collect();
+        let mut unmatched_candidate: Vec<usize> = raw
+            .unmatched_candidate
+            .into_iter()
+            .filter_map(|i| valid_index(Some(i)))
+            .collect();
+
+        let mut matched = Vec::with_capacity(raw.matched.len());
+        for (a, b) in raw.matched {
+            match (valid_index(a), valid_index(b)) {
+                (Some(r), Some(c)) => matched.push((r, c)),
+                // A sentinel in one slot: the other slot names a genuinely unmatched item.
+                (Some(r), None) => push_unique(&mut unmatched_reference, r),
+                (None, Some(c)) => push_unique(&mut unmatched_candidate, c),
+                (None, None) => {}
+            }
+        }
+
+        Ok(JudgeVerdict {
+            matched,
+            unmatched_reference,
+            unmatched_candidate,
+        })
+    }
 }
 
 /// Precision/recall/F1 derivation ported verbatim: each defaults to 1.0 (precision/recall)
@@ -534,6 +616,99 @@ mod tests {
     fn extract_json_block_finds_braces_without_fences() {
         let s = "sure, here you go: {\"matched\": []} thanks";
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
+    }
+
+    /// Verbatim from the #248 run: a `null` sentinel in the candidate slot, with the index
+    /// also correctly listed in `unmatched_reference`. The old derive rejected the whole
+    /// response and the chunk lost its edge score.
+    #[test]
+    fn judge_verdict_drops_null_sentinel_pairs() {
+        let s = r#"{
+          "matched": [[0, 0], [1, 1], [5, null], [6, 9]],
+          "unmatched_reference": [5],
+          "unmatched_candidate": [5]
+        }"#;
+        let v: JudgeVerdict = serde_json::from_str(s).expect("null sentinels must parse");
+        assert_eq!(v.matched, vec![(0, 0), (1, 1), (6, 9)]);
+        assert_eq!(
+            v.unmatched_reference,
+            vec![5],
+            "already listed — must not duplicate"
+        );
+        assert_eq!(v.unmatched_candidate, vec![5]);
+    }
+
+    /// The other observed sentinel: `-1` rather than `null`, three times in one response.
+    #[test]
+    fn judge_verdict_drops_negative_sentinel_pairs() {
+        let s = r#"{
+          "matched": [[0, 0], [9, -1], [10, -1], [11, -1]],
+          "unmatched_reference": [9, 10, 11],
+          "unmatched_candidate": []
+        }"#;
+        let v: JudgeVerdict = serde_json::from_str(s).expect("-1 sentinels must parse");
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert_eq!(v.unmatched_reference, vec![9, 10, 11]);
+    }
+
+    /// If the judge uses a sentinel but *forgets* the unmatched list, the index must still
+    /// be accounted for — otherwise the item silently vanishes from both sides and recall
+    /// is overstated.
+    #[test]
+    fn judge_verdict_recovers_a_sentinel_index_missing_from_the_unmatched_list() {
+        let s = r#"{"matched": [[3, null], [null, 7]],
+                    "unmatched_reference": [], "unmatched_candidate": []}"#;
+        let v: JudgeVerdict = serde_json::from_str(s).unwrap();
+        assert!(v.matched.is_empty());
+        assert_eq!(v.unmatched_reference, vec![3]);
+        assert_eq!(v.unmatched_candidate, vec![7]);
+    }
+
+    /// Sentinels must not be counted as matches: precision and recall are both derived
+    /// from `matched.len()`, so retaining `[5, null]` would inflate both.
+    #[test]
+    fn sentinel_pairs_do_not_inflate_precision_and_recall() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0],[1,null]], "unmatched_reference": [1], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!(p, 1.0, "one real match, one candidate item");
+        assert_eq!(r, 0.5, "one of two reference items matched");
+    }
+
+    /// `JudgeCache` discriminates matching from pairwise verdicts by `#[serde(untagged)]`,
+    /// which needs the two shapes to stay disjoint. Making every field default would let a
+    /// pairwise verdict parse as an all-empty `JudgeVerdict`, so cached pairwise verdicts
+    /// would never reload and would be re-purchased on every run. Pinned here because the
+    /// coupling lives in another module and is invisible from this one.
+    #[test]
+    fn judge_verdict_never_absorbs_a_pairwise_verdict() {
+        let pairwise = r#"{"winner": "A", "rationale": "A is more complete"}"#;
+        assert!(
+            serde_json::from_str::<JudgeVerdict>(pairwise).is_err(),
+            "a pairwise verdict must NOT deserialize as a JudgeVerdict"
+        );
+        assert!(
+            serde_json::from_str::<JudgeVerdict>("{}").is_err(),
+            "an empty object must not parse as an empty verdict"
+        );
+    }
+
+    /// A well-formed verdict must round-trip unchanged through the hand-written impl.
+    #[test]
+    fn judge_verdict_without_sentinels_is_unchanged() {
+        let s =
+            r#"{"matched": [[0,1],[2,3]], "unmatched_reference": [4], "unmatched_candidate": [5]}"#;
+        let v: JudgeVerdict = serde_json::from_str(s).unwrap();
+        assert_eq!(v.matched, vec![(0, 1), (2, 3)]);
+        assert_eq!(v.unmatched_reference, vec![4]);
+        assert_eq!(v.unmatched_candidate, vec![5]);
+        assert_eq!(
+            serde_json::from_str::<JudgeVerdict>(&serde_json::to_string(&v).unwrap()).unwrap(),
+            v,
+            "Serialize/Deserialize must stay symmetric — the judge cache round-trips this"
+        );
     }
 
     /// The exact response that killed the #248 full-corpus run: the judge answered,
