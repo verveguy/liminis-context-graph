@@ -13,13 +13,13 @@
 #   default_corpus_path()'s CARGO_MANIFEST_DIR-relative resolution, not the shell's cwd):
 #
 #   export ANTHROPIC_API_KEY=sk-ant-...
-#   LOCAL_BACKEND_SPEC='oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b' \
+#   LOCAL_BACKEND_SPEC='oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit' \
 #     bash crates/eval/scripts/run_mode_matrix.sh
 #
 # Override any of these env vars to change defaults:
 #   ANTHROPIC_MODEL     claude-haiku-4-5-20251001
 #   LOCAL_BACKEND_SPEC   (required) full --backend SPEC for the local candidate, e.g.
-#                        'oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b'
+#                        'oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit'
 #   ONTOLOGY_FIXTURE    the committed FR-005 fixture (crates/core/tests/fixtures/real_corpus_wal/ontology.yaml)
 #   JUDGE_MODEL         claude-sonnet-4-6
 #   JUDGE_CACHE_PREFIX  eval_judge_cache_266 (one shared cache file across all three modes —
@@ -43,7 +43,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 
 : "${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be set — see docs/eval-full-corpus-runbook.md}"
-: "${LOCAL_BACKEND_SPEC:?LOCAL_BACKEND_SPEC must be set, e.g. LOCAL_BACKEND_SPEC='oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b'}"
+: "${LOCAL_BACKEND_SPEC:?LOCAL_BACKEND_SPEC must be set, e.g. LOCAL_BACKEND_SPEC='oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit'}"
 
 ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}"
 ONTOLOGY_FIXTURE="${ONTOLOGY_FIXTURE:-$REPO_ROOT/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml}"

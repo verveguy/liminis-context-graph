@@ -35,11 +35,11 @@ crates/eval/scripts/04-full-run.sh              # the real benchmark
 > `--chat-template-args '{"enable_thinking": false}'`, which `01-start-server.sh`
 > does and then verifies. A full-corpus capture in thinking mode projects to 15+
 > hours and yields a cassette of the known-bad configuration.
-
+>
 > **Use the model id the server advertises**, i.e.
-> `model=mlx-community/Qwen3.6-27B-4bit`. `mlx_lm.server` treats an unrecognised id
-> as a HuggingFace repo to fetch, so `model=mlx-community/Qwen3.6-27B-4bit` fails *every* call with
-> `Repository Not Found` and leaves an empty cassette with no other symptom.
+> `model=mlx-community/Qwen3.6-27B-4bit`. `mlx_lm.server` treats an unrecognised id as a
+> HuggingFace repo to fetch, so a short-form guess like `model=qwen3.6-27b` fails *every*
+> call with `Repository Not Found` and leaves an empty cassette with no other symptom.
 
 ## Prerequisites
 

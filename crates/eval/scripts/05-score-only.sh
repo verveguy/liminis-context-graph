@@ -114,7 +114,7 @@ echo
   --judge-model claude-sonnet-4-6 \
   --output eval_report_248.json
 
-AFTER=$(wc -l < "$JUDGE_CACHE" | tr -d ' ')
+AFTER=$(wc -l < "$JUDGE_CACHE" 2>/dev/null | tr -d ' ' || echo 0)
 echo
 echo "==> done $(date +%H:%M:%S) -- $((AFTER - BEFORE)) new judge calls"
 echo "    report: eval_report_248.json"

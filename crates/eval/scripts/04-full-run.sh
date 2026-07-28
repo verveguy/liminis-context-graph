@@ -60,7 +60,15 @@ done
 backup_if_present "$CANDIDATE_CASSETTE"
 
 python3 - "$BASELINE_CASSETTE" "$QWEN_CASSETTE" <<'PY'
-import json, sys, collections
+import hashlib, json, sys, collections
+
+def digest(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
+
 def keys(p):
     ks = [json.loads(l)["key"] for l in open(p) if l.strip()]
     dupes = [k for k, n in collections.Counter(ks).items() if n > 1]
@@ -68,11 +76,22 @@ def keys(p):
         sys.exit(f"ERROR: {p} contains {len(dupes)} duplicate keys — it was appended to "
                  "without being moved aside. Replay would serve stale verdicts.")
     return set(ks)
+
+# This script spends real money on the live candidate leg before any scoring happens, so
+# the checks that would invalidate the whole comparison must run first and fail closed.
+if digest(sys.argv[1]) == digest(sys.argv[2]):
+    sys.exit("ERROR: the baseline and qwen cassettes are byte-identical. Every F1 between "
+             "them would be 1.000 by construction — one was almost certainly copied over "
+             "the other.")
+
 b, q = keys(sys.argv[1]), keys(sys.argv[2])
 print(f"==> COVERAGE  baseline {len(b)}  qwen {len(q)}  scoreable overlap {len(b & q)}")
-# Deliberately a warning, not a hard failure: the real captures legitimately differ
+if not (b & q):
+    sys.exit("ERROR: the cassettes share no chunks — nothing could be scored, and the live "
+             "leg would be paid for nothing.")
+# A partial mismatch is a warning, not a failure: the real captures legitimately differ
 # (226/223 with a 221 overlap) because each side lost different chunks to malformed
-# structured output. Unscoreable chunks are reported in error_rate, not hidden.
+# structured output, and unscoreable chunks are accounted in error_rate rather than hidden.
 if len(b & q) < min(len(b), len(q)):
     print(f"    note: {min(len(b), len(q)) - len(b & q)} chunk(s) present on only one side")
 PY

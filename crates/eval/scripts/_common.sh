@@ -30,12 +30,16 @@ URL="http://127.0.0.1:$PORT/v1/chat/completions"
 # machine; an unpredictable name would only obscure it.
 WORK="${LCG_EVAL_WORK:-/tmp/eval248}"
 mkdir -p "$WORK"
-chmod 700 "$WORK"
+# Ownership is checked BEFORE chmod, not after. Against a directory owned by someone else
+# `chmod` itself fails with permission denied and `set -e` kills the script first, so the
+# guard never fired on the one case it exists for — the operator got a bare chmod error
+# instead of the message telling them to set LCG_EVAL_WORK.
 if [ ! -O "$WORK" ]; then
   echo "ERROR: $WORK exists but is not owned by you — refusing to use it." >&2
   echo "       Set LCG_EVAL_WORK to a directory you own." >&2
   exit 1
 fi
+chmod 700 "$WORK"
 
 BIN="$REPO/target/release/lcg-eval"
 
