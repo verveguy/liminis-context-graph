@@ -53,11 +53,128 @@ Respond with ONLY this JSON (no preamble, no commentary):
 ";
 
 /// The judge's per-comparison verdict — matches the JSON shape `JUDGE_PROMPT` asks for.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+///
+/// `Deserialize` is hand-written rather than derived: see [`RawJudgeVerdict`].
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct JudgeVerdict {
     pub matched: Vec<(usize, usize)>,
     pub unmatched_reference: Vec<usize>,
     pub unmatched_candidate: Vec<usize>,
+}
+
+/// The verdict exactly as the judge writes it, before normalisation.
+///
+/// The prompt asks for `matched` to hold pairs of indices, but the judge routinely uses a
+/// *sentinel* in one slot to say "this item matched nothing" — `[5, null]` and `[9, -1]`
+/// were both observed during the #248 run — while also listing that index in
+/// `unmatched_reference`. Against `Vec<(usize, usize)>` serde rejects the whole response
+/// ("invalid type: null, expected usize"), so a verdict that is *complete and correct*
+/// is discarded and the chunk loses that axis.
+///
+/// The sentinel encoding is redundant with the unmatched lists in every observed case, so
+/// normalising costs nothing: drop the sentinel pairs, and union their real index into the
+/// matching unmatched list in case the judge only reported it in one place. Dropping
+/// matters for accuracy as well as parsing — a retained `[5, null]` would inflate
+/// `matched.len()`, and precision and recall are both computed from it.
+///
+/// `matched` is deliberately REQUIRED while the two unmatched lists default.
+///
+/// `JudgeCache` stores matching and pairwise verdicts in one file discriminated by
+/// `#[serde(untagged)]` (`judge_cache.rs`), which relies on the two shapes being disjoint.
+/// Defaulting every field here would make *any* JSON object — including a
+/// `{"winner", "rationale"}` pairwise verdict — parse as an all-empty `JudgeVerdict`, so
+/// every cached pairwise verdict would silently fail to reload and be re-purchased on the
+/// next run. Requiring `matched`, which `PairwiseVerdict` does not have, keeps them
+/// disjoint while still tolerating a judge that omits an empty unmatched list.
+#[derive(Deserialize)]
+struct RawJudgeVerdict {
+    matched: Vec<Vec<Option<i64>>>,
+    #[serde(default)]
+    unmatched_reference: Vec<i64>,
+    #[serde(default)]
+    unmatched_candidate: Vec<i64>,
+}
+
+/// A `matched`-pair slot holds a usable index only when present and non-negative.
+/// `None` here means the judge wrote a sentinel (`null` or a negative number).
+fn valid_index(slot: Option<i64>) -> Option<usize> {
+    match slot {
+        Some(i) if i >= 0 => Some(i as usize),
+        _ => None,
+    }
+}
+
+/// A bare entry in `unmatched_reference`/`unmatched_candidate`, which are plain lists and
+/// never contain `null` slots.
+///
+/// A negative value here is **dropped**, not an error. That is a deliberate choice with a
+/// real cost: before this type existed the field was `Vec<usize>` and a stray negative
+/// failed the whole response loudly. Dropping trades a loud total loss of the axis for a
+/// quiet partial one — the index vanishes and `ref_total`/`cand_total` shrink by one.
+///
+/// It is chosen because a negative index has no recoverable meaning (unlike a sentinel
+/// inside `matched`, where the paired slot still names a real item), so failing the entire
+/// verdict over one nonsense entry discards good data to no benefit. Pinned by a test so
+/// the behaviour is a decision rather than an accident.
+fn valid_bare_index(i: i64) -> Option<usize> {
+    (i >= 0).then_some(i as usize)
+}
+
+fn push_unique(v: &mut Vec<usize>, x: usize) {
+    if !v.contains(&x) {
+        v.push(x);
+    }
+}
+
+impl<'de> Deserialize<'de> for JudgeVerdict {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = RawJudgeVerdict::deserialize(d)?;
+
+        let mut unmatched_reference: Vec<usize> = Vec::new();
+        for i in raw.unmatched_reference {
+            if let Some(i) = valid_bare_index(i) {
+                push_unique(&mut unmatched_reference, i);
+            }
+        }
+        let mut unmatched_candidate: Vec<usize> = Vec::new();
+        for i in raw.unmatched_candidate {
+            if let Some(i) = valid_bare_index(i) {
+                push_unique(&mut unmatched_candidate, i);
+            }
+        }
+
+        let mut matched = Vec::with_capacity(raw.matched.len());
+        for pair in raw.matched {
+            // Arity is deliberately not assumed. `minItems`/`maxItems` are rejected by the
+            // API's schema subset, so nothing upstream guarantees exactly two elements, and
+            // a serde tuple would hard-fail the whole response on a 1- or 3-element array.
+            let a = pair.first().copied().flatten();
+            let b = pair.get(1).copied().flatten();
+            match (valid_index(a), valid_index(b)) {
+                (Some(r), Some(c)) => matched.push((r, c)),
+                // A sentinel in one slot: the other slot names a genuinely unmatched item.
+                (Some(r), None) => push_unique(&mut unmatched_reference, r),
+                (None, Some(c)) => push_unique(&mut unmatched_candidate, c),
+                (None, None) => {}
+            }
+        }
+
+        // A real match is authoritative over any claim that the same index is unmatched,
+        // however that claim arrived — a sentinel pair like `[[0,0],[0,null]]`, or the judge
+        // simply listing 0 in `unmatched_reference` while also matching it. Both were left
+        // standing before, so the index counted once via `matched.len()` and again via the
+        // unmatched list, inflating the denominator in `precision_recall_f1` and
+        // understating recall. That is precisely the inflation this type exists to prevent,
+        // so it must be reconciled after `matched` is final rather than during collection.
+        unmatched_reference.retain(|r| !matched.iter().any(|(mr, _)| mr == r));
+        unmatched_candidate.retain(|c| !matched.iter().any(|(_, mc)| mc == c));
+
+        Ok(JudgeVerdict {
+            matched,
+            unmatched_reference,
+            unmatched_candidate,
+        })
+    }
 }
 
 /// Precision/recall/F1 derivation ported verbatim: each defaults to 1.0 (precision/recall)
@@ -177,6 +294,58 @@ pub struct AnthropicJudgeClient {
     breaker: CircuitBreaker,
 }
 
+/// Response schema for a matching verdict, enforced by the API via
+/// `output_config.format` rather than merely requested in prose.
+///
+/// The prompt already says "respond with ONLY this JSON (no preamble, no commentary)" and
+/// the judge ignored it three separate ways during the #248 run: prose around the JSON, a
+/// second corrected object after reconsidering, and `null`/`-1` sentinels inside `matched`.
+///
+/// What the schema does and does not buy, probed against the live API on 2026-07-28 rather
+/// than assumed — the subset accepted here is narrower than JSON Schema:
+///
+/// | failure mode              | prevented? |
+/// |---------------------------|------------|
+/// | prose around the JSON     | yes        |
+/// | a second corrected object | yes        |
+/// | `null` sentinel           | yes, via `"type": "integer"` |
+/// | `-1` sentinel             | **no** — `minimum` is rejected: "For 'integer' type, property 'minimum' is not supported" |
+/// | inner array not a pair    | **no** — `minItems`/`maxItems` other than 0 or 1 are rejected |
+///
+/// So the sentinel normalisation in [`RawJudgeVerdict`] is load-bearing, not a courtesy
+/// backstop: it is the only thing handling `-1`, and the only thing tolerating an inner
+/// array whose length is not two. Do not delete it on the grounds that "the schema
+/// guarantees the shape" — it guarantees less than it looks like it does.
+fn matching_verdict_schema() -> Value {
+    let index = json!({"type": "integer"});
+    json!({
+        "type": "object",
+        "properties": {
+            "matched": {
+                "type": "array",
+                "items": {"type": "array", "items": index}
+            },
+            "unmatched_reference": {"type": "array", "items": index},
+            "unmatched_candidate": {"type": "array", "items": index},
+        },
+        "required": ["matched", "unmatched_reference", "unmatched_candidate"],
+        "additionalProperties": false
+    })
+}
+
+/// Response schema for a blind pairwise verdict (#269).
+fn pairwise_verdict_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "winner": {"type": "string", "enum": ["A", "B", "tie"]},
+            "rationale": {"type": "string"},
+        },
+        "required": ["winner", "rationale"],
+        "additionalProperties": false
+    })
+}
+
 /// How many judge calls may fail back-to-back before the client stops making requests.
 ///
 /// Judge failures are deliberately non-fatal per call, because one bad response should not
@@ -261,18 +430,35 @@ impl AnthropicJudgeClient {
     /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`
     /// — the only difference between the two is the prompt text and the response shape
     /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
-    async fn request_judge_text(&self, prompt: String) -> Result<String, String> {
+    async fn request_judge_text(&self, prompt: String, schema: Value) -> Result<String, String> {
         self.breaker.check()?;
-        let result = self.request_judge_text_inner(prompt).await;
+        let result = self.request_judge_text_inner(prompt, schema).await;
         self.breaker.record(&result);
         result
     }
 
-    async fn request_judge_text_inner(&self, prompt: String) -> Result<String, String> {
+    async fn request_judge_text_inner(
+        &self,
+        prompt: String,
+        schema: Value,
+    ) -> Result<String, String> {
         let body = json!({
             "model": self.model,
             "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": prompt}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}},
+            // Explicit, not inherited from the model's default. Sonnet 4.6 runs
+            // thinking-off when `thinking` is omitted, but Sonnet 5 runs adaptive thinking
+            // by default — so `--judge-model claude-sonnet-5` would silently switch it on
+            // across every call of a ~6000-call scoring phase, changing cost, latency and
+            // verdicts at once, with nothing in the output saying so.
+            //
+            // Disabled rather than adaptive on purpose. Judging is index enumeration, which
+            // is exactly where thinking measured *worse* on this corpus:
+            // docs/history/extraction-eval-2026-04.md has qwen3.6-27b at 0.894 entity F1
+            // without thinking and 0.772 with. A judge is a measuring instrument — cheap,
+            // fast and repeatable beats deliberative.
+            "thinking": {"type": "disabled"}
         });
 
         // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
@@ -353,7 +539,9 @@ impl JudgeClient for AnthropicJudgeClient {
                     &serde_json::to_string_pretty(candidate).unwrap_or_default(),
                 );
 
-            let text = self.request_judge_text(prompt).await?;
+            let text = self
+                .request_judge_text(prompt, matching_verdict_schema())
+                .await?;
             let json_str = extract_json_block(&text);
             serde_json::from_str::<JudgeVerdict>(json_str)
                 .map_err(|e| format!("judge response not valid JSON ({e}): {text}"))
@@ -380,7 +568,9 @@ impl JudgeClient for AnthropicJudgeClient {
                     &serde_json::to_string_pretty(slot_b).unwrap_or_default(),
                 );
 
-            let text = self.request_judge_text(prompt).await?;
+            let text = self
+                .request_judge_text(prompt, pairwise_verdict_schema())
+                .await?;
             let json_str = extract_json_block(&text);
             serde_json::from_str::<PairwiseVerdict>(json_str)
                 .map_err(|e| format!("pairwise judge response not valid JSON ({e}): {text}"))
@@ -536,6 +726,239 @@ mod tests {
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
     }
 
+    /// The schema must stay inside the subset the API actually accepts. Both `minimum` and
+    /// `minItems` were rejected when probed live, so re-adding either would 400 *every*
+    /// judge call — a total run failure, not a degradation.
+    #[test]
+    fn matching_schema_stays_within_the_supported_subset() {
+        let s = matching_verdict_schema();
+        let rendered = s.to_string();
+        assert!(
+            !rendered.contains("minimum"),
+            "API rejects 'minimum' on integer: every call would 400"
+        );
+        assert!(
+            !rendered.contains("minItems") && !rendered.contains("maxItems"),
+            "API rejects minItems/maxItems other than 0 or 1: every call would 400"
+        );
+        // `type: integer` is the one constraint that does hold, and it is what excludes the
+        // `null` sentinel. `-1` is left to the normaliser.
+        assert_eq!(
+            s["properties"]["matched"]["items"]["items"]["type"],
+            "integer"
+        );
+        for field in ["unmatched_reference", "unmatched_candidate"] {
+            assert_eq!(s["properties"][field]["items"]["type"], "integer");
+        }
+        assert_eq!(s["additionalProperties"], false);
+    }
+
+    /// The pairwise schema's enum must match `PairwiseWinner`'s serde representation, or
+    /// every constrained response would parse-fail on arrival.
+    #[test]
+    fn pairwise_schema_enum_matches_the_winner_type() {
+        let s = pairwise_verdict_schema();
+        let variants = s["properties"]["winner"]["enum"]
+            .as_array()
+            .unwrap()
+            .clone();
+        for v in variants {
+            let as_json = format!(r#"{{"winner": {v}, "rationale": "x"}}"#);
+            serde_json::from_str::<PairwiseVerdict>(&as_json).unwrap_or_else(|e| {
+                panic!("schema allows {v} but PairwiseVerdict rejects it: {e}")
+            });
+        }
+    }
+
+    /// CodeRabbit's finding on #276: a sentinel pair whose real index ALSO appears in a
+    /// genuine match. `[[0,0],[0,null]]` used to yield both `matched=[(0,0)]` and
+    /// `unmatched_reference=[0]`, counting index 0 twice toward `ref_total` — the very
+    /// inflation this type exists to prevent, arriving by a path the original fix missed.
+    #[test]
+    fn a_real_match_wins_over_a_sentinel_claiming_the_same_index() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0],[0,null]], "unmatched_reference": [], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert!(
+            v.unmatched_reference.is_empty(),
+            "0 is matched; it cannot also be unmatched"
+        );
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!((p, r), (1.0, 1.0), "denominators must not be inflated");
+    }
+
+    /// The Claude reviewer's variant of the same gap: no sentinel involved — the judge
+    /// simply lists an index as unmatched while also matching it. Same double count.
+    #[test]
+    fn a_real_match_wins_over_a_declared_unmatched_entry() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[5,3]], "unmatched_reference": [5], "unmatched_candidate": [3]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(5, 3)]);
+        assert!(v.unmatched_reference.is_empty());
+        assert!(v.unmatched_candidate.is_empty());
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!((p, r), (1.0, 1.0));
+    }
+
+    /// Reconciliation must not over-reach: an index unmatched on one axis can legitimately
+    /// be matched on the other, since the two lists index different item lists.
+    #[test]
+    fn reconciliation_is_per_axis_not_global() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,1]], "unmatched_reference": [1], "unmatched_candidate": [0]}"#,
+        )
+        .unwrap();
+        assert_eq!(v.matched, vec![(0, 1)]);
+        assert_eq!(
+            v.unmatched_reference,
+            vec![1],
+            "reference 1 is genuinely unmatched"
+        );
+        assert_eq!(
+            v.unmatched_candidate,
+            vec![0],
+            "candidate 0 is genuinely unmatched"
+        );
+    }
+
+    /// Pins the documented decision that a bare negative in an unmatched list is dropped
+    /// rather than failing the response. Before this type it errored loudly; dropping
+    /// trades a loud total loss of the axis for a quiet partial one, which is a choice and
+    /// should read as one.
+    #[test]
+    fn bare_negative_indices_in_unmatched_lists_are_dropped_not_fatal() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0]], "unmatched_reference": [-1, 2], "unmatched_candidate": [-7]}"#,
+        )
+        .expect("a nonsense index must not discard the whole verdict");
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert_eq!(v.unmatched_reference, vec![2], "-1 dropped, 2 kept");
+        assert!(v.unmatched_candidate.is_empty());
+    }
+
+    /// Duplicates within a declared list must not inflate the denominator either.
+    #[test]
+    fn duplicate_declared_unmatched_indices_are_collapsed() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [], "unmatched_reference": [3, 3, 3], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        assert_eq!(v.unmatched_reference, vec![3]);
+    }
+
+    /// The schema cannot constrain inner-array arity, so a pair that is not a pair must
+    /// degrade rather than fail the whole response — a serde tuple would hard-error here.
+    #[test]
+    fn judge_verdict_tolerates_non_pair_inner_arrays() {
+        let s = r#"{"matched": [[0, 0], [1], [2, 2, 9], []],
+                    "unmatched_reference": [], "unmatched_candidate": []}"#;
+        let v: JudgeVerdict =
+            serde_json::from_str(s).expect("odd arity must not fail the response");
+        assert_eq!(v.matched, vec![(0, 0), (2, 2)], "extra elements ignored");
+        assert_eq!(
+            v.unmatched_reference,
+            vec![1],
+            "a lone index is an unmatched reference"
+        );
+    }
+
+    /// Verbatim from the #248 run: a `null` sentinel in the candidate slot, with the index
+    /// also correctly listed in `unmatched_reference`. The old derive rejected the whole
+    /// response and the chunk lost its edge score.
+    #[test]
+    fn judge_verdict_drops_null_sentinel_pairs() {
+        let s = r#"{
+          "matched": [[0, 0], [1, 1], [5, null], [6, 9]],
+          "unmatched_reference": [5],
+          "unmatched_candidate": [5]
+        }"#;
+        let v: JudgeVerdict = serde_json::from_str(s).expect("null sentinels must parse");
+        assert_eq!(v.matched, vec![(0, 0), (1, 1), (6, 9)]);
+        assert_eq!(
+            v.unmatched_reference,
+            vec![5],
+            "already listed — must not duplicate"
+        );
+        assert_eq!(v.unmatched_candidate, vec![5]);
+    }
+
+    /// The other observed sentinel: `-1` rather than `null`, three times in one response.
+    #[test]
+    fn judge_verdict_drops_negative_sentinel_pairs() {
+        let s = r#"{
+          "matched": [[0, 0], [9, -1], [10, -1], [11, -1]],
+          "unmatched_reference": [9, 10, 11],
+          "unmatched_candidate": []
+        }"#;
+        let v: JudgeVerdict = serde_json::from_str(s).expect("-1 sentinels must parse");
+        assert_eq!(v.matched, vec![(0, 0)]);
+        assert_eq!(v.unmatched_reference, vec![9, 10, 11]);
+    }
+
+    /// If the judge uses a sentinel but *forgets* the unmatched list, the index must still
+    /// be accounted for — otherwise the item silently vanishes from both sides and recall
+    /// is overstated.
+    #[test]
+    fn judge_verdict_recovers_a_sentinel_index_missing_from_the_unmatched_list() {
+        let s = r#"{"matched": [[3, null], [null, 7]],
+                    "unmatched_reference": [], "unmatched_candidate": []}"#;
+        let v: JudgeVerdict = serde_json::from_str(s).unwrap();
+        assert!(v.matched.is_empty());
+        assert_eq!(v.unmatched_reference, vec![3]);
+        assert_eq!(v.unmatched_candidate, vec![7]);
+    }
+
+    /// Sentinels must not be counted as matches: precision and recall are both derived
+    /// from `matched.len()`, so retaining `[5, null]` would inflate both.
+    #[test]
+    fn sentinel_pairs_do_not_inflate_precision_and_recall() {
+        let v: JudgeVerdict = serde_json::from_str(
+            r#"{"matched": [[0,0],[1,null]], "unmatched_reference": [1], "unmatched_candidate": []}"#,
+        )
+        .unwrap();
+        let (p, r, _) = precision_recall_f1(&v);
+        assert_eq!(p, 1.0, "one real match, one candidate item");
+        assert_eq!(r, 0.5, "one of two reference items matched");
+    }
+
+    /// `JudgeCache` discriminates matching from pairwise verdicts by `#[serde(untagged)]`,
+    /// which needs the two shapes to stay disjoint. Making every field default would let a
+    /// pairwise verdict parse as an all-empty `JudgeVerdict`, so cached pairwise verdicts
+    /// would never reload and would be re-purchased on every run. Pinned here because the
+    /// coupling lives in another module and is invisible from this one.
+    #[test]
+    fn judge_verdict_never_absorbs_a_pairwise_verdict() {
+        let pairwise = r#"{"winner": "A", "rationale": "A is more complete"}"#;
+        assert!(
+            serde_json::from_str::<JudgeVerdict>(pairwise).is_err(),
+            "a pairwise verdict must NOT deserialize as a JudgeVerdict"
+        );
+        assert!(
+            serde_json::from_str::<JudgeVerdict>("{}").is_err(),
+            "an empty object must not parse as an empty verdict"
+        );
+    }
+
+    /// A well-formed verdict must round-trip unchanged through the hand-written impl.
+    #[test]
+    fn judge_verdict_without_sentinels_is_unchanged() {
+        let s =
+            r#"{"matched": [[0,1],[2,3]], "unmatched_reference": [4], "unmatched_candidate": [5]}"#;
+        let v: JudgeVerdict = serde_json::from_str(s).unwrap();
+        assert_eq!(v.matched, vec![(0, 1), (2, 3)]);
+        assert_eq!(v.unmatched_reference, vec![4]);
+        assert_eq!(v.unmatched_candidate, vec![5]);
+        assert_eq!(
+            serde_json::from_str::<JudgeVerdict>(&serde_json::to_string(&v).unwrap()).unwrap(),
+            v,
+            "Serialize/Deserialize must stay symmetric — the judge cache round-trips this"
+        );
+    }
+
     /// The exact response that killed the #248 full-corpus run: the judge answered,
     /// reconsidered in prose, and answered again with a correction. The old
     /// first-brace-to-last-brace span covered both objects plus the prose, so serde
@@ -675,7 +1098,7 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
         }
 
         let err = client
-            .request_judge_text("anything".into())
+            .request_judge_text("anything".into(), matching_verdict_schema())
             .await
             .expect_err("breaker must be open");
         assert!(
