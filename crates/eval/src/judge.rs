@@ -301,27 +301,73 @@ impl JudgeClient for AnthropicJudgeClient {
 /// (and specific enough to the judge's own response shape) that duplicating it here beats
 /// exporting a private helper out of `extractor.rs` for one caller (Plan's key decision).
 fn extract_json_block(s: &str) -> &str {
-    if let Some(start) = s.find("```json") {
-        let after = &s[start + 7..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
+    // A fence narrows *where* to look; it never decides *what* to return. Returning fenced
+    // content verbatim reintroduces the bug this function exists to fix whenever the judge
+    // wraps its whole reply -- first verdict, reconsideration prose, corrected verdict --
+    // in a single fence, which is at least as likely as the two-fence form actually
+    // observed. So the object scan runs over the fenced content too.
+    if let Some(fenced) = last_fenced_content(s) {
+        if let Some(obj) = last_top_level_json_object(fenced) {
+            return obj;
         }
     }
-    if let Some(start) = s.find("```") {
-        let after = &s[start + 3..];
-        if let Some(end) = after.find("```") {
-            return after[..end].trim();
+    last_top_level_json_object(s).unwrap_or_else(|| s.trim())
+}
+
+/// Content of the **last** fenced block in `s`, with an optional `json` language tag
+/// stripped, or `None` when there is no complete fence.
+///
+/// Fences are collected as a flat list of ```` ``` ```` positions and the final pair is
+/// taken, because openers and closers are indistinguishable by search: an earlier
+/// implementation used `rfind("```")` to locate the *opening* fence, but for any
+/// well-formed block that finds the *closing* marker, leaving nothing after it to match
+/// and rendering the branch dead. (Caught in review on #271; it was harmless only because
+/// the fallback scan recovers the right object anyway.)
+fn last_fenced_content(s: &str) -> Option<&str> {
+    let fences: Vec<usize> = s.match_indices("```").map(|(i, _)| i).collect();
+    if fences.len() < 2 {
+        return None;
+    }
+    let open = fences[fences.len() - 2];
+    let close = fences[fences.len() - 1];
+    let inner = &s[open + 3..close];
+    Some(inner.strip_prefix("json").unwrap_or(inner).trim())
+}
+
+/// Returns the **last** top-level `{...}` span in `s` that parses as JSON, or `None`.
+///
+/// The judge is a reasoning model, and a reasoning model that spots its own mistake
+/// answers twice: it emits a verdict, reconsiders in prose, then emits a corrected
+/// verdict. The correction is the answer we want — it is the one the model stands
+/// behind — so this scans forward and keeps the last object rather than the first.
+///
+/// The previous `s.find('{') ..= s.rfind('}')` span was first-brace-to-last-brace, which
+/// on a self-corrected response covers *both* objects plus the prose between them.
+/// `serde_json` parses the leading object and then reports "trailing characters", the
+/// error propagates out of `score_candidate`, and a multi-hour scoring run dies on a
+/// response that was not merely valid but *more* correct than the usual one. That killed
+/// the #248 full-corpus run 17 calls into ~1340.
+///
+/// Advancing past each parsed object (rather than to the next `{`) is what keeps this
+/// top-level: descending into a nested object would make the innermost trailing object
+/// win, so `{"a": {"b": 1}}` would yield `{"b": 1}`.
+fn last_top_level_json_object(s: &str) -> Option<&str> {
+    let mut best = None;
+    let mut idx = 0;
+    while let Some(rel) = s[idx..].find('{') {
+        let start = idx + rel;
+        let mut stream =
+            serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
+        match stream.next() {
+            Some(Ok(_)) => {
+                let consumed = stream.byte_offset();
+                best = Some(&s[start..start + consumed]);
+                idx = start + consumed;
+            }
+            _ => idx = start + 1,
         }
     }
-    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
-        // A malformed/refusal response can have a stray '}' before the first '{' (e.g. no
-        // real JSON present at all), which would make `start > end` and panic on the slice
-        // below. Fall through to returning the trimmed whole string in that case.
-        if start <= end {
-            return &s[start..=end];
-        }
-    }
-    s.trim()
+    best
 }
 
 #[cfg(test)]
@@ -397,6 +443,76 @@ mod tests {
     fn extract_json_block_finds_braces_without_fences() {
         let s = "sure, here you go: {\"matched\": []} thanks";
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
+    }
+
+    /// The exact response that killed the #248 full-corpus run: the judge answered,
+    /// reconsidered in prose, and answered again with a correction. The old
+    /// first-brace-to-last-brace span covered both objects plus the prose, so serde
+    /// reported "trailing characters at line 7 column 1" and the run aborted.
+    #[test]
+    fn extract_json_block_takes_the_correction_when_the_judge_answers_twice() {
+        let s = r#"{
+  "matched": [[0, 0], [1, 1], [8, 1]],
+  "unmatched_reference": [],
+  "unmatched_candidate": [4]
+}
+
+Wait, let me reconsider. Reference index 1 is "birthplace of Alan Shepard" and
+reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
+
+{
+  "matched": [[0, 0], [1, 2], [8, 1]],
+  "unmatched_reference": [],
+  "unmatched_candidate": []
+}"#;
+        let verdict: JudgeVerdict = serde_json::from_str(extract_json_block(s))
+            .expect("the corrected block must parse on its own");
+        assert_eq!(verdict.matched, vec![(0, 0), (1, 2), (8, 1)]);
+        assert!(
+            verdict.unmatched_candidate.is_empty(),
+            "must take the second verdict, not the first"
+        );
+    }
+
+    /// Finding #1 from #271's review: the fenced variant of the observed failure. If the
+    /// judge puts its whole reply -- both verdicts and the reconsideration prose -- inside
+    /// ONE fence, returning fenced content verbatim fails to parse exactly as the unfenced
+    /// case did. The scan must run over fenced content too.
+    #[test]
+    fn extract_json_block_handles_a_self_correction_inside_a_single_fence() {
+        let s = "```json\n{\"matched\": [[0, 0]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": [4]}\n\nWait, that mismatches the birthplace. \
+                 Correcting:\n\n{\"matched\": [[0, 1]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": []}\n```";
+        let verdict: JudgeVerdict = serde_json::from_str(extract_json_block(s))
+            .expect("must recover the corrected object from inside one fence");
+        assert_eq!(verdict.matched, vec![(0, 1)]);
+        assert!(verdict.unmatched_candidate.is_empty());
+    }
+
+    /// The bare-fence (no language tag) path, which review found was dead code: `rfind` on
+    /// "```" locates the *closing* marker, so the old branch never fired.
+    #[test]
+    fn extract_json_block_reads_a_bare_fence() {
+        let s = "here:\n```\n{\"matched\": [[1, 1]], \"unmatched_reference\": [], \
+                 \"unmatched_candidate\": []}\n```";
+        let verdict: JudgeVerdict =
+            serde_json::from_str(extract_json_block(s)).expect("bare fences must parse");
+        assert_eq!(verdict.matched, vec![(1, 1)]);
+    }
+
+    #[test]
+    fn extract_json_block_prefers_the_last_fenced_block() {
+        let s = "```json\n{\"matched\": [[0, 0]]}\n```\non reflection:\n```json\n{\"matched\": []}\n```";
+        assert_eq!(extract_json_block(s), "{\"matched\": []}");
+    }
+
+    /// Advancing past each parsed object keeps the scan at the top level. Without that,
+    /// the innermost trailing object would win and this would yield `{"b": 1}`.
+    #[test]
+    fn extract_json_block_does_not_descend_into_nested_objects() {
+        let s = "{\"a\": {\"b\": 1}}";
+        assert_eq!(extract_json_block(s), s);
     }
 
     #[test]

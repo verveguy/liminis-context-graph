@@ -72,8 +72,22 @@ pub struct CandidateReport {
     pub strict_entity_f1: f64,
     pub strict_edge_f1: f64,
     pub judged_entity_f1: Option<f64>,
+    /// Precision and recall are the diagnostic half of the judged score and F1 hides
+    /// them: a model extracting a third more items than the reference is penalised
+    /// identically to one missing a third, but the two mean opposite things. Both were
+    /// already computed by `precision_recall_f1` and discarded before reaching here.
+    pub judged_entity_precision: Option<f64>,
+    pub judged_entity_recall: Option<f64>,
     pub judged_edge_f1: Option<f64>,
+    pub judged_edge_precision: Option<f64>,
+    pub judged_edge_recall: Option<f64>,
     pub judged_summary_f1: Option<f64>,
+    /// Judge **calls** that failed after exhausting their retries — not chunks. Entities,
+    /// edges and summaries are judged by three independent calls per chunk, so one failure
+    /// costs that chunk's data point on *one* axis while its other two axes still land in
+    /// their averages. Non-fatal (see `score_candidate`); read a nonzero value as a caveat
+    /// on the affected averages, not as a run failure or as whole chunks being dropped.
+    pub judge_errors: usize,
 }
 
 /// FR-007/FR-010: one backend pair's aggregated result on one axis (entities/edges/
@@ -128,9 +142,11 @@ impl Report {
              ontology mode: {}\n\n",
             self.corpus_size, self.reference_backend, self.ontology_mode
         );
-        // `None` judged F1 can mean either "no judge client configured" (no
-        // ANTHROPIC_API_KEY) or "zero chunk pairs succeeded on both sides to score" —
-        // report `chunks_scored` alongside rather than guessing which one applied.
+        // `None` judged F1 can mean "no judge client configured" (no ANTHROPIC_API_KEY),
+        // "zero chunk pairs succeeded on both sides to score", or — since judge failures
+        // became non-fatal — "every judge call for this one axis errored", which is
+        // possible even with `chunks_scored > 0`. Report `chunks_scored` and `judge_errors`
+        // alongside rather than guessing which applied.
         let fmt_opt = |v: Option<f64>| {
             v.map(|x| format!("{x:.3}"))
                 .unwrap_or_else(|| "n/a".to_string())
@@ -169,13 +185,27 @@ impl Report {
             }
             out.push_str(&format!(
                 "  strict F1 — entities: {:.3}  edges: {:.3}\n  \
-                 judged F1 — entities: {}  edges: {}  summaries: {}\n\n",
+                 judged F1 — entities: {}  edges: {}  summaries: {}\n  \
+                 judged entities — precision: {}  recall: {}\n  \
+                 judged edges    — precision: {}  recall: {}\n",
                 c.strict_entity_f1,
                 c.strict_edge_f1,
                 fmt_opt(c.judged_entity_f1),
                 fmt_opt(c.judged_edge_f1),
                 fmt_opt(c.judged_summary_f1),
+                fmt_opt(c.judged_entity_precision),
+                fmt_opt(c.judged_entity_recall),
+                fmt_opt(c.judged_edge_precision),
+                fmt_opt(c.judged_edge_recall),
             ));
+            if c.judge_errors > 0 {
+                out.push_str(&format!(
+                    "  judge errors: {} failed judge calls (each costs one chunk's data \
+                     point on one axis, not the whole chunk)\n",
+                    c.judge_errors
+                ));
+            }
+            out.push('\n');
         }
 
         // FR-007: rendered only when pairwise mode actually ran — omitted entirely (not
@@ -273,8 +303,13 @@ mod tests {
                 strict_entity_f1: 0.771,
                 strict_edge_f1: 0.771,
                 judged_entity_f1: Some(0.978),
+                judged_entity_precision: Some(0.981),
+                judged_entity_recall: Some(0.975),
                 judged_edge_f1: Some(0.978),
+                judged_edge_precision: Some(0.981),
+                judged_edge_recall: Some(0.975),
                 judged_summary_f1: None,
+                judge_errors: 0,
             }],
             pairwise: None,
         }
@@ -311,14 +346,30 @@ mod tests {
         report
     }
 
-    /// SC-004: with `--judge-mode` omitted (the `pairwise` field always `None`), the JSON
-    /// report must be byte-identical to the pre-#269 shape. This golden string was captured
-    /// from `sample_report().to_json()` *before* the `pairwise` field was added to `Report`,
-    /// so any accidental key addition/reordering/nulling here is caught immediately.
+    /// SC-004 (#269): with `--judge-mode` omitted, pairwise must leave reference-mode output
+    /// alone. The golden below catches accidental key addition/reordering/nulling.
+    ///
+    /// The golden moved once, deliberately, in #271: `judged_*_precision`, `judged_*_recall`
+    /// and `judge_errors` were added to `CandidateReport`. That is an intentional schema
+    /// addition, not the regression this guards — SC-004 is about *pairwise* not perturbing
+    /// reference-mode output, and those fields are unrelated to pairwise. Update this golden
+    /// when you mean to change the schema; never to make a red test go away.
     #[test]
     fn json_report_is_byte_identical_to_pre_pairwise_golden_sc004() {
-        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_edge_f1\": 0.978,\n      \"judged_summary_f1\": null\n    }\n  ]\n}";
+        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
         assert_eq!(sample_report().to_json(), golden);
+    }
+
+    /// The property SC-004 actually protects, asserted directly so it survives any future
+    /// intentional field addition that forces the golden above to be re-captured: with
+    /// `pairwise: None` the key must be *absent*, not present-and-null.
+    #[test]
+    fn json_report_omits_pairwise_key_entirely_when_not_requested_sc004() {
+        let json = sample_report().to_json();
+        assert!(
+            !json.contains("pairwise"),
+            "reference-mode report must not mention pairwise at all, got: {json}"
+        );
     }
 
     #[test]
