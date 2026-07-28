@@ -88,7 +88,7 @@ pub struct JudgeVerdict {
 /// disjoint while still tolerating a judge that omits an empty unmatched list.
 #[derive(Deserialize)]
 struct RawJudgeVerdict {
-    matched: Vec<(Option<i64>, Option<i64>)>,
+    matched: Vec<Vec<Option<i64>>>,
     #[serde(default)]
     unmatched_reference: Vec<i64>,
     #[serde(default)]
@@ -125,7 +125,12 @@ impl<'de> Deserialize<'de> for JudgeVerdict {
             .collect();
 
         let mut matched = Vec::with_capacity(raw.matched.len());
-        for (a, b) in raw.matched {
+        for pair in raw.matched {
+            // Arity is deliberately not assumed. `minItems`/`maxItems` are rejected by the
+            // API's schema subset, so nothing upstream guarantees exactly two elements, and
+            // a serde tuple would hard-fail the whole response on a 1- or 3-element array.
+            let a = pair.first().copied().flatten();
+            let b = pair.get(1).copied().flatten();
             match (valid_index(a), valid_index(b)) {
                 (Some(r), Some(c)) => matched.push((r, c)),
                 // A sentinel in one slot: the other slot names a genuinely unmatched item.
@@ -266,26 +271,30 @@ pub struct AnthropicJudgeClient {
 /// The prompt already says "respond with ONLY this JSON (no preamble, no commentary)" and
 /// the judge ignored it three separate ways during the #248 run: prose around the JSON, a
 /// second corrected object after reconsidering, and `null`/`-1` sentinels inside `matched`.
-/// A schema makes all three unrepresentable rather than merely discouraged —
-/// `"type": "integer"` excludes `null`, `"minimum": 0` excludes `-1`, and a constrained
-/// response cannot carry commentary at all.
 ///
-/// `extract_json_block` and the sentinel normalisation stay in place as a backstop: schema
-/// support can vary by model and deployment, and a run that costs money should not depend
-/// on a single mechanism holding.
+/// What the schema does and does not buy, probed against the live API on 2026-07-28 rather
+/// than assumed — the subset accepted here is narrower than JSON Schema:
+///
+/// | failure mode              | prevented? |
+/// |---------------------------|------------|
+/// | prose around the JSON     | yes        |
+/// | a second corrected object | yes        |
+/// | `null` sentinel           | yes, via `"type": "integer"` |
+/// | `-1` sentinel             | **no** — `minimum` is rejected: "For 'integer' type, property 'minimum' is not supported" |
+/// | inner array not a pair    | **no** — `minItems`/`maxItems` other than 0 or 1 are rejected |
+///
+/// So the sentinel normalisation in [`RawJudgeVerdict`] is load-bearing, not a courtesy
+/// backstop: it is the only thing handling `-1`, and the only thing tolerating an inner
+/// array whose length is not two. Do not delete it on the grounds that "the schema
+/// guarantees the shape" — it guarantees less than it looks like it does.
 fn matching_verdict_schema() -> Value {
-    let index = json!({"type": "integer", "minimum": 0});
+    let index = json!({"type": "integer"});
     json!({
         "type": "object",
         "properties": {
             "matched": {
                 "type": "array",
-                "items": {
-                    "type": "array",
-                    "items": index,
-                    "minItems": 2,
-                    "maxItems": 2
-                }
+                "items": {"type": "array", "items": index}
             },
             "unmatched_reference": {"type": "array", "items": index},
             "unmatched_candidate": {"type": "array", "items": index},
@@ -688,21 +697,30 @@ mod tests {
         assert_eq!(extract_json_block(s), "{\"matched\": []}");
     }
 
-    /// The schema must forbid exactly the two things the judge actually emitted:
-    /// `"type": "integer"` excludes `null`, `"minimum": 0` excludes `-1`. Asserted rather
-    /// than assumed, because losing either keyword silently reopens the failure mode.
+    /// The schema must stay inside the subset the API actually accepts. Both `minimum` and
+    /// `minItems` were rejected when probed live, so re-adding either would 400 *every*
+    /// judge call — a total run failure, not a degradation.
     #[test]
-    fn matching_schema_forbids_the_observed_sentinels() {
+    fn matching_schema_stays_within_the_supported_subset() {
         let s = matching_verdict_schema();
-        let idx = &s["properties"]["matched"]["items"]["items"];
-        assert_eq!(idx["type"], "integer", "null must be unrepresentable");
-        assert_eq!(idx["minimum"], 0, "-1 must be unrepresentable");
+        let rendered = s.to_string();
+        assert!(
+            !rendered.contains("minimum"),
+            "API rejects 'minimum' on integer: every call would 400"
+        );
+        assert!(
+            !rendered.contains("minItems") && !rendered.contains("maxItems"),
+            "API rejects minItems/maxItems other than 0 or 1: every call would 400"
+        );
+        // `type: integer` is the one constraint that does hold, and it is what excludes the
+        // `null` sentinel. `-1` is left to the normaliser.
+        assert_eq!(
+            s["properties"]["matched"]["items"]["items"]["type"],
+            "integer"
+        );
         for field in ["unmatched_reference", "unmatched_candidate"] {
             assert_eq!(s["properties"][field]["items"]["type"], "integer");
-            assert_eq!(s["properties"][field]["items"]["minimum"], 0);
         }
-        assert_eq!(s["properties"]["matched"]["items"]["minItems"], 2);
-        assert_eq!(s["properties"]["matched"]["items"]["maxItems"], 2);
         assert_eq!(s["additionalProperties"], false);
     }
 
@@ -721,6 +739,22 @@ mod tests {
                 panic!("schema allows {v} but PairwiseVerdict rejects it: {e}")
             });
         }
+    }
+
+    /// The schema cannot constrain inner-array arity, so a pair that is not a pair must
+    /// degrade rather than fail the whole response — a serde tuple would hard-error here.
+    #[test]
+    fn judge_verdict_tolerates_non_pair_inner_arrays() {
+        let s = r#"{"matched": [[0, 0], [1], [2, 2, 9], []],
+                    "unmatched_reference": [], "unmatched_candidate": []}"#;
+        let v: JudgeVerdict =
+            serde_json::from_str(s).expect("odd arity must not fail the response");
+        assert_eq!(v.matched, vec![(0, 0), (2, 2)], "extra elements ignored");
+        assert_eq!(
+            v.unmatched_reference,
+            vec![1],
+            "a lone index is an unmatched reference"
+        );
     }
 
     /// Verbatim from the #248 run: a `null` sentinel in the candidate slot, with the index
