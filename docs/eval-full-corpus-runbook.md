@@ -15,6 +15,32 @@ README's "quality-verified" wording should change to match whatever the numbers 
 — including walking that claim back if the local model scores materially worse than the
 inherited figures.
 
+## Scripted path (recommended)
+
+`crates/eval/scripts/` automates everything below and encodes several traps that have
+each cost a run. Prefer it over copy-pasting the commands in this document:
+
+```bash
+crates/eval/scripts/01-start-server.sh          # starts mlx with thinking DISABLED
+crates/eval/scripts/02-timing-check.sh          # projects runtime; do not skip
+crates/eval/scripts/03-capture-qwen.sh 25       # validate on 25 chunks, no hosted spend
+crates/eval/scripts/04-full-run.sh              # the real benchmark
+```
+
+> **Thinking mode must be disabled on the local server.** `qwen3.6` defaults to
+> emitting `<think>` reasoning, which is ~10x slower *and* scores worse on
+> enumeration tasks — `docs/history/extraction-eval-2026-04.md` measured
+> `qwen3.6-27b-thinking-only` at 112.7s p50 versus 10.9s without, and judged it
+> "operationally non-viable". Start the server with
+> `--chat-template-args '{"enable_thinking": false}'`, which `01-start-server.sh`
+> does and then verifies. A full-corpus capture in thinking mode projects to 15+
+> hours and yields a cassette of the known-bad configuration.
+>
+> **Use the model id the server advertises**, i.e.
+> `model=mlx-community/Qwen3.6-27B-4bit`. `mlx_lm.server` treats an unrecognised id as a
+> HuggingFace repo to fetch, so a short-form guess like `model=qwen3.6-27b` fails *every*
+> call with `Repository Not Found` and leaves an empty cassette with no other symptom.
+
 ## Prerequisites
 
 1. **A reachable local OpenAI-compatible server hosting `qwen3.6-27b`** — e.g. `mlx_lm.server`
@@ -44,7 +70,7 @@ reducing the separate-run cost from three full-corpus Anthropic passes to two:
   `baseline` under `--reference baseline`, this pair **is** the hosted-vs-itself noise floor
   (FR-001) — a judged F1 near the established ceiling while strict-string F1 is materially
   lower, per the property `.github/workflows/eval.yml`'s small-scale smoke pass already checks.
-- `qwen=oai-http:...,model=qwen3.6-27b` — the local candidate. Cassette-recorded to
+- `qwen=oai-http:...,model=mlx-community/Qwen3.6-27B-4bit` — the local candidate. Cassette-recorded to
   `qwen3.6-27b.jsonl` (FR-002). Compared against `baseline`, this pair **is** the hosted-vs-qwen
   comparison (FR-002/SC-002).
 
@@ -54,7 +80,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
   --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \
-  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --record-cassette baseline=anthropic-claude-haiku-4-5-20251001.jsonl \
@@ -64,12 +90,12 @@ cargo run --release -p lcg-eval -- \
   --output eval_report_248.json
 ```
 
-**The local backend spec must spell out `model=qwen3.6-27b` explicitly.** `oai-http`/`oai-uds`
+**The local backend spec must spell out `model=mlx-community/Qwen3.6-27B-4bit` explicitly.** `oai-http`/`oai-uds`
 silently default the model id to the literal string `"local"` when `model=` is omitted
 (`crates/eval/src/backend.rs`) — leaving it off would produce a valid-looking report and
 cassette mislabeled with the wrong model name, undermining SC-002/SC-005's point of attributing
 results to the actual model tested. Swap the URL for wherever your `mlx_lm.server` (or
-equivalent) is actually listening; use `--backend qwen=oai-uds:path=/tmp/qwen.sock,model=qwen3.6-27b`
+equivalent) is actually listening; use `--backend qwen=oai-uds:path=/tmp/qwen.sock,model=mlx-community/Qwen3.6-27B-4bit`
 instead if you're serving over a Unix domain socket.
 
 `--all` runs the full 228-chunk corpus — 2 extraction calls per chunk per backend (6 total
@@ -126,7 +152,7 @@ cargo run --release -p lcg-eval -- \
 # Hosted-vs-qwen leg alone (FR-002):
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
-  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --record-cassette baseline=anthropic-claude-haiku-4-5-20251001.jsonl \
@@ -153,7 +179,7 @@ cassette and failing loudly with `Error::CassetteMiss` on any chunk it can't mat
 # Resume: replay baseline from its captured cassette, run only qwen live.
 cargo run --release -p lcg-eval -- \
   --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
-  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --record-cassette qwen=qwen3.6-27b.jsonl \
@@ -321,7 +347,7 @@ FIXTURE=crates/core/tests/fixtures/real_corpus_wal/ontology.yaml
 # 1. Freeform baseline — no --ontology flag, unchanged from every prior run.
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
-  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --record-cassette baseline=anthropic-freeform-claude-haiku-4-5-20251001.jsonl \
@@ -332,7 +358,7 @@ cargo run --release -p lcg-eval -- \
 # 2. Open — declared types preferred; the model may still invent others.
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
-  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --ontology "$FIXTURE" --ontology-mode open \
@@ -344,7 +370,7 @@ cargo run --release -p lcg-eval -- \
 # 3. Strict — only declared types are ever accepted.
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
-  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=qwen3.6-27b \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
   --reference baseline \
   --all \
   --ontology "$FIXTURE" --ontology-mode strict \
