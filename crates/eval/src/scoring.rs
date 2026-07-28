@@ -232,3 +232,322 @@ pub fn average(values: &[f64]) -> Option<f64> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use futures::future::BoxFuture;
+    use lcg_core::{ExtractedEdge, ExtractedEntity, ExtractionResult};
+    use serde_json::Value;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::judge::PairwiseVerdict;
+    use crate::runner::ChunkResult;
+
+    /// Scripted `JudgeClient` test double: fails per-call based on a caller-supplied
+    /// predicate over `(prompt_name, zero-based call index for that prompt_name)`, so one
+    /// double can express both "fails once, for one axis, on one chunk" and "fails on every
+    /// call for a whole axis" (FR-003) without a family of ad-hoc structs. Tracks its own
+    /// per-prompt-name call counter, matching this crate's convention of keeping test
+    /// doubles local to the module that needs them (`StaticJudge` in `judge.rs`,
+    /// `LexicographicJudge`/`CountingPairwiseJudge` in `pairwise.rs`).
+    struct ScriptedJudge {
+        fails: fn(&str, usize) -> bool,
+        calls: Mutex<HashMap<String, usize>>,
+    }
+
+    impl ScriptedJudge {
+        fn new(fails: fn(&str, usize) -> bool) -> Self {
+            Self {
+                fails,
+                calls: Mutex::new(HashMap::new()),
+            }
+        }
+
+        fn never_fails() -> Self {
+            Self::new(|_, _| false)
+        }
+    }
+
+    impl JudgeClient for ScriptedJudge {
+        fn judge<'a>(
+            &'a self,
+            prompt_name: &'a str,
+            _reference: &'a Value,
+            _candidate: &'a Value,
+        ) -> BoxFuture<'a, Result<JudgeVerdict, String>> {
+            let call_index = {
+                let mut calls = self.calls.lock().unwrap();
+                let entry = calls.entry(prompt_name.to_string()).or_insert(0);
+                let idx = *entry;
+                *entry += 1;
+                idx
+            };
+            let fail = (self.fails)(prompt_name, call_index);
+            Box::pin(async move {
+                if fail {
+                    Err(format!(
+                        "scripted failure on {prompt_name} call {call_index}"
+                    ))
+                } else {
+                    // A single matched pair with nothing unmatched — precision/recall/F1 all
+                    // 1.0, distinct from the both-empty default so a passing call is visibly
+                    // "real" data in test assertions.
+                    Ok(JudgeVerdict {
+                        matched: vec![(0, 0)],
+                        unmatched_reference: vec![],
+                        unmatched_candidate: vec![],
+                    })
+                }
+            })
+        }
+
+        fn judge_pairwise<'a>(
+            &'a self,
+            _prompt_name: &'a str,
+            _chunk_text: &'a str,
+            _slot_a: &'a Value,
+            _slot_b: &'a Value,
+        ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+            unimplemented!("scoring::score_candidate never calls judge_pairwise")
+        }
+    }
+
+    fn extraction_result(entity_name: &str, edge_fact: &str) -> ExtractionResult {
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: entity_name.to_string(),
+                entity_type: "Thing".to_string(),
+                summary: format!("{entity_name} summary"),
+            }],
+            edges: vec![ExtractedEdge {
+                source_name: entity_name.to_string(),
+                target_name: "other".to_string(),
+                fact: edge_fact.to_string(),
+                relation_type: None,
+                valid_at: None,
+                invalid_at: None,
+            }],
+        }
+    }
+
+    /// Builds a `BackendRunResult` whose chunks each carry distinct entity/edge content, so
+    /// each chunk hashes to a distinct judge-cache key — a cache hit on one chunk must never
+    /// silently mask a scripted failure meant for a different chunk.
+    fn backend_run_result(name: &str, chunk_count: usize) -> BackendRunResult {
+        let chunk_results = (0..chunk_count)
+            .map(|i| ChunkResult {
+                chunk_title: format!("chunk-{i}"),
+                latency_ms: 10,
+                result: Ok(extraction_result(
+                    &format!("entity-{name}-{i}"),
+                    &format!("fact-{name}-{i}"),
+                )),
+            })
+            .collect();
+        BackendRunResult {
+            backend_name: name.to_string(),
+            chunk_results,
+            structured_output: Default::default(),
+            vocabulary_compliance: None,
+        }
+    }
+
+    fn fresh_cache() -> (TempDir, JudgeCache) {
+        let dir = TempDir::new().unwrap();
+        let cache = JudgeCache::load(dir.path().join("cache.jsonl")).unwrap();
+        (dir, cache)
+    }
+
+    #[tokio::test]
+    async fn entity_axis_failure_on_one_chunk_does_not_abort_and_other_axes_still_score() {
+        // FR-003 scenario 1: fail only the very first `extract_nodes.extract_text` call
+        // (chunk 0's entity axis); every other call (edge/summary axes on every chunk,
+        // entity axis on later chunks) succeeds.
+        let judge = ScriptedJudge::new(|prompt_name, call_index| {
+            prompt_name == "extract_nodes.extract_text" && call_index == 0
+        });
+        let (_dir, cache) = fresh_cache();
+        let reference = backend_run_result("reference", 2);
+        let candidate = backend_run_result("candidate", 2);
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .expect("a single non-fatal judge error must not abort score_candidate");
+
+        assert_eq!(report.judge_errors, 1);
+        assert_eq!(report.chunks_scored, 2);
+        // The failed chunk's entity data point is missing, but the other chunk's isn't —
+        // the average is over one successful call, not zero.
+        assert_eq!(report.judged_entity_f1, Some(1.0));
+        // Edge/summary axes never failed on the entity-axis chunk — both scored calls land.
+        assert_eq!(report.judged_edge_f1, Some(1.0));
+        assert_eq!(report.judged_summary_f1, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn axis_that_fails_every_call_reports_none_not_zero() {
+        // FR-003 scenario 2: the edge axis fails unconditionally; entity/summary axes never
+        // fail.
+        let judge =
+            ScriptedJudge::new(|prompt_name, _call_index| prompt_name == "extract_edges.default");
+        let (_dir, cache) = fresh_cache();
+        let reference = backend_run_result("reference", 3);
+        let candidate = backend_run_result("candidate", 3);
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report.judged_edge_f1, None,
+            "an all-failures axis must report None, not 0.0"
+        );
+        assert_eq!(report.judged_edge_precision, None);
+        assert_eq!(report.judged_edge_recall, None);
+        assert_eq!(report.judge_errors, 3, "one failed edge call per chunk");
+        assert_eq!(report.judged_entity_f1, Some(1.0));
+        assert_eq!(report.judged_summary_f1, Some(1.0));
+    }
+
+    #[tokio::test]
+    async fn precision_recall_f1_average_only_successful_calls() {
+        // FR-003 scenario 3: entity axis fails on chunks 1 and 3 (0-based call indices 1 and
+        // 3) out of 4, so the reported average must be computed over the 2 successful calls
+        // only, not over 4 (which would silently treat failures as zero).
+        let judge = ScriptedJudge::new(|prompt_name, call_index| {
+            prompt_name == "extract_nodes.extract_text" && (call_index == 1 || call_index == 3)
+        });
+        let (_dir, cache) = fresh_cache();
+        let reference = backend_run_result("reference", 4);
+        let candidate = backend_run_result("candidate", 4);
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .unwrap();
+
+        // Every successful ScriptedJudge call returns a perfect verdict (p=r=f1=1.0), so the
+        // average over 2 successes is still 1.0 — the assertion that matters is judge_errors
+        // and chunks_scored below, which prove the denominator excludes the failures.
+        assert_eq!(report.judged_entity_f1, Some(1.0));
+        assert_eq!(report.judge_errors, 2);
+        assert_eq!(
+            report.chunks_scored, 4,
+            "chunks_scored counts extraction successes, independent of judge outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_with_failed_reference_extraction_is_excluded_from_scoring() {
+        // Edge case: a chunk where the reference side's extraction errored must never reach
+        // judging at all. A judge that fails unconditionally proves no call was attempted
+        // for that chunk (chunks_scored excludes it and judge_errors stays 0).
+        let judge = ScriptedJudge::new(|_, _| true);
+        let (_dir, cache) = fresh_cache();
+        let mut reference = backend_run_result("reference", 1);
+        reference.chunk_results[0].result = Err("extraction failed".to_string());
+        let candidate = backend_run_result("candidate", 1);
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .unwrap();
+
+        assert_eq!(report.chunks_scored, 0);
+        assert_eq!(report.judge_errors, 0);
+        assert_eq!(report.judged_entity_f1, None);
+    }
+
+    #[tokio::test]
+    async fn empty_candidate_list_reports_zeroed_denominators_not_a_panic() {
+        // Edge case: zero chunks on both sides.
+        let judge = ScriptedJudge::never_fails();
+        let (_dir, cache) = fresh_cache();
+        let reference = backend_run_result("reference", 0);
+        let candidate = backend_run_result("candidate", 0);
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .unwrap();
+
+        assert_eq!(report.chunks_scored, 0);
+        assert_eq!(report.judge_errors, 0);
+        assert_eq!(report.error_rate, 0.0);
+        assert_eq!(report.judged_entity_f1, None);
+        assert_eq!(report.judged_entity_precision, None);
+        assert_eq!(report.judged_entity_recall, None);
+        assert_eq!(report.judged_edge_f1, None);
+        assert_eq!(report.judged_edge_precision, None);
+        assert_eq!(report.judged_edge_recall, None);
+        assert_eq!(report.judged_summary_f1, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn judge_call_failure_and_cache_write_failure_are_distinguishable() {
+        // FR-004: `judged_f1` surfaces two different failure classes with different message
+        // text. A judge-call failure comes from the scripted double returning `Err`
+        // directly; a cache-write failure comes from a real filesystem condition (a
+        // read-only cache directory) per Plan's decision to avoid introducing a new mocking
+        // trait for `JudgeCache`.
+        let failing_judge = ScriptedJudge::new(|_, _| true);
+        let (_dir, healthy_cache) = fresh_cache();
+        let call_err = judged_f1(
+            &failing_judge,
+            &healthy_cache,
+            "test-model",
+            "extract_nodes.extract_text",
+            &serde_json::json!({}),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            call_err.contains("judge call failed"),
+            "expected a judge-call failure message, got: {call_err}"
+        );
+
+        let readonly_dir = TempDir::new().unwrap();
+        let cache_path = readonly_dir.path().join("sub").join("cache.jsonl");
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+        let readonly_cache = JudgeCache::load(&cache_path).unwrap();
+        set_readonly(cache_path.parent().unwrap());
+        let never_fails = ScriptedJudge::never_fails();
+        let cache_err = judged_f1(
+            &never_fails,
+            &readonly_cache,
+            "test-model",
+            "extract_nodes.extract_text",
+            &serde_json::json!({}),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap_err();
+        set_writable(cache_path.parent().unwrap());
+        assert!(
+            cache_err.contains("caching it failed"),
+            "expected a cache-write failure message, got: {cache_err}"
+        );
+        assert_ne!(
+            call_err, cache_err,
+            "the two failure classes must be distinguishable in the surfaced message"
+        );
+    }
+
+    #[cfg(unix)]
+    fn set_readonly(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(dir, perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn set_writable(dir: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dir, perms).unwrap();
+    }
+}
