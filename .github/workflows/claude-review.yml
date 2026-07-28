@@ -4,20 +4,21 @@ name: Claude PR Review
 # Submits a FORMAL review (not an issue comment) so it lands in the PR's reviews
 # array — the signal Fabrik's checkReviewGate waits on (engine/reviews.go).
 #
-# Model is pinned to Sonnet 5 deliberately. Left unpinned, the action defaults to
-# Opus 5 ($5/$25 per MTok); measured runs cost $3.28–$3.68 each at 50 turns, and
-# because `synchronize` is a trigger, every Fabrik push re-reviews the whole PR.
-# Sonnet 5 is $2/$10 (intro pricing through 2026-08-31) for near-Opus quality on
-# code review. Re-pin to claude-opus-5 for a one-off deep pass via workflow_dispatch
-# if a change warrants it.
+# Model is pinned to Sonnet 5 deliberately. Left unpinned, claude-code-action@v1
+# defaults to an unusable/expensive id (observed: claude-opus-5[1m]) and every
+# review fails with is_error:true. Sonnet 5 is near-Opus quality on code review
+# at a fraction of the cost. Re-pin to claude-opus-5 for a one-off deep pass via
+# workflow_dispatch if a change warrants it.
+#
+# 'synchronize' is intentionally NOT a trigger: these repos are Fabrik-driven,
+# and Fabrik auto-fixes review findings and pushes, which would re-trigger a
+# review → more findings → another fix — an unbounded loop (handarbeit/fabrik
+# #1078: 18 reviews before the cycle cap tripped). Review once when the PR is
+# ready; use workflow_dispatch to re-review a specific PR on demand.
 
 on:
   pull_request:
-    types: [opened, ready_for_review, synchronize]
-  # Manual re-review for PRs whose automatic run never produced a real review
-  # (e.g. the API-credit outage of 2026-07-26). pull_request events do not re-fire
-  # on existing PRs, so this is the only way to review one after the fact without
-  # pushing a no-op commit or disturbing Fabrik's stage state.
+    types: [opened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr:
@@ -88,3 +89,34 @@ jobs:
           claude_args: "--model claude-sonnet-5 --allowedTools Bash(git:*),Bash(gh:*),Read,Grep"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Capture the SDK execution log for debugging. The action hides full output
+      # (show_full_output: false) for security, writing it to a temp file that is
+      # otherwise lost when the runner is torn down. Uploading it as an
+      # access-controlled artifact lets us read the real error behind an
+      # is_error:true failure without exposing it in the run logs.
+      - name: Upload Claude execution log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-execution-output
+          path: /home/runner/work/_temp/claude-execution-output.json
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Fallback: if the agent produced no formal review (it errored, was skipped,
+      # or didn't post), surface that HONESTLY — never claim "no issues", since a
+      # false all-clear is worse than a visible failure. Still posts a formal
+      # review so Fabrik's review gate (engine/reviews.go) clears rather than hangs.
+      - name: Report if no review was posted
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          count=$(gh pr view "$PR" --json reviews \
+            --jq '[.reviews[] | select(.author.login=="github-actions" or (.author.login|startswith("claude")))] | length')
+          if [ "${count:-0}" -eq 0 ]; then
+            gh pr review "$PR" --comment --body "⚠️ **Claude review did not post a formal review.** The review step errored or was skipped. **This is NOT a clean bill of health** — check the run logs: ${RUN_URL}"
+          fi
