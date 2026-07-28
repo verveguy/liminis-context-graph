@@ -3,7 +3,7 @@
 #
 # COSTS REAL MONEY, but far less than it used to: exactly ONE live hosted leg plus
 # judge calls. The other two legs replay cassettes captured earlier (#263), so this
-# finishes in minutes rather than the ~2.3h a live qwen leg takes on the full corpus.
+# finishes far quicker than the ~2.3h a live qwen leg takes on the full corpus.
 #
 # Why these three backends:
 #   baseline  = cassette  -> the reference. Replaying the recorded Haiku run costs
@@ -35,59 +35,59 @@
 # axis of #266 needs its own capture, including a fresh ~2.3h qwen pass.
 
 set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
-mkdir -p /tmp/eval248
-
-REPO="$HOME/dev/liminis-project/liminis-context-graph"
-HAIKU="claude-haiku-4-5-20251001"
+HAIKU="${LCG_EVAL_HAIKU:-claude-haiku-4-5-20251001}"
 BASELINE_CASSETTE="anthropic-$HAIKU.jsonl"
 QWEN_CASSETTE="qwen3.6-27b.jsonl"
 CANDIDATE_CASSETTE="anthropic-$HAIKU.candidate.jsonl"
+JUDGE_MODE="${LCG_EVAL_JUDGE_MODE:-reference}"
 
 cd "$REPO"
+require_release_binary
 
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  echo "ERROR: ANTHROPIC_API_KEY is not set. The live candidate leg needs it, and" >&2
-  echo "       without it judged F1 is silently skipped (main.rs:98-105)." >&2
-  exit 1
-fi
+[ -n "${ANTHROPIC_API_KEY:-}" ] || die "ANTHROPIC_API_KEY is not set. The live candidate
+       leg needs it, and without it judged F1 is silently skipped."
 
 # The cassettes are INPUTS here. 03 moves its output aside before writing; this script
 # must not, or it would destroy the thing it is about to read.
 for f in "$BASELINE_CASSETTE" "$QWEN_CASSETTE"; do
-  if [ ! -s "$f" ]; then
-    echo "ERROR: missing or empty cassette: $f" >&2
-    echo "       run 03-capture-qwen.sh for qwen, or a live recording pass for baseline." >&2
-    exit 1
-  fi
+  [ -s "$f" ] || die "missing or empty cassette: $f
+       Run 03-capture-qwen.sh for qwen, or a live recording pass for baseline."
 done
 
 # The candidate's cassette is an OUTPUT, so the append-never-truncate rule applies.
-if [ -s "$CANDIDATE_CASSETTE" ]; then
-  STAMP=$(date +%Y%m%d-%H%M%S)
-  mv "$CANDIDATE_CASSETTE" "$CANDIDATE_CASSETTE.$STAMP.bak"
-  echo "==> moved existing candidate cassette aside: $CANDIDATE_CASSETTE.$STAMP.bak"
-fi
+backup_if_present "$CANDIDATE_CASSETTE"
 
 python3 - "$BASELINE_CASSETTE" "$QWEN_CASSETTE" <<'PY'
-import json, sys
+import json, sys, collections
 def keys(p):
-    with open(p) as f:
-        return {json.loads(l)["key"] for l in f if l.strip()}
+    ks = [json.loads(l)["key"] for l in open(p) if l.strip()]
+    dupes = [k for k, n in collections.Counter(ks).items() if n > 1]
+    if dupes:
+        sys.exit(f"ERROR: {p} contains {len(dupes)} duplicate keys — it was appended to "
+                 "without being moved aside. Replay would serve stale verdicts.")
+    return set(ks)
 b, q = keys(sys.argv[1]), keys(sys.argv[2])
 print(f"==> COVERAGE  baseline {len(b)}  qwen {len(q)}  scoreable overlap {len(b & q)}")
+# Deliberately a warning, not a hard failure: the real captures legitimately differ
+# (226/223 with a 221 overlap) because each side lost different chunks to malformed
+# structured output. Unscoreable chunks are reported in error_rate, not hidden.
+if len(b & q) < min(len(b), len(q)):
+    print(f"    note: {min(len(b), len(q)) - len(b & q)} chunk(s) present on only one side")
 PY
 
 echo
-echo "==> starting run $(date +%H:%M:%S) -- one live Haiku leg + judge"
+echo "==> starting run $(date +%H:%M:%S) -- one live Haiku leg + judge (mode: $JUDGE_MODE)"
 echo
 
-./target/release/lcg-eval \
+"$BIN" \
   --backend "baseline=cassette:path=$BASELINE_CASSETTE" \
   --backend "candidate=anthropic:model=$HAIKU" \
   --backend "qwen=cassette:path=$QWEN_CASSETTE" \
   --reference baseline \
   --all \
+  --judge-mode "$JUDGE_MODE" \
   --record-cassette "candidate=$CANDIDATE_CASSETTE" \
   --judge-cache eval_judge_cache_248.jsonl \
   --judge-model claude-sonnet-4-6 \
@@ -97,8 +97,8 @@ echo
 echo "==> done $(date +%H:%M:%S)"
 echo "    report: eval_report_248.json"
 echo
-echo "    Read latency as p50 with p95/p99 alongside. Over the full corpus qwen measured"
-echo "    p50 39.8s / p95 212.6s / p99 377.9s against a 62.4s mean -- the mean overstates"
-echo "    the typical chunk by more than half, so quoting it alone misleads."
+echo "    Read qwen's judged F1 against the baseline-vs-candidate noise floor, never on"
+echo "    its own. Two independent Haiku samples set the ceiling any model could reach."
 echo
-echo "    Replayed legs report the ORIGINAL recording's latency, not this run's."
+echo "    Quote latency as p50 with p95/p99 alongside; replayed legs report the ORIGINAL"
+echo "    recording's latency, not this run's."

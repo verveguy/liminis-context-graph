@@ -13,13 +13,24 @@ one of those traps has now been hit at least once.
 | `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
 
 ```bash
+cargo build --release -p lcg-eval               # the scripts check for this and refuse without it
 crates/eval/scripts/01-start-server.sh
-crates/eval/scripts/02-timing-check.sh          # do not skip
+crates/eval/scripts/02-timing-check.sh          # do not skip; exits nonzero if the projection is bad
 crates/eval/scripts/03-capture-qwen.sh 25       # validate on 25 chunks first
 crates/eval/scripts/03-capture-qwen.sh          # then the full corpus
 export ANTHROPIC_API_KEY=...
 crates/eval/scripts/04-full-run.sh              # replays 03's cassette; no local server needed
+crates/eval/scripts/05-score-only.sh            # only if 04's judging phase died
 ```
+
+They run from any checkout — the repo root is resolved from the script's own location —
+and share `_common.sh`, which holds the repo/model/port resolution, the release-binary
+check, the server health check, and the HTTP error handling that each script would
+otherwise repeat and get subtly wrong in five places.
+
+Overrides, all optional: `LCG_EVAL_MODEL`, `LCG_EVAL_PORT`, `LCG_EVAL_VENV`,
+`LCG_EVAL_WORK`, `LCG_EVAL_HAIKU`, `LCG_EVAL_MAX_CHUNK_S`, `LCG_EVAL_JUDGE_MODE`,
+`LCG_EVAL_ALLOW_NO_KEY`.
 
 ## The traps these encode
 
@@ -44,7 +55,8 @@ cassette aside automatically.
 
 **Judge scoring is key-gated, so capture and scoring are separable.** With
 `ANTHROPIC_API_KEY` unset, `lcg-eval` skips LLM-as-judge entirely
-(`main.rs:98-105`), which is what makes `03` free. `03` unsets it defensively —
+(the judge client is only constructed when the key is present), which is what makes `03`
+free. `03` unsets it defensively —
 otherwise a leftover export would bill judge calls to score qwen against itself.
 
 **Replay the reference, never the noise floor.** Since #263 landed the
@@ -94,8 +106,20 @@ While a run is in flight, judge it by its trailing window rather than its runnin
 a rising cumulative average with a flat trailing window is outliers, not degradation.
 
 **Always run `02` before `03` or `04`.** It is the 30-second check that would have
-caught thinking mode before a 15-hour capture, and it fails loudly if reasoning
-tokens are present or the projected runtime is out of line with the April baseline.
+caught thinking mode before a 15-hour capture, and it **exits nonzero** if reasoning
+tokens are present or the projected runtime exceeds `LCG_EVAL_MAX_CHUNK_S` (default 60s
+per chunk, against an April baseline of ~11s).
+
+**A reachable port is not a healthy server.** `03` and `04` re-verify the served model id
+and that thinking is off, rather than trusting that `01` was the thing that started what
+is listening. An operator pointing `03` at a server left over from a reboot or an earlier
+session would otherwise repeat the 15-hour thinking-mode capture — the check has to live
+at the point of use, not only at the point of starting the server.
+
+**Exit status 0 is not a successful capture.** A wrong model id fails every call and still
+exits cleanly, leaving an empty cassette. `03` validates the artifact: record count
+against expected, error rate under 10%, and a report summary. Trust the file, not the
+exit code.
 
 ## Reference
 

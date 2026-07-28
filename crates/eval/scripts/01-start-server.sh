@@ -8,20 +8,31 @@
 #     qwen3.6-27b-only          10.9s p50
 #     qwen3.6-27b-thinking-only 112.7s p50  ("operationally non-viable")
 #
-# Idempotent: kills any existing server on the port first.
+# Idempotent: stops any existing server on this port first.
 
 set -euo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 
-mkdir -p /tmp/eval248
+VENV="${LCG_EVAL_VENV:-$HOME/liminis-eval-venv}"
+LOG="$WORK/mlx-server.log"
 
-VENV="$HOME/liminis-eval-venv"
-MODEL="mlx-community/Qwen3.6-27B-4bit"
-PORT=8765
-LOG=/tmp/eval248/mlx-server.log
+echo "==> stopping any existing server on port $PORT"
+# Scoped to the port, not `pkill -f "mlx_lm server"`, which would also kill an unrelated
+# MLX server serving a different model on a different port.
+if PIDS=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null) && [ -n "$PIDS" ]; then
+  echo "    stopping: $PIDS"
+  kill $PIDS 2>/dev/null || true
+  sleep 2
+  # Anything still holding the port after a polite kill
+  if PIDS=$(lsof -ti "tcp:$PORT" -sTCP:LISTEN 2>/dev/null) && [ -n "$PIDS" ]; then
+    kill -9 $PIDS 2>/dev/null || true
+    sleep 1
+  fi
+else
+  echo "    nothing listening on $PORT"
+fi
 
-echo "==> stopping any existing mlx_lm server"
-pkill -f "mlx_lm server" 2>/dev/null || true
-sleep 2
+[ -x "$VENV/bin/python" ] || die "no python at $VENV/bin/python (override with LCG_EVAL_VENV)"
 
 echo "==> starting $MODEL on port $PORT (thinking disabled)"
 nohup "$VENV/bin/python" -m mlx_lm server \
@@ -32,7 +43,7 @@ nohup "$VENV/bin/python" -m mlx_lm server \
 
 echo "==> waiting for server to accept requests"
 for i in $(seq 1 60); do
-  if curl -sf --max-time 3 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+  if curl -fsS --max-time 3 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
     echo "    ready after ${i}s"
     break
   fi
@@ -44,27 +55,9 @@ for i in $(seq 1 60); do
   sleep 1
 done
 
-echo "==> verifying thinking is actually OFF"
-curl -s --max-time 300 "http://127.0.0.1:$PORT/v1/chat/completions" \
-  -H 'content-type: application/json' \
-  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Extract entities as JSON from: A New Glenn rocket exploded, delaying NASA.\"}],\"max_tokens\":4096,\"temperature\":0.0}" \
-  > /tmp/eval248/verify.json
-
-python3 - <<'PY'
-import json, sys
-d = json.load(open('/tmp/eval248/verify.json'), strict=False)
-msg = d.get('choices', [{}])[0].get('message', {})
-reasoning = msg.get('reasoning') or ''
-tokens = d.get('usage', {}).get('completion_tokens', 0)
-print(f"    completion_tokens: {tokens}")
-print(f"    reasoning chars  : {len(reasoning)}")
-if reasoning:
-    print("    RESULT: thinking is STILL ON -- do not proceed", file=sys.stderr)
-    print(f"    reasoning starts: {reasoning[:80]!r}", file=sys.stderr)
-    sys.exit(1)
-print("    RESULT: thinking is OFF -- good")
-PY
+echo "==> verifying model identity and that thinking is actually OFF"
+require_server_healthy
 
 echo
 echo "server log: $LOG"
-echo "next: /tmp/eval248/02-timing-check.sh"
+echo "next: $_SCRIPT_DIR/02-timing-check.sh"
