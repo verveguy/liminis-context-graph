@@ -16,3 +16,4 @@ pub mod metrics;
 pub mod pairwise;
 pub mod report;
 pub mod runner;
+pub mod scoring;
