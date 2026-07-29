@@ -12,6 +12,7 @@ one of those traps has now been hit at least once.
 | `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
 | `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
 | `06-ontology-matrix.sh` | The Open/Strict ontology arms, each with its own noise floor | **real money**, ~$92 + overnight |
+| `test-scripts.sh` | Tests the guards above — thresholds, resume decisions, cassette diagnosis, DRY_RUN fidelity | free, seconds |
 
 ```bash
 cargo build --release -p lcg-eval               # the scripts check for this and refuse without it
@@ -62,6 +63,11 @@ Overrides, all optional:
 | `DRY_RUN` | `06` | Print the plan, execute nothing |
 | `REPORT_PREFIX` | `06` | Report filename prefix. The default deliberately differs from `run_mode_matrix.sh`'s, because that script's reports have no noise floor and the two are otherwise indistinguishable by name |
 
+`test-scripts.sh` runs on every PR (CI's `eval script guards` step) and needs no network,
+API key, model server, or built binary. Any guard that decides whether to spend money, or
+that claims to preview what a run will do, gets a case there — the alternative was reviewers
+functioning as the test suite, which took #278 seven rounds.
+
 ## The traps these encode
 
 **Thinking mode is on by default and ruins the benchmark.** `qwen3.6` emits
@@ -99,15 +105,22 @@ producing a plausible-looking report. A cassette miss is a per-chunk error
 (`Error::CassetteMiss`), not a crash, so partial coverage shows up honestly in
 `error_rate`.
 
-**A judge failure kills the whole run, and the retry ladder is short.** The judge retries
-429/529 three times with 1s/2s/4s backoff (`judge.rs:169-173`) — about 7 seconds of
-tolerance — then the error propagates through `judged_f1(...).await?` in
-`score_candidate` and aborts everything. The #248 run died 17 calls into a ~1340-call
-scoring phase this way, immediately after a 228-call extraction burst. Extraction losses
-are per-chunk and recorded in `error_rate`; judge losses are fatal to the run. Nothing is
-*lost* when it happens — cassettes are on disk and each verdict is appended to the judge
-cache the moment it arrives (`judge_cache.rs:157-162`) — but you must resume with `05`,
-not `04`, or you will pay for the live extraction leg a second time for no benefit.
+**Judge failures are survivable now, but resume with `05`, not `04`.** They used to be
+fatal: an error propagated out of `score_candidate` and killed the run, which is how the
+#248 scoring phase died 17 calls into ~1340. Since #271 and #277 a failed judge call costs
+its chunk and is counted (`judge_errors` in the report, per-pair for pairwise), transport
+errors retry on the same ladder as 429/529, and a systemic failure trips a circuit breaker
+after 10 consecutive errors rather than grinding through thousands of doomed calls — which
+is exactly what happened when the account's spend limit was reached mid-run: 10 real
+failures, then 100 short-circuited, and a complete report anyway.
+
+Nothing is lost when a run does die: cassettes are on disk and each verdict appends to the
+judge cache the moment it arrives. But **resume with `05`** — `04` re-runs the live
+extraction leg, and you would pay for it a second time for no benefit.
+
+Read `judge_errors` before trusting the averages. A nonzero value means some chunks are
+missing from the affected axis, and for pairwise it is reported per pair — one #248 pair
+finished on 113 chunks rather than 223 because the limit was hit near the end.
 
 **Cassettes are not reusable across ontology modes.** `opts.ontology` feeds both
 `entity_system_prompt` and `edge_system_prompt`, and those are hashed into the cassette
