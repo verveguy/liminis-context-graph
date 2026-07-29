@@ -145,7 +145,17 @@ pub fn validate_recorded_cassette(
     candidate: &CandidateReport,
     actual_record_count: usize,
 ) -> Result<(), String> {
-    let expected = candidate.chunks_run.saturating_sub(candidate.errors);
+    if candidate.errors > candidate.chunks_run {
+        // `saturating_sub` alone would floor this at 0 and let a report with impossible
+        // accounting (more errors than chunks run) pass as long as the cassette also holds
+        // 0 records — accepting broken accounting instead of detecting it (CodeRabbit review
+        // finding on PR #280).
+        return Err(format!(
+            "backend '{}': report has {} errors for {} run chunk(s) — impossible accounting",
+            candidate.backend_name, candidate.errors, candidate.chunks_run
+        ));
+    }
+    let expected = candidate.chunks_run - candidate.errors;
     if actual_record_count != expected {
         return Err(format!(
             "backend '{}': cassette holds {actual_record_count} record(s) but the report \
@@ -540,14 +550,17 @@ mod tests {
     }
 
     #[test]
-    fn errors_exceeding_chunks_run_does_not_panic() {
-        // A validator must never be the thing that panics. `errors > chunks_run` shouldn't
-        // occur in a well-formed report, but this is a `pub` helper reachable directly by
-        // tests and future callers, so it must degrade to a reported mismatch, not a
-        // subtraction overflow (CodeRabbit review finding on PR #280).
+    fn errors_exceeding_chunks_run_is_rejected_as_impossible_accounting() {
+        // A validator must never be the thing that panics, and it must not accept broken
+        // accounting either. `errors > chunks_run` shouldn't occur in a well-formed report,
+        // but `saturating_sub` alone would floor the expected count at 0 and let this pass
+        // whenever the cassette also happens to hold 0 records — accepting impossible
+        // accounting instead of detecting it (CodeRabbit review findings on PR #280).
         let candidate = sample_candidate(2, 5);
+        let err = validate_recorded_cassette(&candidate, 0).unwrap_err();
+        assert!(err.contains("impossible"), "{err}");
         let err = validate_recorded_cassette(&candidate, 2).unwrap_err();
-        assert!(err.contains('0'), "{err}");
+        assert!(err.contains("impossible"), "{err}");
     }
 
     #[test]
