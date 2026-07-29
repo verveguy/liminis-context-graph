@@ -48,7 +48,8 @@ Overrides, all optional:
 | Variable | Applies to | Effect |
 |---|---|---|
 | `LCG_EVAL_REPO` | all | Target a different checkout (cassettes and the binary live in whichever produced them) |
-| `LCG_EVAL_MODEL` / `LCG_EVAL_PORT` / `LCG_EVAL_VENV` | `01`–`03`, `06` | Local server identity |
+| `LCG_EVAL_MODEL` / `LCG_EVAL_PORT` | `01`–`03`, `06` | Local server identity (set in `_common.sh`, so every script that talks to the server honours them) |
+| `LCG_EVAL_VENV` | `01` only | Python env used to *launch* the server. The other scripts only probe an already-running one, so overriding this has no effect on them |
 | `LCG_EVAL_WORK` | all | Work directory (default `/tmp/eval248`, must be yours) |
 | `LCG_EVAL_HAIKU` | `04`–`06` | Hosted model id |
 | `LCG_EVAL_MAX_CHUNK_S` | `02` | Per-chunk ceiling before it refuses to green-light a capture |
