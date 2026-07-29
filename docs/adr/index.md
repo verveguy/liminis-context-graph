@@ -55,6 +55,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0049](0049-bare-path-ontology-loader-and-cli-mode-override.md) | Bare-Path Ontology Loader and CLI Mode-Override Precedence | 2026-07-27 |
 | [0050](0050-blind-pairwise-judging.md) | Blind Pairwise Judging for the Extraction-Quality Eval Harness | 2026-07-27 |
 | [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
+| [0052](0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md) | `lcg-eval --dry-run` Shares the Real Run's Resolution Path | 2026-07-29 |
 
 ## Historical numbering
 

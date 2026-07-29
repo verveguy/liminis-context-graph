@@ -65,7 +65,7 @@ async fn run(cli: Args) -> Result<(), String> {
     );
 
     // FR-001/User Story 2: `--dry-run` and the real run both resolve through `plan::resolve`
-    // so a preview can never drift from what a real run would actually do (ADR-0051).
+    // so a preview can never drift from what a real run would actually do (ADR-0052).
     let resolved = resolve_plan(&cli, chunks.len());
     if cli.dry_run {
         println!("{}", render_plan(&resolved));

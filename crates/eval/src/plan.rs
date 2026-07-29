@@ -2,7 +2,7 @@
 //! count, and any guard that would abort a real run — shared verbatim by `--dry-run` (which
 //! prints it and exits 0) and the real run (which aborts before any outbound call if
 //! `guard_violations` is non-empty). This is the single code path User Story 2 requires so a
-//! preview can never drift from what a real run would actually do — see ADR-0051.
+//! preview can never drift from what a real run would actually do — see ADR-0052.
 //!
 //! What's a guard violation (FR-002/FR-003/FR-004, aborts a real run) versus a note
 //! (FR-005, informational only): a corrupt or duplicate-keyed cassette, or two backends

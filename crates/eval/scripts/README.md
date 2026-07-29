@@ -12,7 +12,7 @@ one of those traps has now been hit at least once.
 | `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
 | `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
 | `06-ontology-matrix.sh` | The Open/Strict ontology arms, each with its own noise floor | **real money**, ~$92 + overnight |
-| `test-scripts.sh` | Tests the guards above — thresholds, resume decisions, cassette diagnosis, DRY_RUN fidelity | free, seconds |
+| `test-scripts.sh` | Tests what's still shell-level — completeness thresholds, resume decisions, MODES/LIMIT/report-naming contracts | free, seconds |
 
 ```bash
 cargo build --release -p lcg-eval               # the scripts check for this and refuse without it
@@ -29,20 +29,28 @@ crates/eval/scripts/06-ontology-matrix.sh            # then the Open/Strict arms
 ```
 
 **`06` is the only script here that spends money on startup, so it has two brakes.**
-`DRY_RUN=1` prints exactly what the run would do — the per-leg REPLAY/LIVE decision, the
-report names, and any condition that would abort it — without executing anything, and it
-works before the binary is built or the key is set. `MODES=""` is a deliberate no-op:
-the assignment uses `${MODES-…}` rather than `${MODES:-…}` precisely so an *empty* value
-means "do nothing" instead of falling back to the full default matrix, which is how an
-early structural test of it began a live capture by accident.
+`DRY_RUN=1` prints the per-leg REPLAY/LIVE decision and the report names it would use,
+without executing anything, and it works before the binary is built or the key is set.
+`MODES=""` is a deliberate no-op: the assignment uses `${MODES-…}` rather than
+`${MODES:-…}` precisely so an *empty* value means "do nothing" instead of falling back to
+the full default matrix, which is how an early structural test of it began a live capture
+by accident.
+
+`DRY_RUN=1` no longer previews the conditions that would abort a real run (identical
+cassettes, a corrupt or duplicate-keyed cassette) — those guards now live in `lcg-eval`
+itself (#279), which enforces them identically on `--dry-run` and a real invocation, before
+any outbound call. Run `lcg-eval --dry-run --backend ...` directly (see the top-level
+README's "Extraction-quality eval harness" section) to preview them without spending
+anything; `06`'s own `DRY_RUN=1` is purely about the shell's own resume/mode-looping
+decisions now.
 
 It reuses the #248 freeform cassettes rather than re-capturing them, so `MODES="freeform
 open strict"` costs nothing extra for the freeform arm.
 
-`DRY_RUN=1` proves the plan; `LIMIT=3` proves the *live* path for pennies before an
-overnight commits to it. Smoke artifacts carry a `.limitN` suffix, so a partial capture can
-never be picked up as a full one — a `LIMIT=210` run would otherwise leave a cassette that
-passes the 90%-of-228 completeness bar and gets replayed as if whole.
+`DRY_RUN=1` proves the per-leg replay/live plan; `LIMIT=3` proves the *live* path for
+pennies before an overnight commits to it. Smoke artifacts carry a `.limitN` suffix, so a
+partial capture can never be picked up as a full one — a `LIMIT=210` run would otherwise
+leave a cassette that passes the 90%-of-228 completeness bar and gets replayed as if whole.
 
 They run from any checkout — the repo root is resolved from the script's own location —
 and share `_common.sh`, which holds the repo/model/port resolution, the release-binary
@@ -70,9 +78,12 @@ Overrides, all optional:
 | `REPORT_PREFIX` | `06` | Report filename prefix. The default deliberately differs from `run_mode_matrix.sh`'s, because that script's reports have no noise floor and the two are otherwise indistinguishable by name |
 
 `test-scripts.sh` runs on every PR (CI's `eval script guards` step) and needs no network,
-API key, model server, or built binary. Any guard that decides whether to spend money, or
-that claims to preview what a run will do, gets a case there — the alternative was reviewers
-functioning as the test suite, which took #278 seven rounds.
+API key, model server, or built binary. It covers what's still genuinely shell-level here —
+completeness-threshold resume decisions, mode/LIMIT looping, artifact naming. The guards
+that decide whether a run's *result* would be trustworthy (corrupt/duplicate/identical
+cassettes, truncated captures) moved into `lcg-eval` itself (#279) and are covered by that
+crate's own Rust tests instead — see `crates/eval/src/plan.rs` and
+`crates/eval/src/report.rs`.
 
 ## The traps these encode
 
@@ -107,9 +118,9 @@ cassettes and runs only **one** live hosted leg — `candidate`. That leg has to
 live: its disagreement with `baseline` **is** the noise floor, two independent Haiku
 samples of the same corpus. Point it at a cassette and both legs become byte-identical,
 judged F1 is 1.000 by construction, and the measurement destroys itself while still
-producing a plausible-looking report. A cassette miss is a per-chunk error
-(`Error::CassetteMiss`), not a crash, so partial coverage shows up honestly in
-`error_rate`.
+producing a plausible-looking report — `lcg-eval` itself now refuses to run rather than
+let that happen (#279). A cassette miss is a per-chunk error (`Error::CassetteMiss`), not a
+crash, so partial coverage shows up honestly in `error_rate`.
 
 **Judge failures are survivable now, but resume with `05`, not `04`.** They used to be
 fatal: an error propagated out of `score_candidate` and killed the run, which is how the
