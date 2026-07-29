@@ -91,6 +91,21 @@ if [ -n "${DRY_RUN:-}" ]; then
         echo "      $leg: LIVE — no cassette at $cas"
       fi
     done
+
+    # The aborts a real run would hit are previewed too, not just the replay/live plan.
+    # Two clean REPLAY lines followed by an immediate abort on the real invocation is the
+    # same failure as printing the wrong filenames: DRY_RUN exists to show what will
+    # happen, and a preview that omits the stopping conditions is not one.
+    for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
+      if cassette_complete "$cas" && ! cassette_no_duplicate_keys "$cas"; then
+        echo "      WOULD ABORT: $cas has duplicate keys (appended to, not moved aside)"
+      fi
+    done
+    if cassette_complete "$BASE_CAS" && cassette_complete "$CAND_CAS" \
+       && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
+      echo "      WOULD ABORT: baseline and candidate cassettes are byte-identical —"
+      echo "                   the noise floor would be 1.000 by construction"
+    fi
   done
   echo
   echo "==> DRY_RUN: nothing executed."
@@ -104,7 +119,16 @@ fi
 require_release_binary
 [ -n "${ANTHROPIC_API_KEY:-}" ] || die "ANTHROPIC_API_KEY is not set. Both hosted legs and
        the judge need it, and without it lcg-eval silently reports strict F1 only."
-[ -s "$ONTOLOGY" ] || die "ontology fixture not found: $ONTOLOGY"
+# Only required if some requested mode actually uses it. `MODES=freeform` passes no
+# --ontology flag at all (see the empty ONT_ARGS branch), so dying on a missing fixture
+# there would block a run that never needed it.
+for _m in $MODES; do
+  if [ "$_m" != "freeform" ]; then
+    [ -s "$ONTOLOGY" ] || die "ontology fixture not found: $ONTOLOGY
+       (needed for mode '$_m'; a freeform-only run does not require it)"
+    break
+  fi
+done
 
 
 for mode in $MODES; do
