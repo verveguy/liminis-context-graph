@@ -11,6 +11,7 @@ one of those traps has now been hit at least once.
 | `03-capture-qwen.sh` | Captures the qwen cassette, no hosted spend | local compute only |
 | `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
 | `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
+| `06-ontology-matrix.sh` | The Open/Strict ontology arms, each with its own noise floor | **real money**, ~$92 + overnight |
 
 ```bash
 cargo build --release -p lcg-eval               # the scripts check for this and refuse without it
@@ -21,16 +22,44 @@ crates/eval/scripts/03-capture-qwen.sh          # then the full corpus
 export ANTHROPIC_API_KEY=...
 crates/eval/scripts/04-full-run.sh              # replays 03's cassette; no local server needed
 crates/eval/scripts/05-score-only.sh            # only if 04's judging phase died
+
+DRY_RUN=1 crates/eval/scripts/06-ontology-matrix.sh   # ALWAYS preview first
+crates/eval/scripts/06-ontology-matrix.sh            # then the Open/Strict arms
 ```
+
+**`06` is the only script here that spends money on startup, so it has two brakes.**
+`DRY_RUN=1` prints exactly what the run would do — the per-leg REPLAY/LIVE decision, the
+report names, and any condition that would abort it — without executing anything, and it
+works before the binary is built or the key is set. `MODES=""` is a deliberate no-op:
+the assignment uses `${MODES-…}` rather than `${MODES:-…}` precisely so an *empty* value
+means "do nothing" instead of falling back to the full default matrix, which is how an
+early structural test of it began a live capture by accident.
+
+It reuses the #248 freeform cassettes rather than re-capturing them, so `MODES="freeform
+open strict"` costs nothing extra for the freeform arm.
 
 They run from any checkout — the repo root is resolved from the script's own location —
 and share `_common.sh`, which holds the repo/model/port resolution, the release-binary
 check, the server health check, and the HTTP error handling that each script would
 otherwise repeat and get subtly wrong in five places.
 
-Overrides, all optional: `LCG_EVAL_MODEL`, `LCG_EVAL_PORT`, `LCG_EVAL_VENV`,
-`LCG_EVAL_WORK`, `LCG_EVAL_HAIKU`, `LCG_EVAL_MAX_CHUNK_S`, `LCG_EVAL_JUDGE_MODE`,
-`LCG_EVAL_ALLOW_NO_KEY`.
+Overrides, all optional:
+
+| Variable | Applies to | Effect |
+|---|---|---|
+| `LCG_EVAL_REPO` | all | Target a different checkout (cassettes and the binary live in whichever produced them) |
+| `LCG_EVAL_MODEL` / `LCG_EVAL_PORT` / `LCG_EVAL_VENV` | `01`–`03`, `06` | Local server identity |
+| `LCG_EVAL_WORK` | all | Work directory (default `/tmp/eval248`, must be yours) |
+| `LCG_EVAL_HAIKU` | `04`–`06` | Hosted model id |
+| `LCG_EVAL_MAX_CHUNK_S` | `02` | Per-chunk ceiling before it refuses to green-light a capture |
+| `LCG_EVAL_JUDGE_MODE` | `04`–`06` | `reference` \| `pairwise` \| `both` |
+| `LCG_EVAL_JUDGE_MODEL` | `06` | Judge model. Changing it mid-matrix invalidates the comparison — it is part of the cache key and of what each F1 means |
+| `LCG_EVAL_JUDGE_CACHE` | `06` | Judge cache path (shared with `run_mode_matrix.sh` on purpose: keys derive from prompt content, not backend names, so verdicts are reusable across both) |
+| `LCG_EVAL_ALLOW_NO_KEY` | `05` | Permit a fully-cached re-score with no API key |
+| `LCG_EVAL_ONTOLOGY` | `06` | Ontology fixture path |
+| `MODES` | `06` | Which arms to run. **Empty means none** — see above |
+| `DRY_RUN` | `06` | Print the plan, execute nothing |
+| `REPORT_PREFIX` | `06` | Report filename prefix. The default deliberately differs from `run_mode_matrix.sh`'s, because that script's reports have no noise floor and the two are otherwise indistinguishable by name |
 
 ## The traps these encode
 

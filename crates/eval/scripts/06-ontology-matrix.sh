@@ -34,6 +34,12 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 HAIKU="${LCG_EVAL_HAIKU:-claude-haiku-4-5-20251001}"
 ONTOLOGY="${LCG_EVAL_ONTOLOGY:-$REPO/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml}"
 JUDGE_MODE="${LCG_EVAL_JUDGE_MODE:-both}"
+# Overridable like every other tunable here. It was hardcoded, which read as a deliberate
+# pin for cross-mode reproducibility but was simply an omission — and an inconsistency a
+# future reader would have to test to resolve. Changing it mid-matrix WOULD invalidate the
+# comparison, since the judge model is part of the cache key and of what each F1 means, so
+# the warning is where the knob is.
+JUDGE_MODEL="${LCG_EVAL_JUDGE_MODEL:-claude-sonnet-4-6}"
 # Shared with run_mode_matrix.sh on purpose, unlike the report name. Judge cache keys are
 # derived from rendered prompts and operand content, not from backend names, so verdicts
 # computed by either script are reusable by the other — sharing is free reuse, not a
@@ -52,7 +58,7 @@ if [ -z "${MODES// /}" ]; then
   exit 0
 fi
 
-echo "==> ontology matrix: modes [$MODES], judge-mode $JUDGE_MODE"
+echo "==> ontology matrix: modes [$MODES], judge-mode $JUDGE_MODE, judge $JUDGE_MODEL"
 echo "    fixture: $ONTOLOGY"
 echo "    THIS SPENDS MONEY AND RUNS FOR HOURS. Set DRY_RUN=1 to print the plan only."
 echo
@@ -228,7 +234,7 @@ for mode in $MODES; do
     "${ONT_ARGS[@]}" \
     --judge-mode "$JUDGE_MODE" \
     --judge-cache "$JUDGE_CACHE" \
-    --judge-model claude-sonnet-4-6 \
+    --judge-model "$JUDGE_MODEL" \
     --output "$REPORT"
   echo "    finished $(date '+%H:%M:%S') — report: $REPORT"
 
