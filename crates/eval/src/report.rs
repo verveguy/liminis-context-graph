@@ -112,6 +112,10 @@ pub struct PairwiseReportEntry {
     /// FR-010: chunks present on only one side of the pair — never silently folded into
     /// `losses`.
     pub chunks_skipped: usize,
+    /// Chunks dropped because a judge call failed after its retries. Kept separate from
+    /// `chunks_skipped`: that counts expected cassette-coverage variance, this counts a
+    /// degraded run. Folding them together would let a judging outage read as normal.
+    pub judge_errors: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -229,6 +233,13 @@ impl Report {
                         e.chunks_compared,
                         e.chunks_skipped,
                     ));
+                    if e.judge_errors > 0 {
+                        out.push_str(&format!(
+                            "      judge errors: {} chunk(s) dropped — this pair's win rate \
+                             rests on a smaller sample than the others\n",
+                            e.judge_errors
+                        ));
+                    }
                 }
                 out.push('\n');
             }
@@ -342,6 +353,7 @@ mod tests {
             order_inconsistency_rate: 0.05,
             chunks_compared: 20,
             chunks_skipped: 2,
+            judge_errors: 0,
         }]);
         report
     }

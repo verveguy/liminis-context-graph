@@ -115,6 +115,11 @@ pub struct AxisTally {
     pub inconsistent: usize,
     pub chunks_compared: usize,
     pub chunks_skipped: usize,
+    /// Chunks dropped because a judge call failed after its retries. Distinct from
+    /// `chunks_skipped`, which counts chunks absent from one side's cassette: one is a
+    /// judging failure, the other is expected coverage variance, and folding them together
+    /// would hide a degraded run behind a normal-looking number.
+    pub judge_errors: usize,
 }
 
 impl AxisTally {
@@ -207,7 +212,16 @@ pub async fn score_pair_axis(
         let payload_first = payload_for(first_name);
         let payload_second = payload_for(second_name);
 
-        let primary_verdict = judged_pairwise(
+        // Non-fatal, matching the reference-mode scoring path. A judge failure here used
+        // to propagate and abort the entire run: during #248 a single transient transport
+        // error killed a 99-minute scoring pass 1379 pairwise verdicts in. Reference mode
+        // was made non-fatal in #271 but this path was missed, so the guarantee only ever
+        // held for half the harness.
+        //
+        // A chunk is dropped only if BOTH orders fail. One surviving order is still not
+        // usable — the whole point of judging both is that a single order cannot
+        // distinguish a real preference from position bias — so it is counted and skipped.
+        let primary_verdict = match judged_pairwise(
             judge,
             cache,
             judge_model,
@@ -216,8 +230,20 @@ pub async fn score_pair_axis(
             &payload_first,
             &payload_second,
         )
-        .await?;
-        let flipped_verdict = judged_pairwise(
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval: pairwise judge error ({}): {e}",
+                    axis.prompt_name()
+                );
+                tally.judge_errors += 1;
+                tally.chunks_compared -= 1;
+                continue;
+            }
+        };
+        let flipped_verdict = match judged_pairwise(
             judge,
             cache,
             judge_model,
@@ -226,7 +252,19 @@ pub async fn score_pair_axis(
             &payload_second,
             &payload_first,
         )
-        .await?;
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval: pairwise judge error ({}): {e}",
+                    axis.prompt_name()
+                );
+                tally.judge_errors += 1;
+                tally.chunks_compared -= 1;
+                continue;
+            }
+        };
 
         let physical_primary = match primary_verdict.winner {
             PairwiseWinner::A => Some(first_name),
@@ -465,6 +503,105 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cache = JudgeCache::load(dir.path().join("cache.jsonl")).unwrap();
         (dir, cache)
+    }
+
+    /// A judge that fails on the Nth call onward — models a transient fault appearing
+    /// partway through a long run, which is what actually happened during #248.
+    struct FailsAfterJudge {
+        succeed_first: std::sync::atomic::AtomicUsize,
+    }
+
+    impl JudgeClient for FailsAfterJudge {
+        fn judge<'a>(
+            &'a self,
+            _prompt_name: &'a str,
+            _reference: &'a Value,
+            _candidate: &'a Value,
+        ) -> BoxFuture<'a, Result<crate::judge::JudgeVerdict, String>> {
+            unreachable!("pairwise tests never call judge()")
+        }
+
+        fn judge_pairwise<'a>(
+            &'a self,
+            _prompt_name: &'a str,
+            _chunk_text: &'a str,
+            _slot_a: &'a Value,
+            _slot_b: &'a Value,
+        ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
+            let remaining = self
+                .succeed_first
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |n| Some(n.saturating_sub(1)),
+                )
+                .unwrap();
+            Box::pin(async move {
+                if remaining == 0 {
+                    Err("judge request failed after retries: connection reset".to_string())
+                } else {
+                    Ok(PairwiseVerdict {
+                        winner: PairwiseWinner::A,
+                        rationale: String::new(),
+                    })
+                }
+            })
+        }
+    }
+
+    /// The #248 regression: a judge failure must cost its chunk, not the run. Before this,
+    /// `judged_pairwise(...).await?` propagated and a single transient transport error
+    /// aborted a 99-minute scoring pass 1379 verdicts in. Reference mode was made
+    /// non-fatal in #271; this path was missed, so the guarantee held for only half the
+    /// harness.
+    #[tokio::test]
+    async fn a_judge_failure_drops_its_chunk_rather_than_aborting_the_run() {
+        let chunks = vec![chunk("A"), chunk("B"), chunk("C")];
+        let run_x = run(
+            "x",
+            vec![
+                ok_chunk_result("A", "aaa"),
+                ok_chunk_result("B", "aaa"),
+                ok_chunk_result("C", "aaa"),
+            ],
+        );
+        let run_y = run(
+            "y",
+            vec![
+                ok_chunk_result("A", "zzz"),
+                ok_chunk_result("B", "zzz"),
+                ok_chunk_result("C", "zzz"),
+            ],
+        );
+        let (_dir, cache) = empty_cache();
+
+        // Two calls per chunk (both slot orders), so this survives chunk A and fails from
+        // chunk B onward.
+        let judge = FailsAfterJudge {
+            succeed_first: std::sync::atomic::AtomicUsize::new(2),
+        };
+
+        let tally = score_pair_axis(
+            &judge,
+            &cache,
+            "judge-model",
+            PairwiseAxis::Entities,
+            &chunks,
+            &run_x,
+            &run_y,
+        )
+        .await
+        .expect("a judge failure must not abort the axis");
+
+        assert_eq!(
+            tally.chunks_compared, 1,
+            "only chunk A completed both orders"
+        );
+        assert_eq!(tally.judge_errors, 2, "chunks B and C each failed");
+        assert_eq!(
+            tally.chunks_skipped, 0,
+            "judge failures are not coverage gaps"
+        );
     }
 
     #[tokio::test]
