@@ -138,6 +138,7 @@ for _m in $MODES; do
 done
 
 
+REPORTS=()
 for mode in $MODES; do
   cassette_names_for_mode "$mode"
   # Deliberately NOT run_mode_matrix.sh's `eval_report_266_$mode.json`. That script is
@@ -214,6 +215,7 @@ for mode in $MODES; do
     fi
   fi
 
+  REPORTS+=("$REPORT")
   # Belt and braces: even with a distinct name, never lose a previous result silently.
   backup_if_present "$REPORT"
 
@@ -255,7 +257,11 @@ for mode in $MODES; do
 done
 
 echo "==> done. Reports:"
-for mode in $MODES; do echo "    eval_report_266_$mode.json"; done
+# Printed from what was actually written, not re-derived. Re-deriving is how this line came
+# to advertise `eval_report_266_$mode.json` — the very name the REPORT_PREFIX rename exists
+# to avoid, belonging to run_mode_matrix.sh's output — while the run wrote something else,
+# and it ignored a custom REPORT_PREFIX entirely.
+for r in "${REPORTS[@]}"; do echo "    $r"; done
 echo
 echo "    Compare each mode against ITS OWN baseline-vs-candidate noise floor, not against"
 echo "    the other modes' raw F1. The ceiling is expected to differ per mode — that shift"

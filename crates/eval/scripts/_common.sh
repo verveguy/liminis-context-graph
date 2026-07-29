@@ -100,26 +100,54 @@ cassette_complete() {
 # it does on nothing at all, and an earlier version swallowed stderr and let callers report
 # any nonzero exit as "duplicate keys, appended to". That misdiagnoses a corrupted cassette
 # as a workflow mistake and sends whoever is debugging it down the wrong path.
+# The invariant, rather than a list of handled cases: exit 1 means duplicates were
+# CONFIRMED; every other way this can fail exits 2. An earlier version enumerated the
+# failures it knew about (bad JSON, missing key) and let the rest fall through to Python's
+# default exit 1 — so an unreadable file, a non-object record, or an unhashable key still
+# came back as "duplicates". Fixing conflation case-by-case just moves it; the catch-all
+# is what actually holds.
 cassette_key_check() {
   python3 -c "
 import json, sys, collections
-keys = []
-for i, line in enumerate(open(sys.argv[1]), 1):
-    if not line.strip():
-        continue
+
+DUPLICATES, CORRUPT = 1, 2
+
+def fail(msg, code=CORRUPT):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+try:
     try:
-        rec = json.loads(line)
-    except Exception as e:
-        print(f'line {i}: invalid JSON: {e}', file=sys.stderr)
-        sys.exit(2)
-    if 'key' not in rec:
-        print(f'line {i}: record has no \"key\" field', file=sys.stderr)
-        sys.exit(2)
-    keys.append(rec['key'])
-dupes = [k for k, n in collections.Counter(keys).items() if n > 1]
-if dupes:
-    print(f'{len(dupes)} duplicated key(s), e.g. {dupes[0]}', file=sys.stderr)
-    sys.exit(1)
+        raw = open(sys.argv[1]).read()
+    except OSError as e:
+        fail(f'cannot read cassette: {e}')
+
+    keys = []
+    for i, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception as e:
+            fail(f'line {i}: invalid JSON: {e}')
+        if not isinstance(rec, dict):
+            fail(f'line {i}: record is {type(rec).__name__}, not an object')
+        if 'key' not in rec:
+            fail(f'line {i}: record has no \"key\" field')
+        k = rec['key']
+        if not isinstance(k, str):
+            fail(f'line {i}: key is {type(k).__name__}, not a string')
+        keys.append(k)
+
+    dupes = [k for k, n in collections.Counter(keys).items() if n > 1]
+    if dupes:
+        fail(f'{len(dupes)} duplicated key(s), e.g. {dupes[0]}', DUPLICATES)
+except SystemExit:
+    raise
+except Exception as e:
+    # Anything unanticipated is corruption, never a duplicate. Without this, a new failure
+    # mode would silently inherit exit 1 and be misreported all over again.
+    fail(f'unreadable cassette: {type(e).__name__}: {e}')
 " "$1"
 }
 
