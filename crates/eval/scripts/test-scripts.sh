@@ -273,6 +273,36 @@ assert_contains "04/05 default to 'reference'" "$out" "the differing judge-mode 
 out="$(run06 "$REPO1" MODES="open" LCG_EVAL_JUDGE_MODE=reference DRY_RUN=1)"
 assert_not_contains "includes pairwise" "$out" "no pairwise cost warning when reference is chosen"
 
+echo "== validate_report.py: report accounting, not a proportion =="
+V="$WORKROOT/val"; mkdir -p "$V"
+mkreport() {
+  python3 -c "
+import json, sys
+runs = json.loads(sys.argv[2])
+json.dump({'corpus_size': 3, 'reference_backend': 'baseline', 'ontology_mode': 'open',
+           'candidates': [{'backend_name': n, 'chunks_run': r, 'errors': e,
+                           'error_rate': (e / r if r else 0.0)} for n, r, e in runs]},
+          open(sys.argv[1], 'w'))
+" "$1" "$2"
+}
+make_cassette "$V/b.jsonl" 3 b; make_cassette "$V/c.jsonl" 3 c; make_cassette "$V/q.jsonl" 2 q
+# The exact case that falsely failed under the 90% heuristic: 2 of 3, one legitimate error.
+mkreport "$V/r.json" '[["baseline",3,0],["candidate",3,0],["qwen",3,1]]'
+python3 crates/eval/scripts/validate_report.py "$V/r.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
+assert_rc 0 $? "a legitimately-errored chunk is not truncation (33% at n=3 must pass)"
+# Truncation: report accounts for 3 clean chunks but the cassette holds 2.
+mkreport "$V/r2.json" '[["baseline",3,0],["candidate",3,0],["qwen",3,0]]'
+python3 crates/eval/scripts/validate_report.py "$V/r2.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
+assert_rc 1 $? "a truncated cassette IS caught (records < accounted)"
+out="$(python3 crates/eval/scripts/validate_report.py "$V/r2.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" 2>&1)"
+assert_contains "truncated" "$out" "the truncation message says truncated"
+# A leg missing from the report entirely.
+mkreport "$V/r3.json" '[["baseline",3,0],["candidate",3,0]]'
+python3 crates/eval/scripts/validate_report.py "$V/r3.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
+assert_rc 1 $? "a leg absent from the report is caught"
+python3 crates/eval/scripts/validate_report.py "$V/nope.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
+assert_rc 1 $? "an unreadable report is caught"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   printf '\033[32mall %d checks passed\033[0m\n' "$PASS"

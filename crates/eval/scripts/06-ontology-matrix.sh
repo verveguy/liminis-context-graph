@@ -30,6 +30,7 @@
 
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
+HERE_PY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 HAIKU="${LCG_EVAL_HAIKU:-claude-haiku-4-5-20251001}"
 ONTOLOGY="${LCG_EVAL_ONTOLOGY:-$REPO/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml}"
@@ -306,16 +307,19 @@ for mode in $MODES; do
   echo "    finished $(date '+%H:%M:%S') — report: $REPORT"
 
   # Everything below runs AFTER $BIN, because capture and judging share one invocation and
-  # a freshly recorded cassette cannot be inspected before it is judged. Asserting here at
-  # least stops a partial or degenerate report being read as a real result.
+  # a freshly recorded cassette cannot be inspected before it is judged.
   #
-  # cassette_complete gates which legs REPLAY; without this it never gated what a live
-  # capture produced, so a short capture could leave a plausible-looking report behind.
-  for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
-    cassette_complete "$cas" "$EXPECTED" || die "$REPORT is INVALID: $cas holds only
-       $(cassette_records "$cas") records, below the 90% completeness threshold. That
-       report came from a partial capture — delete it and re-run this mode."
-  done
+  # The check is against the REPORT'S OWN ACCOUNTING, not the 90% completeness heuristic
+  # used to pick replay legs. Those answer different questions: pre-run there is no report,
+  # so a threshold is the only option; post-run the report states chunks_run and errors, so
+  # the expected record count is exact. Using the heuristic here conflated a truncated
+  # capture (process died, invalid) with one where some chunks legitimately errored (normal,
+  # and already reported in error_rate). It failed on its first live run for exactly that
+  # reason: at LIMIT=3 a single malformed qwen output is a 33% error rate, so a perfectly
+  # good report was declared INVALID. A proportion cannot distinguish one error from
+  # truncation at small N.
+  python3 "$HERE_PY/validate_report.py" "$REPORT" "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS" \
+    || die "$REPORT failed post-run validation (see above)"
 
   # Capture and judging happen in one invocation, so a freshly recorded pair cannot be
   # compared before it is judged. Asserting afterwards at least stops a degenerate report
