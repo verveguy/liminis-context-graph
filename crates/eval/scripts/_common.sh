@@ -47,6 +47,124 @@ BIN="$REPO/target/release/lcg-eval"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# SHA-256 of a file, via python3 rather than a digest CLI.
+#
+# `md5 -q` is BSD/macOS-only; on Linux it does not exist, the command substitution yields
+# an empty string, and a comparison like `[ "$(md5 -q a)" = "$(md5 -q b)" ]` collapses to
+# `[ "" = "" ]` — which is TRUE. A guard written that way reports two different files as
+# identical on every non-macOS machine, i.e. it fails in the direction that blocks a valid
+# run. Every hash comparison in these scripts goes through here.
+sha256_of() {
+  python3 -c "
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], 'rb') as f:
+    for block in iter(lambda: f.read(65536), b''):
+        h.update(block)
+print(h.hexdigest())
+" "$1"
+}
+
+# Echoes the number of non-blank records in a cassette; 0 if it is missing.
+cassette_records() {
+  [ -f "$1" ] || { echo 0; return; }
+  python3 -c "
+import sys
+print(sum(1 for l in open(sys.argv[1]) if l.strip()))
+" "$1"
+}
+
+# True when a cassette looks like a COMPLETE capture rather than a truncated one.
+#
+# `-s` (non-empty) is not enough. Backends run sequentially and fully, so a run killed
+# during the ~2.3h local leg leaves the hosted cassettes complete and the local one
+# truncated — and a truncated cassette replays as if whole, surfacing only as an elevated
+# error_rate with nothing saying why. The 90% threshold matches 03-capture-qwen.sh and
+# tolerates the genuine per-chunk losses every real capture has (226/223 of 228).
+cassette_complete() {
+  local f="$1" expected="${2:-228}" n
+  n="$(cassette_records "$f")"
+  # Scaled integers, not `expected * 9 / 10`: that rounds DOWN, so 228 expected yielded a
+  # 205 threshold and quietly accepted 89.91% as "at least 90%".
+  [ "$(( n * 10 ))" -ge "$(( expected * 9 ))" ]
+}
+
+# Checks a cassette's `key` entries. Exit codes are distinct on purpose:
+#   0  fine
+#   1  duplicate keys — appended to outside backup_if_present (hand-resumed, stray copy).
+#      Replay serves duplicates FIFO, so a chunk gets scored against a stale verdict
+#      instead of failing. 04 and 05 already reject this before trusting an input.
+#   2  unreadable — malformed JSON, or a record with no `key`
+#
+# Two codes rather than one because `json.loads(l)['key']` raises on a corrupt file just as
+# it does on nothing at all, and an earlier version swallowed stderr and let callers report
+# any nonzero exit as "duplicate keys, appended to". That misdiagnoses a corrupted cassette
+# as a workflow mistake and sends whoever is debugging it down the wrong path.
+# The invariant, rather than a list of handled cases: exit 1 means duplicates were
+# CONFIRMED; every other way this can fail exits 2. An earlier version enumerated the
+# failures it knew about (bad JSON, missing key) and let the rest fall through to Python's
+# default exit 1 — so an unreadable file, a non-object record, or an unhashable key still
+# came back as "duplicates". Fixing conflation case-by-case just moves it; the catch-all
+# is what actually holds.
+cassette_key_check() {
+  python3 -c "
+import json, sys, collections
+
+DUPLICATES, CORRUPT = 1, 2
+
+def fail(msg, code=CORRUPT):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+try:
+    try:
+        raw = open(sys.argv[1]).read()
+    except OSError as e:
+        fail(f'cannot read cassette: {e}')
+
+    keys = []
+    for i, line in enumerate(raw.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception as e:
+            fail(f'line {i}: invalid JSON: {e}')
+        if not isinstance(rec, dict):
+            fail(f'line {i}: record is {type(rec).__name__}, not an object')
+        if 'key' not in rec:
+            fail(f'line {i}: record has no \"key\" field')
+        k = rec['key']
+        if not isinstance(k, str):
+            fail(f'line {i}: key is {type(k).__name__}, not a string')
+        keys.append(k)
+
+    dupes = [k for k, n in collections.Counter(keys).items() if n > 1]
+    if dupes:
+        fail(f'{len(dupes)} duplicated key(s), e.g. {dupes[0]}', DUPLICATES)
+except SystemExit:
+    raise
+except Exception as e:
+    # Anything unanticipated is corruption, never a duplicate. Without this, a new failure
+    # mode would silently inherit exit 1 and be misreported all over again.
+    fail(f'unreadable cassette: {type(e).__name__}: {e}')
+" "$1"
+}
+
+# Convenience wrapper: dies with the right diagnosis for whichever failure occurred.
+require_replayable_cassette() {
+  local cas="$1" err rc
+  err="$(cassette_key_check "$cas" 2>&1)" && return 0
+  rc=$?
+  if [ "$rc" = "1" ]; then
+    die "$cas contains duplicate keys ($err) — it was appended to rather than moved aside.
+       Replay serves duplicates FIFO, so chunks would be scored against stale verdicts.
+       Move it aside and re-capture that leg."
+  fi
+  die "$cas is not readable as a cassette ($err).
+       This is a corrupt or truncated file, NOT the append-without-backup mistake."
+}
+
 require_release_binary() {
   [ -x "$BIN" ] || die "$BIN not found. Build it first:
        cargo build --release -p lcg-eval"

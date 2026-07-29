@@ -114,6 +114,15 @@ jobs:
       - name: cargo test
         run: cargo test --release
 
+      # The benchmark scripts' guards decide whether to spend money on a multi-hour run, and
+      # they had no automated coverage — #278 took seven review rounds, with roughly half the
+      # findings introduced by the previous round's fix. These run in seconds and need no
+      # network, API key, model server, or built binary, so they belong on every PR.
+      # They also cover portability: `md5 -q` shipped once and would have failed only here,
+      # on Linux, in the direction that blocks a valid run.
+      - name: eval script guards
+        run: crates/eval/scripts/test-scripts.sh
+
       # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
       # Runs here (not bench-dedup) so it shares the lbug build artifacts already in ./target/.
       - name: dedup decision-overlap check (R-003)
