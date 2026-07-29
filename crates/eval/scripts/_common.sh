@@ -47,6 +47,46 @@ BIN="$REPO/target/release/lcg-eval"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# SHA-256 of a file, via python3 rather than a digest CLI.
+#
+# `md5 -q` is BSD/macOS-only; on Linux it does not exist, the command substitution yields
+# an empty string, and a comparison like `[ "$(md5 -q a)" = "$(md5 -q b)" ]` collapses to
+# `[ "" = "" ]` — which is TRUE. A guard written that way reports two different files as
+# identical on every non-macOS machine, i.e. it fails in the direction that blocks a valid
+# run. Every hash comparison in these scripts goes through here.
+sha256_of() {
+  python3 -c "
+import hashlib, sys
+h = hashlib.sha256()
+with open(sys.argv[1], 'rb') as f:
+    for block in iter(lambda: f.read(65536), b''):
+        h.update(block)
+print(h.hexdigest())
+" "$1"
+}
+
+# Echoes the number of non-blank records in a cassette; 0 if it is missing.
+cassette_records() {
+  [ -f "$1" ] || { echo 0; return; }
+  python3 -c "
+import sys
+print(sum(1 for l in open(sys.argv[1]) if l.strip()))
+" "$1"
+}
+
+# True when a cassette looks like a COMPLETE capture rather than a truncated one.
+#
+# `-s` (non-empty) is not enough. Backends run sequentially and fully, so a run killed
+# during the ~2.3h local leg leaves the hosted cassettes complete and the local one
+# truncated — and a truncated cassette replays as if whole, surfacing only as an elevated
+# error_rate with nothing saying why. The 90% threshold matches 03-capture-qwen.sh and
+# tolerates the genuine per-chunk losses every real capture has (226/223 of 228).
+cassette_complete() {
+  local f="$1" expected="${2:-228}" n
+  n="$(cassette_records "$f")"
+  [ "$n" -ge "$(( expected * 9 / 10 ))" ]
+}
+
 require_release_binary() {
   [ -x "$BIN" ] || die "$BIN not found. Build it first:
        cargo build --release -p lcg-eval"

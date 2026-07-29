@@ -42,11 +42,6 @@ JUDGE_CACHE="${LCG_EVAL_JUDGE_CACHE:-eval_judge_cache_266.jsonl}"
 MODES="${MODES-open strict}"
 
 cd "$REPO"
-require_release_binary
-
-[ -n "${ANTHROPIC_API_KEY:-}" ] || die "ANTHROPIC_API_KEY is not set. Both hosted legs and
-       the judge need it, and without it lcg-eval silently reports strict F1 only."
-[ -s "$ONTOLOGY" ] || die "ontology fixture not found: $ONTOLOGY"
 
 if [ -z "${MODES// /}" ]; then
   echo "==> MODES is empty — nothing to do. Set MODES to some of: freeform open strict" >&2
@@ -71,6 +66,15 @@ if [ -n "${DRY_RUN:-}" ]; then
   exit 0
 fi
 
+# Checked only once a real run is committed to. They used to run first, which meant
+# DRY_RUN — whose entire purpose is inspecting the plan before anything is in place —
+# died on a missing binary or an unset key. The plan-printing path must work before the
+# prerequisites do.
+require_release_binary
+[ -n "${ANTHROPIC_API_KEY:-}" ] || die "ANTHROPIC_API_KEY is not set. Both hosted legs and
+       the judge need it, and without it lcg-eval silently reports strict F1 only."
+[ -s "$ONTOLOGY" ] || die "ontology fixture not found: $ONTOLOGY"
+
 
 for mode in $MODES; do
   BASE_CAS="anthropic-$mode-baseline-$HAIKU.jsonl"
@@ -83,39 +87,60 @@ for mode in $MODES; do
     ONT_ARGS=(--ontology "$ONTOLOGY" --ontology-mode "$mode")
   fi
 
-  # A mode is resumable only if ALL THREE cassettes are present. A partial set means the
-  # capture died midway; replaying two legs against a third that must run live would
-  # compare a recording to a fresh sample, which is fine for qwen but silently destroys
-  # the noise floor if it happens to be baseline vs candidate.
-  if [ -s "$BASE_CAS" ] && [ -s "$CAND_CAS" ] && [ -s "$QWEN_CAS" ]; then
-    echo "=== mode '$mode': all three cassettes present — REPLAYING (no extraction spend) ==="
-    if [ "$(md5 -q "$BASE_CAS")" = "$(md5 -q "$CAND_CAS")" ]; then
+  # Resume is decided PER LEG, not all-or-nothing.
+  #
+  # Backends run sequentially and fully, in the order baseline, candidate, qwen — so the
+  # likeliest failure is a death during the ~2.3h local leg, leaving both hosted cassettes
+  # complete and qwen's truncated. An all-or-nothing check discards those two and re-pays
+  # ~$8 to reproduce data already on disk. Per-leg resume replays what completed and
+  # re-captures only what did not.
+  #
+  # Mixing a replayed leg with a live one is safe for the NOISE FLOOR, which is what the
+  # earlier all-or-nothing rule was protecting: baseline and candidate only have to be
+  # independent *sampling events*, and a recording of one live run against a fresh run of
+  # the other still satisfies that. What must never happen is the same cassette feeding
+  # both, which the identity check below catches.
+  #
+  # Completeness, not mere existence: a truncated cassette is non-empty and would otherwise
+  # replay as if whole, showing up only as an elevated error_rate with nothing saying why.
+  BACKENDS=() RECORD=() PLAN=()
+  NEED_SERVER=0
+  for leg in baseline candidate qwen; do
+    case "$leg" in
+      baseline) cas="$BASE_CAS"; live="anthropic:model=$HAIKU" ;;
+      candidate) cas="$CAND_CAS"; live="anthropic:model=$HAIKU" ;;
+      qwen) cas="$QWEN_CAS"; live="oai-http:url=$URL,model=$MODEL" ;;
+    esac
+    if cassette_complete "$cas"; then
+      BACKENDS+=(--backend "$leg=cassette:path=$cas")
+      PLAN+=("$leg=replay($(cassette_records "$cas") records)")
+    else
+      if [ -s "$cas" ]; then
+        echo "    $leg: cassette present but incomplete ($(cassette_records "$cas") records) — re-capturing"
+      fi
+      backup_if_present "$cas"
+      BACKENDS+=(--backend "$leg=$live")
+      RECORD+=(--record-cassette "$leg=$cas")
+      PLAN+=("$leg=live")
+      [ "$leg" = "qwen" ] && NEED_SERVER=1
+    fi
+  done
+
+  echo "=== mode '$mode': ${PLAN[*]} ==="
+
+  # Only verify the local server if a live qwen leg is actually planned. Reachability alone
+  # is not enough: this re-checks the served model id and that thinking is off, so a server
+  # left over from a reboot cannot silently produce a thinking-mode capture.
+  [ "$NEED_SERVER" = "1" ] && require_server_healthy
+
+  # The noise floor dies silently if baseline and candidate are the same data, so check it
+  # whenever both are replayed. When either is live they are independent by construction,
+  # and the post-run check below covers the freshly recorded pair.
+  if cassette_complete "$BASE_CAS" && cassette_complete "$CAND_CAS"; then
+    if [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
       die "$BASE_CAS and $CAND_CAS are byte-identical — the noise floor would be 1.000 by
        construction. One was copied over the other; delete both and re-capture."
     fi
-    BACKENDS=(
-      --backend "baseline=cassette:path=$BASE_CAS"
-      --backend "candidate=cassette:path=$CAND_CAS"
-      --backend "qwen=cassette:path=$QWEN_CAS"
-    )
-    RECORD=()
-  else
-    echo "=== mode '$mode': capturing live (2 hosted legs + ~2.3h local qwen) ==="
-    for f in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do backup_if_present "$f"; done
-    # Reachability is not enough: this re-verifies the served model id and that thinking is
-    # off, so a server left over from a reboot cannot silently produce a thinking-mode
-    # capture — the 15-hour mistake these scripts exist to prevent.
-    require_server_healthy
-    BACKENDS=(
-      --backend "baseline=anthropic:model=$HAIKU"
-      --backend "candidate=anthropic:model=$HAIKU"
-      --backend "qwen=oai-http:url=$URL,model=$MODEL"
-    )
-    RECORD=(
-      --record-cassette "baseline=$BASE_CAS"
-      --record-cassette "candidate=$CAND_CAS"
-      --record-cassette "qwen=$QWEN_CAS"
-    )
   fi
 
   echo "    started $(date '+%H:%M:%S')"
@@ -130,6 +155,16 @@ for mode in $MODES; do
     --judge-model claude-sonnet-4-6 \
     --output "$REPORT"
   echo "    finished $(date '+%H:%M:%S') — report: $REPORT"
+
+  # Capture and judging happen in one invocation, so a freshly recorded pair cannot be
+  # compared before it is judged. Asserting afterwards at least stops a degenerate report
+  # being read as a real one.
+  if [ -s "$BASE_CAS" ] && [ -s "$CAND_CAS" ] \
+     && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
+    die "$REPORT is INVALID: the two hosted cassettes came out byte-identical, so the
+       noise floor in it is 1.000 by construction rather than measured. Delete both
+       cassettes and the report, and re-capture."
+  fi
   echo
 done
 
