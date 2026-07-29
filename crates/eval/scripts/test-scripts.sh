@@ -238,6 +238,41 @@ assert_contains "ontology fixture not found" "$out" "a non-freeform mode require
 out="$(run06 "$REPO7" MODES="freeform" ANTHROPIC_API_KEY=dummy)"
 assert_not_contains "ontology fixture not found" "$out" "freeform does not require the fixture"
 
+echo "== 06: LIMIT smoke path =="
+REPO8="$WORKROOT/repo8"; make_fake_repo "$REPO8"
+out="$(run06 "$REPO8" MODES="open" LIMIT=3 DRY_RUN=1)"
+assert_contains "SMOKE RUN: first 3 chunks" "$out" "LIMIT announces itself as a smoke run"
+assert_contains ".limit3" "$out" "smoke artifacts are suffixed so they cannot pass as full captures"
+out="$(run06 "$REPO8" MODES="open" LIMIT=abc DRY_RUN=1)"
+assert_contains "LIMIT must be a positive integer" "$out" "non-numeric LIMIT is rejected"
+out="$(run06 "$REPO8" MODES="open" LIMIT=0 DRY_RUN=1)"
+assert_contains "greater than 0" "$out" "LIMIT=0 is rejected"
+
+# A smoke cassette must satisfy completeness against the LIMIT, not against 228 — and must
+# never be read by a full run.
+make_cassette "$REPO8/anthropic-open-baseline-$H.limit3.jsonl" 3 b
+make_cassette "$REPO8/anthropic-open-candidate-$H.limit3.jsonl" 3 c
+make_cassette "$REPO8/qwen3.6-27b-open.limit3.jsonl" 3 q
+out="$(run06 "$REPO8" MODES="open" LIMIT=3 DRY_RUN=1)"
+assert_eq 3 "$(printf '%s\n' "$out" | grep -c 'REPLAY')" "3-record cassettes are complete for LIMIT=3"
+out="$(run06 "$REPO8" MODES="open" DRY_RUN=1)"
+assert_not_contains "REPLAY" "$out" "a full run ignores smoke cassettes entirely"
+
+# Freeform must not touch the #248 cassettes under LIMIT.
+REPO9="$WORKROOT/repo9"; make_fake_repo "$REPO9"
+make_cassette "$REPO9/anthropic-$H.jsonl" 226 b
+make_cassette "$REPO9/anthropic-$H.candidate.jsonl" 228 c
+make_cassette "$REPO9/qwen3.6-27b.jsonl" 223 q
+out="$(run06 "$REPO9" MODES="freeform" LIMIT=3 DRY_RUN=1)"
+assert_not_contains "anthropic-$H.jsonl " "$out" "a freeform smoke run does not read the #248 cassettes"
+assert_contains ".limit3" "$out" "a freeform smoke run uses suffixed names"
+
+echo "== 06: judge-mode cost is stated, not implied =="
+out="$(run06 "$REPO1" MODES="open" DRY_RUN=1)"
+assert_contains "04/05 default to 'reference'" "$out" "the differing judge-mode default is called out"
+out="$(run06 "$REPO1" MODES="open" LCG_EVAL_JUDGE_MODE=reference DRY_RUN=1)"
+assert_not_contains "includes pairwise" "$out" "no pairwise cost warning when reference is chosen"
+
 echo
 if [ "$FAIL" -eq 0 ]; then
   printf '\033[32mall %d checks passed\033[0m\n' "$PASS"

@@ -51,6 +51,31 @@ JUDGE_CACHE="${LCG_EVAL_JUDGE_CACHE:-eval_judge_cache_266.jsonl}"
 # safe reading for a script that spends money on startup.
 MODES="${MODES-open strict}"
 
+# LIMIT=<N> runs the LIVE path over the first N chunks instead of the full corpus — the
+# cheap way to validate this script end to end before committing to a full run. There was
+# no such hatch, and the first structural test of this script started a live full-corpus
+# capture by accident; a smoke path makes the next surprise cost pennies rather than an
+# overnight.
+#
+# Smoke artifacts are named distinctly (.limitN) so they can NEVER be mistaken for a full
+# capture. Without that, a LIMIT=210 smoke run would leave a 210-record cassette that a
+# later full run reads as complete (210 >= 90% of 228) and replays as if whole — a partial
+# capture silently becoming the input to a real comparison.
+LIMIT="${LIMIT-}"
+if [ -n "$LIMIT" ]; then
+  case "$LIMIT" in
+    ''|*[!0-9]*) die "LIMIT must be a positive integer, got '$LIMIT'" ;;
+  esac
+  [ "$LIMIT" -gt 0 ] || die "LIMIT must be greater than 0"
+  SCOPE=(--limit "$LIMIT")
+  EXPECTED="$LIMIT"
+  SUFFIX=".limit$LIMIT"
+else
+  SCOPE=(--all)
+  EXPECTED=228
+  SUFFIX=""
+fi
+
 cd "$REPO"
 
 if [ -z "${MODES// /}" ]; then
@@ -72,8 +97,23 @@ for _m in $MODES; do
 done
 
 echo "==> ontology matrix: modes [$MODES], judge-mode $JUDGE_MODE, judge $JUDGE_MODEL"
+# 04 and 05 default LCG_EVAL_JUDGE_MODE to 'reference'; this script defaults to 'both',
+# because the freeform arm it is compared against was run with pairwise and a matrix whose
+# regimes were judged differently is not a matrix. That is a deliberate choice, but it is
+# also roughly 2x the judge cost of what an operator coming from 04/05 will expect, so it
+# is stated rather than left in the default.
+if [ "$JUDGE_MODE" = "both" ]; then
+  echo "    judge-mode 'both' includes pairwise (~\$38/mode). 04/05 default to 'reference';"
+  echo "    this script defaults to 'both' so the arms stay comparable with the freeform run."
+  echo "    Set LCG_EVAL_JUDGE_MODE=reference for the cheaper pass (~\$21/mode)."
+fi
 echo "    fixture: $ONTOLOGY"
-echo "    THIS SPENDS MONEY AND RUNS FOR HOURS. Set DRY_RUN=1 to print the plan only."
+if [ -n "$LIMIT" ]; then
+  echo "    SMOKE RUN: first $LIMIT chunks only; artifacts suffixed $SUFFIX"
+else
+  echo "    THIS SPENDS MONEY AND RUNS FOR HOURS. Set DRY_RUN=1 to print the plan only,"
+  echo "    or LIMIT=3 to exercise the live path over 3 chunks first."
+fi
 echo
 
 # Sets BASE_CAS/CAND_CAS/QWEN_CAS for a mode. Defined once and called from BOTH the
@@ -86,14 +126,16 @@ cassette_names_for_mode() {
   # in their names. Without this mapping the freeform arm looks for files that do not exist
   # and re-captures live — two hosted legs and 2.3h to reproduce data already on disk,
   # which is the exact waste this script's header claims to avoid.
-  if [ "$mode" = "freeform" ]; then
+  if [ "$mode" = "freeform" ] && [ -z "$SUFFIX" ]; then
+    # Only a full-corpus freeform arm reuses the #248 cassettes; a smoke run must not read
+    # them (they are 228-chunk captures) nor write over them.
     BASE_CAS="anthropic-$HAIKU.jsonl"
     CAND_CAS="anthropic-$HAIKU.candidate.jsonl"
     QWEN_CAS="qwen3.6-27b.jsonl"
   else
-    BASE_CAS="anthropic-$mode-baseline-$HAIKU.jsonl"
-    CAND_CAS="anthropic-$mode-candidate-$HAIKU.jsonl"
-    QWEN_CAS="qwen3.6-27b-$mode.jsonl"
+    BASE_CAS="anthropic-$mode-baseline-$HAIKU$SUFFIX.jsonl"
+    CAND_CAS="anthropic-$mode-candidate-$HAIKU$SUFFIX.jsonl"
+    QWEN_CAS="qwen3.6-27b-$mode$SUFFIX.jsonl"
   fi
 }
 
@@ -101,7 +143,7 @@ cassette_names_for_mode() {
 # separately is how the summary came to advertise a name the run never wrote.
 report_name_for_mode() {
   local prefix="${REPORT_PREFIX-eval_report_266_noisefloor}"
-  if [ -n "$prefix" ]; then echo "${prefix}_$1.json"; else echo "$1.json"; fi
+  if [ -n "$prefix" ]; then echo "${prefix}_$1$SUFFIX.json"; else echo "$1$SUFFIX.json"; fi
 }
 
 # A dry run is the only way to inspect what this will do without it starting. Added
@@ -113,7 +155,7 @@ if [ -n "${DRY_RUN:-}" ]; then
     for pair in "baseline:$BASE_CAS" "candidate:$CAND_CAS" "qwen:$QWEN_CAS"; do
       leg="${pair%%:*}"
       cas="${pair#*:}"
-      if cassette_complete "$cas"; then
+      if cassette_complete "$cas" "$EXPECTED"; then
         echo "      $leg: REPLAY $cas ($(cassette_records "$cas") records)"
       elif [ -s "$cas" ]; then
         echo "      $leg: LIVE — $cas is incomplete ($(cassette_records "$cas") records)"
@@ -127,14 +169,14 @@ if [ -n "${DRY_RUN:-}" ]; then
     # same failure as printing the wrong filenames: DRY_RUN exists to show what will
     # happen, and a preview that omits the stopping conditions is not one.
     for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
-      if cassette_complete "$cas"; then
+      if cassette_complete "$cas" "$EXPECTED"; then
         keyerr="$(cassette_key_check "$cas" 2>&1)" || case $? in
           1) echo "      WOULD ABORT: $cas has duplicate keys ($keyerr)" ;;
           2) echo "      WOULD ABORT: $cas is corrupt or truncated ($keyerr)" ;;
         esac
       fi
     done
-    if cassette_complete "$BASE_CAS" && cassette_complete "$CAND_CAS" \
+    if cassette_complete "$BASE_CAS" "$EXPECTED" && cassette_complete "$CAND_CAS" "$EXPECTED" \
        && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
       echo "      WOULD ABORT: baseline and candidate cassettes are byte-identical —"
       echo "                   the noise floor would be 1.000 by construction"
@@ -209,7 +251,7 @@ for mode in $MODES; do
       candidate) cas="$CAND_CAS"; live="anthropic:model=$HAIKU" ;;
       qwen) cas="$QWEN_CAS"; live="oai-http:url=$URL,model=$MODEL" ;;
     esac
-    if cassette_complete "$cas"; then
+    if cassette_complete "$cas" "$EXPECTED"; then
       # Complete by count is not the same as trustworthy. A cassette appended to outside
       # backup_if_present — a hand-resumed capture, a stray copy — holds duplicate keys,
       # and replay serves duplicates FIFO, so a chunk would be scored against a stale
@@ -255,7 +297,7 @@ for mode in $MODES; do
     "${BACKENDS[@]}" \
     "${RECORD[@]}" \
     --reference baseline \
-    --all \
+    "${SCOPE[@]}" \
     "${ONT_ARGS[@]}" \
     --judge-mode "$JUDGE_MODE" \
     --judge-cache "$JUDGE_CACHE" \
@@ -270,7 +312,7 @@ for mode in $MODES; do
   # cassette_complete gates which legs REPLAY; without this it never gated what a live
   # capture produced, so a short capture could leave a plausible-looking report behind.
   for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
-    cassette_complete "$cas" || die "$REPORT is INVALID: $cas holds only
+    cassette_complete "$cas" "$EXPECTED" || die "$REPORT is INVALID: $cas holds only
        $(cassette_records "$cas") records, below the 90% completeness threshold. That
        report came from a partial capture — delete it and re-run this mode."
   done

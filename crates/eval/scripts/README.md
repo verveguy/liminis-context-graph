@@ -39,6 +39,11 @@ early structural test of it began a live capture by accident.
 It reuses the #248 freeform cassettes rather than re-capturing them, so `MODES="freeform
 open strict"` costs nothing extra for the freeform arm.
 
+`DRY_RUN=1` proves the plan; `LIMIT=3` proves the *live* path for pennies before an
+overnight commits to it. Smoke artifacts carry a `.limitN` suffix, so a partial capture can
+never be picked up as a full one — a `LIMIT=210` run would otherwise leave a cassette that
+passes the 90%-of-228 completeness bar and gets replayed as if whole.
+
 They run from any checkout — the repo root is resolved from the script's own location —
 and share `_common.sh`, which holds the repo/model/port resolution, the release-binary
 check, the server health check, and the HTTP error handling that each script would
@@ -54,13 +59,14 @@ Overrides, all optional:
 | `LCG_EVAL_WORK` | all | Work directory (default `/tmp/eval248`, must be yours) |
 | `LCG_EVAL_HAIKU` | `04`–`06` | Hosted model id |
 | `LCG_EVAL_MAX_CHUNK_S` | `02` | Per-chunk ceiling before it refuses to green-light a capture |
-| `LCG_EVAL_JUDGE_MODE` | `04`–`06` | `reference` \| `pairwise` \| `both` |
+| `LCG_EVAL_JUDGE_MODE` | `04`–`06` | `reference` \| `pairwise` \| `both`. **Defaults differ**: `04`/`05` use `reference` (~$21), `06` uses `both` (~$38/mode) so its arms stay comparable with the freeform run, which was judged with pairwise |
 | `LCG_EVAL_JUDGE_MODEL` | `06` | Judge model. Changing it mid-matrix invalidates the comparison — it is part of the cache key and of what each F1 means |
 | `LCG_EVAL_JUDGE_CACHE` | `06` | Judge cache path (shared with `run_mode_matrix.sh` on purpose: keys derive from prompt content, not backend names, so verdicts are reusable across both) |
 | `LCG_EVAL_ALLOW_NO_KEY` | `05` | Permit a fully-cached re-score with no API key |
 | `LCG_EVAL_ONTOLOGY` | `06` | Ontology fixture path |
 | `MODES` | `06` | Which arms to run. **Empty means none** — see above |
 | `DRY_RUN` | `06` | Print the plan, execute nothing |
+| `LIMIT` | `06` | Run the **live** path over the first N chunks — the cheap end-to-end smoke test. Artifacts are suffixed `.limitN` so a partial capture can never be read as a full one |
 | `REPORT_PREFIX` | `06` | Report filename prefix. The default deliberately differs from `run_mode_matrix.sh`'s, because that script's reports have no noise floor and the two are otherwise indistinguishable by name |
 
 `test-scripts.sh` runs on every PR (CI's `eval script guards` step) and needs no network,
