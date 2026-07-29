@@ -84,7 +84,24 @@ print(sum(1 for l in open(sys.argv[1]) if l.strip()))
 cassette_complete() {
   local f="$1" expected="${2:-228}" n
   n="$(cassette_records "$f")"
-  [ "$n" -ge "$(( expected * 9 / 10 ))" ]
+  # Scaled integers, not `expected * 9 / 10`: that rounds DOWN, so 228 expected yielded a
+  # 205 threshold and quietly accepted 89.91% as "at least 90%".
+  [ "$(( n * 10 ))" -ge "$(( expected * 9 ))" ]
+}
+
+# True when a cassette has no duplicate `key` entries.
+#
+# A duplicate key means the file was appended to outside the backup_if_present flow — a
+# hand-resumed capture, or a stray copy. Replay serves duplicates FIFO, so the second run
+# of a chunk would be scored against a stale verdict rather than failing. 04 and 05 already
+# reject this before trusting an input cassette; anything that replays should.
+cassette_no_duplicate_keys() {
+  python3 -c "
+import json, sys, collections
+ks = [json.loads(l)['key'] for l in open(sys.argv[1]) if l.strip()]
+dupes = sum(1 for _, n in collections.Counter(ks).items() if n > 1)
+sys.exit(1 if dupes else 0)
+" "$1" 2>/dev/null
 }
 
 require_release_binary() {

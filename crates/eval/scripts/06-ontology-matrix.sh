@@ -53,13 +53,44 @@ echo "    fixture: $ONTOLOGY"
 echo "    THIS SPENDS MONEY AND RUNS FOR HOURS. Set DRY_RUN=1 to print the plan only."
 echo
 
+# Sets BASE_CAS/CAND_CAS/QWEN_CAS for a mode. Defined once and called from BOTH the
+# DRY_RUN branch and the real loop: a dry run that prints different filenames from the ones
+# the run would actually use is worse than no dry run at all, because it invites precisely
+# the mistake it exists to reveal.
+cassette_names_for_mode() {
+  local mode="$1"
+  # Freeform reuses the #248 cassettes, which predate this script and carry no mode segment
+  # in their names. Without this mapping the freeform arm looks for files that do not exist
+  # and re-captures live — two hosted legs and 2.3h to reproduce data already on disk,
+  # which is the exact waste this script's header claims to avoid.
+  if [ "$mode" = "freeform" ]; then
+    BASE_CAS="anthropic-$HAIKU.jsonl"
+    CAND_CAS="anthropic-$HAIKU.candidate.jsonl"
+    QWEN_CAS="qwen3.6-27b.jsonl"
+  else
+    BASE_CAS="anthropic-$mode-baseline-$HAIKU.jsonl"
+    CAND_CAS="anthropic-$mode-candidate-$HAIKU.jsonl"
+    QWEN_CAS="qwen3.6-27b-$mode.jsonl"
+  fi
+}
+
 # A dry run is the only way to inspect what this will do without it starting. Added
 # because the first structural test of this script began a live capture within seconds.
 if [ -n "${DRY_RUN:-}" ]; then
   for mode in $MODES; do
-    echo "    mode '$mode': would use ontology=${ONTOLOGY##*/} mode=$mode,"
-    echo "      cassettes anthropic-$mode-{baseline,candidate}-$HAIKU.jsonl, qwen3.6-27b-$mode.jsonl"
-    echo "      -> eval_report_266_$mode.json"
+    cassette_names_for_mode "$mode"
+    echo "    mode '$mode' (ontology=${ONTOLOGY##*/}) -> eval_report_266_$mode.json"
+    for pair in "baseline:$BASE_CAS" "candidate:$CAND_CAS" "qwen:$QWEN_CAS"; do
+      leg="${pair%%:*}"
+      cas="${pair#*:}"
+      if cassette_complete "$cas"; then
+        echo "      $leg: REPLAY $cas ($(cassette_records "$cas") records)"
+      elif [ -s "$cas" ]; then
+        echo "      $leg: LIVE — $cas is incomplete ($(cassette_records "$cas") records)"
+      else
+        echo "      $leg: LIVE — no cassette at $cas"
+      fi
+    done
   done
   echo
   echo "==> DRY_RUN: nothing executed."
@@ -77,9 +108,7 @@ require_release_binary
 
 
 for mode in $MODES; do
-  BASE_CAS="anthropic-$mode-baseline-$HAIKU.jsonl"
-  CAND_CAS="anthropic-$mode-candidate-$HAIKU.jsonl"
-  QWEN_CAS="qwen3.6-27b-$mode.jsonl"
+  cassette_names_for_mode "$mode"
   REPORT="eval_report_266_$mode.json"
 
   ONT_ARGS=()
@@ -112,6 +141,14 @@ for mode in $MODES; do
       qwen) cas="$QWEN_CAS"; live="oai-http:url=$URL,model=$MODEL" ;;
     esac
     if cassette_complete "$cas"; then
+      # Complete by count is not the same as trustworthy. A cassette appended to outside
+      # backup_if_present — a hand-resumed capture, a stray copy — holds duplicate keys,
+      # and replay serves duplicates FIFO, so a chunk would be scored against a stale
+      # verdict rather than failing. 04 and 05 already reject this before trusting an input.
+      cassette_no_duplicate_keys "$cas" \
+        || die "$cas contains duplicate keys — it was appended to rather than moved aside.
+       Replay serves duplicates FIFO, so chunks would be scored against stale verdicts.
+       Move it aside and re-capture that leg."
       BACKENDS+=(--backend "$leg=cassette:path=$cas")
       PLAN+=("$leg=replay($(cassette_records "$cas") records)")
     else
@@ -155,6 +192,18 @@ for mode in $MODES; do
     --judge-model claude-sonnet-4-6 \
     --output "$REPORT"
   echo "    finished $(date '+%H:%M:%S') — report: $REPORT"
+
+  # Everything below runs AFTER $BIN, because capture and judging share one invocation and
+  # a freshly recorded cassette cannot be inspected before it is judged. Asserting here at
+  # least stops a partial or degenerate report being read as a real result.
+  #
+  # cassette_complete gates which legs REPLAY; without this it never gated what a live
+  # capture produced, so a short capture could leave a plausible-looking report behind.
+  for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
+    cassette_complete "$cas" || die "$REPORT is INVALID: $cas holds only
+       $(cassette_records "$cas") records, below the 90% completeness threshold. That
+       report came from a partial capture — delete it and re-run this mode."
+  done
 
   # Capture and judging happen in one invocation, so a freshly recorded pair cannot be
   # compared before it is judged. Asserting afterwards at least stops a degenerate report
