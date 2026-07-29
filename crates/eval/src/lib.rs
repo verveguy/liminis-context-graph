@@ -14,6 +14,7 @@ pub mod judge;
 pub mod judge_cache;
 pub mod metrics;
 pub mod pairwise;
+pub mod plan;
 pub mod report;
 pub mod runner;
 pub mod scoring;

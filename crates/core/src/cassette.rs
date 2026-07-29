@@ -36,7 +36,7 @@
 //! above HTTP request construction. This is also what satisfies FR-008: cassette records can
 //! never contain credentials, because nothing at this boundary carries them.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
@@ -137,6 +137,72 @@ pub struct CassetteRecord {
     /// The call's return value, serialized (`ExtractionResult` for `extract`, `Vec<String>` for
     /// the two classify methods).
     pub response: Value,
+}
+
+/// Parses a cassette file into its raw records, rejecting corruption and duplicate keys
+/// rather than tolerating either (#279 FR-002/FR-003). Shared by [`ReplayingExtractor::load`]
+/// and, in `lcg_eval`, by the `--dry-run`/guard resolution path and the post-report
+/// cassette-count check — one implementation of "what is a valid cassette line," used three
+/// ways instead of three times.
+///
+/// Malformed JSON, a non-object record, a record missing `key`, and a record whose `key` is
+/// not a string are all reported as [`Error::CassetteCorrupt`]. A repeated `key` is reported
+/// as [`Error::CassetteDuplicateKey`], naming the file, the key, and both line numbers — a
+/// distinct diagnosis from corruption, not just a distinct exit code.
+pub fn load_records(path: impl AsRef<Path>) -> Result<Vec<CassetteRecord>, Error> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        Error::CassetteCorrupt(format!("failed to read cassette {}: {e}", path.display()))
+    })?;
+
+    let mut records = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for (i, line) in content.lines().enumerate() {
+        let line_no = i + 1;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: Value = serde_json::from_str(line).map_err(|e| {
+            Error::CassetteCorrupt(format!(
+                "cassette {} line {line_no}: invalid JSON: {e}",
+                path.display()
+            ))
+        })?;
+        if !value.is_object() {
+            return Err(Error::CassetteCorrupt(format!(
+                "cassette {} line {line_no}: record is not an object",
+                path.display()
+            )));
+        }
+        match value.get("key") {
+            Some(Value::String(_)) => {}
+            Some(_) => {
+                return Err(Error::CassetteCorrupt(format!(
+                    "cassette {} line {line_no}: \"key\" is not a string",
+                    path.display()
+                )))
+            }
+            None => {
+                return Err(Error::CassetteCorrupt(format!(
+                    "cassette {} line {line_no}: record has no \"key\" field",
+                    path.display()
+                )))
+            }
+        }
+        let record: CassetteRecord = serde_json::from_value(value).map_err(|e| {
+            Error::CassetteCorrupt(format!("cassette {} line {line_no}: {e}", path.display()))
+        })?;
+        if let Some(first_line) = seen.insert(record.key.clone(), line_no) {
+            return Err(Error::CassetteDuplicateKey(format!(
+                "cassette {} line {line_no}: key '{}' duplicates the one at line {first_line}",
+                path.display(),
+                record.key
+            )));
+        }
+        records.push(record);
+    }
+    Ok(records)
 }
 
 // ── CassetteWriter ───────────────────────────────────────────────────────────
@@ -276,53 +342,32 @@ impl Extractor for RecordingExtractor {
 /// (`LlmRouter` with primary/fallback, or a bare extractor) — matching by request-content hash
 /// alone means replay needs no router-specific logic (User Story 4).
 ///
-/// Duplicate keys (two calls with identical semantic content) are served FIFO, in the order
-/// they were recorded, via a per-key queue built once at load time.
+/// Duplicate keys are rejected at load time by [`load_records`] (#279 FR-002) — this index
+/// is therefore a plain map, not a per-key queue, and a key requested twice at runtime
+/// replays the same value both times rather than draining toward a miss.
+#[derive(Debug)]
 pub struct ReplayingExtractor {
-    index: Mutex<HashMap<String, VecDeque<Value>>>,
+    index: HashMap<String, Value>,
 }
 
 impl ReplayingExtractor {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, Error> {
-        let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            Error::Config(format!("failed to read cassette {}: {e}", path.display()))
-        })?;
-
-        let mut index: HashMap<String, VecDeque<Value>> = HashMap::new();
-        for (i, line) in content.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let record: CassetteRecord = serde_json::from_str(line).map_err(|e| {
-                Error::Config(format!(
-                    "cassette {} line {}: invalid JSON: {e}",
-                    path.display(),
-                    i + 1
-                ))
-            })?;
-            index
-                .entry(record.key)
-                .or_default()
-                .push_back(record.response);
+        let records = load_records(path)?;
+        let mut index = HashMap::with_capacity(records.len());
+        for record in records {
+            index.insert(record.key, record.response);
         }
-
-        Ok(Self {
-            index: Mutex::new(index),
-        })
+        Ok(Self { index })
     }
 
-    /// Pops the next queued response for `key`, or a [`Error::CassetteMiss`] identifying the
-    /// call type and key when no (or no more) recorded entries match (FR-003/SC-002).
+    /// Returns the recorded response for `key`, or a [`Error::CassetteMiss`] identifying the
+    /// call type and key when no recorded entry matches (FR-003/SC-002).
     fn pop(&self, call_type: &str, key: &str) -> Result<Value, Error> {
-        let mut index = self.index.lock().unwrap();
-        match index.get_mut(key) {
-            Some(queue) if !queue.is_empty() => Ok(queue.pop_front().unwrap()),
-            _ => Err(Error::CassetteMiss(format!(
+        self.index.get(key).cloned().ok_or_else(|| {
+            Error::CassetteMiss(format!(
                 "no cassette record for {call_type} call with key {key}"
-            ))),
-        }
+            ))
+        })
     }
 }
 
@@ -528,13 +573,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_serves_duplicate_keys_fifo() {
+    async fn replay_rejects_duplicate_keys_at_load_time() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("cassette.jsonl");
         let writer = CassetteWriter::open(&path).unwrap();
 
         // Two distinct responses recorded under the identical key, simulating two calls with
-        // identical semantic content within one ingest run.
+        // identical semantic content within one ingest run. FR-002: this must be rejected
+        // outright, not served FIFO — a chunk would otherwise be scored against a stale verdict.
         let make_record = |name: &str| CassetteRecord {
             key: "dup-key".to_string(),
             call_type: "classify_entities".to_string(),
@@ -547,11 +593,132 @@ mod tests {
         writer.append(&make_record("first")).unwrap();
         writer.append(&make_record("second")).unwrap();
 
+        let err = ReplayingExtractor::load(&path).unwrap_err();
+        assert!(
+            matches!(err, Error::CassetteDuplicateKey(_)),
+            "expected CassetteDuplicateKey, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("dup-key"), "error should name the key: {msg}");
+    }
+
+    #[tokio::test]
+    async fn replay_serves_a_key_requested_twice_without_draining() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let writer = CassetteWriter::open(&path).unwrap();
+        writer
+            .append(&CassetteRecord {
+                key: "k1".to_string(),
+                call_type: "classify_entities".to_string(),
+                provider: "mock".to_string(),
+                model: "mock-model".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                request: json!({}),
+                response: json!(["once"]),
+            })
+            .unwrap();
+
         let replayer = ReplayingExtractor::load(&path).unwrap();
-        let first = replayer.pop("classify_entities", "dup-key").unwrap();
-        let second = replayer.pop("classify_entities", "dup-key").unwrap();
-        assert_eq!(first, json!(["first"]));
-        assert_eq!(second, json!(["second"]));
-        assert!(replayer.pop("classify_entities", "dup-key").is_err());
+        let first = replayer.pop("classify_entities", "k1").unwrap();
+        let second = replayer.pop("classify_entities", "k1").unwrap();
+        assert_eq!(first, json!(["once"]));
+        assert_eq!(
+            second,
+            json!(["once"]),
+            "a non-draining map serves the same value again"
+        );
+    }
+
+    // ── load_records (#279 FR-002/FR-003) ────────────────────────────────────────
+
+    fn write_lines(dir: &TempDir, lines: &[&str]) -> std::path::PathBuf {
+        let path = dir.path().join("cassette.jsonl");
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_records_missing_file_is_corrupt() {
+        let err = load_records("/nonexistent/path/cassette.jsonl").unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)));
+    }
+
+    #[test]
+    fn load_records_malformed_json_is_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &["not json"]);
+        let err = load_records(&path).unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_records_non_object_record_is_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &["[1, 2, 3]"]);
+        let err = load_records(&path).unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_records_missing_key_field_is_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[r#"{"call_type": "extract"}"#]);
+        let err = load_records(&path).unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_records_non_string_key_is_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[r#"{"key": 5}"#]);
+        let err = load_records(&path).unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_records_duplicate_key_is_duplicate_not_corrupt() {
+        let dir = TempDir::new().unwrap();
+        let make = |name: &str| {
+            serde_json::to_string(&CassetteRecord {
+                key: "dup".to_string(),
+                call_type: "extract".to_string(),
+                provider: "mock".to_string(),
+                model: "mock-model".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                request: json!({}),
+                response: json!({"name": name}),
+            })
+            .unwrap()
+        };
+        let path = write_lines(&dir, &[&make("first"), &make("second")]);
+        let err = load_records(&path).unwrap_err();
+        assert!(matches!(err, Error::CassetteDuplicateKey(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn load_records_empty_file_loads_zero_records() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[]);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 0);
+    }
+
+    #[test]
+    fn load_records_valid_file_returns_every_record() {
+        let dir = TempDir::new().unwrap();
+        let record = CassetteRecord {
+            key: "k1".to_string(),
+            call_type: "extract".to_string(),
+            provider: "mock".to_string(),
+            model: "mock-model".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            request: json!({}),
+            response: json!({"entities": []}),
+        };
+        let path = write_lines(&dir, &[&serde_json::to_string(&record).unwrap()]);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].key, "k1");
     }
 }

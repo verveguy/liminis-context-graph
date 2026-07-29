@@ -135,6 +135,28 @@ pub struct Report {
     pub pairwise: Option<Vec<PairwiseReportEntry>>,
 }
 
+/// FR-006: verifies a recorded cassette's record count equals `chunks_run - errors` for
+/// `candidate` — a truncated capture means the report was scored against partial data. A
+/// high `error_rate` is a quality signal about the model, not a truncation signal, and this
+/// check never fails on it: it compares against the report's own accounting, never a
+/// proportion (the proportion-based version this replaces produced a false failure at
+/// `LIMIT=3` with a 33% error rate — see the #248 runbook history).
+pub fn validate_recorded_cassette(
+    candidate: &CandidateReport,
+    actual_record_count: usize,
+) -> Result<(), String> {
+    let expected = candidate.chunks_run - candidate.errors;
+    if actual_record_count != expected {
+        return Err(format!(
+            "backend '{}': cassette holds {actual_record_count} record(s) but the report \
+             accounts for {expected} ({} run - {} errored) — the capture was truncated, so \
+             this report was scored against partial data",
+            candidate.backend_name, candidate.chunks_run, candidate.errors
+        ));
+    }
+    Ok(())
+}
+
 impl Report {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -482,6 +504,39 @@ mod tests {
     fn human_readable_report_omits_pairwise_section_when_none() {
         let out = sample_report().render_human_readable();
         assert!(!out.contains("pairwise judging"));
+    }
+
+    // ── validate_recorded_cassette (FR-006) ────────────────────────────────────────
+
+    fn sample_candidate(chunks_run: usize, errors: usize) -> CandidateReport {
+        let mut c = sample_report().candidates.remove(0);
+        c.chunks_run = chunks_run;
+        c.errors = errors;
+        c
+    }
+
+    #[test]
+    fn exact_match_is_accepted() {
+        let candidate = sample_candidate(10, 2);
+        assert!(validate_recorded_cassette(&candidate, 8).is_ok());
+    }
+
+    #[test]
+    fn mismatch_is_rejected_and_named() {
+        let candidate = sample_candidate(10, 2);
+        let err = validate_recorded_cassette(&candidate, 5).unwrap_err();
+        assert!(err.contains("baseline"));
+        assert!(err.contains('5'));
+        assert!(err.contains('8'));
+        assert!(err.contains("truncated"));
+    }
+
+    #[test]
+    fn high_error_rate_alone_does_not_fail_the_check() {
+        // The exact LIMIT=3 trap this check exists to avoid: a legitimate 33% error rate
+        // must not be mistaken for truncation as long as the record count matches.
+        let candidate = sample_candidate(3, 1);
+        assert!(validate_recorded_cassette(&candidate, 2).is_ok());
     }
 
     #[test]

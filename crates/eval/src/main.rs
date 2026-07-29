@@ -16,7 +16,8 @@ use lcg_eval::pairwise::{
     score_all_pairs, CALIBRATION_BAND_HIGH, CALIBRATION_BAND_LOW,
     ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD,
 };
-use lcg_eval::report::{PairwiseReportEntry, Report};
+use lcg_eval::plan::{render as render_plan, resolve as resolve_plan};
+use lcg_eval::report::{validate_recorded_cassette, PairwiseReportEntry, Report};
 use lcg_eval::runner::{run_backend, BackendRunResult, CountingSink};
 use lcg_eval::scoring::score_candidate;
 
@@ -62,6 +63,38 @@ async fn run(cli: Args) -> Result<(), String> {
         chunks.len(),
         corpus_path.display()
     );
+
+    // FR-001/User Story 2: `--dry-run` and the real run both resolve through `plan::resolve`
+    // so a preview can never drift from what a real run would actually do (ADR-0051).
+    let resolved = resolve_plan(&cli, chunks.len());
+    if cli.dry_run {
+        println!("{}", render_plan(&resolved));
+        return Ok(());
+    }
+    if !resolved.guard_violations.is_empty() {
+        let violations = resolved
+            .guard_violations
+            .iter()
+            .map(|v| format!("  - {v}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(format!(
+            "refusing to run — {} guard violation(s) would invalidate the measurement:\n{}",
+            resolved.guard_violations.len(),
+            violations
+        ));
+    }
+    // FR-005: a coverage shortfall shrinks the sample but never aborts (see plan.rs's module
+    // doc) — noted here so it's visible even outside --dry-run.
+    for b in &resolved.backends {
+        if let Some(shortfall) = b.coverage_shortfall {
+            eprintln!(
+                "lcg-eval: NOTE backend '{}' cassette covers {shortfall} fewer chunk(s) than \
+                 the requested scope ({})",
+                b.name, resolved.scope_label
+            );
+        }
+    }
 
     // cli::parse_args always resolves --reference to a configured backend name.
     let reference_name = cli
@@ -196,6 +229,26 @@ async fn run(cli: Args) -> Result<(), String> {
         candidates,
         pairwise,
     };
+
+    // FR-006: verify each recorded cassette's record count matches this report's own
+    // accounting before printing or writing anything — a truncated capture must never
+    // produce a plausible-looking report artifact.
+    for cassette in &cli.record_cassette {
+        let candidate = report
+            .candidates
+            .iter()
+            .find(|c| c.backend_name == cassette.backend)
+            .ok_or_else(|| {
+                format!(
+                    "--record-cassette backend '{}' matched no candidate in the report",
+                    cassette.backend
+                )
+            })?;
+        let actual = lcg_core::cassette::load_records(&cassette.path)
+            .map_err(|e| format!("--record-cassette {}: {e}", cassette.path))?
+            .len();
+        validate_recorded_cassette(candidate, actual)?;
+    }
 
     println!("{}", report.render_human_readable());
     if let Some(path) = &cli.output {
