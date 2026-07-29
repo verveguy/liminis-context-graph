@@ -20,18 +20,28 @@ use lcg_core::cassette::load_records;
 use crate::backend::{parse_backend_spec, BackendKind};
 use crate::cli::Args;
 
+/// What a real run would do with a backend — distinct from whether it *should* (that's
+/// `guard_violations`). An unparseable spec is neither `Live` nor `Replay`: it isn't a
+/// backend a real run could dispatch to at all, so `render()` must not print it as either
+/// (see ADR-0051 — a preview that mislabels an aborting backend as `LIVE` is exactly the
+/// kind of drift this module exists to prevent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Live,
+    Replay,
+    Invalid,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackendPlan {
     pub name: String,
     pub spec: String,
-    /// `true` for a `cassette:` backend that loaded successfully; `false` for a live
-    /// backend or one whose spec/cassette failed to resolve (see `guard_violations`).
-    pub replay: bool,
+    pub decision: Decision,
     /// `Some` only for a `cassette:` backend that loaded successfully.
     pub cassette_record_count: Option<usize>,
     /// `Some(n)` when a cassette backend's record count is `n` short of the requested
-    /// scope (FR-005). The check is `>=`, not `>`: an exact match or a superset is not a
-    /// shortfall.
+    /// scope (FR-005). `None` when the count meets or exceeds the scope: neither an exact
+    /// match nor a superset is a shortfall.
     pub coverage_shortfall: Option<usize>,
 }
 
@@ -80,7 +90,7 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
                 backends.push(BackendPlan {
                     name: b.name.clone(),
                     spec: b.spec.clone(),
-                    replay: false,
+                    decision: Decision::Invalid,
                     cassette_record_count: None,
                     coverage_shortfall: None,
                 });
@@ -94,7 +104,7 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
                 backends.push(BackendPlan {
                     name: b.name.clone(),
                     spec: b.spec.clone(),
-                    replay: false,
+                    decision: Decision::Live,
                     cassette_record_count: None,
                     coverage_shortfall: None,
                 });
@@ -118,19 +128,31 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
         match load_records(&path) {
             Ok(records) => {
                 if !same_path_already_flagged {
-                    if let Ok(hash) = hash_file(&path) {
-                        if let Some((_, prior_name, prior_path)) =
-                            seen_hashes.iter().find(|(h, _, _)| *h == hash)
-                        {
-                            guard_violations.push(format!(
-                                "backend '{}' (cassette '{path}') and backend '{prior_name}' \
-                                 (cassette '{prior_path}') have byte-identical cassette \
-                                 content — a self-comparison is degenerate",
-                                b.name
-                            ));
-                        } else {
-                            seen_hashes.push((hash, b.name.clone(), path.clone()));
+                    match hash_file(&path) {
+                        Ok(hash) => {
+                            if let Some((_, prior_name, prior_path)) =
+                                seen_hashes.iter().find(|(h, _, _)| *h == hash)
+                            {
+                                guard_violations.push(format!(
+                                    "backend '{}' (cassette '{path}') and backend \
+                                     '{prior_name}' (cassette '{prior_path}') have \
+                                     byte-identical cassette content — a self-comparison is \
+                                     degenerate",
+                                    b.name
+                                ));
+                            } else {
+                                seen_hashes.push((hash, b.name.clone(), path.clone()));
+                            }
                         }
+                        // A guard that can no-op without saying so is worth avoiding: this
+                        // read races nothing in practice (load_records just read the same
+                        // file), but if it ever fails, the FR-004 identity check must be
+                        // reported as unable to run, not silently skipped.
+                        Err(e) => guard_violations.push(format!(
+                            "backend '{}': cannot hash cassette '{path}' for the identity \
+                             check: {e}",
+                            b.name
+                        )),
                     }
                 }
 
@@ -139,7 +161,7 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
                 backends.push(BackendPlan {
                     name: b.name.clone(),
                     spec: b.spec.clone(),
-                    replay: true,
+                    decision: Decision::Replay,
                     cassette_record_count: Some(count),
                     coverage_shortfall: (shortfall > 0).then_some(shortfall),
                 });
@@ -149,7 +171,7 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
                 backends.push(BackendPlan {
                     name: b.name.clone(),
                     spec: b.spec.clone(),
-                    replay: true,
+                    decision: Decision::Replay,
                     cassette_record_count: None,
                     coverage_shortfall: None,
                 });
@@ -176,7 +198,11 @@ pub fn render(plan: &ResolvedPlan) -> String {
             "  backend '{}': spec='{}' decision={}",
             b.name,
             b.spec,
-            if b.replay { "REPLAY" } else { "LIVE" }
+            match b.decision {
+                Decision::Replay => "REPLAY",
+                Decision::Live => "LIVE",
+                Decision::Invalid => "INVALID",
+            }
         ));
         if let Some(n) = b.cassette_record_count {
             out.push_str(&format!(" records={n}"));
@@ -303,7 +329,22 @@ mod tests {
             10,
         );
         assert!(plan.guard_violations.is_empty());
-        assert!(plan.backends.iter().all(|b| !b.replay));
+        assert!(plan.backends.iter().all(|b| b.decision == Decision::Live));
+    }
+
+    #[test]
+    fn unparseable_spec_is_invalid_not_live() {
+        // handarbeit-pruefer's review finding on PR #280: an unresolvable spec used to be
+        // given `replay: false`, which `render()` printed as `decision=LIVE` — asserting
+        // something false about a backend that can only ever abort the real run. A real run
+        // can't dispatch to it as either live or replay, so the dry-run plan must not claim
+        // either.
+        let plan = resolve_args(&["--backend", "x=not-a-real-kind"], 2);
+        assert_eq!(plan.backends[0].decision, Decision::Invalid);
+        assert_eq!(plan.guard_violations.len(), 1);
+        let out = render(&plan);
+        assert!(out.contains("decision=INVALID"), "{out}");
+        assert!(!out.contains("decision=LIVE"), "{out}");
     }
 
     #[test]

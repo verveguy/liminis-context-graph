@@ -145,7 +145,7 @@ pub fn validate_recorded_cassette(
     candidate: &CandidateReport,
     actual_record_count: usize,
 ) -> Result<(), String> {
-    let expected = candidate.chunks_run - candidate.errors;
+    let expected = candidate.chunks_run.saturating_sub(candidate.errors);
     if actual_record_count != expected {
         return Err(format!(
             "backend '{}': cassette holds {actual_record_count} record(s) but the report \
@@ -537,6 +537,17 @@ mod tests {
         // must not be mistaken for truncation as long as the record count matches.
         let candidate = sample_candidate(3, 1);
         assert!(validate_recorded_cassette(&candidate, 2).is_ok());
+    }
+
+    #[test]
+    fn errors_exceeding_chunks_run_does_not_panic() {
+        // A validator must never be the thing that panics. `errors > chunks_run` shouldn't
+        // occur in a well-formed report, but this is a `pub` helper reachable directly by
+        // tests and future callers, so it must degrade to a reported mismatch, not a
+        // subtraction overflow (CodeRabbit review finding on PR #280).
+        let candidate = sample_candidate(2, 5);
+        let err = validate_recorded_cassette(&candidate, 2).unwrap_err();
+        assert!(err.contains('0'), "{err}");
     }
 
     #[test]

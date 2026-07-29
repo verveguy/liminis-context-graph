@@ -132,10 +132,11 @@ OPTIONS:
                                  Reference-mode judge calls are skipped entirely in this
                                  mode (use 'both' to get both).
                                  'both': runs both passes.
-                                 Under pairwise/both, two backends whose specs resolve to
-                                 the identical cassette:path=<PATH> are rejected at parse
-                                 time — a self-comparison is a degenerate, trivial 100%-tie
-                                 result, not a meaningful pairwise result.
+                                 Note: regardless of --judge-mode, two backends whose
+                                 cassettes resolve to the same path or byte-identical
+                                 content are rejected before any outbound call (a
+                                 self-comparison is a degenerate, trivial 100%-tie result).
+                                 Use --dry-run to preview that guard.
     --record-cassette <NAME>=<PATH>
                                  Wrap the named backend in a cassette recorder (#232),
                                  writing to PATH, so this run also captures a cassette.

@@ -47,8 +47,8 @@ the check does not depend on which wrapper invokes it, or on a wrapper existing 
 
 As someone about to spend money on a multi-hour benchmark run, `lcg-eval` itself rejects the
 configurations that would make the result meaningless — two backends resolving to the same
-cassette, a cassette with duplicate keys, a cassette that does not cover the requested scope
-— so the check does not depend on which wrapper invoked it, or on a wrapper existing at all.
+cassette or a cassette with duplicate keys — and reports any cassette coverage shortfall, so
+the check does not depend on which wrapper invoked it, or on a wrapper existing at all.
 
 **Why this priority**: This is the actual defect class the nine review rounds on PR #278
 were catching by hand. Without it, every new script (or a bare `lcg-eval` invocation with no

@@ -16,7 +16,7 @@ once omitting an abort condition (the identity guard) that the real invocation w
 hit. Both were caught by reviewers, not by any check — a preview that can silently disagree
 with the thing it previews is worse than no preview, because it looks trustworthy.
 
-#279 moves the underlying guards (corrupt/duplicate cassette detection, the identical-
+Issue `#279` moves the underlying guards (corrupt/duplicate cassette detection, the identical-
 cassette identity check, coverage-shortfall reporting) out of shell and into `lcg-eval`
 itself, for exactly this class of defect — see the sibling ADRs and `crates/eval/src/
 plan.rs`'s own module doc for the guard semantics. That move only pays off if `--dry-run`
