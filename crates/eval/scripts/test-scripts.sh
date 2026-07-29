@@ -273,6 +273,27 @@ assert_contains "04/05 default to 'reference'" "$out" "the differing judge-mode 
 out="$(run06 "$REPO1" MODES="open" LCG_EVAL_JUDGE_MODE=reference DRY_RUN=1)"
 assert_not_contains "includes pairwise" "$out" "no pairwise cost warning when reference is chosen"
 
+echo "== 06: guards fire under LIMIT too, not just at full scale =="
+# The identity guard tested against a hardcoded 228 rather than the requested scope, so it
+# was dead during every smoke run — the mode whose whole purpose is making mistakes cheap.
+REPO10="$WORKROOT/repo10"; make_fake_repo "$REPO10"
+make_cassette "$REPO10/anthropic-open-baseline-$H.limit3.jsonl" 3 same
+cp "$REPO10/anthropic-open-baseline-$H.limit3.jsonl" "$REPO10/anthropic-open-candidate-$H.limit3.jsonl"
+make_cassette "$REPO10/qwen3.6-27b-open.limit3.jsonl" 3 q
+out="$(run06 "$REPO10" MODES="open" LIMIT=3 DRY_RUN=1)"
+assert_contains "byte-identical" "$out" "identity guard fires under LIMIT in DRY_RUN"
+out="$(run06 "$REPO10" MODES="open" LIMIT=3 ANTHROPIC_API_KEY=dummy)"
+assert_contains "byte-identical" "$out" "identity guard fires under LIMIT on the real path"
+assert_not_contains "finished" "$out" "it aborts BEFORE invoking the binary"
+
+# Same for the duplicate-key guard.
+REPO11="$WORKROOT/repo11"; make_fake_repo "$REPO11"
+make_cassette "$REPO11/anthropic-open-baseline-$H.limit4.jsonl" 4 b
+make_cassette "$REPO11/anthropic-open-candidate-$H.limit4.jsonl" 4 c
+printf '{"key":"d"}\n{"key":"d"}\n{"key":"e"}\n{"key":"f"}\n' > "$REPO11/qwen3.6-27b-open.limit4.jsonl"
+out="$(run06 "$REPO11" MODES="open" LIMIT=4 ANTHROPIC_API_KEY=dummy)"
+assert_contains "duplicate keys" "$out" "duplicate-key guard fires under LIMIT"
+
 echo "== validate_report.py: report accounting, not a proportion =="
 V="$WORKROOT/val"; mkdir -p "$V"
 mkreport() {

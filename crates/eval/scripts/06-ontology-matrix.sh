@@ -282,7 +282,13 @@ for mode in $MODES; do
   # The noise floor dies silently if baseline and candidate are the same data, so check it
   # whenever both are replayed. When either is live they are independent by construction,
   # and the post-run check below covers the freshly recorded pair.
-  if cassette_complete "$BASE_CAS" && cassette_complete "$CAND_CAS"; then
+  # "$EXPECTED", not cassette_complete's 228 default. Omitting it made this guard dead under
+  # every LIMIT run: a 3-record cassette can never satisfy n*10 >= 228*9, so two identical
+  # smoke cassettes sailed past the pre-$BIN abort and the script went on to invoke the
+  # binary — capturing qwen live — before the post-run check caught the same condition.
+  # The guard that exists to stop a wasted run was skipped precisely in the mode designed to
+  # make wasted runs cheap.
+  if cassette_complete "$BASE_CAS" "$EXPECTED" && cassette_complete "$CAND_CAS" "$EXPECTED"; then
     if [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
       die "$BASE_CAS and $CAND_CAS are byte-identical — the noise floor would be 1.000 by
        construction. One was copied over the other; delete both and re-capture."
