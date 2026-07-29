@@ -34,6 +34,10 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
 HAIKU="${LCG_EVAL_HAIKU:-claude-haiku-4-5-20251001}"
 ONTOLOGY="${LCG_EVAL_ONTOLOGY:-$REPO/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml}"
 JUDGE_MODE="${LCG_EVAL_JUDGE_MODE:-both}"
+# Shared with run_mode_matrix.sh on purpose, unlike the report name. Judge cache keys are
+# derived from rendered prompts and operand content, not from backend names, so verdicts
+# computed by either script are reusable by the other — sharing is free reuse, not a
+# collision. It is the *reports* that mean different things and must not share a name.
 JUDGE_CACHE="${LCG_EVAL_JUDGE_CACHE:-eval_judge_cache_266.jsonl}"
 # `${MODES-...}` not `${MODES:-...}`: the colon form treats an EMPTY value as unset, so
 # `MODES="" 06-ontology-matrix.sh` silently ran the full default matrix and began live
@@ -79,7 +83,7 @@ cassette_names_for_mode() {
 if [ -n "${DRY_RUN:-}" ]; then
   for mode in $MODES; do
     cassette_names_for_mode "$mode"
-    echo "    mode '$mode' (ontology=${ONTOLOGY##*/}) -> eval_report_266_$mode.json"
+    echo "    mode '$mode' (ontology=${ONTOLOGY##*/}) -> ${REPORT_PREFIX:-eval_report_266_noisefloor}_$mode.json"
     for pair in "baseline:$BASE_CAS" "candidate:$CAND_CAS" "qwen:$QWEN_CAS"; do
       leg="${pair%%:*}"
       cas="${pair#*:}"
@@ -97,8 +101,11 @@ if [ -n "${DRY_RUN:-}" ]; then
     # same failure as printing the wrong filenames: DRY_RUN exists to show what will
     # happen, and a preview that omits the stopping conditions is not one.
     for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
-      if cassette_complete "$cas" && ! cassette_no_duplicate_keys "$cas"; then
-        echo "      WOULD ABORT: $cas has duplicate keys (appended to, not moved aside)"
+      if cassette_complete "$cas"; then
+        keyerr="$(cassette_key_check "$cas" 2>&1)" || case $? in
+          1) echo "      WOULD ABORT: $cas has duplicate keys ($keyerr)" ;;
+          2) echo "      WOULD ABORT: $cas is corrupt or truncated ($keyerr)" ;;
+        esac
       fi
     done
     if cassette_complete "$BASE_CAS" && cassette_complete "$CAND_CAS" \
@@ -133,7 +140,13 @@ done
 
 for mode in $MODES; do
   cassette_names_for_mode "$mode"
-  REPORT="eval_report_266_$mode.json"
+  # Deliberately NOT run_mode_matrix.sh's `eval_report_266_$mode.json`. That script is
+  # two-backend with no noise floor; this one is three-backend with one. The two reports
+  # are structurally different and a reader cannot tell them apart from the filename, so
+  # sharing a name means a later run silently overwrites the other's result and the
+  # survivor gets read as whatever the reader assumes. Nothing backs reports up the way
+  # backup_if_present covers cassettes, so the loss would be total and unannounced.
+  REPORT="${REPORT_PREFIX:-eval_report_266_noisefloor}_$mode.json"
 
   ONT_ARGS=()
   if [ "$mode" != "freeform" ]; then
@@ -169,10 +182,7 @@ for mode in $MODES; do
       # backup_if_present — a hand-resumed capture, a stray copy — holds duplicate keys,
       # and replay serves duplicates FIFO, so a chunk would be scored against a stale
       # verdict rather than failing. 04 and 05 already reject this before trusting an input.
-      cassette_no_duplicate_keys "$cas" \
-        || die "$cas contains duplicate keys — it was appended to rather than moved aside.
-       Replay serves duplicates FIFO, so chunks would be scored against stale verdicts.
-       Move it aside and re-capture that leg."
+      require_replayable_cassette "$cas"
       BACKENDS+=(--backend "$leg=cassette:path=$cas")
       PLAN+=("$leg=replay($(cassette_records "$cas") records)")
     else
@@ -203,6 +213,9 @@ for mode in $MODES; do
        construction. One was copied over the other; delete both and re-capture."
     fi
   fi
+
+  # Belt and braces: even with a distinct name, never lose a previous result silently.
+  backup_if_present "$REPORT"
 
   echo "    started $(date '+%H:%M:%S')"
   "$BIN" \

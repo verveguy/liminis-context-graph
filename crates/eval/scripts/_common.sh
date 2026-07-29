@@ -89,19 +89,52 @@ cassette_complete() {
   [ "$(( n * 10 ))" -ge "$(( expected * 9 ))" ]
 }
 
-# True when a cassette has no duplicate `key` entries.
+# Checks a cassette's `key` entries. Exit codes are distinct on purpose:
+#   0  fine
+#   1  duplicate keys — appended to outside backup_if_present (hand-resumed, stray copy).
+#      Replay serves duplicates FIFO, so a chunk gets scored against a stale verdict
+#      instead of failing. 04 and 05 already reject this before trusting an input.
+#   2  unreadable — malformed JSON, or a record with no `key`
 #
-# A duplicate key means the file was appended to outside the backup_if_present flow — a
-# hand-resumed capture, or a stray copy. Replay serves duplicates FIFO, so the second run
-# of a chunk would be scored against a stale verdict rather than failing. 04 and 05 already
-# reject this before trusting an input cassette; anything that replays should.
-cassette_no_duplicate_keys() {
+# Two codes rather than one because `json.loads(l)['key']` raises on a corrupt file just as
+# it does on nothing at all, and an earlier version swallowed stderr and let callers report
+# any nonzero exit as "duplicate keys, appended to". That misdiagnoses a corrupted cassette
+# as a workflow mistake and sends whoever is debugging it down the wrong path.
+cassette_key_check() {
   python3 -c "
 import json, sys, collections
-ks = [json.loads(l)['key'] for l in open(sys.argv[1]) if l.strip()]
-dupes = sum(1 for _, n in collections.Counter(ks).items() if n > 1)
-sys.exit(1 if dupes else 0)
-" "$1" 2>/dev/null
+keys = []
+for i, line in enumerate(open(sys.argv[1]), 1):
+    if not line.strip():
+        continue
+    try:
+        rec = json.loads(line)
+    except Exception as e:
+        print(f'line {i}: invalid JSON: {e}', file=sys.stderr)
+        sys.exit(2)
+    if 'key' not in rec:
+        print(f'line {i}: record has no \"key\" field', file=sys.stderr)
+        sys.exit(2)
+    keys.append(rec['key'])
+dupes = [k for k, n in collections.Counter(keys).items() if n > 1]
+if dupes:
+    print(f'{len(dupes)} duplicated key(s), e.g. {dupes[0]}', file=sys.stderr)
+    sys.exit(1)
+" "$1"
+}
+
+# Convenience wrapper: dies with the right diagnosis for whichever failure occurred.
+require_replayable_cassette() {
+  local cas="$1" err rc
+  err="$(cassette_key_check "$cas" 2>&1)" && return 0
+  rc=$?
+  if [ "$rc" = "1" ]; then
+    die "$cas contains duplicate keys ($err) — it was appended to rather than moved aside.
+       Replay serves duplicates FIFO, so chunks would be scored against stale verdicts.
+       Move it aside and re-capture that leg."
+  fi
+  die "$cas is not readable as a cassette ($err).
+       This is a corrupt or truncated file, NOT the append-without-backup mistake."
 }
 
 require_release_binary() {
