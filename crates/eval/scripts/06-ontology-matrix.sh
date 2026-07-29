@@ -58,6 +58,19 @@ if [ -z "${MODES// /}" ]; then
   exit 0
 fi
 
+# Validated here rather than inside DRY_RUN, so a typo is rejected identically by both
+# paths. Without this, MODES="Open strict" sailed through cassette_names_for_mode into the
+# else branch, printed a full plan against fabricated cassette names, and the real run then
+# aborted immediately at lcg-eval's --ontology-mode validation. That is the same failure the
+# comments in this file warn about twice: a preview that omits a stopping condition.
+for _m in $MODES; do
+  case "$_m" in
+    freeform|open|strict) ;;
+    *) die "unknown mode '$_m'. Valid modes: freeform, open, strict (case-sensitive —
+       lcg-eval's --ontology-mode rejects anything else)." ;;
+  esac
+done
+
 echo "==> ontology matrix: modes [$MODES], judge-mode $JUDGE_MODE, judge $JUDGE_MODEL"
 echo "    fixture: $ONTOLOGY"
 echo "    THIS SPENDS MONEY AND RUNS FOR HOURS. Set DRY_RUN=1 to print the plan only."
@@ -84,12 +97,19 @@ cassette_names_for_mode() {
   fi
 }
 
+# One rule for the report filename, shared by DRY_RUN and the real loop — re-deriving it
+# separately is how the summary came to advertise a name the run never wrote.
+report_name_for_mode() {
+  local prefix="${REPORT_PREFIX-eval_report_266_noisefloor}"
+  if [ -n "$prefix" ]; then echo "${prefix}_$1.json"; else echo "$1.json"; fi
+}
+
 # A dry run is the only way to inspect what this will do without it starting. Added
 # because the first structural test of this script began a live capture within seconds.
 if [ -n "${DRY_RUN:-}" ]; then
   for mode in $MODES; do
     cassette_names_for_mode "$mode"
-    echo "    mode '$mode' (ontology=${ONTOLOGY##*/}) -> ${REPORT_PREFIX:-eval_report_266_noisefloor}_$mode.json"
+    echo "    mode '$mode' (ontology=${ONTOLOGY##*/}) -> $(report_name_for_mode "$mode")"
     for pair in "baseline:$BASE_CAS" "candidate:$CAND_CAS" "qwen:$QWEN_CAS"; do
       leg="${pair%%:*}"
       cas="${pair#*:}"
@@ -153,7 +173,12 @@ for mode in $MODES; do
   # sharing a name means a later run silently overwrites the other's result and the
   # survivor gets read as whatever the reader assumes. Nothing backs reports up the way
   # backup_if_present covers cassettes, so the loss would be total and unannounced.
-  REPORT="${REPORT_PREFIX:-eval_report_266_noisefloor}_$mode.json"
+  # `${REPORT_PREFIX-...}` not `${REPORT_PREFIX:-...}`, matching the MODES contract this
+  # file explains at the top: an explicitly-empty value must mean something different from
+  # unset. REPORT_PREFIX="" now yields an unprefixed `<mode>.json` rather than silently
+  # reverting to the default. Nothing is at stake but a filename — the point is that the
+  # empty-vs-unset rule holds everywhere in this script, not just where money is involved.
+  REPORT="$(report_name_for_mode "$mode")"
 
   ONT_ARGS=()
   if [ "$mode" != "freeform" ]; then
