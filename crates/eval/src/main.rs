@@ -229,6 +229,7 @@ fn to_report_entry(r: lcg_eval::pairwise::PairwiseAxisResult) -> PairwiseReportE
         order_inconsistency_rate: r.tally.order_inconsistency_rate(),
         chunks_compared: r.tally.chunks_compared,
         chunks_skipped: r.tally.chunks_skipped,
+        judge_errors: r.tally.judge_errors,
     }
 }
 

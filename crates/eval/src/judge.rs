@@ -432,91 +432,132 @@ impl AnthropicJudgeClient {
     /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
     async fn request_judge_text(&self, prompt: String, schema: Value) -> Result<String, String> {
         self.breaker.check()?;
-        let result = self.request_judge_text_inner(prompt, schema).await;
+        let result = self.request_judge_text_inner(prompt, Some(schema)).await;
         self.breaker.record(&result);
         result
     }
 
-    async fn request_judge_text_inner(
+    /// `schema: None` issues the same call without `output_config.format`. That is the
+    /// fallback for a grammar-compilation timeout, and the reason `extract_json_block` and
+    /// the sentinel normalisation are still worth keeping: they are what parses the
+    /// unconstrained response.
+    fn request_judge_text_inner(
         &self,
         prompt: String,
-        schema: Value,
-    ) -> Result<String, String> {
-        let body = json!({
-            "model": self.model,
-            "max_tokens": 4096,
-            "messages": [{"role": "user", "content": prompt}],
-            "output_config": {"format": {"type": "json_schema", "schema": schema}},
-            // Explicit, not inherited from the model's default. Sonnet 4.6 runs
-            // thinking-off when `thinking` is omitted, but Sonnet 5 runs adaptive thinking
-            // by default — so `--judge-model claude-sonnet-5` would silently switch it on
-            // across every call of a ~6000-call scoring phase, changing cost, latency and
-            // verdicts at once, with nothing in the output saying so.
-            //
-            // Disabled rather than adaptive on purpose. Judging is index enumeration, which
-            // is exactly where thinking measured *worse* on this corpus:
-            // docs/history/extraction-eval-2026-04.md has qwen3.6-27b at 0.894 entity F1
-            // without thinking and 0.772 with. A judge is a measuring instrument — cheap,
-            // fast and repeatable beats deliberative.
-            "thinking": {"type": "disabled"}
-        });
-
-        // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
-        // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
-        // the whole harness run.
-        let mut attempt = 0u32;
-        let resp: Value = loop {
-            let http_resp = self
-                .client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| format!("judge request failed: {e}"))?;
-
-            let status = http_resp.status();
-            if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
-                let delay = Duration::from_secs(1u64 << attempt);
-                sleep(delay).await;
-                attempt += 1;
-                continue;
+        schema: Option<Value>,
+    ) -> BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let mut body = json!({
+                "model": self.model,
+                "max_tokens": 4096,
+                "messages": [{"role": "user", "content": prompt.clone()}],
+                // Explicit, not inherited from the model's default. Sonnet 4.6 runs
+                // thinking-off when `thinking` is omitted, but Sonnet 5 runs adaptive thinking
+                // by default — so `--judge-model claude-sonnet-5` would silently switch it on
+                // across every call of a ~6000-call scoring phase, changing cost, latency and
+                // verdicts at once, with nothing in the output saying so.
+                //
+                // Disabled rather than adaptive on purpose. Judging is index enumeration, which
+                // is exactly where thinking measured *worse* on this corpus:
+                // docs/history/extraction-eval-2026-04.md has qwen3.6-27b at 0.894 entity F1
+                // without thinking and 0.772 with. A judge is a measuring instrument — cheap,
+                // fast and repeatable beats deliberative.
+                "thinking": {"type": "disabled"}
+            });
+            if let Some(schema) = &schema {
+                body["output_config"] =
+                    json!({"format": {"type": "json_schema", "schema": schema}});
             }
 
-            // The API puts the *reason* in the response body, and `error_for_status()`
-            // discards it — a 400 for an invalid model, an oversized prompt, or an
-            // exhausted credit balance are indistinguishable without it. During the #248
-            // run that left every judge call reporting only "HTTP status client error
-            // (400 Bad Request)", which is true and useless.
-            if !status.is_success() {
-                let body = http_resp.text().await.unwrap_or_default();
-                let detail = serde_json::from_str::<Value>(&body)
-                    .ok()
-                    .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                    .unwrap_or_else(|| {
-                        // Truncate by BYTES at a char boundary: `chars().take(500)` can
-                        // yield ~2 KB of UTF-8 and contradict the documented cap.
-                        let mut end = body.len().min(ERROR_BODY_FALLBACK_BYTES);
-                        while end > 0 && !body.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        body[..end].to_owned()
-                    });
-                return Err(format!("judge request failed ({status}): {detail}"));
-            }
+            // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
+            // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
+            // the whole harness run.
+            let mut attempt = 0u32;
+            let resp: Value = loop {
+                let sent = self
+                    .client
+                    .post("https://api.anthropic.com/v1/messages")
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await;
 
-            break http_resp
-                .json()
-                .await
-                .map_err(|e| format!("judge response not JSON: {e}"))?;
-        };
+                // Transport errors are retried on the same ladder as 429/529. They were not
+                // retried at all before, so a single dropped connection propagated straight
+                // out — which is precisely how the #248 scoring run died 99 minutes and 1379
+                // pairwise verdicts in. Over ~6000 sequential calls a transient network fault
+                // is close to certain; treating it as fatal made the run's success depend on
+                // an unbroken hour of perfect connectivity.
+                let http_resp = match sent {
+                    Ok(r) => r,
+                    Err(_) if attempt < 3 => {
+                        sleep(Duration::from_secs(1u64 << attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(format!("judge request failed after retries: {e}")),
+                };
 
-        resp["content"][0]["text"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| "judge response missing content[0].text".to_string())
+                let status = http_resp.status();
+                if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
+                    let delay = Duration::from_secs(1u64 << attempt);
+                    sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+
+                // The API puts the *reason* in the response body, and `error_for_status()`
+                // discards it — a 400 for an invalid model, an oversized prompt, or an
+                // exhausted credit balance are indistinguishable without it. During the #248
+                // run that left every judge call reporting only "HTTP status client error
+                // (400 Bad Request)", which is true and useless.
+                if !status.is_success() {
+                    let body = http_resp.text().await.unwrap_or_default();
+
+                    // "Grammar compilation timed out" is the API failing to compile the
+                    // constrained-output grammar, not a problem with the request's content — a
+                    // failure mode that only exists because we ask for output_config.format.
+                    // Retrying the same constrained request would time out again, so drop the
+                    // constraint and let extract_json_block plus the sentinel normalisation
+                    // handle the response, which is what they existed for before the schema.
+                    // Losing the constraint on one call is strictly better than losing the
+                    // call.
+                    if body.contains("Grammar compilation") && schema.is_some() {
+                        eprintln!(
+                            "lcg-eval: judge grammar compilation timed out — retrying this call \
+                         without the schema constraint"
+                        );
+                        return self.request_judge_text_inner(prompt, None).await;
+                    }
+
+                    let detail = serde_json::from_str::<Value>(&body)
+                        .ok()
+                        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| {
+                            // Truncate by BYTES at a char boundary: `chars().take(500)` can
+                            // yield ~2 KB of UTF-8 and contradict the documented cap.
+                            let mut end = body.len().min(ERROR_BODY_FALLBACK_BYTES);
+                            while end > 0 && !body.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            body[..end].to_owned()
+                        });
+                    return Err(format!("judge request failed ({status}): {detail}"));
+                }
+
+                break http_resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("judge response not JSON: {e}"))?;
+            };
+
+            resp["content"][0]["text"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "judge response missing content[0].text".to_string())
+        })
     }
 }
 
