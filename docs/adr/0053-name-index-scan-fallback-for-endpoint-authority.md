@@ -1,4 +1,4 @@
-# ADR-0052: Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution
+# ADR-0053: Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution
 
 **Status**: Accepted
 **Date**: 2026-07-30

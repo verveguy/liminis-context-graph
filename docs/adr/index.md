@@ -58,7 +58,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0050](0050-blind-pairwise-judging.md) | Blind Pairwise Judging for the Extraction-Quality Eval Harness | 2026-07-27 |
 | [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
 | [0052](0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md) | `lcg-eval --dry-run` Shares the Real Run's Resolution Path | 2026-07-29 |
-| [0052](0052-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
+| [0053](0053-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
 
 ## Historical numbering
 
