@@ -7,6 +7,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.11.0] - 2026-07-30
+
+The first release driven substantially by outside bug reports. Six issues filed by
+[@totalslacker](https://github.com/totalslacker) and [@bdueck](https://github.com/bdueck) against 0.9.0/0.10.0 —
+[#201](https://github.com/verveguy/liminis-context-graph/issues/201), [#202](https://github.com/verveguy/liminis-context-graph/issues/202),
+[#203](https://github.com/verveguy/liminis-context-graph/issues/203), [#204](https://github.com/verveguy/liminis-context-graph/issues/204),
+[#205](https://github.com/verveguy/liminis-context-graph/issues/205), [#206](https://github.com/verveguy/liminis-context-graph/issues/206) —
+account for most of what follows. Several were silent data-loss bugs that our own fixtures were too small to expose.
+
+### Upgrade notes
+
+- **Ingest output changes.** The entity/edge extraction prompts were rewritten (#281). Re-ingesting a corpus
+  produces a different set of entities and edges than 0.10.0 did — more complete on the documents we have measured,
+  but *different*, and graphs built before and after this release are not directly comparable. Nothing migrates
+  automatically; existing data is untouched, but new ingest will not match old ingest. If you run a user-defined
+  ontology, re-measure against your own corpus rather than assuming our figures transfer — they were taken with the
+  built-in ontology.
+- **`knowledge_backfill_relation_types` is deprecated** in favour of the new `knowledge_reprocess_relation_types`.
+  It still exists, but its description now says not to use it. See below.
+- **No schema change and no manual migration.** Vector/FTS indexes are now built eagerly at startup, so the first
+  launch after upgrading may take slightly longer on a large graph.
+
+### Added
+
+- **Local / OpenAI-compatible extraction** (`OaiExtractor`): `--extractor-uds <path>` and `--extractor-http <url>`,
+  plus `LCG_EXTRACTION_URL`, make the "fully local" claim true — extraction no longer requires `ANTHROPIC_API_KEY`.
+  Selection is explicit: a reachable local sidecar is never silently preferred over a configured API key.
+  ([ADR-0041](docs/adr/0041-local-openai-compatible-extraction-adapter.md), #201, #212)
+- **`knowledge_reprocess_relation_types`** — fact-based LLM relation classification, replacing the string-prefix
+  heuristic, with honest abstention when a fact maps to no declared type. Brings the MCP tool surface to 34.
+  ([ADR-0037](docs/adr/0037-relation-classification-abstention-writes-unclassified.md), #204, #210)
+- **`lcg-eval`** — a new workspace crate: an extraction-quality evaluation harness with replay support, ontology
+  modes, and blind pairwise LLM-as-judge scoring, so model and prompt changes are measured rather than asserted.
+  ([ADR-0048](docs/adr/0048-rust-extraction-quality-eval-harness.md),
+  [ADR-0050](docs/adr/0050-blind-pairwise-judging.md),
+  [ADR-0049](docs/adr/0049-bare-path-ontology-loader-and-cli-mode-override.md),
+  #228, #263, #266, #269, #273, #279)
+- **LLM cassette record/replay** (`LCG_RECORD_LLM` / `LCG_REPLAY_LLM`) — record an extraction pass once, replay it
+  deterministically at zero API cost. Makes extraction-path tests reproducible and offline.
+  ([ADR-0044](docs/adr/0044-llm-cassette-record-replay-seam.md), #232)
+- **`--help` / `--version`**, and unknown flags are now rejected instead of ignored. (#198)
+- **End-to-end MCP suites** over a golden real-corpus WAL fixture, covering the read, write/mutation, and
+  admin/lifecycle paths. (#217, #234, #235, #236)
+- **Published extraction-quality evaluation methodology and model rankings.** (#227)
+
+### Fixed
+
+- **Edges were silently dropped whenever an endpoint wasn't in the chunk's own extracted entity list.** This hit two
+  ways. An edge referencing a recurring hub entity created by an *earlier* chunk was discarded even though the entity
+  existed in the graph. And on long documents the extraction prompts worked against each other — the entity prompt
+  forbade abstract concepts while the edge prompt was asked for facts between entities, so the natural hub of a
+  document's facts was often never extracted, leaving every edge to it unresolvable.
+
+  Endpoint handling was reworked end to end (#202, #209, #281):
+
+  - The `extract_edges` tool schema now constrains `source_name`/`target_name` to an `enum` of the batch's entity
+    names, so on the Anthropic path a compliant model cannot name an off-list endpoint at all. The local /
+    OpenAI-compatible path has no tool schema to enforce, so it relies on the steps below.
+  - The two prompts were reconciled, so the concepts edges hub on can be extracted as entities.
+  - An off-list endpoint that does arrive is **salvaged** against the batch's entities rather than dropped outright.
+  - The drop decision moved to the write-lock commit, where resolution falls back to the persisted `Entity` table
+    scoped by `group_id` — so a cross-chunk endpoint resolves there. This replaced the earlier pre-lock lookup, which
+    duplicated the same query less safely.
+  - `knowledge_process_chunk` now reports `edges_dropped_unresolvable`, so remaining loss is visible in the response
+    rather than only in a log line.
+
+  ([ADR-0051](docs/adr/0051-edge-endpoint-salvage-and-deferred-drop.md))
+
+  The long-document effect scaled with chunk size. Replaying the 0.10.0 prompts over one reporter's corpus discarded
+  0% of extracted edges at ~4.8 KB, 5.6% at ~12.8 KB, and 45 of 46 edges on a single 257 KB article. **Those figures
+  are from the default built-in ontology with the default extraction model, over three documents** — they illustrate
+  the failure mode, they are not a benchmark. Behaviour under a user-defined ontology (where strict mode filters
+  extracted entities by type) is not characterised yet; systematic measurement across ontology modes is in progress
+  (#248, #266).
+- **`entity_name_embedding_idx` went missing under sustained ingest**, breaking every subsequent query until the
+  database was deleted. Indexes were built lazily and the dedup path queried one it never triggered a build for.
+  They are now built eagerly after schema init — before the socket accepts requests — and after recovery, with the
+  same missing-index auto-heal the search handlers use now extended to the dedup path.
+  ([ADR-0036](docs/adr/0036-eager-index-build-at-startup.md), #203, #208)
+- **`knowledge_backfill_relation_types` minted garbage pseudo-types** from fact prefixes. (#205, #211)
+- **Attached-mode MCP (`--connect`)**: long whole-graph operations no longer false-timeout, and progress is
+  reported for `reprocess_entity_types`. ([ADR-0040](docs/adr/0040-attached-mode-reconnect-retry-boundary.md), #206, #213)
+- **WAL replay hardening**, across four issues:
+  - Rebuild statistics were discarded, so a partial replay reported as clean, and files could replay out of
+    sequence. ([ADR-0043](docs/adr/0043-wal-replay-seq-ordering-and-noop-accounting.md), #237)
+  - The prepared-statement cache grew unbounded across a large rebuild.
+    ([ADR-0045](docs/adr/0045-wal-replay-prepared-statement-cache-scope.md), #238)
+  - One malformed template blinded the entire failure report, and `rebuild_from_wal` was not idempotent.
+    ([ADR-0046](docs/adr/0046-wal-replay-failure-dedup-and-rebuild-idempotency.md), #239)
+  - Replay now has defined transaction boundaries and a defined recovery state, rather than partial writes on
+    failure. ([ADR-0047](docs/adr/0047-wal-replay-transaction-boundaries.md), #240)
+- **Entity name lookup was a full table scan on every ingest**, now served by an in-process `NameIndex`
+  ([ADR-0038](docs/adr/0038-in-process-name-index.md), #219) — with a bounded scan fallback so an index miss can no
+  longer be mistaken for "this entity does not exist", which would silently drop an edge
+  ([ADR-0283](docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md), #283).
+- **Embedder and extractor UDS connections are pooled** instead of dialling, handshaking and tearing down per call.
+  ([ADR-0039](docs/adr/0039-uds-embedder-connection-pooling.md), #229;
+  [ADR-0042](docs/adr/0042-oai-extractor-uds-connection-pooling.md), #230)
+- Service now logs the sender PID of a received `SIGTERM`, so unexplained shutdowns are attributable. (#247)
+
+### Deprecated
+
+- **`knowledge_backfill_relation_types`** — use `knowledge_reprocess_relation_types`. The tool description now says
+  so; the method still works. (#211)
+
+### Documentation
+
+- Extraction claims corrected to match behaviour, and `canonicalize_relations` / recovery semantics documented. (#206, #214)
+- ADR numbers are now issue numbers, ending a shared sequential counter that collided whenever two issues were in
+  flight. (#289)
+- Local verification given an explicit 10-minute budget, and the lbug build story corrected — it is a downloaded
+  prebuilt bundle, not a source build. (#256)
+- **Documentation drift accumulated over this cycle was audited and corrected** (PR #294). Several docs had gone from
+  merely incomplete to actively wrong, which matters because this repo is built from source and read by coding
+  agents: `docs/telemetry.md` described two events as "not yet emitted" that had been emitting for weeks, and
+  documented a `wal_replay_complete` payload whose fields do not exist; the README undercounted the JSON-RPC surface
+  and omitted six environment variables the code reads; and the MCP description for `knowledge_process_chunk` never
+  mentioned `edges_dropped_unresolvable`, leaving the release's headline new signal invisible to the clients meant to
+  act on it. All eleven telemetry events and all twenty-six environment variables are now documented, and
+  `CONTRIBUTING.md` gained the ADR-numbering rule external contributors need.
+
 ## [0.10.0] - 2026-07-23
 
 ### Added

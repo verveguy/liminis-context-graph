@@ -181,9 +181,13 @@ must agree. Per this repo's worktree rule, prepare the release on a branch and l
 never commit release prep directly to `main` — then tag the merge commit.
 
 1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
-   `Cargo.toml` to `x.y.z` (both crates inherit it via `version.workspace = true`), then run
-   `cargo update -p lcg-core -p lcg-service` to sync the two workspace entries in `Cargo.lock`.
-2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`.
+   `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
+   `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
+   Add any newly-introduced workspace member to that command — a crate left out keeps a stale version
+   in the lockfile.
+2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
+   `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
+   tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
 3. **Open a PR and merge it** to `main` once CI is green.
 4. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
