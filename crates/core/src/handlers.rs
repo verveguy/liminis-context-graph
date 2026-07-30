@@ -754,9 +754,11 @@ async fn handle_knowledge_process_chunk(
         // Emit before the loop, not after: if add_episode fails partway through (e.g. unit 3 of
         // 5), the `?` below propagates immediately and a post-loop emit would never fire, even
         // though the split was attempted and units 0..idx-1 already committed as orphaned
-        // episodes (self-healed on retry, but invisible to telemetry in the meantime). Firing
-        // here means unit_count reflects the intended split count, not necessarily the surviving
-        // committed count on a partial failure.
+        // episodes (self-healed on retry, but invisible to telemetry in the meantime). This
+        // means `unit_count` here is the *intended* split count, not a post-hoc fact about how
+        // many episodes exist once the call returns — see docs/telemetry.md's field table,
+        // which states this distinction explicitly to avoid a consumer treating it as the
+        // latter on a partial failure.
         state.sink.emit(TelemetryEvent::ChunkTextOversized {
             ts_ms: now_ms(),
             chunk_id: chunk_id.clone(),
@@ -772,6 +774,12 @@ async fn handle_knowledge_process_chunk(
         let mut edges_dropped_unresolvable = 0usize;
         let mut edges_reclassified_unclassified = 0usize;
         for (idx, unit) in units.into_iter().enumerate() {
+            // Encoder half of the `"{source_file}:{chunk_id}#{unit_1_based}/{unit_count}"`
+            // convention — the decoder half lives in `reconstruct_prior_chunk_text` above (see
+            // the module comment before `PriorState`). The two are far apart in this file and
+            // kept in sync only by convention/tests: changing this format string without
+            // updating the parser (or vice versa) silently breaks lineage reconstruction for
+            // every split chunk.
             let unit_source_desc = format!("{}#{}/{}", source_desc_base, idx + 1, unit_count);
             let result = episode::add_episode(
                 Arc::clone(&state),
@@ -829,6 +837,12 @@ async fn handle_knowledge_process_chunk(
         let write_guard = state.write_lock.write().await;
         let deleted = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
             let conn = db_for_delete.connect()?;
+            // `remove_episodes_by_uuids` deletes exactly the UUIDs it's given, with no
+            // chunk_id/group_id scoping check of its own (unlike `remove_episodes_by_chunk_id`)
+            // — it trusts the caller entirely. That's safe here only because `uuids` came from
+            // `reconstruct_prior_chunk_text`'s lineage reconstruction above, not from any
+            // caller-supplied or otherwise unvalidated list. Do not reuse this call with a UUID
+            // list from any other source without re-deriving that same guarantee.
             conn.remove_episodes_by_uuids(&uuids)?;
             wal_exec::wal_flush_ungrouped(&wal_writer_delete, conn.drain_mutations(), &sink_delete);
             Ok(uuids)
