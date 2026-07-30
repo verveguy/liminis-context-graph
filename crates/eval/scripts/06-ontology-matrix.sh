@@ -291,16 +291,12 @@ for mode in $MODES; do
   # report's own chunks_run - errors accounting before it ever prints or writes the report
   # (#279 FR-006) — a truncated capture aborts the invocation above with a nonzero exit and
   # no report on disk, rather than needing a separate post-hoc pass here.
-
-  # Capture and judging happen in one invocation, so a freshly recorded pair cannot be
-  # compared before it is judged. Asserting afterwards at least stops a degenerate report
-  # being read as a real one.
-  if [ -s "$BASE_CAS" ] && [ -s "$CAND_CAS" ] \
-     && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
-    die "$REPORT is INVALID: the two hosted cassettes came out byte-identical, so the
-       noise floor in it is 1.000 by construction rather than measured. Delete both
-       cassettes and the report, and re-capture."
-  fi
+  #
+  # It also now catches a freshly recorded pair coming out byte-identical (#279, post-run
+  # half of FR-004): capture and judging share one invocation, so there is nothing to hash
+  # before $BIN runs, but lcg-eval hashes its own --record-cassette output right after and
+  # before ever printing or writing the report — no separate post-hoc pass is needed here
+  # either.
   echo
 done
 

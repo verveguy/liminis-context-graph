@@ -59,7 +59,13 @@ pub struct ResolvedPlan {
 /// SHA-256 hex digest of `path`'s raw bytes — deliberately over the file's bytes, not the
 /// parsed records, so two cassettes are "identical" exactly when a naive `cp` would have
 /// made them so (matching what the #278 shell guards this supersedes checked).
-fn hash_file(path: &str) -> Result<String, std::io::Error> {
+///
+/// `pub` rather than private: `main.rs` (a separate crate from this lib target) reuses this
+/// for the post-run identity check over freshly `--record-cassette`d output (see
+/// `report::validate_recorded_cassettes_distinct`) — a pair of backends recorded during the
+/// run being invoked doesn't exist to hash until the run completes, so this module's own
+/// pre-flight `resolve()` can't cover that case.
+pub fn hash_file(path: &str) -> Result<String, std::io::Error> {
     let bytes = std::fs::read(path)?;
     Ok(format!("{:x}", Sha256::digest(&bytes)))
 }

@@ -167,6 +167,31 @@ pub fn validate_recorded_cassette(
     Ok(())
 }
 
+/// Two backends `--record-cassette`d in the *same* invocation that end up with
+/// byte-identical content make the noise floor read as 1.000 by construction — the same
+/// invalidation `plan::resolve`'s FR-004 guard rejects pre-flight for pre-existing
+/// `cassette:` replay backends. A freshly recorded pair can't be caught that way: the
+/// files don't exist (or aren't complete) until the run they're part of has finished, so
+/// this is checked here, post-run, alongside [`validate_recorded_cassette`] — before the
+/// report is ever printed or written. Takes precomputed `(backend_name, content_hash)`
+/// pairs so hashing (file I/O) stays at the call site and this stays a pure, testable
+/// check, mirroring `plan::resolve`'s own separation.
+pub fn validate_recorded_cassettes_distinct(cassettes: &[(String, String)]) -> Result<(), String> {
+    for i in 0..cassettes.len() {
+        for j in (i + 1)..cassettes.len() {
+            if cassettes[i].1 == cassettes[j].1 {
+                return Err(format!(
+                    "backend '{}' and backend '{}' recorded byte-identical cassette content \
+                     in this run — the noise floor would be 1.000 by construction; delete \
+                     both cassettes and re-capture",
+                    cassettes[i].0, cassettes[j].0
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Report {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -561,6 +586,47 @@ mod tests {
         assert!(err.contains("impossible"), "{err}");
         let err = validate_recorded_cassette(&candidate, 2).unwrap_err();
         assert!(err.contains("impossible"), "{err}");
+    }
+
+    // ── validate_recorded_cassettes_distinct (post-run FR-004) ─────────────────────
+
+    #[test]
+    fn distinct_hashes_are_accepted() {
+        let cassettes = vec![
+            ("baseline".to_string(), "hash-a".to_string()),
+            ("candidate".to_string(), "hash-b".to_string()),
+        ];
+        assert!(validate_recorded_cassettes_distinct(&cassettes).is_ok());
+    }
+
+    #[test]
+    fn identical_hashes_are_rejected_and_name_both_backends() {
+        let cassettes = vec![
+            ("baseline".to_string(), "same-hash".to_string()),
+            ("candidate".to_string(), "same-hash".to_string()),
+        ];
+        let err = validate_recorded_cassettes_distinct(&cassettes).unwrap_err();
+        assert!(err.contains("baseline"), "{err}");
+        assert!(err.contains("candidate"), "{err}");
+        assert!(err.contains("noise floor"), "{err}");
+    }
+
+    #[test]
+    fn a_single_recorded_cassette_has_nothing_to_compare() {
+        let cassettes = vec![("baseline".to_string(), "hash-a".to_string())];
+        assert!(validate_recorded_cassettes_distinct(&cassettes).is_ok());
+    }
+
+    #[test]
+    fn three_backends_only_two_identical_is_still_rejected() {
+        let cassettes = vec![
+            ("baseline".to_string(), "hash-a".to_string()),
+            ("candidate".to_string(), "hash-a".to_string()),
+            ("qwen".to_string(), "hash-b".to_string()),
+        ];
+        let err = validate_recorded_cassettes_distinct(&cassettes).unwrap_err();
+        assert!(err.contains("baseline"), "{err}");
+        assert!(err.contains("candidate"), "{err}");
     }
 
     #[test]

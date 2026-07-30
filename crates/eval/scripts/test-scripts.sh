@@ -106,21 +106,18 @@ cassette_complete "$D/absent.jsonl"; assert_rc 1 $? "missing file is not complet
 assert_eq 228 "$(cassette_records "$D/full.jsonl")" "cassette_records counts records"
 assert_eq 0 "$(cassette_records "$D/absent.jsonl")" "cassette_records on a missing file is 0"
 
-K="$WORKROOT/keys"; mkdir -p "$K"
-
 # The corrupt-vs-duplicated cassette diagnosis formerly tested here via _common.sh's
 # cassette_key_check now lives in lcg-eval itself (crates/core/src/cassette.rs's
 # load_records, #279 FR-002/FR-003) — see its own unit tests (load_records_*) and
 # crates/eval/src/plan.rs's tests for the guard-violation-level coverage.
 
-echo "== _common.sh: sha256_of and backup_if_present =="
-printf 'same\n' > "$K/x.jsonl"; printf 'same\n' > "$K/y.jsonl"; printf 'diff\n' > "$K/z.jsonl"
-assert_eq "$(sha256_of "$K/x.jsonl")" "$(sha256_of "$K/y.jsonl")" "identical files hash equal"
-if [ "$(sha256_of "$K/x.jsonl")" != "$(sha256_of "$K/z.jsonl")" ]; then
-  ok "different files hash differently"
-else
-  bad "different files hash differently"
-fi
+echo "== _common.sh: backup_if_present =="
+# sha256_of and the byte-identical-cassette-pair check it backed (both the pre-run guard
+# formerly in this file's identity-check tests and 06's post-run "hosted cassettes came out
+# identical" check) now live in lcg-eval itself (crates/eval/src/plan.rs's FR-004 guard for
+# pre-existing cassette: backends, crates/eval/src/report.rs's
+# validate_recorded_cassettes_distinct for freshly --record-cassette'd ones, #279) — see
+# those modules' own unit tests for the guard-violation-level coverage.
 B="$WORKROOT/bk"; mkdir -p "$B"; printf 'orig\n' > "$B/c.jsonl"
 ( cd "$B" && backup_if_present "c.jsonl" >/dev/null )
 [ ! -e "$B/c.jsonl" ] && ok "backup_if_present moves the original aside" \

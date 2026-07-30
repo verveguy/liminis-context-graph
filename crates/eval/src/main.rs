@@ -16,8 +16,10 @@ use lcg_eval::pairwise::{
     score_all_pairs, CALIBRATION_BAND_HIGH, CALIBRATION_BAND_LOW,
     ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD,
 };
-use lcg_eval::plan::{render as render_plan, resolve as resolve_plan};
-use lcg_eval::report::{validate_recorded_cassette, PairwiseReportEntry, Report};
+use lcg_eval::plan::{hash_file, render as render_plan, resolve as resolve_plan};
+use lcg_eval::report::{
+    validate_recorded_cassette, validate_recorded_cassettes_distinct, PairwiseReportEntry, Report,
+};
 use lcg_eval::runner::{run_backend, BackendRunResult, CountingSink};
 use lcg_eval::scoring::score_candidate;
 
@@ -233,6 +235,7 @@ async fn run(cli: Args) -> Result<(), String> {
     // FR-006: verify each recorded cassette's record count matches this report's own
     // accounting before printing or writing anything — a truncated capture must never
     // produce a plausible-looking report artifact.
+    let mut recorded_hashes = Vec::with_capacity(cli.record_cassette.len());
     for cassette in &cli.record_cassette {
         let candidate = report
             .candidates
@@ -248,7 +251,18 @@ async fn run(cli: Args) -> Result<(), String> {
             .map_err(|e| format!("--record-cassette {}: {e}", cassette.path))?
             .len();
         validate_recorded_cassette(candidate, actual)?;
+        let hash = hash_file(&cassette.path).map_err(|e| {
+            format!(
+                "--record-cassette {}: cannot hash cassette for the identity check: {e}",
+                cassette.path
+            )
+        })?;
+        recorded_hashes.push((cassette.backend.clone(), hash));
     }
+    // FR-004 (post-run): `plan::resolve`'s pre-flight identity guard only sees pre-existing
+    // `cassette:` replay backends — a pair recorded during THIS run doesn't exist to hash
+    // until it completes, so that half of the check happens here instead.
+    validate_recorded_cassettes_distinct(&recorded_hashes)?;
 
     println!("{}", report.render_human_readable());
     if let Some(path) = &cli.output {

@@ -550,6 +550,12 @@ note, since the shortfall already shows up honestly in `error_rate`. `--dry-run`
 run share this resolution code exactly (see ADR-0052), so the preview cannot drift from
 what actually happens.
 
+A pair of backends `--record-cassette`d fresh in the *same* invocation can't be checked this
+way — there's nothing on disk to hash until the run finishes — so that half of the identity
+guard runs post-run instead, before the report is ever printed or written: if two freshly
+recorded cassettes come out byte-identical, the run still fails loudly, just after capture
+rather than before it.
+
 ### Adding a candidate backend
 
 `--backend NAME=SPEC` is repeatable. `SPEC` is one of:

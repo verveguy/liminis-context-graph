@@ -47,24 +47,6 @@ BIN="$REPO/target/release/lcg-eval"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
-# SHA-256 of a file, via python3 rather than a digest CLI.
-#
-# `md5 -q` is BSD/macOS-only; on Linux it does not exist, the command substitution yields
-# an empty string, and a comparison like `[ "$(md5 -q a)" = "$(md5 -q b)" ]` collapses to
-# `[ "" = "" ]` — which is TRUE. A guard written that way reports two different files as
-# identical on every non-macOS machine, i.e. it fails in the direction that blocks a valid
-# run. Every hash comparison in these scripts goes through here.
-sha256_of() {
-  python3 -c "
-import hashlib, sys
-h = hashlib.sha256()
-with open(sys.argv[1], 'rb') as f:
-    for block in iter(lambda: f.read(65536), b''):
-        h.update(block)
-print(h.hexdigest())
-" "$1"
-}
-
 # Echoes the number of non-blank records in a cassette; 0 if it is missing.
 cassette_records() {
   [ -f "$1" ] || { echo 0; return; }
