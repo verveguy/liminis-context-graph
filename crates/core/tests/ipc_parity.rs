@@ -955,7 +955,10 @@ async fn test_knowledge_process_chunk_splits_oversized_text() {
     .await;
     assert_ok_resp(&v, 50);
     let r = &v["result"];
-    assert!(r.get("episode_uuid").is_none(), "expected no episode_uuid singular: {v}");
+    assert!(
+        r.get("episode_uuid").is_none(),
+        "expected no episode_uuid singular: {v}"
+    );
     let episode_uuids = r["episode_uuids"].as_array().expect("episode_uuids array");
     let unit_count = r["unit_count"].as_u64().unwrap() as usize;
     assert_eq!(episode_uuids.len(), unit_count);
@@ -1079,7 +1082,9 @@ async fn test_knowledge_process_chunk_splits_unbreakable_token() {
     assert_eq!(unit_count, big_token.len().div_ceil(8000));
 
     let conn = db.connect().unwrap();
-    let rows = conn.get_episodes_by_chunk_id("token-chunk", None).unwrap();
+    let rows = conn
+        .get_episodes_by_chunk_id("token-chunk", "liminis")
+        .unwrap();
     let mut by_index: Vec<(usize, String)> = rows
         .into_iter()
         .map(|(_uuid, source_description, content)| {
