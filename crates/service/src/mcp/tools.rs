@@ -281,7 +281,17 @@ pub fn registry() -> Vec<ToolSpec> {
                            and adds them to the graph. The result reports \
                            `edges_dropped_unresolvable`: extracted edges discarded because an \
                            endpoint matched no entity in this chunk or in the graph. A nonzero \
-                           count means facts stated in this chunk were not written.",
+                           count means facts stated in this chunk were not written. \
+                           `chunk_text` above the advisory threshold \
+                           (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 chars) \
+                           is split internally into threshold-sized units that all share the \
+                           caller's `chunk_id`; the response then carries `episode_uuids` and \
+                           `unit_count` instead of a single `episode_uuid`, plus a `warning` \
+                           describing the split. Resubmitting a `chunk_id` is idempotent: \
+                           identical `chunk_text` no-ops (`idempotent: true`, no new episodes), \
+                           different `chunk_text` replaces the prior episode(s) for that \
+                           `chunk_id` (`replaced_uuids` names what was deleted) — a `chunk_id` \
+                           never accumulates unrelated episodes across calls.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -356,8 +366,9 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_delete_chunk_episode",
-            description: "Delete all episodes for a given chunk ID. Orphaned entities remain \
-                           in the graph.",
+            description: "Delete all episodes for a given chunk ID — including every unit of \
+                           a chunk that `knowledge_process_chunk` split for exceeding the \
+                           advisory size threshold. Orphaned entities remain in the graph.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
