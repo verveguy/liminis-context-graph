@@ -334,7 +334,7 @@ scan; it only increments on a miss; a healthy, coherent index keeps this at (or 
 fields are `null` while the service is degraded (no connected database). A rising
 `name_index_fallback_scans` count, or a `name_index_trusted: false` that doesn't clear on its
 own, signals index desync worth investigating — see issue #283 and
-[ADR-0053](docs/adr/0053-name-index-scan-fallback-for-endpoint-authority.md) for the mechanism.
+[ADR-0283](docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the mechanism.
 
 ## Embedder sidecar
 
