@@ -210,6 +210,8 @@ type StatusFields = (
     u64,
     Option<String>,
     Option<String>,
+    bool,
+    u64,
 );
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
@@ -266,6 +268,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
             "indices_built": state.indices_built.load(Ordering::Acquire),
+            "name_index_trusted": null,
+            "name_index_fallback_scans": null,
         }));
     }
     let db = db_opt.unwrap();
@@ -284,6 +288,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         wal_byte_size,
         last_index_time,
         index_created_at,
+        name_index_trusted,
+        name_index_fallback_scans,
     ) = tokio::task::spawn_blocking(move || -> Result<StatusFields, crate::error::Error> {
         let conn = db.connect()?;
         let entity_count = conn.count_nodes("Entity")?;
@@ -292,6 +298,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         let last_index_time = conn.get_latest_episode_time()?;
         let index_created_at = conn.get_earliest_episode_time()?;
         let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+        let name_index_trusted = conn.name_index_trusted();
+        let name_index_fallback_scans = conn.name_index_fallback_scan_count();
         Ok((
             entity_count,
             episode_count,
@@ -301,6 +309,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_byte_size,
             last_index_time,
             index_created_at,
+            name_index_trusted,
+            name_index_fallback_scans,
         ))
     })
     .await??;
@@ -325,6 +335,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "byte_size": wal_byte_size,
         },
         "indices_built": state.indices_built.load(Ordering::Acquire),
+        "name_index_trusted": name_index_trusted,
+        "name_index_fallback_scans": name_index_fallback_scans,
     });
     if let Some(t) = index_created_at {
         result["index_created_at"] = json!(t);
@@ -644,6 +656,20 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // and is explicitly out of scope per Issue #170 FR-008.
         let rows = conn.cypher_query(&query)?;
         wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
+        // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
+        // an Entity row with the index never learning about it. Reuse the WAL's own
+        // mutation-keyword heuristic so read-only Cypher through this admin path pays no
+        // extra scan cost, and only rebuild (a full Entity scan) when the query looks like a
+        // write. A rebuild failure is non-fatal to this request — it marks the index
+        // untrusted so downstream endpoint-authority lookups fall back to a scan until the
+        // next successful rebuild, matching the two `knowledge_rebuild_from_wal` arms below.
+        if crate::wal::looks_like_mutation(&query) {
+            if let Err(e) = conn.rebuild_name_index() {
+                eprintln!("[NAME INDEX] rebuild after query_cypher mutation failed: {e}");
+                conn.mark_name_index_untrusted();
+            }
+        }
         Ok(rows)
     })
     .await??;
@@ -1501,6 +1527,10 @@ async fn handle_rebuild_from_wal(
                     // posture as the index build above.
                     if let Err(e) = conn.rebuild_name_index() {
                         eprintln!("liminis-context-graph: reload: end-of-reload name index rebuild failed: {e} (non-fatal)");
+                        // FR-003: the index may now be blind to replayed entities — mark it
+                        // untrusted so endpoint-authority lookups fall back to a scan until a
+                        // later rebuild succeeds, instead of silently trusting a stale index.
+                        conn.mark_name_index_untrusted();
                     }
                 }
                 Ok((stats, build_ok))
@@ -1773,6 +1803,10 @@ async fn handle_rebuild_from_wal(
                     // posture as the index build above.
                     if let Err(e) = conn.rebuild_name_index() {
                         eprintln!("liminis-context-graph: reload(bg): end-of-reload name index rebuild failed: {e} (non-fatal)");
+                        // FR-003: the index may now be blind to replayed entities — mark it
+                        // untrusted so endpoint-authority lookups fall back to a scan until a
+                        // later rebuild succeeds, instead of silently trusting a stale index.
+                        conn.mark_name_index_untrusted();
                     }
                 }
                 Ok((stats, build_ok))

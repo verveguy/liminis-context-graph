@@ -96,18 +96,7 @@ impl WalWriter {
             return Ok(());
         }
 
-        // Scan all tokens outside single-quoted literals for mutation keywords.
-        // MATCH-prefixed writes (e.g. "MATCH (...) DETACH DELETE" or "MATCH (...) SET ...")
-        // don't start with the DML verb, so a first-token check misses them. Stripping quoted
-        // literals first prevents entity names that happen to contain DML words from being
-        // treated as mutations.
-        let is_mutation = strip_quoted_literals(&upper).split_whitespace().any(|t| {
-            matches!(
-                t,
-                "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
-            )
-        });
-        if !is_mutation {
+        if !looks_like_mutation(cypher) {
             return Ok(());
         }
 
@@ -322,6 +311,26 @@ pub(crate) fn strip_quoted_literals(s: &str) -> String {
         }
     }
     result
+}
+
+/// Whether `cypher` looks like a write (as opposed to a read-only query), by scanning all
+/// tokens outside single-quoted literals for mutation keywords. MATCH-prefixed writes (e.g.
+/// `"MATCH (...) DETACH DELETE"` or `"MATCH (...) SET ..."`) don't start with the DML verb,
+/// so a first-token check would miss them. Stripping quoted literals first prevents entity
+/// names that happen to contain DML words from being misclassified as mutations.
+///
+/// Originally `log_mutation`'s inline check (WAL-logging decision); also used by
+/// `handle_query_cypher` (issue #283, FR-004) to decide whether a raw-Cypher call through the
+/// `cypher` MCP scope needs a follow-up `NameIndex` rebuild — reusing this heuristic keeps the
+/// two "does this look like a write" decisions from silently diverging.
+pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
+    let upper = cypher.to_uppercase();
+    strip_quoted_literals(&upper).split_whitespace().any(|t| {
+        matches!(
+            t,
+            "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
+        )
+    })
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
