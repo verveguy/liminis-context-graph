@@ -291,7 +291,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            identical `chunk_text` no-ops (`idempotent: true`, no new episodes), \
                            different `chunk_text` replaces the prior episode(s) for that \
                            `chunk_id` (`replaced_uuids` names what was deleted) — a `chunk_id` \
-                           never accumulates unrelated episodes across calls.",
+                           never accumulates unrelated episodes across calls. This guarantee \
+                           holds for serialized resubmissions only: concurrent calls for the \
+                           same `chunk_id` are not mutually exclusive and can both insert; \
+                           callers wanting exactly-once retry semantics must serialize retries \
+                           per `chunk_id` themselves.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
