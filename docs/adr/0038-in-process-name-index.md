@@ -184,6 +184,12 @@ index-scan rewrite) and wouldn't work on any version for a `lower()` predicate s
 Rejected: reintroduces the exact O(edges × |Entity|) cost this fix exists to remove, on every
 cache miss. The whole point of an accelerator-with-verify design is that a miss is cheap.
 
+**Narrowed by ADR-0052** (#283): this rejection held uniformly across all four call sites, but
+didn't distinguish the two endpoint-authority sites (#218/#209's "does this entity exist
+anywhere in the group" check) from the two per-entity/per-edge accelerator sites this ADR was
+actually written to fix. ADR-0052 adds a bounded, self-healing scan fallback scoped only to the
+former — see that ADR for why the distinction matters and how it stays bounded.
+
 ### `Arc<NameIndex>` clone per `Conn::connect()`
 
 Rejected in favor of a `&'db NameIndex` borrow: unnecessary atomic-refcount overhead per request
