@@ -149,6 +149,26 @@ pub fn entity_user_prompt_for(
     }
 }
 
+/// Sanitizes a list of entity names for use in the edge-extraction prompt and tool schema:
+/// strips control characters (including newlines, which would break the bullet-list structure
+/// or a JSON schema `enum` entry), trims whitespace, drops entries that become empty, and
+/// deduplicates while preserving first-seen order (FR-001, FR-006).
+pub fn sanitize_entity_names(entity_names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    entity_names
+        .iter()
+        .filter_map(|n| {
+            let sanitized: String = n.chars().filter(|c| !c.is_control()).collect();
+            let sanitized = sanitized.trim().to_string();
+            if sanitized.is_empty() || !seen.insert(sanitized.clone()) {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+        .collect()
+}
+
 /// Builds the edge extraction user message.
 ///
 /// `entity_names` is the list of entity names extracted in the entity pass.
@@ -160,18 +180,9 @@ pub fn edge_user_prompt(
     body: &str,
     custom_instructions: Option<&str>,
 ) -> String {
-    let entities_section = entity_names
-        .iter()
-        .filter_map(|n| {
-            // Strip control chars (including newlines) that would break the bullet-list structure.
-            let sanitized: String = n.chars().filter(|c| !c.is_control()).collect();
-            let sanitized = sanitized.trim().to_string();
-            if sanitized.is_empty() {
-                None
-            } else {
-                Some(format!("- {sanitized}"))
-            }
-        })
+    let entities_section = sanitize_entity_names(entity_names)
+        .into_iter()
+        .map(|n| format!("- {n}"))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -241,6 +252,33 @@ mod tests {
             !prompt.contains("{{ENTITY_TYPES_SECTION}}"),
             "placeholder must not appear in output"
         );
+    }
+
+    #[test]
+    fn sanitize_entity_names_strips_control_chars_dedupes_and_drops_empty() {
+        let names = vec![
+            "Alice".to_string(),
+            "Alice".to_string(),               // exact duplicate, dropped
+            "Bob\ncontrol\tchars".to_string(), // control chars stripped
+            "   ".to_string(),                 // empty after trim, dropped
+            "\u{0007}".to_string(),            // empty after control-char strip, dropped
+            "  Carol  ".to_string(),           // trimmed
+        ];
+        let sanitized = sanitize_entity_names(&names);
+        assert_eq!(
+            sanitized,
+            vec![
+                "Alice".to_string(),
+                "Bobcontrolchars".to_string(),
+                "Carol".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_entity_names_empty_input_yields_empty_output() {
+        assert!(sanitize_entity_names(&[]).is_empty());
+        assert!(sanitize_entity_names(&["   ".to_string(), "\n".to_string()]).is_empty());
     }
 
     #[test]
