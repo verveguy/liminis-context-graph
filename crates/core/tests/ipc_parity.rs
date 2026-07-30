@@ -1042,6 +1042,91 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id_different_text() {
 }
 
 #[tokio::test]
+async fn test_knowledge_process_chunk_idempotency_survives_source_file_rename() {
+    // Regression test: idempotency lineage matching must key on chunk_id alone, not on
+    // "{source_file}:{chunk_id}". A caller resubmitting the same chunk_id under a
+    // renamed/moved source_file must still be recognized as the same lineage — both for a
+    // byte-identical no-op and for a replace on changed text.
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let v1 = dispatch_val(
+        60,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "renamed-source-chunk",
+            "source_file": "old-name.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 60);
+    let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+    // Identical text, renamed source_file: must still no-op, not create a second episode.
+    let v2 = dispatch_val(
+        61,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "renamed-source-chunk",
+            "source_file": "new-name.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v2, 61);
+    assert_eq!(
+        v2["result"]["idempotent"], true,
+        "identical text under a renamed source_file must still no-op: {v2}"
+    );
+    assert_eq!(
+        v2["result"]["episode_uuid"].as_str().unwrap(),
+        uuid1,
+        "no-op must return the original episode, not create a second one: {v2}"
+    );
+
+    // Different text, still-renamed source_file: must replace the original lineage, not
+    // leave two independent episode sets under one chunk_id.
+    let v3 = dispatch_val(
+        62,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Bob works at Widget Inc.",
+            "chunk_id": "renamed-source-chunk",
+            "source_file": "new-name.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v3, 62);
+    let uuid3 = v3["result"]["episode_uuid"].as_str().unwrap();
+    assert_ne!(uuid1, uuid3);
+    assert_eq!(
+        v3["result"]["replaced_uuids"],
+        json!([uuid1]),
+        "replace must supersede the original lineage even under a renamed source_file: {v3}"
+    );
+
+    let del = dispatch_val(
+        63,
+        "knowledge_delete_chunk_episode",
+        json!({ "chunk_id": "renamed-source-chunk" }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&del, 63);
+    assert_eq!(
+        del["result"]["deleted_count"], 1,
+        "no orphaned episode should remain across the rename: {del}"
+    );
+}
+
+#[tokio::test]
 async fn test_knowledge_process_chunk_replace_crosses_threshold() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);

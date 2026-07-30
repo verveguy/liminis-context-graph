@@ -65,12 +65,15 @@ only if a replace-delete actually needs to happen — see Consequences):
 1. Query existing `Episodic` rows for `(chunk_id, group_id)`
    (`Db::get_episodes_by_chunk_id`, the read-only counterpart to `remove_episodes_by_chunk_id`).
 2. Reconstruct (`handlers.rs::reconstruct_prior_chunk_text` → `PriorState`), counting only rows
-   whose `source_description` matches *this call's own* `"{source_file}:{chunk_id}"` convention
-   — exactly, for the never-split shape, or that exact base plus a parseable `#i/N` suffix for a
-   split unit. `Episodic.name` is not exclusive to this handler (`knowledge_add_episode` lets a
-   caller set an arbitrary `name`), so a row that merely shares the same `name` but doesn't match
-   this handler's own `source_description` convention is a different endpoint's data and is
-   excluded entirely: never reconstructed into, never deleted (see Consequences).
+   whose `source_description` ends with `":{chunk_id}"` — exactly, for the never-split shape, or
+   that ending immediately before a parseable `#i/N` suffix for a split unit — regardless of
+   what `source_file` precedes it. `Episodic.name` is not exclusive to this handler
+   (`knowledge_add_episode` lets a caller set an arbitrary `name`), so a row that merely shares
+   the same `name` but doesn't match this ending convention is a different endpoint's data and
+   is excluded entirely: never reconstructed into, never deleted (see Consequences). Matching is
+   deliberately *not* anchored to the current call's `source_file`: a caller may legitimately
+   resubmit a `chunk_id` under a renamed/moved `source_file`, and FR-006/FR-007 idempotency must
+   still recognize that as the same lineage.
    - No matching rows → `PriorState::None` (first-time ingest for this lineage, unaffected —
      any foreign row sharing the `name` is left alone).
    - One matching row with no `#i/N` suffix → its `content` **is** the prior `chunk_text`.
@@ -87,18 +90,25 @@ only if a replace-delete actually needs to happen — see Consequences):
      is not guaranteed to reproduce the same entities/edges, and `remove_episodes_by_chunk_id`'s
      own doc comment already warns that orphaned entities from a deleted episode are not cleaned
      up — a naive replace-always design would risk both.
-   - **Different (including `Anomalous`) → replace.** Delete exactly the UUIDs already known to
-     belong to this lineage via `Db::remove_episodes_by_uuids` (never a name-based delete, so a
-     foreign row is never touched), flush that delete's WAL the same way
-     `handle_delete_chunk_episode` does (`wal_exec::wal_flush_ungrouped`), then proceed as a
-     fresh ingest (single episode or split, depending on the incoming text's size).
+   - **Different (including `Anomalous`) → replace.** Proceed with a fresh ingest of the incoming
+     `chunk_text` (single episode or split, depending on its size) *first*, and only once that
+     ingest fully succeeds, delete exactly the UUIDs already known to belong to this lineage via
+     `Db::remove_episodes_by_uuids` (never a name-based delete, so a foreign row is never
+     touched), flushing that delete's WAL the same way `handle_delete_chunk_episode` does
+     (`wal_exec::wal_flush_ungrouped`). Deleting *after* the new ingest succeeds, rather than
+     before, means a failed ingest (e.g. an extraction error) never leaves the `chunk_id` with
+     zero episodes — the prior lineage stays in place until its replacement actually exists.
 
 **Mid-split partial failure has no explicit rollback — it self-heals via step 2/3 above.** Each
 unit of a split is its own `add_episode` call with its own `write_lock` acquisition and WAL
 flush (Research's Constraint 5); if unit *i* of *N* fails, units `0..i-1` are already committed
-and the error propagates to the caller. A retry of the same call reconstructs only the partial
-units, finds `PriorState::Anomalous` (the index sequence is incomplete), and takes the replace
-path — deleting the partial leftovers and re-splitting from scratch. No separate
+and the error propagates to the caller. For a fresh ingest (no prior lineage), a retry of the
+same call reconstructs only the partial units, finds `PriorState::Anomalous` (the index sequence
+is incomplete), and takes the replace path — deleting the partial leftovers and re-splitting from
+scratch. For a *replace* whose new ingest fails partway, the prior lineage was never deleted (see
+above), so the retry's reconstruction sees the old lineage's rows plus the new partial units
+together — inconsistent shapes/counts, so still `PriorState::Anomalous` — and the replace path
+deletes that whole combined set before re-splitting from scratch. Either way, no separate
 partial-failure-detection code was needed.
 
 **Response shape changes only where behavior is new.** The below-threshold,
@@ -131,13 +141,24 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   `PriorState`, almost certainly find its content didn't match the incoming `chunk_text`, and
   silently `DETACH DELETE` it as a side effect of a routine ingest call — data loss with no
   explicit delete action from the caller. Anchoring reconstruction (and the resulting delete) to
-  rows whose `source_description` matches `"{source_file}:{chunk_id}"` (exactly, or plus a
-  parseable `#i/N` suffix) closes this: a foreign row is left untouched, and `chunk_id`
-  resubmission proceeds as a fresh ingest instead. `handle_delete_chunk_episode` (an explicit,
-  caller-invoked deletion) is unaffected by this change and still matches/deletes by `name` alone
-  — that endpoint's contract has always been "delete everything with this name," which is a
-  different, and here still an intentionally accepted, risk from routine ingestion silently
-  destroying data.
+  rows whose `source_description` ends with `":{chunk_id}"` (exactly, or plus a parseable `#i/N`
+  suffix) closes this: a foreign row is left untouched, and `chunk_id` resubmission proceeds as a
+  fresh ingest instead. `handle_delete_chunk_episode` (an explicit, caller-invoked deletion) is
+  unaffected by this change and still matches/deletes by `name` alone — that endpoint's contract
+  has always been "delete everything with this name," which is a different, and here still an
+  intentionally accepted, risk from routine ingestion silently destroying data. Deliberately *not*
+  anchored to the current call's `source_file`, since a caller may legitimately resubmit a
+  `chunk_id` under a renamed/moved `source_file` and idempotency must still recognize that as the
+  same lineage — an earlier revision of this design required an exact `"{source_file}:{chunk_id}"`
+  match, which broke idempotency across a `source_file` rename (review caught this too).
+- **A replace's delete is deferred until after the new ingest succeeds, not performed up front.**
+  An earlier revision deleted the prior lineage before starting the fresh ingest; if that ingest
+  then failed (e.g. an extraction error partway through a split), the `chunk_id` was left with
+  zero episodes — the caller's previously-good content gone, the new content never written, and
+  no leftover to self-heal from (unlike the mid-split-partial-failure case, which always has a
+  prior-lineage fallback). Performing the fresh ingest first and deleting the superseded UUIDs
+  only once it fully succeeds (`Db::remove_episodes_by_uuids`, same as before) closes this
+  window: the prior lineage stays intact until its replacement actually exists.
 - **`source_description`'s `#{i}/{N}` suffix is now a load-bearing convention**, consumed by
   `reconstruct_prior_chunk_text`. A future change to how `source_description` is built for chunk
   ingests must preserve or explicitly migrate this format, or idempotency reconstruction silently
