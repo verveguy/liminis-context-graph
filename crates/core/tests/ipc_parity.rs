@@ -933,6 +933,65 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id_different_text() {
 }
 
 #[tokio::test]
+async fn test_knowledge_process_chunk_replace_crosses_threshold() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    // First ingest: a single-unit, below-threshold episode.
+    let v1 = dispatch_val(
+        44,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "crossing-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 44);
+    let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+    // Resubmit the same chunk_id with oversized text: must replace the single prior episode
+    // with a fresh multi-unit split, not leave it alongside a growing accumulation.
+    let big_text = "The quick brown fox jumps over the lazy dog. ".repeat(300);
+    let v2 = dispatch_val(
+        45,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": big_text,
+            "chunk_id": "crossing-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v2, 45);
+    assert_eq!(
+        v2["result"]["replaced_uuids"],
+        json!([uuid1]),
+        "expected the below-threshold episode to be replaced: {v2}"
+    );
+    let unit_count = v2["result"]["unit_count"].as_u64().unwrap();
+    assert!(unit_count > 1, "expected a multi-unit split: {v2}");
+
+    let del = dispatch_val(
+        46,
+        "knowledge_delete_chunk_episode",
+        json!({ "chunk_id": "crossing-chunk" }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&del, 46);
+    assert_eq!(
+        del["result"]["deleted_count"], unit_count,
+        "delete must account for exactly the current (split) episodes, not the replaced one: {del}"
+    );
+}
+
+#[tokio::test]
 async fn test_knowledge_process_chunk_splits_oversized_text() {
     let (db, _dir) = make_db(4);
     let (state, sink) = make_state_with_capture_sink(Arc::clone(&db));
