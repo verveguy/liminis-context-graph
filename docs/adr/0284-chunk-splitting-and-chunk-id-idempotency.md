@@ -123,6 +123,26 @@ itself has no rollback: building active reconciliation is a materially larger op
 (a background sweep or an admin-facing "list incomplete chunk lineages" query), out of scope for
 this issue — tracked as a recommended follow-up alongside the per-`chunk_id` locking gap below.
 
+**Repeated resubmission under a persistently-failing extractor can accumulate orphans across
+multiple retries, not just one, before anything is cleaned up (raised in Validate-stage review of
+PR #286).** Because a replace's delete is deferred until *after* a fresh ingest fully succeeds
+(see above), a retry whose own ingest also fails partway does not clean up the previous attempt's
+leftovers before adding its own: `get_episodes_by_chunk_id` matches every `Episodic` row anchored
+to this `chunk_id`'s `source_description` convention regardless of which attempt wrote it, so each
+failed retry's partial units join the same `family_uuids` set as all prior failed attempts,
+growing it further. Under N consecutive failures (e.g. a flaky extractor backing a large,
+frequently-retried oversized chunk), this is unbounded growth in orphaned episodes — and the
+entities/edges they reference — with no cap and no dedicated telemetry signal distinguishing
+"first failed attempt" from "Nth accumulated failed attempt." This is not a correctness bug: the
+*next* fully successful ingest for that `chunk_id` still reconstructs and deletes the entire
+accumulated set in one pass, since the lookup is unconditional on attempt history, not just the
+most recent one — the accumulation is transient (bounded by how long the extractor stays flaky),
+not permanent like the never-resubmitted case above. But nothing today would surface the growth
+while it's happening, or cap it if the failure persists indefinitely. Not fixed in this pass — a
+telemetry counter (e.g. distinguishing a fresh split attempt from a replace-after-anomalous retry)
+or a hard retry cap would be the natural mitigation, tracked as a recommended follow-up alongside
+the reconciliation gap above rather than built speculatively here.
+
 **Response shape changes only where behavior is new.** The below-threshold,
 never-seen-`chunk_id` path is byte-identical to pre-#284 (`episode_uuid`, `nodes_extracted`,
 `edges_extracted`, `duration_seconds` — no new keys), satisfying FR-001. A split response
