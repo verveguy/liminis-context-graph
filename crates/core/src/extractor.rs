@@ -66,6 +66,40 @@ pub trait Extractor: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
 }
 
+/// Builds the `extract_edges` tool schema for the Anthropic tool-use call. Constrains
+/// `source_name`/`target_name` to `sanitized_names` via a JSON-schema `enum` (FR-001) — this is
+/// enforced by the provider regardless of whether the model attends to the prompt's own
+/// "names not in the list will be rejected" instruction. `sanitized_names` must be non-empty and
+/// already sanitized via `prompts::sanitize_entity_names` (an empty `enum` is invalid schema and
+/// the caller should skip the extraction call entirely in that case).
+fn build_edge_tool_schema(sanitized_names: &[String]) -> Value {
+    json!({
+        "name": "extract_edges",
+        "description": "Extract factual relationship edges between the given entities.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edges": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_name": {"type": "string", "enum": sanitized_names},
+                            "target_name": {"type": "string", "enum": sanitized_names},
+                            "fact": {"type": "string"},
+                            "relation_type": {"type": ["string", "null"]},
+                            "valid_at": {"type": ["string", "null"]},
+                            "invalid_at": {"type": ["string", "null"]}
+                        },
+                        "required": ["source_name", "target_name", "fact"]
+                    }
+                }
+            },
+            "required": ["edges"]
+        }
+    })
+}
+
 // ── AnthropicExtractor ────────────────────────────────────────────────────────
 
 /// Out-of-process entity/relationship extraction adapter (Principle V).
@@ -258,6 +292,13 @@ impl AnthropicExtractor {
         opts: &ExtractOptions<'_>,
         entity_names: &[String],
     ) -> Result<Vec<ExtractedEdge>, Error> {
+        // FR-001 edge case: an empty (or all-empty-after-sanitizing) entity list has no valid
+        // endpoints to constrain the schema `enum` to — skip the call rather than send one.
+        let sanitized_names = prompts::sanitize_entity_names(entity_names);
+        if sanitized_names.is_empty() {
+            return Ok(vec![]);
+        }
+
         let system_text = prompts::edge_system_prompt(opts.ontology);
         let user_text = prompts::edge_user_prompt(
             entity_names,
@@ -272,31 +313,7 @@ impl AnthropicExtractor {
             json!(system_text)
         };
 
-        let edge_tool = json!({
-            "name": "extract_edges",
-            "description": "Extract factual relationship edges between the given entities.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "edges": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "source_name": {"type": "string"},
-                                "target_name": {"type": "string"},
-                                "fact": {"type": "string"},
-                                "relation_type": {"type": ["string", "null"]},
-                                "valid_at": {"type": ["string", "null"]},
-                                "invalid_at": {"type": ["string", "null"]}
-                            },
-                            "required": ["source_name", "target_name", "fact"]
-                        }
-                    }
-                },
-                "required": ["edges"]
-            }
-        });
+        let edge_tool = build_edge_tool_schema(&sanitized_names);
 
         const INITIAL_MAX_TOKENS: u32 = 8192;
         let chunk_len_bytes = opts.episode_body.len();
@@ -2268,5 +2285,49 @@ mod tests {
             TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
                 if call_type == "edges" && outcome == "clean"
         )));
+    }
+
+    // FR-001: the extract_edges tool schema constrains source_name/target_name to an enum
+    // built from the batch's sanitized entity names.
+    #[test]
+    fn build_edge_tool_schema_enum_contains_exactly_sanitized_names() {
+        let names = vec!["Alice".to_string(), "Acme Corp".to_string()];
+        let schema = build_edge_tool_schema(&names);
+
+        let source_enum = schema["input_schema"]["properties"]["edges"]["items"]["properties"]
+            ["source_name"]["enum"]
+            .as_array()
+            .expect("source_name.enum must be an array");
+        let target_enum = schema["input_schema"]["properties"]["edges"]["items"]["properties"]
+            ["target_name"]["enum"]
+            .as_array()
+            .expect("target_name.enum must be an array");
+
+        let source_names: Vec<&str> = source_enum.iter().filter_map(|v| v.as_str()).collect();
+        let target_names: Vec<&str> = target_enum.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(source_names, vec!["Alice", "Acme Corp"]);
+        assert_eq!(target_names, vec!["Alice", "Acme Corp"]);
+    }
+
+    #[tokio::test]
+    async fn do_extract_edges_skips_http_call_when_entity_names_sanitize_to_empty() {
+        let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+        // Point at an address nothing listens on — if do_extract_edges attempted an HTTP call
+        // it would fail; returning Ok(vec![]) proves the call was skipped entirely.
+        let extractor = AnthropicExtractor::with_url(
+            "claude-haiku-4-5-20251001".to_string(),
+            "key".to_string(),
+            "http://127.0.0.1:1/v1/messages".to_string(),
+            sink,
+        );
+
+        let edges = extractor
+            .do_extract_edges(
+                &test_extract_options(),
+                &["   ".to_string(), "\n".to_string()],
+            )
+            .await
+            .unwrap();
+        assert!(edges.is_empty());
     }
 }
