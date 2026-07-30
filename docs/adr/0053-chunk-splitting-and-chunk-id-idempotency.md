@@ -198,7 +198,24 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   *serialized* (non-concurrent) calls for a given `chunk_id`, first-time or resubmission alike;
   the general fix is per-`(group_id, chunk_id)` locking held for the full request duration, which
   needs a new `AppState` field and is a larger change than fits this feature — tracked as a
-  recommended follow-up rather than fixed here.
+  recommended follow-up rather than fixed here. Two further shapes of the same underlying gap,
+  both review-caught and neither fixed for the same reason:
+  - **The split loop itself is not atomic against a concurrent `knowledge_delete_chunk_episode`
+    for the same `chunk_id`.** Each unit's `add_episode` call acquires and releases `write_lock`
+    independently (no lock is held across the whole split), so an explicit delete landing between
+    two units removes whatever is already committed while the loop keeps inserting the units
+    still to come — leaving a transient mix of "some pre-delete units gone, some new units still
+    arriving" under one `chunk_id` that reads/search can observe mid-flight. This resolves itself
+    once the split loop finishes (the `chunk_id` then has exactly the surviving new units), but
+    unlike the mid-split-extraction-failure case there is no reconstruction step re-run
+    automatically afterward — the caller sees this only if it happens to read during the window.
+  - **Two concurrent resubmissions with different `chunk_text` (both taking the Replace path)**
+    can both reconstruct the same prior state, both run their own fresh ingest, and both then
+    delete the same prior UUIDs via `Db::remove_episodes_by_uuids` — the loser's delete is a
+    silent no-op against rows the winner already removed, but the loser's response still reports
+    those UUIDs in `replaced_uuids`, naming rows that are already gone by the time the response
+    is returned. Not a data-integrity problem (no unintended deletion), but a response-accuracy
+    one: `replaced_uuids` can name UUIDs the caller can no longer look up.
 
 ## Related
 
