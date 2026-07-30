@@ -607,6 +607,33 @@ impl<'db> Conn<'db> {
         Ok(uuids)
     }
 
+    /// Returns `(uuid, source_description, content)` for every Episodic node whose name
+    /// (chunk identifier) matches `chunk_id` within `group_id`. Read-only counterpart to
+    /// `remove_episodes_by_chunk_id`, used by `handle_knowledge_process_chunk` (issue #284) to
+    /// reconstruct a prior chunk_text before deciding whether a resubmission is a no-op,
+    /// a replace, or a fresh ingest.
+    pub fn get_episodes_by_chunk_id(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        let result = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.source_description, ep.content",
+            serde_json::json!({ "name": chunk_id, "gid": group_id }),
+        )?;
+        Ok(result
+            .into_iter()
+            .map(|row| {
+                (
+                    value_as_string(&row[0]),
+                    value_as_string(&row[1]),
+                    value_as_string(&row[2]),
+                )
+            })
+            .collect())
+    }
+
     /// Returns all Entity nodes in the given group_ids.
     pub fn get_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<EntityRow>, Error> {
         let result = self.query_params(

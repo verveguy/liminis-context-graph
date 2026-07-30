@@ -135,6 +135,18 @@ pub enum TelemetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         fallback_reason: Option<String>,
     },
+    /// Emitted by `handle_knowledge_process_chunk` whenever `chunk_text` exceeds
+    /// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, regardless of whether the call created, replaced,
+    /// or no-op'd (issue #284). `unit_count` is however many episodes back `chunk_id` after
+    /// the call completes (1 for the pre-split accept-and-warn baseline established by #282).
+    ChunkTextOversized {
+        ts_ms: u64,
+        chunk_id: String,
+        source_file: String,
+        chunk_text_chars: usize,
+        threshold_chars: usize,
+        unit_count: usize,
+    },
 }
 
 pub fn now_ms() -> u64 {
