@@ -123,6 +123,15 @@ functionally harmless inconsistency (a subsequent search succeeds directly, sinc
 genuinely exist and never trip the auto-heal path) — flagged here as a candidate follow-up, not
 fixed in this change.
 
+> **The follow-up flagged here was taken — see [ADR-0036](0036-eager-index-build-at-startup.md).**
+> #208 closed this gap, though not inside `recovery.rs`: `bootstrap_app_state` now tracks an
+> `indices_ready` flag — true on direct-open success and on recovery success — and stores it into
+> `AppState.indices_built` after construction. `run_full_recovery_sequence` already performed the
+> build, so no new call was needed there; what was missing was reflecting that build in the flag.
+> `knowledge_status` therefore no longer under-reports readiness immediately after a successful
+> **startup** auto-recovery. The runtime `knowledge_recover` path this section places out of scope
+> is unchanged and still out of scope. The rest of this ADR stands.
+
 ## Consequences
 
 - A rebuild's `success: true` no longer implies "search is definitely ready" — callers that want

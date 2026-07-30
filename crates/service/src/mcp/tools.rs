@@ -278,7 +278,10 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
-                           and adds them to the graph.",
+                           and adds them to the graph. The result reports \
+                           `edges_dropped_unresolvable`: extracted edges discarded because an \
+                           endpoint matched no entity in this chunk or in the graph. A nonzero \
+                           count means facts stated in this chunk were not written.",
             scope: Scope::Write,
             input_schema: || {
                 json!({

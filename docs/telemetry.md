@@ -81,7 +81,8 @@ Example:
 
 ### `llm_fallback`
 
-Emitted when the primary LLM is unavailable and extraction falls back to a secondary model. **Not yet emitted** — pending FR-009 (primary→fallback chain implementation).
+Emitted when the primary LLM is unavailable and extraction falls back to the secondary model
+configured via `LCG_EXTRACTION_LLM`'s `primary:fallback` form.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -117,7 +118,7 @@ Emitted when the daemon changes operational state: on degraded startup, after su
 |-------|------|-------------|
 | `state` | string | One of `"degraded"`, `"healthy"`, `"shutting_down"`, or `"stopped"` |
 | `reason` | string or absent | Machine-readable reason code (e.g. `"lbug_wal_corrupt"`). Present when `state = "degraded"`. |
-| `detail` | string or absent | Human-readable detail, typically the lbug error string. Present when `state = "degraded"` |
+| `detail` | JSON value or absent | Structured detail, typically a string carrying the lbug error. Present when `state = "degraded"` |
 
 Degraded example (emitted at startup when lbug WAL is corrupt):
 ```json
@@ -143,17 +144,99 @@ The renderer uses this event to update the recovery UI state without polling `kn
 
 ### `wal_replay_complete`
 
-Emitted once when WAL replay finishes at startup. **Not yet emitted** — pending issue #3 (WAL implementation).
+Emitted once when WAL replay finishes — at startup, after `knowledge_rebuild_from_wal`, and at the end
+of autonomous recovery.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `episodes_replayed` | u64 | Number of episodes replayed from the WAL |
+| `mutations_replayed` | u64 | WAL mutations successfully applied |
+| `unrecognised_lines` | u64 | Lines whose shape matched no known mutation template |
+| `failed_lines` | u64 | Lines that parsed but whose statement failed to execute |
+| `unparseable_lines` | u64 | Lines that were not valid JSON |
+| `legacy_skipped_lines` | u64 | Lines skipped as a superseded legacy format |
 | `duration_ms` | u64 | Total replay wall-clock time in milliseconds |
-| `throughput_eps` | f64 | Episodes replayed per second |
+
+A nonzero `failed_lines`, `unrecognised_lines`, or `unparseable_lines` means the rebuilt graph is
+not a faithful reconstruction of the WAL — each counts a line whose content did not make it into
+the graph, whether it failed to execute, matched no known template, or was not valid JSON. Use
+`LCG_REPLAY_FAILURE_SAMPLES` to surface examples. `legacy_skipped_lines` is the one counter that
+does not indicate loss: those lines are a superseded format that is intentionally not replayed.
 
 Example:
 ```json
-{"type":"wal_replay_complete","ts_ms":1716100000004,"episodes_replayed":42,"duration_ms":380,"throughput_eps":110.5}
+{"type":"wal_replay_complete","ts_ms":1716100000004,"mutations_replayed":1284,"unrecognised_lines":0,"failed_lines":0,"unparseable_lines":0,"legacy_skipped_lines":0,"duration_ms":380}
+```
+
+### `structured_output_parse`
+
+Emitted by `OaiExtractor` for every entity/edge extraction response on the local /
+OpenAI-compatible path, recording whether the model's structured output was usable as-is.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Model that produced the response |
+| `call_type` | string | `"entities"` or `"edges"` |
+| `outcome` | string | `"clean"` (valid JSON as returned), `"recovered"` (needed fence/prefix stripping), or `"malformed"` (unparseable) |
+
+A high `"recovered"` or `"malformed"` rate is the main signal that a local model is a poor fit for
+extraction. The Anthropic path uses tool-use and does not emit this event.
+
+Example:
+```json
+{"type":"structured_output_parse","ts_ms":1716100000060,"model":"qwen3.6-27b","call_type":"edges","outcome":"recovered"}
+```
+
+### `wal_rotated`
+
+Emitted when the WAL rolls over to a new file.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from_file_seq` | u32 | Sequence number of the file just closed |
+| `to_file_seq` | u32 | Sequence number of the file now being written |
+| `closed_bytes` | u64 | Size of the closed file in bytes |
+| `closed_events` | u64 | Number of events in the closed file |
+
+Example:
+```json
+{"type":"wal_rotated","ts_ms":1716100000070,"from_file_seq":3,"to_file_seq":4,"closed_bytes":8388608,"closed_events":15220}
+```
+
+### `workspace_migration`
+
+Emitted at each phase of a workspace layout migration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | Migration phase reached |
+| `detail` | JSON value or absent | Structured phase detail |
+
+Example:
+```json
+{"type":"workspace_migration","ts_ms":1716100000080,"phase":"complete"}
+```
+
+### `wal_auto_recovery`
+
+Emitted at each phase of autonomous WAL-corruption self-recovery — the observability for the
+self-healing path described in the README. Every field except `phase` is optional and present only
+where the phase produces it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | One of `"corruption_detected"`, `"checkpoint_drop_complete"`, `"cursor_derived"`, `"replay_complete"`, `"index_build_complete"`, `"recovery_complete"`, `"fallback_triggered"` |
+| `from_seq` | u64 or absent | WAL sequence the replay resumed from |
+| `cursor_reason` | string or absent | How the resume cursor was derived |
+| `mutations_replayed` | u64 or absent | Mutations applied during recovery replay |
+| `elapsed_ms` | u64 or absent | Wall-clock time for the phase |
+| `fallback_reason` | string or absent | Why automatic recovery gave up, on `"fallback_triggered"` |
+
+A stream ending in `"recovery_complete"` means the service healed itself; one ending in
+`"fallback_triggered"` means it needs manual intervention.
+
+Example:
+```json
+{"type":"wal_auto_recovery","ts_ms":1716100000090,"phase":"replay_complete","from_seq":7,"mutations_replayed":412,"elapsed_ms":1830}
 ```
 
 ---

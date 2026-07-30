@@ -12,7 +12,7 @@ All feature specs in this project use Spec Kit format: `## User Scenarios & Test
 
 ## ADR numbers are issue numbers (NON-NEGOTIABLE)
 
-A new ADR is named `docs/adr/<issue_number>-<slug>.md` — the **GitHub issue number** that motivated the decision, zero-padded to four digits. `docs/adr/0281-edge-endpoint-salvage.md`, not the next free number in the sequence.
+A new ADR is named `docs/adr/<issue_number>-<slug>.md` — the **GitHub issue number** that motivated the decision, zero-padded to four digits. [`docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md`](docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md) (from issue #283) is the first one written under this rule; it is not `0053`, the next free number in the sequence.
 
 This is the same rule, for the same reason, as `specs/<issue_number>-<slug>/`: a shared sequential counter is claimed at *branch* time, so any two issues in flight claim the same number, and the collision is invisible until merge.
 
@@ -20,7 +20,7 @@ This is the same rule, for the same reason, as `specs/<issue_number>-<slug>/`: a
 
 - **Existing ADRs keep their numbers.** `0001`–`0052` are sequential and immutable; do not renumber them. The gap between the last sequential ADR and the first issue-numbered one is expected, not missing history.
 - **No motivating issue** (a decision recorded during direct collaboration): use the PR number instead, and say so in the ADR's own header.
-- **Two ADRs from one issue**: both carry that issue's number and are distinguished by slug. The number identifies the issue, the slug identifies the decision, so cite them as `ADR-0281 (edge-endpoint-salvage)` when the number alone is ambiguous.
+- **Two ADRs from one issue**: both carry that issue's number and are distinguished by slug. The number identifies the issue, the slug identifies the decision, so cite them as `ADR-0283 (name-index-scan-fallback)` when the number alone is ambiguous.
 - **Citing an ADR** below `0042` in old material: check `docs/adr/index.md`'s *Historical numbering* appendix first. Those are pre-consolidation numbers from when ADRs lived in two directories, and the left column decodes them. Never renumber a historical citation to match a current ADR — they refer to different decisions.
 
 **For small bug fixes**: The full Spec Kit workflow is overkill — a focused issue with reproduction steps, expected/actual behavior, and acceptance criteria is fine. The Spec Kit threshold is roughly: if the work is large enough to be a "feature" or to have user-facing acceptance scenarios, file it as a Fabrik issue and let the Specify stage handle the spec. If it's a one-line fix or a clearly-scoped regression, just file the issue directly.

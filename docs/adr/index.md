@@ -1,8 +1,8 @@
 # Architecture Decision Records
 
-Decisions are recorded chronologically. Numbers are project-local and immutable once assigned. See [ADR-0001](0001-record-architecture-decisions.md) for the format.
+Numbers are project-local and immutable once assigned. See [ADR-0001](0001-record-architecture-decisions.md) for the format.
 
-**From 2026-07-30, a new ADR takes the number of the GitHub issue that motivated it** (`0281-edge-endpoint-salvage.md`), matching the `specs/<issue_number>-<slug>/` convention and for the same reason: a shared sequential counter is claimed at branch time, so two issues in flight always claim the same number. `0001`–`0052` predate this and keep their sequential numbers — **the gap between `0052` and the first issue-numbered ADR is expected, not missing history.** See CLAUDE.md for the full rule.
+**From 2026-07-30, a new ADR takes the number of the GitHub issue that motivated it** — [`0283-name-index-scan-fallback-for-endpoint-authority.md`](0283-name-index-scan-fallback-for-endpoint-authority.md), from issue #283, is the first — matching the `specs/<issue_number>-<slug>/` convention and for the same reason: a shared sequential counter is claimed at branch time, so two issues in flight always claim the same number. `0001`–`0052` predate this and keep their sequential numbers — **the gap between `0052` and the first issue-numbered ADR is expected, not missing history.** See CLAUDE.md for the full rule.
 
 | ADR | Title | Date |
 |-----|-------|------|

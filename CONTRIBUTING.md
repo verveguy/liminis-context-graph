@@ -55,6 +55,12 @@ No contributor license agreement and no Developer Certificate of Origin sign-off
 
 Significant architectural changes should be recorded as an Architecture Decision Record in [`docs/adr/`](docs/adr/). See [`docs/adr/0001-record-architecture-decisions.md`](docs/adr/0001-record-architecture-decisions.md) for the format. If you're unsure whether your change warrants an ADR, err on the side of writing one — a short ADR is better than an undocumented decision.
 
+**Name it after the issue, not the next free number.** A new ADR is `docs/adr/<issue_number>-<slug>.md`, using the GitHub issue number that motivated the decision, zero-padded to four digits — for example `docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md`. If there is no motivating issue, use your PR number and say so in the ADR's header.
+
+Please **do not take the next sequential number**. `0001`–`0052` are sequential for historical reasons and are immutable, but a shared counter is claimed at branch time, so two contributors working in parallel both pick the same number. That collision does not show up as a conflict in the ADR files — they have different slugs and both apply cleanly — only as a conflict on the one row each adds to [`docs/adr/index.md`](docs/adr/index.md), which surfaces as a branch that simply won't merge. The gap between `0052` and the first issue-numbered ADR is expected, not missing history.
+
+Add your ADR's row to [`docs/adr/index.md`](docs/adr/index.md) in the same PR.
+
 ### Feature specifications
 
 Substantial features (anything with user-facing scenarios and acceptance criteria) are specified using Spec Kit format in `specs/<issue-number>-<slug>/spec.md`. This is the maintainer's primary workflow via the Fabrik pipeline. External contributors don't need to use Fabrik — a well-written issue body covering problem, solution, and acceptance criteria is sufficient for a PR conversation.

@@ -58,7 +58,7 @@ The result is a context graph you can treat like the rest of your local tooling:
 
 ## Features
 
-- **34 JSON-RPC methods** over a Unix domain socket, covering ingestion, hybrid search, graph reads, curation (`knowledge_merge_entities`, a corrections workflow, relation canonicalization), and administration.
+- **35 JSON-RPC methods** over a Unix domain socket, covering ingestion, hybrid search, graph reads, curation (`knowledge_merge_entities`, a corrections workflow, relation canonicalization), and administration.
 - **Native MCP server** — the same graph is exposed to any [Model Context Protocol](https://modelcontextprotocol.io) client over stdin/stdout via `--mcp-stdio`, with per-scope tool gating (`read` / `write` / `cypher` / `admin`). Point Claude Code, Claude Desktop, or any agent straight at your workspace — no app, no custom client. See [MCP-over-stdio transport](#mcp-over-stdio-transport).
 - **Hybrid retrieval** — full-text + HNSW vector similarity in one query path, plus raw Cypher (`knowledge_query_cypher`) for arbitrary graph queries.
 - **Optional ontology** — declare entity and relation types (with single-parent hierarchies) in YAML; `open` mode prefers your vocabulary, `strict` mode enforces it. Drift detection flags when the graph predates an ontology change.
@@ -225,6 +225,21 @@ branch, merge it, then re-tag the corrected commit and re-push.
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
 | `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the hosted Anthropic API for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). When unset, extraction requires an explicit `--extractor-uds`/`--extractor-http` flag or `LCG_EXTRACTION_URL` pointing at a local OpenAI-compatible endpoint — it is not auto-detected — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
+| `LCG_REPLAY_BATCH_SIZE` | No | Rows per batch during WAL replay (default `64`, valid range `1`–`256`). Lower values reduce peak memory on a large rebuild; higher values replay faster. |
+| `LCG_REPLAY_FAILURE_SAMPLES` | No | How many distinct failing lines to retain and report per WAL replay (default `10`). Samples are deduplicated by failure shape, so one bad template cannot crowd out the rest. |
+| `LCG_REPLAY_FIDELITY_THRESHOLD` | No | Float `0.0`–`1.0`. Replay warns when the fraction of successfully applied mutations falls below this, i.e. the rebuilt graph is not a faithful reconstruction of the WAL. |
+| `LCG_MIGRATION_KEEP_BACKUP` | No | When set, a workspace-layout migration retains its pre-migration backup instead of removing it after a successful migration. |
+| `LCG_SHUTDOWN_TIMEOUT_MS` | No | Grace period in milliseconds for in-flight requests to finish on `SIGTERM` before the service exits. |
+| `LCG_ATTACHED_CALL_TIMEOUT_MS` | No | Idle-read timeout in milliseconds for MCP attached mode (`--connect`, default `30000`). See [MCP-over-stdio transport](#mcp-over-stdio-transport). |
+| `LIMINIS_DEDUP_HYBRID_THRESHOLD` | No | Entity count per `group_id` above which dedup switches from brute-force cosine to the hybrid FTS + vector path. |
+| `LIMINIS_LLM_COST_TABLE_PATH` | No | Path to a JSON model-pricing table used to populate `estimated_cost_usd` in `token_usage` telemetry. See [docs/telemetry.md](docs/telemetry.md). |
+
+**Deprecated `GRAPHITI_*` aliases.** Every `LCG_*` variable above that predates the rename also
+accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
+`GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
+`GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, `GRAPHITI_DEDUP_ADAPTER_URL`, and
+`GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is deprecated; rename to <new>` at
+startup. They are honoured for now; prefer the `LCG_*` names.
 
 ## Ontology
 
@@ -355,11 +370,12 @@ embedding dimension. If the probe fails and `LCG_EMBEDDING_DIM` is not set, the 
 exits with an error rather than failing silently on the first embed request.
 
 Start the embedder sidecar **before** starting the `liminis-context-graph` binary.
-Without it, the five embedding-dependent IPC methods fail immediately with an embedding error:
+Without it, the embedding-dependent IPC methods fail immediately with an embedding error:
 `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`,
-`knowledge_process_chunk`, and `knowledge_reprocess_entity_types`. Read-only methods that do
-not call the embedder (`health_check`, `knowledge_status`, `knowledge_list_entities`,
-`knowledge_get_episodes`) work without the sidecar.
+`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`, and
+`knowledge_canonicalize_relations` (its ontology-description fallback embeds each residual edge's
+`fact`). Read-only methods that do not call the embedder (`health_check`, `knowledge_status`,
+`knowledge_list_entities`, `knowledge_get_episodes`) work without the sidecar.
 
 ### macOS: Swift CoreML sidecar (default)
 
@@ -928,6 +944,7 @@ crates/core/             # lcg-core: library crate — all DB interaction
 crates/core/benches/     # performance benchmarks (criterion)
 crates/core/examples/    # standalone consumers demonstrating the library API
 crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
+crates/eval/             # lcg-eval: binary crate — extraction-quality eval harness
 native/local-inference/  # Swift CoreML embedding/LLM sidecar for macOS
 docs/adr/                # architecture decision records (index at docs/adr/index.md)
 specs/                   # feature specifications
