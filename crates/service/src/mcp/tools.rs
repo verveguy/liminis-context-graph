@@ -292,10 +292,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            different `chunk_text` replaces the prior episode(s) for that \
                            `chunk_id` (`replaced_uuids` names what was deleted) — a `chunk_id` \
                            never accumulates unrelated episodes across calls. This guarantee \
-                           holds for serialized resubmissions only: concurrent calls for the \
-                           same `chunk_id` are not mutually exclusive and can both insert; \
-                           callers wanting exactly-once retry semantics must serialize retries \
-                           per `chunk_id` themselves.",
+                           holds for serialized calls only: concurrent calls for the same \
+                           `chunk_id` — including two first-time submissions racing each \
+                           other, not just retries — are not mutually exclusive and can both \
+                           insert; callers wanting exactly-once semantics must serialize calls \
+                           per `chunk_id` themselves. Matching is scoped by `chunk_id` and \
+                           `group_id` only, independent of `source_file`, so `chunk_id` must be \
+                           unique per logical document within a `group_id`, not merely unique \
+                           per `source_file`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({

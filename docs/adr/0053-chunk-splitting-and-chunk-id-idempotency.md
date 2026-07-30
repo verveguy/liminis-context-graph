@@ -150,7 +150,15 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   anchored to the current call's `source_file`, since a caller may legitimately resubmit a
   `chunk_id` under a renamed/moved `source_file` and idempotency must still recognize that as the
   same lineage — an earlier revision of this design required an exact `"{source_file}:{chunk_id}"`
-  match, which broke idempotency across a `source_file` rename (review caught this too).
+  match, which broke idempotency across a `source_file` rename (review caught this too). This
+  `source_file`-independence has a wider blast radius than just the rename case: two *unrelated*
+  documents from different callers that happen to reuse the same `chunk_id` under different
+  `source_file`s are indistinguishable from a rename to this matching logic, and one submission
+  will replace the other's episodes exactly as if it were a legitimate resubmission. This is an
+  accepted consequence of `chunk_id` being the caller-supplied idempotency key with no
+  `source_file` namespacing: callers must treat `chunk_id` as unique per logical document within
+  a `group_id`, not merely unique per `source_file`. No enforcement of this uniqueness is done
+  (or feasible) server-side — it is a documented caller contract, not a runtime check.
 - **A replace's delete is deferred until after the new ingest succeeds, not performed up front.**
   An earlier revision deleted the prior lineage before starting the fresh ingest; if that ingest
   then failed (e.g. an extraction error partway through a split), the `chunk_id` was left with
@@ -179,15 +187,18 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   acquisition) and, if needed, the delete step (a separate write acquisition) in
   `handlers.rs::handle_knowledge_process_chunk`, both dropped before the fresh ingest runs;
   `add_episode` only reacquires the lock briefly, per unit, at its own Phase C commit —
-  extraction in between runs unlocked. Two calls racing for one `chunk_id` (e.g. a
-  client retry sent while the original is still blocked on LLM extraction — exactly the case
-  this feature is meant to make safe) can both observe the same prior state and both proceed to
-  insert, producing duplicate/divergent episodes for that `chunk_id` until a later resubmission
-  self-heals via the mismatch/`Anomalous` path. The idempotency guarantee above therefore only
-  holds for *serialized* (non-concurrent) resubmissions of a given `chunk_id`; the general fix
-  is per-`(group_id, chunk_id)` locking held for the full request duration, which needs a new
-  `AppState` field and is a larger change than fits this feature — tracked as a recommended
-  follow-up rather than fixed here.
+  extraction in between runs unlocked. Two calls racing for one `chunk_id` can both observe the
+  same prior state (including `PriorState::None`) and both proceed to insert, producing
+  duplicate/divergent episodes for that `chunk_id` until a later resubmission self-heals via the
+  mismatch/`Anomalous` path. This is not limited to the retry case (a client retry sent while the
+  original is still blocked on LLM extraction, which is the scenario this feature is primarily
+  meant to make safe) — it applies equally to two independent callers submitting the *same*
+  `chunk_id` for the *first* time concurrently, since both observe `PriorState::None` and neither
+  sees the other's in-flight write. The idempotency guarantee above therefore only holds for
+  *serialized* (non-concurrent) calls for a given `chunk_id`, first-time or resubmission alike;
+  the general fix is per-`(group_id, chunk_id)` locking held for the full request duration, which
+  needs a new `AppState` field and is a larger change than fits this feature — tracked as a
+  recommended follow-up rather than fixed here.
 
 ## Related
 
