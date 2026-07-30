@@ -341,6 +341,23 @@ pub async fn add_episode(
                     edge.target_name = canonical.clone();
                 }
             }
+
+            // Rewriting an off-list endpoint to its canonical entity name can make two
+            // previously-distinct endpoints collide (e.g. "Global Warming" and "Climate Change"
+            // both salvage to the same batch entity) — re-run the self-referential filter after
+            // salvage so a rewritten edge like that doesn't slip past the earlier check and get
+            // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
+            extraction.edges.retain(|edge| {
+                if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase()
+                {
+                    eprintln!(
+                        "liminis-context-graph: dropping self-referential edge after salvage: '{}' → '{}'",
+                        edge.source_name, edge.target_name
+                    );
+                    return false;
+                }
+                true
+            });
         }
     }
 

@@ -389,3 +389,51 @@ async fn test_genuinely_unresolvable_edge_is_counted_in_result() {
         "a genuinely unresolvable edge must be reported in the process_chunk result, not only on stderr"
     );
 }
+
+// ── Regression: salvage rewriting an off-list endpoint must not create a self-loop ─────
+
+#[tokio::test]
+async fn test_salvage_collapsing_both_endpoints_to_same_entity_is_not_inserted() {
+    let (db, _dir) = make_db();
+
+    // 'Global Warming' is off-list but salvage-matches 'Climate Change' (identical embeddings,
+    // well above DEDUP_THRESHOLD). The edge's *other* endpoint is already 'Climate Change'
+    // itself, so after salvage rewrites the source name the edge becomes self-referential —
+    // even though the pre-salvage self-referential check ('global warming' != 'climate change')
+    // did not catch it. It must not be persisted as a self-loop.
+    let mut map = HashMap::new();
+    map.insert("Climate Change".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Global Warming".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Climate Change"],
+        &[(
+            "Global Warming",
+            "Climate Change",
+            "Global warming is also called climate change",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Global warming is also called climate change.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "an edge that collapses to a self-loop after salvage must not be inserted, got {}",
+        result.edges_extracted
+    );
+
+    let conn = db.connect().unwrap();
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert!(
+        rels.is_empty(),
+        "no self-referential relationship should be persisted after a salvage collision"
+    );
+}
