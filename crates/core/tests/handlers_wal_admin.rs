@@ -1382,3 +1382,168 @@ async fn test_rebuild_from_wal_non_empty_db_from_seq_gt_zero_unaffected() {
         "must not surface the non-empty-database error for an incremental resume: {v}"
     );
 }
+
+// ── Issue #283 / FR-004: knowledge_query_cypher proactively rebuilds the NameIndex ─────
+
+/// A raw-Cypher `CREATE` issued through `knowledge_query_cypher` bypasses every
+/// `NameIndex` insert/update hook. FR-004 requires the handler to notice the mutation and
+/// rebuild the index so the entity is immediately resolvable, without needing the scan
+/// fallback issue #283 also introduces for the endpoint-authority call sites.
+#[tokio::test]
+async fn test_raw_cypher_mutation_proactively_rebuilds_name_index() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_no_wal(Arc::clone(&db));
+
+    let create_query = "CREATE (:Entity {uuid: 'raw-1', name: 'RawEntity', group_id: 'g', \
+         labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+         name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})";
+    let v = dispatch(
+        80,
+        "knowledge_query_cypher",
+        json!({"query": create_query}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        v.get("error").is_none(),
+        "raw Cypher CREATE via knowledge_query_cypher should succeed: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.get_entity_by_name_ci("RawEntity", "g")
+            .unwrap()
+            .expect("plain index-only lookup must find it — proves the proactive rebuild ran")
+            .uuid,
+        "raw-1"
+    );
+    assert_eq!(
+        conn.name_index_fallback_scan_count(),
+        0,
+        "the proactive rebuild must make the entity resolvable without a fallback scan"
+    );
+}
+
+/// A read-only Cypher query through the same handler must not trigger a rebuild — FR-004's
+/// mutation-keyword heuristic should leave the (still-empty, still-trusted) index alone.
+#[tokio::test]
+async fn test_read_only_raw_cypher_does_not_rebuild_name_index() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // Bypass insert_entity so the index starts blind to this entity, isolating the
+        // assertion to "did a MATCH-only query trigger a rebuild" rather than depending on
+        // whether some earlier write already populated it.
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'raw-2', name: 'Untouched', group_id: 'g', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+    let state = make_state_no_wal(Arc::clone(&db));
+
+    let v = dispatch(
+        81,
+        "knowledge_query_cypher",
+        json!({"query": "MATCH (e:Entity) RETURN e.uuid"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        v.get("error").is_none(),
+        "read-only query should succeed: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_name_ci("Untouched", "g")
+            .unwrap()
+            .is_none(),
+        "a read-only query must not trigger a rebuild that would incidentally pick up the \
+         raw-Cypher-created entity"
+    );
+}
+
+/// Index DDL (`CALL CREATE_VECTOR_INDEX(...)`) contains the `CREATE` keyword, which
+/// `looks_like_mutation` alone would treat as an Entity mutation. `log_mutation` (wal.rs) has
+/// always excluded index DDL from its own mutation check via the same `is_index_ddl` filter;
+/// `handle_query_cypher` must apply it too, or a `CREATE_VECTOR_INDEX` call through the raw
+/// Cypher `cypher` MCP scope would trigger a wasted full-Entity-table rebuild scan.
+#[tokio::test]
+async fn test_index_ddl_via_raw_cypher_does_not_rebuild_name_index() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // Bypass insert_entity so the index starts blind to this entity, isolating the
+        // assertion to "did the CREATE_VECTOR_INDEX call trigger a rebuild".
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'raw-4', name: 'StillUntouched', group_id: 'g', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+    let state = make_state_no_wal(Arc::clone(&db));
+
+    let v = dispatch(
+        82,
+        "knowledge_query_cypher",
+        json!({"query": "CALL CREATE_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', \
+             'name_embedding', metric := 'cosine')"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        v.get("error").is_none(),
+        "index-creation DDL should succeed: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_name_ci("StillUntouched", "g")
+            .unwrap()
+            .is_none(),
+        "index DDL must not trigger a NameIndex rebuild that would incidentally pick up the \
+         raw-Cypher-created entity"
+    );
+}
+
+// ── Issue #283 / SC-004: knowledge_status surfaces NameIndex trust + fallback-scan count ──
+
+#[tokio::test]
+async fn test_knowledge_status_surfaces_name_index_trust_and_fallback_scan_count() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'raw-3', name: 'Tracked', group_id: 'g', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})",
+        )
+        .unwrap();
+        // Trigger one fallback scan, then force the untrusted flag directly — simulating the
+        // FR-003 failure posture (a failed post-replay rebuild) independent of this test's
+        // own raw_query call, which doesn't go through the handlers.rs rebuild wiring.
+        assert!(conn
+            .get_entity_by_name_ci_with_scan_fallback("Tracked", "g")
+            .unwrap()
+            .is_some());
+        conn.mark_name_index_untrusted();
+    }
+    let state = make_state_no_wal(db);
+
+    let v = dispatch(82, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(
+        v.get("error").is_none(),
+        "knowledge_status should succeed: {v}"
+    );
+    assert_eq!(
+        v["result"]["name_index_trusted"], false,
+        "status must reflect the untrusted mark: {v}"
+    );
+    assert_eq!(
+        v["result"]["name_index_fallback_scans"], 1,
+        "status must reflect the fallback-scan count: {v}"
+    );
+}

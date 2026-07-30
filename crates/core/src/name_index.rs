@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// In-process accelerator for `Conn::get_entity_by_name_ci`, restoring an indexed access
@@ -16,9 +17,28 @@ use std::sync::RwLock;
 /// This structure is an accelerator only: a hit is always re-verified against the database
 /// (`Conn::get_entity_by_uuid`) before being trusted, so a stale or missing entry can only
 /// ever degrade a lookup to a miss, never return a wrong entity.
-#[derive(Default)]
 pub(crate) struct NameIndex {
     state: RwLock<NameIndexState>,
+    /// Whether the index is believed coherent with the database (FR-003). Starts `true`;
+    /// cleared by [`NameIndex::mark_untrusted`] when a caller knows a write bypassed the
+    /// index (e.g. a failed post-replay rebuild), and restored by a successful [`rebuild`].
+    ///
+    /// [`rebuild`]: NameIndex::rebuild
+    trusted: AtomicBool,
+    /// Count of scan-fallback lookups performed against this index (SC-004), for
+    /// operational visibility into how often the index is missing entities a scan would
+    /// have found. Monotonically increasing for the lifetime of this `NameIndex`.
+    fallback_scans: AtomicU64,
+}
+
+impl Default for NameIndex {
+    fn default() -> Self {
+        Self {
+            state: RwLock::default(),
+            trusted: AtomicBool::new(true),
+            fallback_scans: AtomicU64::new(0),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -28,11 +48,24 @@ struct NameIndexState {
 }
 
 impl NameIndex {
-    /// Records a newly-inserted entity. Idempotent under retries with the same values.
+    /// Records an entity, upserting it: if `uuid` was already tracked under a different
+    /// `(group_id, lower_name, created_at)` — e.g. `get_entity_by_name_ci_with_scan_fallback`
+    /// self-healing a UUID that was previously indexed under a now-stale name after an
+    /// out-of-band rename or group move — the prior `by_key` entry is removed first, so a
+    /// single UUID never accumulates multiple stale candidates across keys. Idempotent under
+    /// retries with the same values, and a plain insert when `uuid` isn't tracked yet (the
+    /// common case: a brand-new entity from `insert_entity`).
     pub(crate) fn insert(&self, uuid: &str, name: &str, group_id: &str, created_at: &str) {
         let lower_name = name.trim().to_lowercase();
         let created_at = crate::db::canonical_created_at_for_index(created_at);
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        if let Some((old_group_id, old_lower_name, old_created_at)) =
+            state.by_uuid.get(uuid).cloned()
+        {
+            if let Some(set) = state.by_key.get_mut(&(old_group_id, old_lower_name)) {
+                set.remove(&(old_created_at, uuid.to_string()));
+            }
+        }
         state
             .by_key
             .entry((group_id.to_string(), lower_name.clone()))
@@ -65,18 +98,45 @@ impl NameIndex {
             .insert(uuid.to_string(), (group_id, lower_name, created_at));
     }
 
-    /// Returns the UUID of the deterministic winner for `(name, group_id)`, if the index
-    /// knows of any matching entity. Callers MUST verify this against the database before
-    /// trusting it (FR-006) — this method alone does not guarantee the entity still exists
-    /// or still matches.
-    pub(crate) fn lookup(&self, name: &str, group_id: &str) -> Option<String> {
+    /// Returns every UUID matching `(name, group_id)`, in winner-first order (the same
+    /// `ORDER BY created_at ASC, uuid ASC` the database's own winner-selection rule uses).
+    /// Callers MUST verify each candidate against the database before trusting it (FR-006)
+    /// — this method alone does not guarantee any candidate still exists or still matches.
+    ///
+    /// Returning every candidate (not just the winner) lets a caller whose winner fails
+    /// verify-on-hit fall through to the next-best candidate instead of degrading straight
+    /// to a miss (FR-005) — e.g. the winner was deleted out-of-band but a same-named entity
+    /// survives.
+    pub(crate) fn lookup_candidates(&self, name: &str, group_id: &str) -> Vec<String> {
         let lower_name = name.trim().to_lowercase();
         let state = self.state.read().unwrap_or_else(|e| e.into_inner());
         state
             .by_key
             .get(&(group_id.to_string(), lower_name))
-            .and_then(|set| set.iter().next())
-            .map(|(_, uuid)| uuid.clone())
+            .map(|set| set.iter().map(|(_, uuid)| uuid.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Whether the index is currently believed coherent with the database (FR-003).
+    pub(crate) fn is_trusted(&self) -> bool {
+        self.trusted.load(Ordering::Relaxed)
+    }
+
+    /// Marks the index as potentially stale, e.g. after a failed post-replay
+    /// `rebuild_name_index()` or a raw-Cypher mutation whose follow-up rebuild failed.
+    /// Cleared by the next successful [`NameIndex::rebuild`].
+    pub(crate) fn mark_untrusted(&self) {
+        self.trusted.store(false, Ordering::Relaxed);
+    }
+
+    /// Records that a scan-fallback lookup was performed (SC-004 telemetry).
+    pub(crate) fn record_fallback_scan(&self) {
+        self.fallback_scans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Total scan-fallback lookups performed against this index since it was created.
+    pub(crate) fn fallback_scan_count(&self) -> u64 {
+        self.fallback_scans.load(Ordering::Relaxed)
     }
 
     /// Replaces the entire index with `rows` (`uuid, name, group_id, created_at`), the
@@ -99,6 +159,7 @@ impl NameIndex {
         }
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
         *state = new_state;
+        self.trusted.store(true, Ordering::Relaxed);
     }
 }
 
@@ -106,18 +167,24 @@ impl NameIndex {
 mod tests {
     use super::*;
 
+    /// Winner-only convenience wrapper over `lookup_candidates`, for tests that only care
+    /// about the deterministic winner and predate FR-005's multi-candidate return.
+    fn winner(idx: &NameIndex, name: &str, group_id: &str) -> Option<String> {
+        idx.lookup_candidates(name, group_id).into_iter().next()
+    }
+
     #[test]
     fn lookup_returns_none_when_empty() {
         let idx = NameIndex::default();
-        assert_eq!(idx.lookup("Alice", "g1"), None);
+        assert_eq!(winner(&idx, "Alice", "g1"), None);
     }
 
     #[test]
     fn insert_then_lookup_is_case_and_whitespace_insensitive() {
         let idx = NameIndex::default();
         idx.insert("u1", "Alice", "g1", "2026-01-01 00:00:00");
-        assert_eq!(idx.lookup(" alice ", "g1"), Some("u1".to_string()));
-        assert_eq!(idx.lookup("alice", "g2"), None);
+        assert_eq!(winner(&idx, " alice ", "g1"), Some("u1".to_string()));
+        assert_eq!(winner(&idx, "alice", "g2"), None);
     }
 
     #[test]
@@ -127,7 +194,23 @@ mod tests {
         idx.insert("a-earliest", "Alice", "g1", "2026-01-01 00:00:00");
         idx.insert("b-tie", "Alice", "g1", "2026-01-01 00:00:00");
         // "a-earliest" wins on created_at; among ties, the smallest uuid wins.
-        assert_eq!(idx.lookup("Alice", "g1"), Some("a-earliest".to_string()));
+        assert_eq!(winner(&idx, "Alice", "g1"), Some("a-earliest".to_string()));
+    }
+
+    #[test]
+    fn lookup_candidates_returns_all_matches_in_winner_first_order() {
+        let idx = NameIndex::default();
+        idx.insert("z-later", "Alice", "g1", "2026-02-01 00:00:00");
+        idx.insert("a-earliest", "Alice", "g1", "2026-01-01 00:00:00");
+        idx.insert("b-tie", "Alice", "g1", "2026-01-01 00:00:00");
+        assert_eq!(
+            idx.lookup_candidates("Alice", "g1"),
+            vec![
+                "a-earliest".to_string(),
+                "b-tie".to_string(),
+                "z-later".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -135,16 +218,16 @@ mod tests {
         let idx = NameIndex::default();
         idx.insert("early", "Alice", "g1", "2026-01-01 00:00:00");
         idx.insert("late", "Alice", "g1", "2026-02-01 00:00:00");
-        assert_eq!(idx.lookup("Alice", "g1"), Some("early".to_string()));
+        assert_eq!(winner(&idx, "Alice", "g1"), Some("early".to_string()));
         idx.update_created_at("late", "2025-01-01 00:00:00");
-        assert_eq!(idx.lookup("Alice", "g1"), Some("late".to_string()));
+        assert_eq!(winner(&idx, "Alice", "g1"), Some("late".to_string()));
     }
 
     #[test]
     fn update_created_at_on_unknown_uuid_is_a_noop() {
         let idx = NameIndex::default();
         idx.update_created_at("ghost", "2026-01-01 00:00:00");
-        assert_eq!(idx.lookup("Alice", "g1"), None);
+        assert_eq!(winner(&idx, "Alice", "g1"), None);
     }
 
     #[test]
@@ -161,7 +244,7 @@ mod tests {
         // Chronologically earlier (Jan), space-formatted.
         idx.insert("earlier-space", "Alice", "g1", "2026-01-01 00:00:00");
         assert_eq!(
-            idx.lookup("Alice", "g1"),
+            winner(&idx, "Alice", "g1"),
             Some("earlier-space".to_string()),
             "the chronologically earliest entry must win regardless of its created_at string format"
         );
@@ -177,7 +260,61 @@ mod tests {
             "g1".to_string(),
             "2026-01-01 00:00:00".to_string(),
         )]);
-        assert_eq!(idx.lookup("Alice", "g1"), None);
-        assert_eq!(idx.lookup("Bob", "g1"), Some("fresh".to_string()));
+        assert_eq!(winner(&idx, "Alice", "g1"), None);
+        assert_eq!(winner(&idx, "Bob", "g1"), Some("fresh".to_string()));
+    }
+
+    #[test]
+    fn trusted_by_default_and_after_rebuild_untrusted_only_after_mark_untrusted() {
+        let idx = NameIndex::default();
+        assert!(idx.is_trusted());
+        idx.mark_untrusted();
+        assert!(!idx.is_trusted());
+        idx.rebuild(vec![]);
+        assert!(idx.is_trusted(), "a successful rebuild restores trust");
+    }
+
+    #[test]
+    fn fallback_scan_count_accumulates() {
+        let idx = NameIndex::default();
+        assert_eq!(idx.fallback_scan_count(), 0);
+        idx.record_fallback_scan();
+        idx.record_fallback_scan();
+        assert_eq!(idx.fallback_scan_count(), 2);
+    }
+
+    #[test]
+    fn insert_upserts_removing_a_prior_entry_under_a_different_key() {
+        let idx = NameIndex::default();
+        idx.insert("u1", "Alice", "g1", "2026-01-01 00:00:00");
+        assert_eq!(winner(&idx, "Alice", "g1"), Some("u1".to_string()));
+
+        // Simulates a self-heal after an out-of-band rename: same UUID, new name, same
+        // created_at. The old ("g1", "alice") key's entry for "u1" must be removed, not left
+        // behind as a permanently stale candidate.
+        idx.insert("u1", "Bob", "g1", "2026-01-01 00:00:00");
+        assert_eq!(
+            winner(&idx, "Bob", "g1"),
+            Some("u1".to_string()),
+            "must resolve under the new name"
+        );
+        assert_eq!(
+            idx.lookup_candidates("Alice", "g1"),
+            Vec::<String>::new(),
+            "the old key must not retain a stale candidate for the renamed uuid"
+        );
+    }
+
+    #[test]
+    fn insert_upserts_across_a_group_move() {
+        let idx = NameIndex::default();
+        idx.insert("u1", "Alice", "g1", "2026-01-01 00:00:00");
+        idx.insert("u1", "Alice", "g2", "2026-01-01 00:00:00");
+        assert_eq!(winner(&idx, "Alice", "g2"), Some("u1".to_string()));
+        assert_eq!(
+            idx.lookup_candidates("Alice", "g1"),
+            Vec::<String>::new(),
+            "the old group's key must not retain a stale candidate after a group move"
+        );
     }
 }

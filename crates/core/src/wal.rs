@@ -88,26 +88,11 @@ impl WalWriter {
         database: &str,
     ) -> Result<(), Error> {
         // Filter index DDL before first-token check (higher priority per AD-W7).
-        let upper = cypher.to_uppercase();
-        if upper.contains("CREATE_VECTOR_INDEX")
-            || upper.contains("CREATE INDEX")
-            || upper.contains("DROP INDEX")
-        {
+        if is_index_ddl(cypher) {
             return Ok(());
         }
 
-        // Scan all tokens outside single-quoted literals for mutation keywords.
-        // MATCH-prefixed writes (e.g. "MATCH (...) DETACH DELETE" or "MATCH (...) SET ...")
-        // don't start with the DML verb, so a first-token check misses them. Stripping quoted
-        // literals first prevents entity names that happen to contain DML words from being
-        // treated as mutations.
-        let is_mutation = strip_quoted_literals(&upper).split_whitespace().any(|t| {
-            matches!(
-                t,
-                "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
-            )
-        });
-        if !is_mutation {
+        if !looks_like_mutation(cypher) {
             return Ok(());
         }
 
@@ -324,6 +309,56 @@ pub(crate) fn strip_quoted_literals(s: &str) -> String {
     result
 }
 
+/// Whether `cypher` is index DDL (`CREATE_VECTOR_INDEX`, `CREATE INDEX`, `DROP INDEX`), which
+/// `looks_like_mutation` would otherwise misclassify as an `Entity`-mutating write on its
+/// `CREATE`/`DROP` keywords. Checked ahead of `looks_like_mutation` wherever the result decides
+/// whether to pay for `Entity`-related work (WAL logging, `NameIndex` rebuild) — index DDL never
+/// touches `Entity` rows, so neither is needed for it (higher priority per AD-W7).
+pub(crate) fn is_index_ddl(cypher: &str) -> bool {
+    let upper = cypher.to_uppercase();
+    upper.contains("CREATE_VECTOR_INDEX")
+        || upper.contains("CREATE INDEX")
+        || upper.contains("DROP INDEX")
+}
+
+/// Whether `cypher` looks like a write (as opposed to a read-only query), by scanning all
+/// tokens outside single-quoted literals for mutation keywords. MATCH-prefixed writes (e.g.
+/// `"MATCH (...) DETACH DELETE"` or `"MATCH (...) SET ..."`) don't start with the DML verb,
+/// so a first-token check would miss them. Stripping quoted literals first prevents entity
+/// names that happen to contain DML words from being misclassified as mutations. Parentheses
+/// are also treated as token boundaries (in addition to whitespace) so a keyword directly
+/// touching punctuation with no space — `"CREATE(:Entity"`, `"MATCH (n)SET"` — still tokenizes
+/// as a standalone word instead of being swallowed into one run that never matches exactly.
+/// This can only ever turn a prior false negative into a (correct) match, never the reverse,
+/// since it splits existing tokens further rather than merging any together.
+///
+/// Originally `log_mutation`'s inline check (WAL-logging decision); also used by
+/// `handle_query_cypher` (issue #283, FR-004) to decide whether a raw-Cypher call through the
+/// `cypher` MCP scope needs a follow-up `NameIndex` rebuild — reusing this heuristic keeps the
+/// two "does this look like a write" decisions from silently diverging. Callers that care about
+/// index DDL specifically (see `is_index_ddl`) should check that first, since this function
+/// alone would classify `CREATE INDEX ...` as a mutation.
+pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
+    let upper = cypher.to_uppercase();
+    let stripped = strip_quoted_literals(&upper);
+    let spaced: String = stripped
+        .chars()
+        .flat_map(|c| {
+            if c == '(' || c == ')' {
+                vec![' ', c, ' ']
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    spaced.split_whitespace().any(|t| {
+        matches!(
+            t,
+            "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
+        )
+    })
+}
+
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
 fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
     let content = fs::read(path)?;
@@ -340,4 +375,26 @@ fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_mutation_detects_keywords_touching_parentheses() {
+        // Regression for a punctuation-adjacency gap: split_whitespace alone treats
+        // "CREATE(:Entity" and "N)SET" as single opaque tokens that never equal "CREATE"/"SET"
+        // exactly, silently missing real mutations that happen to have no space before/after
+        // a paren.
+        assert!(looks_like_mutation("CREATE(:Entity {uuid: 'x'})"));
+        assert!(looks_like_mutation("MATCH (n)SET n.x = 1"));
+        assert!(looks_like_mutation("MATCH (n)DETACH DELETE n"));
+    }
+
+    #[test]
+    fn looks_like_mutation_still_ignores_read_only_queries() {
+        assert!(!looks_like_mutation("MATCH (n) RETURN n"));
+        assert!(!looks_like_mutation("MATCH(n)RETURN n"));
+    }
 }

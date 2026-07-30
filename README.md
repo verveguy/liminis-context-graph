@@ -321,6 +321,21 @@ discovering it only via a search or ingest attempt. The same field appears on
 background-job path) for the specific rebuild that produced it; it is omitted from dry-run
 rebuild results, since a dry run never touches indices.
 
+The response also includes `name_index_trusted` (boolean) and `name_index_fallback_scans`
+(integer), reporting the health of the in-process `NameIndex` accelerator behind
+case-insensitive entity name lookups (ADR-0038). `name_index_trusted` is `true` unless a write
+path is known to have bypassed the index — e.g. a raw-Cypher mutation via
+`knowledge_query_cypher` whose follow-up rebuild failed, or a post-replay
+`rebuild_name_index()` failure inside `knowledge_rebuild_from_wal` — and goes back to `true`
+once the next rebuild succeeds. `name_index_fallback_scans` counts how many times an
+endpoint-existence lookup (the #218/#283 "does this entity exist anywhere in the group" check
+used during edge-endpoint resolution) missed the index and fell back to a bounded database
+scan; it only increments on a miss; a healthy, coherent index keeps this at (or near) `0`. Both
+fields are `null` while the service is degraded (no connected database). A rising
+`name_index_fallback_scans` count, or a `name_index_trusted: false` that doesn't clear on its
+own, signals index desync worth investigating — see issue #283 and
+[ADR-0283](docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the mechanism.
+
 ## Embedder sidecar
 
 `OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
