@@ -12,9 +12,12 @@
 /// in that window (e.g. one long unbreakable token).
 ///
 /// Text at or below `max_chars` returns a single unit equal to the input. `max_chars == 0` is
-/// not a supported input (the advisory threshold is always a positive char count) and produces
-/// one unit per char via the hard-cut fallback.
+/// not an expected input (the advisory threshold is always a positive char count), but is
+/// clamped to 1 rather than left to loop forever, degrading to one unit per char.
 pub fn split_into_units(text: &str, max_chars: usize) -> Vec<String> {
+    // A zero-width window never advances `start` below, which would hang the caller forever.
+    // Clamp to 1 so `max_chars == 0` degrades to "one unit per char", matching the doc comment.
+    let max_chars = max_chars.max(1);
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {
         return vec![text.to_string()];
@@ -119,5 +122,18 @@ mod tests {
     fn empty_text_returns_single_empty_unit() {
         let units = split_into_units("", 8000);
         assert_eq!(units, vec!["".to_string()]);
+    }
+
+    #[test]
+    fn zero_max_chars_degrades_to_one_unit_per_char_without_hanging() {
+        // A misconfigured LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS=0 must not hang the caller: a
+        // zero-width window makes no progress unless max_chars is clamped to at least 1.
+        let text = "abc";
+        let units = split_into_units(text, 0);
+        assert_eq!(
+            units,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        assert_eq!(units.concat(), text);
     }
 }
