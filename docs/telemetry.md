@@ -89,7 +89,7 @@ Emitted by `handle_knowledge_process_chunk` whenever `chunk_text` exceeds `LCG_C
 | `source_file` | string | Source file path or identifier from the request |
 | `chunk_text_chars` | u64 | Character count of the incoming `chunk_text` |
 | `threshold_chars` | u64 | The advisory threshold in effect for this call |
-| `unit_count` | u64 | Number of episodes backing `chunk_id` after the call completes (the split unit count for a fresh/replaced ingest, or the existing unit count for a no-op) |
+| `unit_count` | u64 | Number of episodes backing `chunk_id` after the call completes (the split unit count for a fresh/replaced ingest, or the existing unit count for a no-op). For a fresh/replaced ingest, the event fires before extraction begins, so on a mid-split failure `unit_count` is the *intended* split count, not necessarily the surviving committed count. |
 
 Example:
 ```json

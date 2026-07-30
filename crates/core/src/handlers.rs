@@ -646,6 +646,22 @@ async fn handle_knowledge_process_chunk(
         // exact-match deletion must keep working unchanged).
         let units = chunk_split::split_into_units(&chunk_text, threshold);
         let unit_count = units.len();
+
+        // Emit before the loop, not after: if add_episode fails partway through (e.g. unit 3 of
+        // 5), the `?` below propagates immediately and a post-loop emit would never fire, even
+        // though the split was attempted and units 0..idx-1 already committed as orphaned
+        // episodes (self-healed on retry, but invisible to telemetry in the meantime). Firing
+        // here means unit_count reflects the intended split count, not necessarily the surviving
+        // committed count on a partial failure.
+        state.sink.emit(TelemetryEvent::ChunkTextOversized {
+            ts_ms: now_ms(),
+            chunk_id: chunk_id.clone(),
+            source_file: source_file.clone(),
+            chunk_text_chars,
+            threshold_chars: threshold,
+            unit_count,
+        });
+
         let mut episode_uuids = Vec::with_capacity(unit_count);
         let mut nodes_extracted = 0usize;
         let mut edges_extracted = 0usize;
@@ -679,15 +695,6 @@ async fn handle_knowledge_process_chunk(
         response["edges_dropped_unresolvable"] = json!(edges_dropped_unresolvable);
         response["edges_reclassified_unclassified"] = json!(edges_reclassified_unclassified);
         response["warning"] = oversized_warning(chunk_text_chars, threshold);
-
-        state.sink.emit(TelemetryEvent::ChunkTextOversized {
-            ts_ms: now_ms(),
-            chunk_id: chunk_id.clone(),
-            source_file: source_file.clone(),
-            chunk_text_chars,
-            threshold_chars: threshold,
-            unit_count,
-        });
     } else {
         let result = episode::add_episode(
             state,

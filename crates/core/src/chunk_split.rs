@@ -14,6 +14,13 @@
 /// Text at or below `max_chars` returns a single unit equal to the input. `max_chars == 0` is
 /// not an expected input (the advisory threshold is always a positive char count), but is
 /// clamped to 1 rather than left to loop forever, degrading to one unit per char.
+///
+/// The backward whitespace scan has no lower bound other than `start` itself: a window that
+/// contains one whitespace character very close to `start`, followed by a long whitespace-free
+/// run past the `max_chars` mark, cuts near `start` and repeats — producing a run of small units
+/// until the whitespace-free stretch is exhausted. Invariants (unit length, lossless
+/// concatenation) still hold; this is a quality/performance caveat for pathological input, not a
+/// correctness issue.
 pub fn split_into_units(text: &str, max_chars: usize) -> Vec<String> {
     // A zero-width window never advances `start` below, which would hang the caller forever.
     // Clamp to 1 so `max_chars == 0` degrades to "one unit per char", matching the doc comment.
