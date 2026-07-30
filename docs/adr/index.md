@@ -54,6 +54,7 @@ Decisions are recorded chronologically. Numbers are project-local and immutable 
 | [0048](0048-rust-extraction-quality-eval-harness.md) | Rust Extraction-Quality Eval Harness — Architecture and Judge Design | 2026-07-26 |
 | [0049](0049-bare-path-ontology-loader-and-cli-mode-override.md) | Bare-Path Ontology Loader and CLI Mode-Override Precedence | 2026-07-27 |
 | [0050](0050-blind-pairwise-judging.md) | Blind Pairwise Judging for the Extraction-Quality Eval Harness | 2026-07-27 |
+| [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
 
 ## Historical numbering
 
