@@ -238,8 +238,8 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   sees the other's in-flight write. The idempotency guarantee above therefore only holds for
   *serialized* (non-concurrent) calls for a given `chunk_id`, first-time or resubmission alike;
   the general fix is per-`(group_id, chunk_id)` locking held for the full request duration, which
-  needs a new `AppState` field and is a larger change than fits this feature — tracked as a
-  recommended follow-up rather than fixed here. Two further shapes of the same underlying gap,
+  needs a new `AppState` field and is a larger change than fits this feature — tracked as
+  follow-up issue #288 rather than fixed here. Two further shapes of the same underlying gap,
   both review-caught and neither fixed for the same reason:
   - **The split loop itself is not atomic against a concurrent `knowledge_delete_chunk_episode`
     for the same `chunk_id`.** Each unit's `add_episode` call acquires and releases `write_lock`
@@ -263,6 +263,22 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
     rather than by design, and there is no way to tell from the data alone which of the two
     divergent sets a later reader should trust. Not a *deletion*-correctness problem (no
     unintended data loss), but a lineage-correctness one.
+
+- **No upstream size cap on `chunk_text` exists at the IPC/transport layer**, so `chunk_split.rs`'s
+  documented pathological-input worst case (`O(chars.len() * max_chars)`, see that file's doc
+  comment) is reachable at whatever scale a caller submits, not just as a Big-O footnote. The
+  service reads each request as one line via `tokio::io::AsyncBufReadExt::lines()`
+  (`crates/service/src/main.rs::handle_connection`), which has no built-in maximum line length —
+  it buffers until a newline is found, bounded only by available memory. A `chunk_text` engineered
+  to hit the splitter's worst case (whitespace only very close to the start of many consecutive
+  `max_chars` windows) could tie up a blocking-pool thread for a long time at multi-megabyte
+  scale. `spawn_blocking` (see above) keeps this off the async executor, so it degrades one
+  blocking-pool thread rather than stalling request handling generally, but it is not an active
+  mitigation — no request-level size limit or cost-based rejection exists today. Raised in
+  Validate-stage review of PR #286; accepted as an extension of the already-documented
+  unbounded-chunk_text-size gap (#282's own scope explicitly excludes introducing a size cap, only
+  a warning threshold) rather than fixed here — a hard IPC-layer request size limit is a separate,
+  broader decision than this issue's chunk-splitting scope.
 
 ## Related
 

@@ -501,6 +501,14 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
         };
     }
 
+    // `unit_count` here is scoped entirely to this reconstruction: it's read from whichever row
+    // `get_episodes_by_chunk_id` happens to return first (iteration-order-dependent, not a
+    // stable value), used only to drive the `consistent_n`/`complete_sequence` checks below, and
+    // never returned from this function or exposed in a response/telemetry field. Any
+    // inconsistency in what the rows actually report falls through to `Anomalous` regardless of
+    // which row was seen first. This is unrelated to the response-level `unit_count` field
+    // (`handle_knowledge_process_chunk`'s split branch, and `ChunkTextOversized` telemetry),
+    // which is always computed fresh from `chunk_split::split_into_units(..).len()`.
     let unit_count = split_units[0].1;
     let consistent_n = split_units.iter().all(|(_, n, _, _)| *n == unit_count);
     if !consistent_n || split_units.len() != unit_count {
