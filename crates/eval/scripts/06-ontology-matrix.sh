@@ -30,7 +30,6 @@
 
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/_common.sh"
-HERE_PY="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 HAIKU="${LCG_EVAL_HAIKU:-claude-haiku-4-5-20251001}"
 ONTOLOGY="${LCG_EVAL_ONTOLOGY:-$REPO/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml}"
@@ -164,25 +163,11 @@ if [ -n "${DRY_RUN:-}" ]; then
         echo "      $leg: LIVE — no cassette at $cas"
       fi
     done
-
-    # The aborts a real run would hit are previewed too, not just the replay/live plan.
-    # Two clean REPLAY lines followed by an immediate abort on the real invocation is the
-    # same failure as printing the wrong filenames: DRY_RUN exists to show what will
-    # happen, and a preview that omits the stopping conditions is not one.
-    for cas in "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS"; do
-      if cassette_complete "$cas" "$EXPECTED"; then
-        keyerr="$(cassette_key_check "$cas" 2>&1)" || case $? in
-          1) echo "      WOULD ABORT: $cas has duplicate keys ($keyerr)" ;;
-          2) echo "      WOULD ABORT: $cas is corrupt or truncated ($keyerr)" ;;
-        esac
-      fi
-    done
-    if cassette_complete "$BASE_CAS" "$EXPECTED" && cassette_complete "$CAND_CAS" "$EXPECTED" \
-       && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
-      echo "      WOULD ABORT: baseline and candidate cassettes are byte-identical —"
-      echo "                   the noise floor would be 1.000 by construction"
-    fi
   done
+  echo
+  echo "    Corrupt/duplicate-keyed cassettes and identical-content cassette pairs are now"
+  echo "    guarded by lcg-eval itself (#279) — it refuses those before any outbound call,"
+  echo "    on both --dry-run and a real invocation, so they are not re-previewed here."
   echo
   echo "==> DRY_RUN: nothing executed."
   exit 0
@@ -253,11 +238,10 @@ for mode in $MODES; do
       qwen) cas="$QWEN_CAS"; live="oai-http:url=$URL,model=$MODEL" ;;
     esac
     if cassette_complete "$cas" "$EXPECTED"; then
-      # Complete by count is not the same as trustworthy. A cassette appended to outside
-      # backup_if_present — a hand-resumed capture, a stray copy — holds duplicate keys,
-      # and replay serves duplicates FIFO, so a chunk would be scored against a stale
-      # verdict rather than failing. 04 and 05 already reject this before trusting an input.
-      require_replayable_cassette "$cas"
+      # Complete by count is not the same as trustworthy — a cassette appended to outside
+      # backup_if_present (a hand-resumed capture, a stray copy) can hold duplicate keys or
+      # be otherwise corrupt. lcg-eval itself now rejects that before making any outbound
+      # call (#279 FR-002/FR-003), so there is no separate pre-trust check here anymore.
       BACKENDS+=(--backend "$leg=cassette:path=$cas")
       PLAN+=("$leg=replay($(cassette_records "$cas") records)")
     else
@@ -279,21 +263,12 @@ for mode in $MODES; do
   # left over from a reboot cannot silently produce a thinking-mode capture.
   [ "$NEED_SERVER" = "1" ] && require_server_healthy
 
-  # The noise floor dies silently if baseline and candidate are the same data, so check it
-  # whenever both are replayed. When either is live they are independent by construction,
-  # and the post-run check below covers the freshly recorded pair.
-  # "$EXPECTED", not cassette_complete's 228 default. Omitting it made this guard dead under
-  # every LIMIT run: a 3-record cassette can never satisfy n*10 >= 228*9, so two identical
-  # smoke cassettes sailed past the pre-$BIN abort and the script went on to invoke the
-  # binary — capturing qwen live — before the post-run check caught the same condition.
-  # The guard that exists to stop a wasted run was skipped precisely in the mode designed to
-  # make wasted runs cheap.
-  if cassette_complete "$BASE_CAS" "$EXPECTED" && cassette_complete "$CAND_CAS" "$EXPECTED"; then
-    if [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
-      die "$BASE_CAS and $CAND_CAS are byte-identical — the noise floor would be 1.000 by
-       construction. One was copied over the other; delete both and re-capture."
-    fi
-  fi
+  # The noise floor dies silently if baseline and candidate replay the same cassette
+  # content. That used to be checked here, pre-$BIN; it is now lcg-eval's own FR-004 guard
+  # (#279), which fires before any outbound call on both replayed legs — no separate
+  # pre-flight check is needed, and unlike the shell version it cannot go dead under a
+  # LIMIT run (it compares against whatever scope was actually requested, not a hardcoded
+  # 228).
 
   REPORTS+=("$REPORT")
   # Belt and braces: even with a distinct name, never lose a previous result silently.
@@ -312,30 +287,16 @@ for mode in $MODES; do
     --output "$REPORT"
   echo "    finished $(date '+%H:%M:%S') — report: $REPORT"
 
-  # Everything below runs AFTER $BIN, because capture and judging share one invocation and
-  # a freshly recorded cassette cannot be inspected before it is judged.
+  # lcg-eval itself now validates each recorded cassette's record count against the
+  # report's own chunks_run - errors accounting before it ever prints or writes the report
+  # (#279 FR-006) — a truncated capture aborts the invocation above with a nonzero exit and
+  # no report on disk, rather than needing a separate post-hoc pass here.
   #
-  # The check is against the REPORT'S OWN ACCOUNTING, not the 90% completeness heuristic
-  # used to pick replay legs. Those answer different questions: pre-run there is no report,
-  # so a threshold is the only option; post-run the report states chunks_run and errors, so
-  # the expected record count is exact. Using the heuristic here conflated a truncated
-  # capture (process died, invalid) with one where some chunks legitimately errored (normal,
-  # and already reported in error_rate). It failed on its first live run for exactly that
-  # reason: at LIMIT=3 a single malformed qwen output is a 33% error rate, so a perfectly
-  # good report was declared INVALID. A proportion cannot distinguish one error from
-  # truncation at small N.
-  python3 "$HERE_PY/validate_report.py" "$REPORT" "$BASE_CAS" "$CAND_CAS" "$QWEN_CAS" \
-    || die "$REPORT failed post-run validation (see above)"
-
-  # Capture and judging happen in one invocation, so a freshly recorded pair cannot be
-  # compared before it is judged. Asserting afterwards at least stops a degenerate report
-  # being read as a real one.
-  if [ -s "$BASE_CAS" ] && [ -s "$CAND_CAS" ] \
-     && [ "$(sha256_of "$BASE_CAS")" = "$(sha256_of "$CAND_CAS")" ]; then
-    die "$REPORT is INVALID: the two hosted cassettes came out byte-identical, so the
-       noise floor in it is 1.000 by construction rather than measured. Delete both
-       cassettes and the report, and re-capture."
-  fi
+  # It also now catches a freshly recorded pair coming out byte-identical (#279, post-run
+  # half of FR-004): capture and judging share one invocation, so there is nothing to hash
+  # before $BIN runs, but lcg-eval hashes its own --record-cassette output right after and
+  # before ever printing or writing the report — no separate post-hoc pass is needed here
+  # either.
   echo
 done
 

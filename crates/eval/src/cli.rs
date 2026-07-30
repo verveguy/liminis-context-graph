@@ -47,22 +47,6 @@ fn parse_judge_mode(v: &str) -> Result<JudgeMode, String> {
     }
 }
 
-/// Extracts the `path=` value out of a `cassette:path=<PATH>[,...]` backend spec, or
-/// `None` for any other backend kind. Hand-parsed rather than depending on
-/// `backend::parse_backend_spec` (Plan's Key Decision: keeps `cli.rs` free of a new
-/// dependency on `backend.rs`), mirroring this file's existing kind-prefix extraction
-/// convention used by the `--record-cassette` validation below.
-fn cassette_path(spec: &str) -> Option<&str> {
-    let (kind, rest) = spec.split_once(':')?;
-    if kind != "cassette" {
-        return None;
-    }
-    rest.split(',').find_map(|kv| {
-        let (k, v) = kv.split_once('=')?;
-        (k == "path").then_some(v)
-    })
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackendArg {
     pub name: String,
@@ -89,6 +73,9 @@ pub struct Args {
     pub ontology: Option<String>,
     pub ontology_mode: OntologyMode,
     pub judge_mode: JudgeMode,
+    /// FR-001: resolve every `--backend` spec (replay-or-live decision, cassette record
+    /// count, requested scope) and print the plan without making any outbound call.
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,10 +132,11 @@ OPTIONS:
                                  Reference-mode judge calls are skipped entirely in this
                                  mode (use 'both' to get both).
                                  'both': runs both passes.
-                                 Under pairwise/both, two backends whose specs resolve to
-                                 the identical cassette:path=<PATH> are rejected at parse
-                                 time — a self-comparison is a degenerate, trivial 100%-tie
-                                 result, not a meaningful pairwise result.
+                                 Note: regardless of --judge-mode, two backends whose
+                                 cassettes resolve to the same path or byte-identical
+                                 content are rejected before any outbound call (a
+                                 self-comparison is a degenerate, trivial 100%-tie result).
+                                 Use --dry-run to preview that guard.
     --record-cassette <NAME>=<PATH>
                                  Wrap the named backend in a cassette recorder (#232),
                                  writing to PATH, so this run also captures a cassette.
@@ -161,6 +149,13 @@ OPTIONS:
                                  reported.
     --output <PATH>              Also write the JSON report to PATH (always printed to stdout
                                  as human-readable text).
+    --dry-run                    Resolve every --backend spec (replay-or-live decision,
+                                 cassette record count, requested scope) and print the plan,
+                                 without making any outbound call. Exits 0 for a syntactically
+                                 valid invocation even when the plan shows a guard that would
+                                 abort a real run — that guard is named in the plan output,
+                                 not turned into a nonzero exit. Combining with
+                                 --record-cassette writes nothing.
     -h, --help                   Print this help and exit.
 
 Documentation: https://github.com/verveguy/liminis-context-graph — see README.md's
@@ -183,11 +178,13 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut ontology_mode: Option<OntologyMode> = None;
     let mut judge_mode: Option<JudgeMode> = None;
     let mut want_help = false;
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--help" | "-h" => want_help = true,
+            "--dry-run" => dry_run = true,
             "--backend" => {
                 i += 1;
                 let v = args
@@ -368,39 +365,16 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
 
     let judge_mode = judge_mode.unwrap_or(DEFAULT_JUDGE_MODE);
 
-    // FR-011: a pairwise pass over two backends that resolve to the identical cassette
-    // path is degenerate — a guaranteed 100%-tie result computed and buried in the report
-    // rather than caught up front. Scoped narrowly to `cassette:path=` equality (not "any
-    // two backends sharing a spec string") so the existing --reference noise-floor pattern
-    // — the same *live* spec (e.g. `anthropic:model=X`) configured twice under different
-    // names, which produces two independently-sampled, non-degenerate outputs — keeps
-    // working under pairwise mode; that pair is User Story 2's mandatory calibration
-    // control, not a case to reject.
-    if judge_mode != JudgeMode::Reference {
-        if backends.len() < 2 {
-            return Err(
-                "--judge-mode pairwise/both requires at least two --backend entries; there is \
-                 no pair to compare"
-                    .to_string(),
-            );
-        }
-        for i in 0..backends.len() {
-            for j in (i + 1)..backends.len() {
-                if let (Some(path_i), Some(path_j)) = (
-                    cassette_path(&backends[i].spec),
-                    cassette_path(&backends[j].spec),
-                ) {
-                    if path_i == path_j {
-                        return Err(format!(
-                            "--judge-mode pairwise/both cannot compare backend '{}' with \
-                             backend '{}': both resolve to the identical cassette path \
-                             '{}', which is a degenerate self-comparison",
-                            backends[i].name, backends[j].name, path_i
-                        ));
-                    }
-                }
-            }
-        }
+    // A pairwise pass needs a pair — fail fast rather than silently scoring nothing.
+    // (The identical-cassette degenerate-pair guard formerly here (FR-011) is superseded by
+    // `plan::resolve`'s unconditional, content-hash-aware FR-004 check — cli.rs stays free
+    // of file I/O, so that check now lives where the file reads already happen.)
+    if judge_mode != JudgeMode::Reference && backends.len() < 2 {
+        return Err(
+            "--judge-mode pairwise/both requires at least two --backend entries; there is \
+             no pair to compare"
+                .to_string(),
+        );
     }
 
     Ok(CliMode::Run(Box::new(Args {
@@ -416,6 +390,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         ontology,
         ontology_mode,
         judge_mode,
+        dry_run,
     })))
 }
 
@@ -652,6 +627,7 @@ mod tests {
             "--ontology",
             "--ontology-mode",
             "--judge-mode",
+            "--dry-run",
             "--help",
         ] {
             assert!(u.contains(flag), "usage missing {flag}");
@@ -785,23 +761,8 @@ mod tests {
         assert!(err.contains("bogus"));
     }
 
-    // ── FR-011: degenerate same-cassette-path pair rejection ────────────────────────
-
-    #[test]
-    fn pairwise_mode_rejects_duplicate_cassette_path() {
-        let err = parse_args(&args(&[
-            "--backend",
-            "a=cassette:path=/tmp/shared.jsonl",
-            "--backend",
-            "b=cassette:path=/tmp/shared.jsonl",
-            "--judge-mode",
-            "pairwise",
-        ]))
-        .unwrap_err();
-        assert!(err.contains('a'));
-        assert!(err.contains('b'));
-        assert!(err.contains("/tmp/shared.jsonl"));
-    }
+    // ── judge-mode pair requirement (the identity/duplicate-cassette guards themselves
+    //    moved to plan.rs's FR-004 check — see plan.rs's own test module) ────────────
 
     #[test]
     fn pairwise_mode_rejects_a_single_backend() {
@@ -832,38 +793,6 @@ mod tests {
     }
 
     #[test]
-    fn both_mode_rejects_duplicate_cassette_path() {
-        let err = parse_args(&args(&[
-            "--backend",
-            "a=cassette:path=/tmp/shared.jsonl",
-            "--backend",
-            "b=cassette:path=/tmp/shared.jsonl",
-            "--judge-mode",
-            "both",
-        ]))
-        .unwrap_err();
-        assert!(err.contains("/tmp/shared.jsonl"));
-    }
-
-    #[test]
-    fn reference_mode_accepts_duplicate_cassette_path_check_is_gated() {
-        // The default (reference) mode never runs pairwise judging, so this same
-        // configuration that FR-011 rejects under pairwise/both must be accepted here —
-        // the check is gated on judge_mode, not a global backend-configuration rule.
-        match parse_args(&args(&[
-            "--backend",
-            "a=cassette:path=/tmp/shared.jsonl",
-            "--backend",
-            "b=cassette:path=/tmp/shared.jsonl",
-        ]))
-        .unwrap()
-        {
-            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Reference),
-            other => panic!("expected Run mode, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn pairwise_mode_accepts_same_live_spec_under_two_names_noise_floor_pattern() {
         // User Story 2's mandatory calibration control: the same *live* spec configured
         // twice under different names produces two independently-sampled, non-degenerate
@@ -883,20 +812,26 @@ mod tests {
         }
     }
 
+    // ── --dry-run (FR-001) ───────────────────────────────────────────────────────
+
     #[test]
-    fn pairwise_mode_accepts_distinct_cassette_paths() {
-        match parse_args(&args(&[
-            "--backend",
-            "a=cassette:path=/tmp/one.jsonl",
-            "--backend",
-            "b=cassette:path=/tmp/two.jsonl",
-            "--judge-mode",
-            "pairwise",
-        ]))
-        .unwrap()
-        {
-            CliMode::Run(a) => assert_eq!(a.judge_mode, JudgeMode::Pairwise),
+    fn dry_run_defaults_to_false() {
+        match parse_args(&args(&["--backend", "baseline=anthropic"])).unwrap() {
+            CliMode::Run(a) => assert!(!a.dry_run),
             other => panic!("expected Run mode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dry_run_flag_is_parsed() {
+        match parse_args(&args(&["--backend", "baseline=anthropic", "--dry-run"])).unwrap() {
+            CliMode::Run(a) => assert!(a.dry_run),
+            other => panic!("expected Run mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_text_documents_dry_run() {
+        assert!(usage().contains("--dry-run"));
     }
 }

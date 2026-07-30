@@ -106,39 +106,18 @@ cassette_complete "$D/absent.jsonl"; assert_rc 1 $? "missing file is not complet
 assert_eq 228 "$(cassette_records "$D/full.jsonl")" "cassette_records counts records"
 assert_eq 0 "$(cassette_records "$D/absent.jsonl")" "cassette_records on a missing file is 0"
 
-echo "== _common.sh: cassette_key_check diagnosis (1 = duplicates, 2 = anything else) =="
-K="$WORKROOT/keys"; mkdir -p "$K"
-printf '{"key":"a"}\n{"key":"b"}\n'        > "$K/ok.jsonl"
-printf '{"key":"a"}\n{"key":"a"}\n'        > "$K/dupes.jsonl"
-printf '{"key":"a"}\nNOT JSON\n'           > "$K/badjson.jsonl"
-printf '{"key":"a"}\n{"other":1}\n'        > "$K/nokey.jsonl"
-printf '{"key":"a"}\n5\n'                  > "$K/notobject.jsonl"
-printf '{"key":"a"}\n[1,2]\n'              > "$K/listrec.jsonl"
-printf '{"key":"a"}\n{"key":{"x":1}}\n'    > "$K/unhashable.jsonl"
-: > "$K/empty.jsonl"
-printf '{"key":"a"}\n'                     > "$K/unreadable.jsonl"; chmod 000 "$K/unreadable.jsonl"
-cassette_key_check "$K/ok.jsonl" >/dev/null 2>&1;         assert_rc 0 $? "clean cassette"
-cassette_key_check "$K/dupes.jsonl" >/dev/null 2>&1;      assert_rc 1 $? "duplicate keys -> 1"
-cassette_key_check "$K/badjson.jsonl" >/dev/null 2>&1;    assert_rc 2 $? "invalid JSON -> 2, not 1"
-cassette_key_check "$K/nokey.jsonl" >/dev/null 2>&1;      assert_rc 2 $? "missing key field -> 2"
-cassette_key_check "$K/notobject.jsonl" >/dev/null 2>&1;  assert_rc 2 $? "scalar record -> 2"
-cassette_key_check "$K/listrec.jsonl" >/dev/null 2>&1;    assert_rc 2 $? "list record -> 2"
-cassette_key_check "$K/unhashable.jsonl" >/dev/null 2>&1; assert_rc 2 $? "non-string key -> 2"
-cassette_key_check "$K/empty.jsonl" >/dev/null 2>&1;      assert_rc 0 $? "empty cassette is not an error"
-if [ "$(id -u)" != "0" ]; then
-  cassette_key_check "$K/unreadable.jsonl" >/dev/null 2>&1; assert_rc 2 $? "unreadable file -> 2"
-else
-  ok "unreadable file -> 2 (skipped: running as root)"
-fi
+# The corrupt-vs-duplicated cassette diagnosis formerly tested here via _common.sh's
+# cassette_key_check now lives in lcg-eval itself (crates/core/src/cassette.rs's
+# load_records, #279 FR-002/FR-003) — see its own unit tests (load_records_*) and
+# crates/eval/src/plan.rs's tests for the guard-violation-level coverage.
 
-echo "== _common.sh: sha256_of and backup_if_present =="
-printf 'same\n' > "$K/x.jsonl"; printf 'same\n' > "$K/y.jsonl"; printf 'diff\n' > "$K/z.jsonl"
-assert_eq "$(sha256_of "$K/x.jsonl")" "$(sha256_of "$K/y.jsonl")" "identical files hash equal"
-if [ "$(sha256_of "$K/x.jsonl")" != "$(sha256_of "$K/z.jsonl")" ]; then
-  ok "different files hash differently"
-else
-  bad "different files hash differently"
-fi
+echo "== _common.sh: backup_if_present =="
+# sha256_of and the byte-identical-cassette-pair check it backed (both the pre-run guard
+# formerly in this file's identity-check tests and 06's post-run "hosted cassettes came out
+# identical" check) now live in lcg-eval itself (crates/eval/src/plan.rs's FR-004 guard for
+# pre-existing cassette: backends, crates/eval/src/report.rs's
+# validate_recorded_cassettes_distinct for freshly --record-cassette'd ones, #279) — see
+# those modules' own unit tests for the guard-violation-level coverage.
 B="$WORKROOT/bk"; mkdir -p "$B"; printf 'orig\n' > "$B/c.jsonl"
 ( cd "$B" && backup_if_present "c.jsonl" >/dev/null )
 [ ! -e "$B/c.jsonl" ] && ok "backup_if_present moves the original aside" \
@@ -194,41 +173,11 @@ out="$(run06 "$REPO3" MODES="freeform" DRY_RUN=1)"
 assert_eq 3 "$(printf '%s\n' "$out" | grep -c 'REPLAY')" "freeform replays all three legs"
 assert_not_contains "anthropic-freeform-baseline" "$out" "freeform does not invent mode-segmented names"
 
-echo "== 06: abort conditions are previewed, not just hit =="
-REPO4="$WORKROOT/repo4"; make_fake_repo "$REPO4"
-make_cassette "$REPO4/anthropic-open-baseline-$H.jsonl" 228 same
-cp "$REPO4/anthropic-open-baseline-$H.jsonl" "$REPO4/anthropic-open-candidate-$H.jsonl"
-make_cassette "$REPO4/qwen3.6-27b-open.jsonl" 228 q
-out="$(run06 "$REPO4" MODES="open" DRY_RUN=1)"
-assert_contains "WOULD ABORT" "$out" "identical hosted cassettes are flagged in DRY_RUN"
-assert_contains "byte-identical" "$out" "the identity abort names its reason"
-# A dummy key is required: the real path checks the key before the cassette guards, so
-# without one this would die early and the guard would go untested.
-out="$(run06 "$REPO4" MODES="open" ANTHROPIC_API_KEY=dummy)"
-assert_contains "byte-identical" "$out" "a real run aborts on identical hosted cassettes"
-
-REPO5="$WORKROOT/repo5"; make_fake_repo "$REPO5"
-make_cassette "$REPO5/anthropic-open-baseline-$H.jsonl" 228 b
-make_cassette "$REPO5/anthropic-open-candidate-$H.jsonl" 228 c
-python3 -c "
-import sys
-with open(sys.argv[1], 'w') as f:
-    for i in range(228):
-        f.write('{\"key\": \"dup%d\"}\n' % (i % 50))
-" "$REPO5/qwen3.6-27b-open.jsonl"
-out="$(run06 "$REPO5" MODES="open" DRY_RUN=1)"
-assert_contains "duplicate keys" "$out" "duplicate-keyed cassette flagged in DRY_RUN"
-out="$(run06 "$REPO5" MODES="open" ANTHROPIC_API_KEY=dummy)"
-assert_contains "duplicate keys" "$out" "a real run aborts on duplicate keys"
-
-REPO6="$WORKROOT/repo6"; make_fake_repo "$REPO6"
-make_cassette "$REPO6/anthropic-open-baseline-$H.jsonl" 228 b
-make_cassette "$REPO6/anthropic-open-candidate-$H.jsonl" 228 c
-printf '%s\n' "$(python3 -c "print('\n'.join('{\"key\": \"q%d\"}' % i for i in range(227)))")" > "$REPO6/qwen3.6-27b-open.jsonl"
-printf 'NOT JSON\n' >> "$REPO6/qwen3.6-27b-open.jsonl"
-out="$(run06 "$REPO6" MODES="open" DRY_RUN=1)"
-assert_contains "corrupt or truncated" "$out" "corrupt cassette diagnosed as corrupt in DRY_RUN"
-assert_not_contains "has duplicate keys ($REPO6/qwen" "$out" "corrupt is not misreported as duplicated"
+# The identity/duplicate/corrupt-cassette abort-preview cases formerly tested here
+# (identical hosted cassettes, a duplicate-keyed cassette, a corrupt cassette — each both
+# in DRY_RUN and on a real invocation) moved to lcg-eval itself (#279 FR-002..FR-004) and
+# are no longer previewable or enforceable by this script's stub binary; see
+# crates/eval/src/plan.rs's test module for the Rust-side equivalents.
 
 echo "== 06: ontology fixture required only when a mode needs it =="
 REPO7="$WORKROOT/repo7"; make_fake_repo "$REPO7"
@@ -273,56 +222,11 @@ assert_contains "04/05 default to 'reference'" "$out" "the differing judge-mode 
 out="$(run06 "$REPO1" MODES="open" LCG_EVAL_JUDGE_MODE=reference DRY_RUN=1)"
 assert_not_contains "includes pairwise" "$out" "no pairwise cost warning when reference is chosen"
 
-echo "== 06: guards fire under LIMIT too, not just at full scale =="
-# The identity guard tested against a hardcoded 228 rather than the requested scope, so it
-# was dead during every smoke run — the mode whose whole purpose is making mistakes cheap.
-REPO10="$WORKROOT/repo10"; make_fake_repo "$REPO10"
-make_cassette "$REPO10/anthropic-open-baseline-$H.limit3.jsonl" 3 same
-cp "$REPO10/anthropic-open-baseline-$H.limit3.jsonl" "$REPO10/anthropic-open-candidate-$H.limit3.jsonl"
-make_cassette "$REPO10/qwen3.6-27b-open.limit3.jsonl" 3 q
-out="$(run06 "$REPO10" MODES="open" LIMIT=3 DRY_RUN=1)"
-assert_contains "byte-identical" "$out" "identity guard fires under LIMIT in DRY_RUN"
-out="$(run06 "$REPO10" MODES="open" LIMIT=3 ANTHROPIC_API_KEY=dummy)"
-assert_contains "byte-identical" "$out" "identity guard fires under LIMIT on the real path"
-assert_not_contains "finished" "$out" "it aborts BEFORE invoking the binary"
-
-# Same for the duplicate-key guard.
-REPO11="$WORKROOT/repo11"; make_fake_repo "$REPO11"
-make_cassette "$REPO11/anthropic-open-baseline-$H.limit4.jsonl" 4 b
-make_cassette "$REPO11/anthropic-open-candidate-$H.limit4.jsonl" 4 c
-printf '{"key":"d"}\n{"key":"d"}\n{"key":"e"}\n{"key":"f"}\n' > "$REPO11/qwen3.6-27b-open.limit4.jsonl"
-out="$(run06 "$REPO11" MODES="open" LIMIT=4 ANTHROPIC_API_KEY=dummy)"
-assert_contains "duplicate keys" "$out" "duplicate-key guard fires under LIMIT"
-
-echo "== validate_report.py: report accounting, not a proportion =="
-V="$WORKROOT/val"; mkdir -p "$V"
-mkreport() {
-  python3 -c "
-import json, sys
-runs = json.loads(sys.argv[2])
-json.dump({'corpus_size': 3, 'reference_backend': 'baseline', 'ontology_mode': 'open',
-           'candidates': [{'backend_name': n, 'chunks_run': r, 'errors': e,
-                           'error_rate': (e / r if r else 0.0)} for n, r, e in runs]},
-          open(sys.argv[1], 'w'))
-" "$1" "$2"
-}
-make_cassette "$V/b.jsonl" 3 b; make_cassette "$V/c.jsonl" 3 c; make_cassette "$V/q.jsonl" 2 q
-# The exact case that falsely failed under the 90% heuristic: 2 of 3, one legitimate error.
-mkreport "$V/r.json" '[["baseline",3,0],["candidate",3,0],["qwen",3,1]]'
-python3 crates/eval/scripts/validate_report.py "$V/r.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
-assert_rc 0 $? "a legitimately-errored chunk is not truncation (33% at n=3 must pass)"
-# Truncation: report accounts for 3 clean chunks but the cassette holds 2.
-mkreport "$V/r2.json" '[["baseline",3,0],["candidate",3,0],["qwen",3,0]]'
-python3 crates/eval/scripts/validate_report.py "$V/r2.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
-assert_rc 1 $? "a truncated cassette IS caught (records < accounted)"
-out="$(python3 crates/eval/scripts/validate_report.py "$V/r2.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" 2>&1)"
-assert_contains "truncated" "$out" "the truncation message says truncated"
-# A leg missing from the report entirely.
-mkreport "$V/r3.json" '[["baseline",3,0],["candidate",3,0]]'
-python3 crates/eval/scripts/validate_report.py "$V/r3.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
-assert_rc 1 $? "a leg absent from the report is caught"
-python3 crates/eval/scripts/validate_report.py "$V/nope.json" "$V/b.jsonl" "$V/c.jsonl" "$V/q.jsonl" >/dev/null 2>&1
-assert_rc 1 $? "an unreadable report is caught"
+# The identity/duplicate-key-under-LIMIT guard cases formerly tested here, and the
+# validate_report.py report-accounting cases, both moved to lcg-eval itself (#279
+# FR-002..FR-006) — see crates/eval/src/plan.rs's and crates/eval/src/report.rs's test
+# modules for the Rust-side equivalents (including the exact LIMIT=3/33%-error-rate case
+# that used to falsely fail under the old proportion-based heuristic).
 
 echo
 if [ "$FAIL" -eq 0 ]; then

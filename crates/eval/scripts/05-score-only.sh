@@ -16,8 +16,8 @@
 #
 #   What destroys the measurement is replaying the SAME cassette into both legs: the two
 #   become byte-identical, judged F1 is 1.000 by construction, and the noise floor reads
-#   as zero -- silently, in a clean-looking report. This script refuses to run if any two
-#   cassettes are identical.
+#   as zero -- silently, in a clean-looking report. lcg-eval itself refuses to run if any
+#   two cassette backends are identical, or corrupt, or duplicate-keyed (#279).
 #
 # So: 04 is how you MAKE an independent sample. 05 is how you SCORE one you already have.
 #
@@ -46,42 +46,9 @@ for f in "$BASELINE_CASSETTE" "$CANDIDATE_CASSETTE" "$QWEN_CASSETTE"; do
        Run 04-full-run.sh to capture the live candidate leg first."
 done
 
-# Guard the one mistake that fails silently rather than loudly (see header). Compares all
-# three pairwise so a copy-paste of any cassette over another is caught, not just the
-# baseline/candidate pair.
-python3 - "$BASELINE_CASSETTE" "$CANDIDATE_CASSETTE" "$QWEN_CASSETTE" <<'PY'
-import hashlib, itertools, json, sys, collections
-paths = sys.argv[1:4]
-digests = {}
-for p in paths:
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for block in iter(lambda: f.read(65536), b""):
-            h.update(block)
-    digests[p] = h.hexdigest()
-for a, b in itertools.combinations(paths, 2):
-    if digests[a] == digests[b]:
-        sys.exit(f"ERROR: {a} and {b} are byte-identical.\n"
-                 "       Any F1 between them would be 1.000 by construction.")
-
-def keys(p):
-    ks = [json.loads(l)["key"] for l in open(p) if l.strip()]
-    dupes = [k for k, n in collections.Counter(ks).items() if n > 1]
-    if dupes:
-        sys.exit(f"ERROR: {p} contains {len(dupes)} duplicate keys — it was appended to "
-                 "without being moved aside. Replay would serve stale verdicts.")
-    return set(ks)
-
-b, c, q = (keys(p) for p in paths)
-print(f"==> COVERAGE  baseline {len(b)}  candidate {len(c)}  qwen {len(q)}")
-print(f"    scoreable  vs candidate {len(b & c)}   vs qwen {len(b & q)}")
-# A warning, not a hard stop: the real captures legitimately differ because each side lost
-# different chunks to malformed structured output, and unscoreable chunks are accounted in
-# error_rate rather than hidden. Refusing here would block the recovery path this script
-# exists for.
-if not (b & q) or not (b & c):
-    sys.exit("ERROR: a pair has zero overlapping chunks — nothing could be scored.")
-PY
+# The one mistake that fails silently rather than loudly (see header) — any two of these
+# three cassettes being byte-identical, or any one being corrupt/duplicate-keyed — is now
+# guarded by lcg-eval itself (#279 FR-002..FR-004), before it makes any judge call.
 
 BEFORE=$(wc -l < "$JUDGE_CACHE" 2>/dev/null | tr -d ' ' || echo 0)
 

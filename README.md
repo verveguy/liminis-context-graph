@@ -517,6 +517,45 @@ To validate the judge itself rather than compare backends, point `--reference` a
 1.0 (pure wording-variance noise floor) while the strict-string score is materially lower —
 this is what the `eval.yml` workflow's on-demand smoke pass checks.
 
+### Previewing a run (`--dry-run`)
+
+Before committing to a multi-hour, real-money run, add `--dry-run` to any invocation:
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=baseline.jsonl \
+  --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \
+  --reference baseline \
+  --all \
+  --dry-run
+```
+
+This resolves every `--backend` spec exactly the way a real run would — the replay-or-live
+decision, a cassette backend's on-disk record count, and the requested scope (`--limit N`
+or the full corpus) — and prints the plan without making a single outbound call. It also
+names any guard that would abort a real run: two backends resolving to the same cassette
+(by path or by byte-identical content), or a cassette that's corrupt or has a duplicate
+key. `--dry-run` itself always exits 0 for a syntactically valid invocation, even when the
+plan shows a guard that would abort a real run — the point is to see the plan, not to run
+the guard as a separate pass-fail check. Combining `--dry-run` with `--record-cassette`
+writes nothing.
+
+These are the same guards a real run enforces unconditionally before touching the network:
+a duplicate-keyed or otherwise corrupt cassette is rejected at load time (distinguishable by
+error type — `Error::CassetteDuplicateKey` vs. `Error::CassetteCorrupt` — not just by exit
+code), and two cassette backends that would make the comparison degenerate (identical path
+or identical content) are rejected before any extraction happens. A cassette covering fewer
+chunks than the requested scope is not an abort condition — it's reported as a coverage
+note, since the shortfall already shows up honestly in `error_rate`. `--dry-run` and a real
+run share this resolution code exactly (see ADR-0052), so the preview cannot drift from
+what actually happens.
+
+A pair of backends `--record-cassette`d fresh in the *same* invocation can't be checked this
+way — there's nothing on disk to hash until the run finishes — so that half of the identity
+guard runs post-run instead, before the report is ever printed or written: if two freshly
+recorded cassettes come out byte-identical, the run still fails loudly, just after capture
+rather than before it.
+
 ### Adding a candidate backend
 
 `--backend NAME=SPEC` is repeatable. `SPEC` is one of:

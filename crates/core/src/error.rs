@@ -41,6 +41,19 @@ pub enum Error {
     /// string-sniffing an error message. See `crate::cassette` for the record/replay design.
     #[error("cassette miss: {0}")]
     CassetteMiss(String),
+
+    /// A cassette file is malformed: unreadable, invalid JSON, a non-object record, a
+    /// record missing `key`, or a record whose `key` is not a string. Distinct from
+    /// `Error::CassetteDuplicateKey` so callers can tell "this file is corrupt" from "this
+    /// file has a workflow problem" by type, not by sniffing the message (#279 FR-003).
+    #[error("cassette corrupt: {0}")]
+    CassetteCorrupt(String),
+
+    /// A cassette file contains two records with the same key (#279 FR-002). Replay used to
+    /// serve duplicates FIFO, silently scoring a chunk against a stale verdict; loading now
+    /// rejects this outright instead.
+    #[error("cassette duplicate key: {0}")]
+    CassetteDuplicateKey(String),
 }
 
 impl From<tokio::task::JoinError> for Error {

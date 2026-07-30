@@ -135,6 +135,66 @@ pub struct Report {
     pub pairwise: Option<Vec<PairwiseReportEntry>>,
 }
 
+/// FR-006: verifies a recorded cassette's record count equals `chunks_run - errors` for
+/// `candidate` — a truncated capture means the report was scored against partial data. A
+/// high `error_rate` is a quality signal about the model, not a truncation signal, and this
+/// check never fails on it: it compares against the report's own accounting, never a
+/// proportion (the proportion-based version this replaces produced a false failure at
+/// `LIMIT=3` with a 33% error rate — see the #248 runbook history).
+pub fn validate_recorded_cassette(
+    candidate: &CandidateReport,
+    actual_record_count: usize,
+) -> Result<(), String> {
+    if candidate.errors > candidate.chunks_run {
+        // `saturating_sub` alone would floor this at 0 and let a report with impossible
+        // accounting (more errors than chunks run) pass as long as the cassette also holds
+        // 0 records — accepting broken accounting instead of detecting it (CodeRabbit review
+        // finding on PR #280).
+        return Err(format!(
+            "backend '{}': report has {} errors for {} run chunk(s) — impossible accounting",
+            candidate.backend_name, candidate.errors, candidate.chunks_run
+        ));
+    }
+    let expected = candidate.chunks_run - candidate.errors;
+    if actual_record_count != expected {
+        return Err(format!(
+            "backend '{}': cassette holds {actual_record_count} record(s) but the report \
+             accounts for {expected} ({} run - {} errored) — the capture was truncated, so \
+             this report was scored against partial data",
+            candidate.backend_name, candidate.chunks_run, candidate.errors
+        ));
+    }
+    Ok(())
+}
+
+/// Any two backends in this run — a pre-existing `cassette:` replay backend, a freshly
+/// `--record-cassette`d live one, or one of each — that end up with byte-identical cassette
+/// content make the noise floor read as 1.000 by construction. `plan::resolve`'s FR-004
+/// guard only compares pre-existing replay backends against each other, pre-flight; a
+/// freshly recorded cassette doesn't exist to hash until the run it's part of has finished,
+/// and a replay-vs-fresh pair (e.g. `04-full-run.sh`'s baseline replayed, candidate
+/// recorded) is never compared by either the pre-flight guard or a fresh-only post-run
+/// check — only a check over the *union* of both kinds, run once, closes all three shapes.
+/// That's why this is checked here, post-run over every cassette this run touched, alongside
+/// [`validate_recorded_cassette`] — before the report is ever printed or written. Takes
+/// precomputed `(backend_name, content_hash)` pairs so hashing (file I/O) stays at the call
+/// site and this stays a pure, testable check, mirroring `plan::resolve`'s own separation.
+pub fn validate_recorded_cassettes_distinct(cassettes: &[(String, String)]) -> Result<(), String> {
+    for i in 0..cassettes.len() {
+        for j in (i + 1)..cassettes.len() {
+            if cassettes[i].1 == cassettes[j].1 {
+                return Err(format!(
+                    "backend '{}' and backend '{}' recorded byte-identical cassette content \
+                     in this run — the noise floor would be 1.000 by construction; delete \
+                     both cassettes and re-capture",
+                    cassettes[i].0, cassettes[j].0
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Report {
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -482,6 +542,94 @@ mod tests {
     fn human_readable_report_omits_pairwise_section_when_none() {
         let out = sample_report().render_human_readable();
         assert!(!out.contains("pairwise judging"));
+    }
+
+    // ── validate_recorded_cassette (FR-006) ────────────────────────────────────────
+
+    fn sample_candidate(chunks_run: usize, errors: usize) -> CandidateReport {
+        let mut c = sample_report().candidates.remove(0);
+        c.chunks_run = chunks_run;
+        c.errors = errors;
+        c
+    }
+
+    #[test]
+    fn exact_match_is_accepted() {
+        let candidate = sample_candidate(10, 2);
+        assert!(validate_recorded_cassette(&candidate, 8).is_ok());
+    }
+
+    #[test]
+    fn mismatch_is_rejected_and_named() {
+        let candidate = sample_candidate(10, 2);
+        let err = validate_recorded_cassette(&candidate, 5).unwrap_err();
+        assert!(err.contains("baseline"));
+        assert!(err.contains('5'));
+        assert!(err.contains('8'));
+        assert!(err.contains("truncated"));
+    }
+
+    #[test]
+    fn high_error_rate_alone_does_not_fail_the_check() {
+        // The exact LIMIT=3 trap this check exists to avoid: a legitimate 33% error rate
+        // must not be mistaken for truncation as long as the record count matches.
+        let candidate = sample_candidate(3, 1);
+        assert!(validate_recorded_cassette(&candidate, 2).is_ok());
+    }
+
+    #[test]
+    fn errors_exceeding_chunks_run_is_rejected_as_impossible_accounting() {
+        // A validator must never be the thing that panics, and it must not accept broken
+        // accounting either. `errors > chunks_run` shouldn't occur in a well-formed report,
+        // but `saturating_sub` alone would floor the expected count at 0 and let this pass
+        // whenever the cassette also happens to hold 0 records — accepting impossible
+        // accounting instead of detecting it (CodeRabbit review findings on PR #280).
+        let candidate = sample_candidate(2, 5);
+        let err = validate_recorded_cassette(&candidate, 0).unwrap_err();
+        assert!(err.contains("impossible"), "{err}");
+        let err = validate_recorded_cassette(&candidate, 2).unwrap_err();
+        assert!(err.contains("impossible"), "{err}");
+    }
+
+    // ── validate_recorded_cassettes_distinct (post-run FR-004) ─────────────────────
+
+    #[test]
+    fn distinct_hashes_are_accepted() {
+        let cassettes = vec![
+            ("baseline".to_string(), "hash-a".to_string()),
+            ("candidate".to_string(), "hash-b".to_string()),
+        ];
+        assert!(validate_recorded_cassettes_distinct(&cassettes).is_ok());
+    }
+
+    #[test]
+    fn identical_hashes_are_rejected_and_name_both_backends() {
+        let cassettes = vec![
+            ("baseline".to_string(), "same-hash".to_string()),
+            ("candidate".to_string(), "same-hash".to_string()),
+        ];
+        let err = validate_recorded_cassettes_distinct(&cassettes).unwrap_err();
+        assert!(err.contains("baseline"), "{err}");
+        assert!(err.contains("candidate"), "{err}");
+        assert!(err.contains("noise floor"), "{err}");
+    }
+
+    #[test]
+    fn a_single_recorded_cassette_has_nothing_to_compare() {
+        let cassettes = vec![("baseline".to_string(), "hash-a".to_string())];
+        assert!(validate_recorded_cassettes_distinct(&cassettes).is_ok());
+    }
+
+    #[test]
+    fn three_backends_only_two_identical_is_still_rejected() {
+        let cassettes = vec![
+            ("baseline".to_string(), "hash-a".to_string()),
+            ("candidate".to_string(), "hash-a".to_string()),
+            ("qwen".to_string(), "hash-b".to_string()),
+        ];
+        let err = validate_recorded_cassettes_distinct(&cassettes).unwrap_err();
+        assert!(err.contains("baseline"), "{err}");
+        assert!(err.contains("candidate"), "{err}");
     }
 
     #[test]
