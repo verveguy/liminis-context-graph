@@ -129,7 +129,8 @@ fixed in this change.
 > `AppState.indices_built` after construction. `run_full_recovery_sequence` already performed the
 > build, so no new call was needed there; what was missing was reflecting that build in the flag.
 > `knowledge_status` therefore no longer under-reports readiness immediately after a successful
-> auto-recovery. The rest of this ADR stands.
+> **startup** auto-recovery. The runtime `knowledge_recover` path this section places out of scope
+> is unchanged and still out of scope. The rest of this ADR stands.
 
 ## Consequences
 

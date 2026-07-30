@@ -20,8 +20,9 @@ arose:
 ## Decisions
 
 > **Lazy index build — SUPERSEDED for the startup path, see [ADR-0036](0036-eager-index-build-at-startup.md).**
-> This ADR assumes indices exist only once something triggers a build, so the first search after
-> startup repairs them (§ Context item 1, and "rebuilds on the first search" below). Since #208 the
+> The decision recorded below assumed indices exist only once something triggers a build, so the
+> first search after startup repairs them (§ Context item 1, and "rebuilds on the first search"
+> below). That assumption described the system as it stood in 2026-06 and is now historical: since #208 the
 > HNSW/FTS indices are built **eagerly** after schema init — before the socket accepts requests —
 > and again after recovery, so a correctly-started service is never in the missing-index state this
 > ADR describes. The auto-heal mechanism itself is **not** superseded: it remains the repair path,

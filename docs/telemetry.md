@@ -156,8 +156,11 @@ of autonomous recovery.
 | `legacy_skipped_lines` | u64 | Lines skipped as a superseded legacy format |
 | `duration_ms` | u64 | Total replay wall-clock time in milliseconds |
 
-A nonzero `failed_lines` or `unrecognised_lines` means the rebuilt graph is not a faithful
-reconstruction of the WAL. Use `LCG_REPLAY_FAILURE_SAMPLES` to surface examples.
+A nonzero `failed_lines`, `unrecognised_lines`, or `unparseable_lines` means the rebuilt graph is
+not a faithful reconstruction of the WAL — each counts a line whose content did not make it into
+the graph, whether it failed to execute, matched no known template, or was not valid JSON. Use
+`LCG_REPLAY_FAILURE_SAMPLES` to surface examples. `legacy_skipped_lines` is the one counter that
+does not indicate loss: those lines are a superseded format that is intentionally not replayed.
 
 Example:
 ```json
