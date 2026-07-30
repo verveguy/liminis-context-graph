@@ -19,6 +19,15 @@ arose:
 
 ## Decisions
 
+> **Lazy index build — SUPERSEDED for the startup path, see [ADR-0036](0036-eager-index-build-at-startup.md).**
+> This ADR assumes indices exist only once something triggers a build, so the first search after
+> startup repairs them (§ Context item 1, and "rebuilds on the first search" below). Since #208 the
+> HNSW/FTS indices are built **eagerly** after schema init — before the socket accepts requests —
+> and again after recovery, so a correctly-started service is never in the missing-index state this
+> ADR describes. The auto-heal mechanism itself is **not** superseded: it remains the repair path,
+> and ADR-0036 extends it to the ingest dedup path, which previously queried
+> `entity_name_embedding_idx` with no auto-heal at all.
+
 ### Auto-heal search path (from #58)
 
 `handle_find_entities`, `handle_find_relationships`, and `handle_search_facts` catch lbug binder
