@@ -69,7 +69,9 @@ fn duplicate_keyed_cassette_is_rejected_by_load_records_and_by_the_real_run_path
 fn corrupt_cassette_is_rejected_and_distinguished_from_duplication() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("corrupt.jsonl");
-    std::fs::write(&path, "{\"key\": \"a\"}\nNOT JSON\n").unwrap();
+    let valid = "{\"key\": \"a\", \"call_type\": \"extract\", \"provider\": \"m\", \
+                 \"model\": \"m\", \"timestamp\": \"t\", \"request\": {}, \"response\": {}}";
+    std::fs::write(&path, format!("{valid}\nNOT JSON\n")).unwrap();
 
     let err = load_records(&path).unwrap_err();
     assert!(matches!(err, Error::CassetteCorrupt(_)));
