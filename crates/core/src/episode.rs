@@ -10,6 +10,7 @@ use crate::{
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
     ontology_sidecar,
+    prompts::normalize_name,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
@@ -19,6 +20,9 @@ pub struct AddEpisodeResult {
     pub episode_uuid: String,
     pub nodes_extracted: usize,
     pub edges_extracted: usize,
+    /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
+    /// the persisted graph, and were dropped at Phase C commit time (FR-004, FR-005).
+    pub edges_dropped_unresolvable: usize,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -226,10 +230,10 @@ pub async fn add_episode(
     // empty-name extraction as a failure and do not create a node for it).
     extraction.entities.retain(|e| !e.name.trim().is_empty());
 
-    // Load the DB handle here (rather than at Phase B, below) so edge validation can fall back
-    // to a persisted-entity lookup for endpoints created in an earlier ingest batch (#209) —
-    // entities themselves already resolve globally via `get_entity_by_name_ci`, but until now
-    // edge endpoint validation only ever consulted the current batch's extraction result.
+    // Load the DB handle here (rather than at Phase B, below) — Phase B's entity-count check
+    // and dedup resolution reuse this same Arc. Phase C, below, reloads its own handle
+    // (`db_c`) right before acquiring the write lock, deliberately, in case a concurrent
+    // `clear_all` swapped `state.db` in the meantime.
     let db_shared = state.db.load_full().ok_or_else(|| {
         let reason = state
             .degraded_reason
@@ -240,82 +244,11 @@ pub async fn add_episode(
         Error::DbUnavailable(reason)
     })?;
 
-    // Post-extraction edge validation: drop self-referential and unresolvable edges.
-    {
-        let entity_name_set: std::collections::HashSet<String> = extraction
-            .entities
-            .iter()
-            .map(|e| e.name.trim().to_lowercase())
-            .collect();
-
-        // Endpoint names referenced by edges but absent from this batch may still resolve
-        // against the persisted Entity table (e.g. a recurring hub entity created earlier).
-        // Collect the unique set of such names first so a batch with many edges to the same
-        // absent entity costs one lookup, not one per edge (FR-001, FR-003, FR-005).
-        let mut missing_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for edge in &extraction.edges {
-            let src_lower = edge.source_name.trim().to_lowercase();
-            let dst_lower = edge.target_name.trim().to_lowercase();
-            if src_lower == dst_lower {
-                continue; // self-referential; dropped below regardless of resolution.
-            }
-            if !entity_name_set.contains(&src_lower) {
-                missing_names.insert(src_lower);
-            }
-            if !entity_name_set.contains(&dst_lower) {
-                missing_names.insert(dst_lower);
-            }
-        }
-
-        let globally_resolved: std::collections::HashSet<String> = if missing_names.is_empty() {
-            std::collections::HashSet::new()
-        } else {
-            let gid_owned = group_id.to_string();
-            let names: Vec<String> = missing_names.into_iter().collect();
-            let db_v = Arc::clone(&db_shared);
-            tokio::task::spawn_blocking(
-                move || -> Result<std::collections::HashSet<String>, Error> {
-                    let conn = db_v.connect()?;
-                    let mut resolved = std::collections::HashSet::new();
-                    for name in names {
-                        if conn.get_entity_by_name_ci(&name, &gid_owned)?.is_some() {
-                            resolved.insert(name);
-                        }
-                    }
-                    Ok(resolved)
-                },
-            )
-            .await??
-        };
-
-        extraction.edges.retain(|edge| {
-            if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
-                eprintln!(
-                    "liminis-context-graph: dropping self-referential edge: '{}' → '{}'",
-                    edge.source_name, edge.target_name
-                );
-                return false;
-            }
-            let src_lower = edge.source_name.trim().to_lowercase();
-            let dst_lower = edge.target_name.trim().to_lowercase();
-            let src_ok =
-                entity_name_set.contains(&src_lower) || globally_resolved.contains(&src_lower);
-            let dst_ok =
-                entity_name_set.contains(&dst_lower) || globally_resolved.contains(&dst_lower);
-            if !src_ok || !dst_ok {
-                eprintln!(
-                    "liminis-context-graph: dropping edge with unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
-                    edge.source_name, edge.target_name, src_ok, dst_ok
-                );
-                return false;
-            }
-            true
-        });
-    }
-
+    // name_embeddings is computed here — before edge validation, rather than after it as
+    // before — so the salvage step below can cosine-match an off-list edge endpoint against
+    // the batch's own entity name embeddings without re-embedding anything (order-only change;
+    // extraction.entities is already final by this point).
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
-    let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
-
     let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
     for n in &entity_names {
         name_embeddings.push(tokio::select! {
@@ -326,6 +259,114 @@ pub async fn add_episode(
             }
         });
     }
+
+    // Post-extraction edge validation (pre-lock, advisory only): drop self-referential edges —
+    // a pure, DB-independent check that's always correct — then *salvage*, rather than
+    // permanently drop, edges whose endpoint name is absent from this batch's own entity list.
+    // An off-list endpoint's name embedding is cosine-matched against the batch's entity
+    // name_embeddings, reusing DEDUP_THRESHOLD (the same threshold already used for entity
+    // dedup); a match rewrites the edge's endpoint to that entity's canonical name in place.
+    // Anything that doesn't salvage-match is left untouched and passed through to Phase C
+    // (write-lock held), which is now the *sole* point that resolves an endpoint — falling back
+    // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`
+    // authoritative (FR-003, FR-005) instead of one of two independent, easily-desynced passes.
+    extraction.edges.retain(|edge| {
+        if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
+            eprintln!(
+                "liminis-context-graph: dropping self-referential edge: '{}' → '{}'",
+                edge.source_name, edge.target_name
+            );
+            return false;
+        }
+        true
+    });
+
+    if !extraction.edges.is_empty() {
+        // Keyed by the same normalization applied to a name before it ever reaches the model
+        // (control-char strip + trim + lowercase, `prompts::normalize_name`) — an entity name
+        // containing a control character is shown to the model with that character stripped, so
+        // matching against the *original* name here would spuriously miss it.
+        let entity_name_set: std::collections::HashSet<String> = extraction
+            .entities
+            .iter()
+            .map(|e| normalize_name(&e.name))
+            .collect();
+
+        // Collect the unique off-batch endpoint names needing salvage, keyed by the normalized
+        // name, so a batch with many edges naming the same missing endpoint costs one
+        // embed+match, not one per edge.
+        let mut missing_names: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for edge in &extraction.edges {
+            for name in [&edge.source_name, &edge.target_name] {
+                let key = normalize_name(name);
+                if !entity_name_set.contains(&key) {
+                    missing_names
+                        .entry(key)
+                        .or_insert_with(|| name.trim().to_string());
+                }
+            }
+        }
+
+        let mut salvage_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (lower, original) in missing_names {
+            let emb = tokio::select! {
+                r = state.embedder.embed(&original) => r?,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
+            };
+            let mut best: Option<(f32, &str)> = None;
+            for (i, candidate_emb) in name_embeddings.iter().enumerate() {
+                let score = crate::db::cosine_similarity(&emb, candidate_emb);
+                let is_better = match best {
+                    Some((b, _)) => score > b,
+                    None => true,
+                };
+                if score >= DEDUP_THRESHOLD && is_better {
+                    best = Some((score, extraction.entities[i].name.as_str()));
+                }
+            }
+            if let Some((score, canonical)) = best {
+                eprintln!(
+                    "liminis-context-graph: salvaging off-list edge endpoint '{}' → '{}' (cosine similarity {:.3})",
+                    original, canonical, score
+                );
+                salvage_map.insert(lower, canonical.to_string());
+            }
+        }
+
+        if !salvage_map.is_empty() {
+            for edge in extraction.edges.iter_mut() {
+                if let Some(canonical) = salvage_map.get(&normalize_name(&edge.source_name)) {
+                    edge.source_name = canonical.clone();
+                }
+                if let Some(canonical) = salvage_map.get(&normalize_name(&edge.target_name)) {
+                    edge.target_name = canonical.clone();
+                }
+            }
+
+            // Rewriting an off-list endpoint to its canonical entity name can make two
+            // previously-distinct endpoints collide (e.g. "Global Warming" and "Climate Change"
+            // both salvage to the same batch entity) — re-run the self-referential filter after
+            // salvage so a rewritten edge like that doesn't slip past the earlier check and get
+            // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
+            extraction.edges.retain(|edge| {
+                if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
+                    eprintln!(
+                        "liminis-context-graph: dropping self-referential edge after salvage: '{}' → '{}'",
+                        edge.source_name, edge.target_name
+                    );
+                    return false;
+                }
+                true
+            });
+        }
+    }
+
+    let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
     let mut fact_embeddings: Vec<Vec<f32>> = Vec::with_capacity(edge_facts.len());
     for f in &edge_facts {
         fact_embeddings.push(tokio::select! {
@@ -473,9 +514,10 @@ pub async fn add_episode(
         decisions.push(decision);
     }
 
-    // Capture counts before extraction moves into the Phase C closure.
+    // Capture counts before extraction moves into the Phase C closure. `edges_extracted` is
+    // no longer precomputed here — it's now the actual insert count Phase C returns, since
+    // Phase C is the sole point that finally resolves or drops an edge (FR-004, FR-005).
     let nodes_extracted = extraction.entities.len();
-    let edges_extracted = extraction.edges.len();
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
@@ -509,8 +551,11 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
-    tokio::task::spawn_blocking(move || -> Result<(), Error> {
+    let (edges_inserted, edges_dropped_unresolvable) = tokio::task::spawn_blocking(
+        move || -> Result<(usize, usize), Error> {
         let conn = db_c.connect()?;
+        let mut edges_inserted = 0usize;
+        let mut edges_dropped_unresolvable = 0usize;
 
         // Apply dedup decisions → collect entity UUIDs
         let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
@@ -534,28 +579,33 @@ pub async fn add_episode(
             }
         }
 
-        // name→uuid map for edge endpoint resolution. Keys are lowercase-normalized so a
-        // batch-internal case mismatch between an entity's extracted name and an edge's
-        // endpoint name doesn't fall through to the global fallback unnecessarily (#209).
+        // name→uuid map for edge endpoint resolution. Keys use `prompts::normalize_name` (control
+        // -char strip + trim + lowercase) — the same normalization a name gets before it reaches
+        // the model — so neither a batch-internal case mismatch (#209) nor a control character
+        // in the original entity name causes a genuine batch-local match to fall through to the
+        // global fallback unnecessarily.
         let name_to_uuid: std::collections::HashMap<String, String> = extraction
             .entities
             .iter()
             .enumerate()
-            .map(|(i, e)| (e.name.trim().to_lowercase(), entity_uuids[i].clone()))
+            .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
             .collect();
 
-        // Insert relationship edges
+        // Insert relationship edges. This is the sole, authoritative point at which an edge's
+        // endpoints are finally resolved or the edge is dropped (FR-003, FR-005) — pre-lock,
+        // above, only salvage-rewrites an off-list endpoint name; it never drops for endpoint
+        // reasons (except the always-correct self-referential case).
         for (i, edge) in extraction.edges.iter().enumerate() {
             // An endpoint absent from this batch's name→uuid map may still resolve against the
             // persisted Entity table (e.g. a recurring hub entity created in an earlier ingest
             // batch that survived Site 1's validation via the same fallback) (FR-002, FR-003).
-            let src_uuid = match name_to_uuid.get(&edge.source_name.trim().to_lowercase()) {
+            let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
                     .get_entity_by_name_ci(&edge.source_name, &gid_owned)?
                     .map(|existing| existing.uuid),
             };
-            let dst_uuid = match name_to_uuid.get(&edge.target_name.trim().to_lowercase()) {
+            let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
                     .get_entity_by_name_ci(&edge.target_name, &gid_owned)?
@@ -568,6 +618,7 @@ pub async fn add_episode(
                         "liminis-context-graph: dropping edge at commit, unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
                         edge.source_name, edge.target_name, src.is_some(), dst.is_some()
                     );
+                    edges_dropped_unresolvable += 1;
                     continue;
                 }
             };
@@ -588,6 +639,7 @@ pub async fn add_episode(
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             })?;
+            edges_inserted += 1;
         }
 
         // Insert episodic node
@@ -615,7 +667,7 @@ pub async fn add_episode(
 
         wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
 
-        Ok(())
+        Ok((edges_inserted, edges_dropped_unresolvable))
     })
     .await??;
     drop(_write_guard);
@@ -638,7 +690,8 @@ pub async fn add_episode(
     Ok(AddEpisodeResult {
         episode_uuid,
         nodes_extracted,
-        edges_extracted,
+        edges_extracted: edges_inserted,
+        edges_dropped_unresolvable,
     })
 }
 

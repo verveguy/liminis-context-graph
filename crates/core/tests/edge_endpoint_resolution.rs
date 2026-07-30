@@ -17,7 +17,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::MockEmbedder,
+    embedder::{MockEmbedder, NameMapEmbedder},
     episode,
     extractor::ConfigurableExtractor,
     telemetry::{NoopSink, TelemetrySink},
@@ -252,4 +252,238 @@ async fn test_edge_dropped_when_one_endpoint_unresolvable_even_if_other_resolves
         rels.is_empty(),
         "no relationship should be persisted when an endpoint is unresolvable"
     );
+}
+
+// ── User Story 3 / FR-003 / SC-003: salvage an off-list endpoint by name-embedding
+//    similarity against the batch's own entities, instead of dropping it ────────
+
+#[tokio::test]
+async fn test_off_list_endpoint_salvaged_via_name_embedding_similarity() {
+    let (db, _dir) = make_db();
+
+    // 'Global Warming' is not in this batch's entity list, but its name embedding is
+    // deliberately made identical to 'Climate Change' (a batch entity) — well above
+    // DEDUP_THRESHOLD — so the salvage step must rewrite the edge to point at it instead of
+    // dropping it.
+    let mut map = HashMap::new();
+    map.insert("Climate Change".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Ocean Acidification".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    map.insert("Global Warming".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Climate Change", "Ocean Acidification"],
+        &[(
+            "Global Warming",
+            "Ocean Acidification",
+            "Global warming causes ocean acidification",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Global warming causes ocean acidification.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "salvaged edge must be inserted, not dropped, got {}",
+        result.edges_extracted
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "a successfully salvaged edge must not be counted as dropped"
+    );
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_name_ci("Global Warming", GROUP_A)
+            .unwrap()
+            .is_none(),
+        "salvage must not create a new entity for the off-list name"
+    );
+    let climate_change = conn
+        .get_entity_by_name_ci("Climate Change", GROUP_A)
+        .unwrap()
+        .expect("Climate Change entity must exist");
+    let ocean_acidification = conn
+        .get_entity_by_name_ci("Ocean Acidification", GROUP_A)
+        .unwrap()
+        .expect("Ocean Acidification entity must exist");
+
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
+    assert_eq!(
+        rels[0].source_node_uuid, climate_change.uuid,
+        "the salvaged edge must attach to 'Climate Change', not a new entity"
+    );
+    assert_eq!(rels[0].target_node_uuid, ocean_acidification.uuid);
+}
+
+// ── Edge case: adversarial pairs must not cross-resolve below the similarity threshold ──
+
+#[tokio::test]
+async fn test_salvage_does_not_collapse_adversarial_pairs_below_threshold() {
+    let (db, _dir) = make_db();
+
+    // 'Carbon Dioxide' and 'Carbon Monoxide' are textually similar but semantically distinct;
+    // their embeddings are deliberately orthogonal (cosine 0). The off-list endpoint 'CO' sits
+    // roughly equidistant between them — similar enough to be tempting, but below
+    // DEDUP_THRESHOLD (0.85) against either — so salvage must not force a match to whichever is
+    // nominally closer.
+    let mut map = HashMap::new();
+    map.insert("Carbon Dioxide".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Carbon Monoxide".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    map.insert("CO".to_string(), vec![0.5, 0.5, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Carbon Dioxide", "Carbon Monoxide"],
+        &[("CO", "Carbon Dioxide", "CO is related to carbon dioxide")],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(&state, "ep-a", "CO is related to carbon dioxide.", GROUP_A).await;
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "a below-threshold near-miss must not be salvaged, got {}",
+        result.edges_extracted
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 1,
+        "the unsalvaged edge must be counted as dropped"
+    );
+
+    let conn = db.connect().unwrap();
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert!(
+        rels.is_empty(),
+        "no relationship should be persisted for a below-threshold adversarial pair"
+    );
+}
+
+// ── FR-004: a genuinely-unresolvable edge is dropped and counted, not just logged ──────
+
+#[tokio::test]
+async fn test_genuinely_unresolvable_edge_is_counted_in_result() {
+    let (db, _dir) = make_db();
+
+    // 'Nonexistent' is absent from the batch's entities, has no persisted match, and (under
+    // MockEmbedder's zero vectors) no salvage match either — it must be dropped and counted.
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Alice"],
+        &[("Alice", "Nonexistent", "Alice relates to Nonexistent")],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(&state, "ep-a", "Alice relates to Nonexistent.", GROUP_A).await;
+
+    assert_eq!(result.edges_extracted, 0);
+    assert_eq!(
+        result.edges_dropped_unresolvable, 1,
+        "a genuinely unresolvable edge must be reported in the process_chunk result, not only on stderr"
+    );
+}
+
+// ── Regression: salvage rewriting an off-list endpoint must not create a self-loop ─────
+
+#[tokio::test]
+async fn test_salvage_collapsing_both_endpoints_to_same_entity_is_not_inserted() {
+    let (db, _dir) = make_db();
+
+    // 'Global Warming' is off-list but salvage-matches 'Climate Change' (identical embeddings,
+    // well above DEDUP_THRESHOLD). The edge's *other* endpoint is already 'Climate Change'
+    // itself, so after salvage rewrites the source name the edge becomes self-referential —
+    // even though the pre-salvage self-referential check ('global warming' != 'climate change')
+    // did not catch it. It must not be persisted as a self-loop.
+    let mut map = HashMap::new();
+    map.insert("Climate Change".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Global Warming".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Climate Change"],
+        &[(
+            "Global Warming",
+            "Climate Change",
+            "Global warming is also called climate change",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Global warming is also called climate change.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "an edge that collapses to a self-loop after salvage must not be inserted, got {}",
+        result.edges_extracted
+    );
+
+    let conn = db.connect().unwrap();
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert!(
+        rels.is_empty(),
+        "no self-referential relationship should be persisted after a salvage collision"
+    );
+}
+
+// ── Regression: an entity name containing a control character must still resolve
+//    batch-locally, since the model only ever sees the control-stripped form ───────────
+
+#[tokio::test]
+async fn test_edge_endpoint_resolves_when_entity_name_has_control_char() {
+    let (db, _dir) = make_db();
+
+    // The entity's *stored* name has an embedded tab; `sanitize_entity_names` deletes control
+    // characters outright (no separator substituted) before the name ever reaches the
+    // edge-extraction prompt/schema (FR-001, FR-006), so a well-behaved model constrained by the
+    // tool schema's `enum` can only echo back the exact sanitized form — "ClimateChange", not
+    // "Climate Change". With `MockEmbedder`'s zero vectors, salvage can never match (cosine
+    // similarity is always 0.0), so this edge can only resolve via the direct batch-local name
+    // lookup — proving that lookup normalizes the same way the prompt/schema sanitization does.
+    // 'Ocean Acidification' has no control character, so only the control-char-affected
+    // endpoint ('ClimateChange') is exercising the behavior under test.
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Climate\tChange", "Ocean Acidification"],
+        &[(
+            "ClimateChange",
+            "Ocean Acidification",
+            "Climate change causes ocean acidification",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Climate change causes ocean acidification.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "an edge naming the sanitized form of a control-char-containing entity name must \
+         resolve batch-locally, got edges_extracted={}, edges_dropped_unresolvable={}",
+        result.edges_extracted, result.edges_dropped_unresolvable
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "this edge must resolve via direct batch-local match, not be dropped"
+    );
+
+    let conn = db.connect().unwrap();
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
 }

@@ -40,7 +40,7 @@ The result is a context graph you can treat like the rest of your local tooling:
                       └─────────────────────┴────────────┴──────────────┘
 ```
 
-**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](#ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced, so provenance is queryable.
+**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](#ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced, so provenance is queryable. Any relationship whose endpoint can't be resolved — even after a name-embedding similarity salvage attempt against the chunk's own entities — is dropped rather than written, and the count of such drops is returned as `edges_dropped_unresolvable` in the result.
 
 **Search** is hybrid by default: `knowledge_find_entities` and `knowledge_find_relationships` combine full-text and vector similarity over the same embedded store; `knowledge_search_passages` does semantic passage retrieval over episode content; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly.
 

@@ -149,6 +149,40 @@ pub fn entity_user_prompt_for(
     }
 }
 
+fn strip_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// Sanitizes a list of entity names for use in the edge-extraction prompt and tool schema:
+/// strips control characters (including newlines, which would break the bullet-list structure
+/// or a JSON schema `enum` entry), trims whitespace, drops entries that become empty, and
+/// deduplicates while preserving first-seen order (FR-001, FR-006).
+pub fn sanitize_entity_names(entity_names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    entity_names
+        .iter()
+        .filter_map(|n| {
+            let sanitized = strip_control_chars(n).trim().to_string();
+            if sanitized.is_empty() || !seen.insert(sanitized.clone()) {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+        .collect()
+}
+
+/// Normalizes a name to the key used to match an entity against a model-echoed edge endpoint
+/// name: strips control characters (the same stripping `sanitize_entity_names` applies before a
+/// name ever reaches the model), trims whitespace, and lowercases. An entity name containing a
+/// control character is control-stripped before the model ever sees it (both in the edge
+/// prompt's entity list and the tool schema's `enum`), so any endpoint-resolution key derived
+/// from the *original* entity name must use the same normalization or a genuine batch-local
+/// match will spuriously fail and fall through to salvage or drop.
+pub fn normalize_name(name: &str) -> String {
+    strip_control_chars(name).trim().to_lowercase()
+}
+
 /// Builds the edge extraction user message.
 ///
 /// `entity_names` is the list of entity names extracted in the entity pass.
@@ -160,18 +194,9 @@ pub fn edge_user_prompt(
     body: &str,
     custom_instructions: Option<&str>,
 ) -> String {
-    let entities_section = entity_names
-        .iter()
-        .filter_map(|n| {
-            // Strip control chars (including newlines) that would break the bullet-list structure.
-            let sanitized: String = n.chars().filter(|c| !c.is_control()).collect();
-            let sanitized = sanitized.trim().to_string();
-            if sanitized.is_empty() {
-                None
-            } else {
-                Some(format!("- {sanitized}"))
-            }
-        })
+    let entities_section = sanitize_entity_names(entity_names)
+        .into_iter()
+        .map(|n| format!("- {n}"))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -241,6 +266,58 @@ mod tests {
             !prompt.contains("{{ENTITY_TYPES_SECTION}}"),
             "placeholder must not appear in output"
         );
+    }
+
+    // FR-002: the entity prompt must not forbid the entity types its own ontology defines —
+    // the old unqualified "NEVER extract...abstract concepts" ban contradicted the Concept
+    // entity type and must not reappear in any of the three source-type prompts.
+    #[test]
+    fn concept_ban_contradiction_is_resolved_by_specificity_test() {
+        for (label, prompt) in [
+            ("extract_text.txt", EXTRACT_TEXT),
+            ("extract_message.txt", EXTRACT_MESSAGE),
+            ("extract_json.txt", EXTRACT_JSON),
+        ] {
+            assert!(
+                !prompt.contains("NEVER extract vague or standalone abstract concepts"),
+                "{label}: the old unqualified concept-ban phrasing must not reappear"
+            );
+            assert!(
+                prompt.contains("Concept entity"),
+                "{label}: must instruct that a specific, named concept is extracted as a Concept entity"
+            );
+            assert!(
+                prompt.contains("Wikipedia-article test") || prompt.contains("Wikipedia article"),
+                "{label}: must carry the specificity/Wikipedia-article test for concepts"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_entity_names_strips_control_chars_dedupes_and_drops_empty() {
+        let names = vec![
+            "Alice".to_string(),
+            "Alice".to_string(),               // exact duplicate, dropped
+            "Bob\ncontrol\tchars".to_string(), // control chars stripped
+            "   ".to_string(),                 // empty after trim, dropped
+            "\u{0007}".to_string(),            // empty after control-char strip, dropped
+            "  Carol  ".to_string(),           // trimmed
+        ];
+        let sanitized = sanitize_entity_names(&names);
+        assert_eq!(
+            sanitized,
+            vec![
+                "Alice".to_string(),
+                "Bobcontrolchars".to_string(),
+                "Carol".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_entity_names_empty_input_yields_empty_output() {
+        assert!(sanitize_entity_names(&[]).is_empty());
+        assert!(sanitize_entity_names(&["   ".to_string(), "\n".to_string()]).is_empty());
     }
 
     #[test]
