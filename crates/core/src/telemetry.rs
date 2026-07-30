@@ -137,8 +137,11 @@ pub enum TelemetryEvent {
     },
     /// Emitted by `handle_knowledge_process_chunk` whenever `chunk_text` exceeds
     /// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, regardless of whether the call created, replaced,
-    /// or no-op'd (issue #284). `unit_count` is however many episodes back `chunk_id` after
-    /// the call completes (1 for the pre-split accept-and-warn baseline established by #282).
+    /// or no-op'd (issue #284). For a no-op, `unit_count` is however many episodes already back
+    /// `chunk_id` (1 for the pre-split accept-and-warn baseline established by #282). For a
+    /// fresh/replaced ingest, the event fires before extraction begins, so `unit_count` is the
+    /// *intended* split count, not necessarily the count still present after a mid-split
+    /// failure (see `docs/telemetry.md`).
     ChunkTextOversized {
         ts_ms: u64,
         chunk_id: String,

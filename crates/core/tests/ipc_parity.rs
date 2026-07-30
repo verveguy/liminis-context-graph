@@ -913,6 +913,78 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id_looks_like_split_suffix
 }
 
 #[tokio::test]
+async fn test_knowledge_process_chunk_ignores_foreign_name_collision() {
+    // Regression test: `knowledge_add_episode` lets a caller set an arbitrary `name` unrelated
+    // to any chunk_id namespace. If a later `knowledge_process_chunk` call happens to use that
+    // same string as its `chunk_id`, reconstruction must not treat the foreign episode as part
+    // of this chunk_id's own lineage: it must be left untouched (not read as prior state, not
+    // deleted), and the process_chunk call must proceed as a fresh ingest.
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let foreign = dispatch_val(
+        50,
+        "knowledge_add_episode",
+        json!({
+            "name": "collision-id",
+            "episode_body": "Unrelated content from a different endpoint.",
+            "source": "text",
+            "source_description": "some/other/source.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&foreign, 50);
+    let foreign_uuid = foreign["result"]["episode_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let v = dispatch_val(
+        51,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "collision-id",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 51);
+    assert!(
+        v["result"]["replaced_uuids"].is_null(),
+        "the foreign episode must never be reported as replaced: {v}"
+    );
+    let chunk_uuid = v["result"]["episode_uuid"].as_str().unwrap().to_string();
+    assert_ne!(chunk_uuid, foreign_uuid);
+
+    let episodes = dispatch_val(
+        52,
+        "knowledge_get_episodes",
+        json!({"last_n": 10}),
+        Arc::clone(&state),
+    )
+    .await;
+    let uuids: Vec<&str> = episodes["result"]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uuid"].as_str().unwrap())
+        .collect();
+    assert!(
+        uuids.contains(&foreign_uuid.as_str()),
+        "foreign episode must survive the name collision, untouched: {episodes}"
+    );
+    assert!(
+        uuids.contains(&chunk_uuid.as_str()),
+        "chunk episode must have been created: {episodes}"
+    );
+}
+
+#[tokio::test]
 async fn test_knowledge_process_chunk_duplicate_chunk_id_different_text() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);

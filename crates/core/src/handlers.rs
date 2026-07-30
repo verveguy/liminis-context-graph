@@ -392,86 +392,121 @@ fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
 // ADR for the full convention). Reconstruction parses that suffix back off so a resubmitted
 // chunk_id's prior chunk_text can be compared against the incoming one, uniformly across both
 // shapes (FR-007).
+//
+// `get_episodes_by_chunk_id` matches purely on `ep.name`, which is not exclusive to this
+// handler — `knowledge_add_episode` lets a caller set an arbitrary `name` unrelated to any
+// `chunk_id` namespace. Reconstruction therefore only ever counts a row as belonging to *this*
+// chunk_id's own lineage if its `source_description` matches the convention anchored to the
+// current call's `"{source_file}:{chunk_id}"` base exactly (or that base plus a parseable
+// `#i/N` suffix) — a row from a different endpoint that merely shares the same `name` is
+// ignored entirely: never reconstructed into, never deleted.
 
-/// What a chunk_id's existing `Episodic` row(s) represent, reconstructed from a
-/// `get_episodes_by_chunk_id` lookup.
+/// What a chunk_id's existing `Episodic` row(s) — restricted to ones matching this call's own
+/// `source_description` convention — represent, reconstructed from a `get_episodes_by_chunk_id`
+/// lookup.
 enum PriorState {
-    /// No existing episodes for this chunk_id — first-time ingest.
+    /// No existing episodes belonging to this chunk_id's own lineage — first-time ingest (any
+    /// rows sharing the same `name` from a different endpoint are left untouched).
     None,
     /// Existing episode(s) parsed cleanly into a single ordered `chunk_text`, plus their
     /// UUIDs in unit order (or the sole UUID for a never-split chunk).
     Reconstructed { text: String, uuids: Vec<String> },
-    /// Existing rows don't parse into a complete, consistent unit set (mismatched counts,
-    /// missing indices, unparseable suffix, ...) — includes a mid-split partial-failure
-    /// leftover. Treated as a mismatch: the safe default is to replace, per Plan. The caller
-    /// re-deletes by chunk_id (not by these rows' UUIDs specifically), so no UUIDs are carried.
-    Anomalous,
-}
-
-/// Parses a trailing `#{i}/{N}` unit marker off a `source_description`, if present.
-/// Returns `None` for a source_description with no such suffix (the never-split shape) or one
-/// that fails to parse as `i/N` with `1 <= i <= N`.
-fn parse_unit_suffix(source_description: &str) -> Option<(usize, usize)> {
-    let hash_idx = source_description.rfind('#')?;
-    let suffix = &source_description[hash_idx + 1..];
-    let (i_str, n_str) = suffix.split_once('/')?;
-    let i: usize = i_str.parse().ok()?;
-    let n: usize = n_str.parse().ok()?;
-    if i == 0 || n == 0 || i > n {
-        return None;
-    }
-    Some((i, n))
+    /// Existing rows belong to this chunk_id's lineage but don't parse into a complete,
+    /// consistent unit set (mismatched counts, missing indices, mixed split/non-split shapes,
+    /// ...) — includes a mid-split partial-failure leftover. Treated as a mismatch: the safe
+    /// default is to replace, per Plan. Carries exactly the UUIDs that belong to this lineage,
+    /// so the replace step deletes only those, never a foreign row.
+    Anomalous { uuids: Vec<String> },
 }
 
 /// Reconstructs the prior `chunk_text` (if any) that a chunk_id's existing `Episodic` rows
 /// represent, from `(uuid, source_description, content)` triples returned by
-/// `Db::get_episodes_by_chunk_id`.
-fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>) -> PriorState {
-    if rows.is_empty() {
+/// `Db::get_episodes_by_chunk_id`, restricted to rows whose `source_description` matches
+/// `expected_base` (`"{source_file}:{chunk_id}"`) — exactly, for the never-split shape, or
+/// `expected_base` plus a `#i/N` suffix for a split unit. Anything else is a different
+/// endpoint's data that merely shares this `name` and is excluded entirely.
+fn reconstruct_prior_chunk_text(
+    rows: Vec<(String, String, String)>,
+    expected_base: &str,
+) -> PriorState {
+    let split_prefix = format!("{expected_base}#");
+
+    let mut never_split: Option<(String, String)> = None; // (uuid, content)
+    let mut split_units: Vec<(usize, usize, String, String)> = Vec::new(); // (i, n, uuid, content)
+    let mut family_uuids: Vec<String> = Vec::new();
+
+    for (uuid, source_description, content) in rows {
+        if source_description == expected_base {
+            family_uuids.push(uuid.clone());
+            never_split = Some((uuid, content));
+            continue;
+        }
+        if let Some(suffix) = source_description.strip_prefix(&split_prefix) {
+            if let Some((i_str, n_str)) = suffix.split_once('/') {
+                if let (Ok(i), Ok(n)) = (i_str.parse::<usize>(), n_str.parse::<usize>()) {
+                    if i >= 1 && n >= 1 && i <= n {
+                        family_uuids.push(uuid.clone());
+                        split_units.push((i, n, uuid, content));
+                        continue;
+                    }
+                }
+            }
+        }
+        // Doesn't match this chunk_id's own source_description convention — belongs to a
+        // different endpoint/lineage (e.g. a `knowledge_add_episode` call whose caller-chosen
+        // `name` happens to equal this `chunk_id`). Leave it untouched: not counted, not
+        // deleted.
+    }
+
+    if family_uuids.is_empty() {
         return PriorState::None;
     }
 
-    // A single row is always the never-split shape: its content is the prior chunk_text
-    // verbatim, used as-is regardless of what its source_description looks like. Do NOT probe
-    // it with parse_unit_suffix first — a caller-supplied chunk_id or source_file that happens
-    // to end in a "#i/N"-shaped substring (e.g. chunk_id = "page#3/7") would otherwise be
-    // misparsed as a stale split marker, forcing every resubmission of that chunk_id into the
-    // replace path even on a byte-identical retry. This also still self-heals a genuine
-    // single-row leftover from a partial split failure (real `#i/N` suffix, i<N): its content
-    // is only one unit's fragment, so comparing it against the caller's full chunk_text falls
-    // through to the Replace path exactly as the old Anomalous branch did.
-    if rows.len() == 1 {
-        let (uuid, _source_description, content) = rows.into_iter().next().unwrap();
-        return PriorState::Reconstructed {
-            text: content,
-            uuids: vec![uuid],
+    if split_units.is_empty() {
+        // Exactly one never-split row and nothing else in this lineage.
+        if family_uuids.len() == 1 {
+            let (uuid, content) = never_split.expect("family_uuids non-empty implies a row");
+            return PriorState::Reconstructed {
+                text: content,
+                uuids: vec![uuid],
+            };
+        }
+        return PriorState::Anomalous {
+            uuids: family_uuids,
         };
     }
 
-    let mut parsed: Vec<(usize, usize, String, String)> = Vec::with_capacity(rows.len());
-    for (uuid, source_description, content) in rows {
-        match parse_unit_suffix(&source_description) {
-            Some((i, n)) => parsed.push((i, n, uuid, content)),
-            None => return PriorState::Anomalous,
-        }
+    if never_split.is_some() {
+        // Mixed never-split + split shapes for the same lineage — shouldn't happen under normal
+        // operation (replace always clears the whole lineage first), but treat conservatively.
+        return PriorState::Anomalous {
+            uuids: family_uuids,
+        };
     }
 
-    let unit_count = parsed[0].1;
-    let consistent_n = parsed.iter().all(|(_, n, _, _)| *n == unit_count);
-    if !consistent_n || parsed.len() != unit_count {
-        return PriorState::Anomalous;
+    let unit_count = split_units[0].1;
+    let consistent_n = split_units.iter().all(|(_, n, _, _)| *n == unit_count);
+    if !consistent_n || split_units.len() != unit_count {
+        return PriorState::Anomalous {
+            uuids: family_uuids,
+        };
     }
 
-    parsed.sort_by_key(|(i, _, _, _)| *i);
+    split_units.sort_by_key(|(i, _, _, _)| *i);
     let mut seen = std::collections::HashSet::new();
-    let all_unique = parsed.iter().all(|(i, _, _, _)| seen.insert(*i));
-    let complete_sequence = parsed.iter().map(|(i, _, _, _)| *i).eq(1..=unit_count);
+    let all_unique = split_units.iter().all(|(i, _, _, _)| seen.insert(*i));
+    let complete_sequence = split_units.iter().map(|(i, _, _, _)| *i).eq(1..=unit_count);
     if !all_unique || !complete_sequence {
-        return PriorState::Anomalous;
+        return PriorState::Anomalous {
+            uuids: family_uuids,
+        };
     }
 
-    let uuids: Vec<String> = parsed.iter().map(|(_, _, uuid, _)| uuid.clone()).collect();
-    let text: String = parsed
+    let uuids: Vec<String> = split_units
+        .iter()
+        .map(|(_, _, uuid, _)| uuid.clone())
+        .collect();
+    let text: String = split_units
         .iter()
         .map(|(_, _, _, content)| content.as_str())
         .collect::<Vec<_>>()
@@ -559,42 +594,55 @@ async fn handle_knowledge_process_chunk(
 
     // Resolve against any existing episode(s) for this chunk_id first (FR-006/FR-007) — this
     // always runs, even for a chunk_id seen for the first time, so the never-split and split
-    // cases share one idempotency path. A mismatch (including an unparseable/partial prior
-    // split) deletes the prior episode(s) here, under the same write-lock acquisition, before
-    // any fresh ingest proceeds.
+    // cases share one idempotency path. Only a read lock is needed for the lookup itself (it's
+    // a pure query); the write lock is acquired only if a replace turns out to be necessary, so
+    // a resubmission that no-ops (the common retry case) never blocks concurrent ingestion of
+    // unrelated chunk_ids behind an exclusive lock.
     let db_for_lookup = load_db(&state)?;
-    let wal_writer_lookup = Arc::clone(&state.wal_writer);
-    let sink_lookup = Arc::clone(&state.sink);
     let chunk_id_lookup = chunk_id.clone();
     let group_id_lookup = group_id.clone();
+    let source_desc_base_lookup = source_desc_base.clone();
     let chunk_text_for_compare = chunk_text.clone();
-    let lookup_guard = state.write_lock.write().await;
-    let resubmission = tokio::task::spawn_blocking(move || -> Result<ChunkResubmission, Error> {
+    let read_guard = state.write_lock.read().await;
+    let prior_state = tokio::task::spawn_blocking(move || -> Result<PriorState, Error> {
         let conn = db_for_lookup.connect()?;
         let rows = conn.get_episodes_by_chunk_id(&chunk_id_lookup, &group_id_lookup)?;
-        match reconstruct_prior_chunk_text(rows) {
-            PriorState::None => Ok(ChunkResubmission::New),
-            PriorState::Reconstructed { text, uuids } if text == chunk_text_for_compare => {
-                Ok(ChunkResubmission::NoOp {
-                    episode_uuids: uuids,
-                })
-            }
-            PriorState::Reconstructed { .. } | PriorState::Anomalous => {
-                let replaced_uuids = conn.remove_episodes_by_chunk_id(
-                    &chunk_id_lookup,
-                    Some(&[group_id_lookup.as_str()]),
-                )?;
-                wal_exec::wal_flush_ungrouped(
-                    &wal_writer_lookup,
-                    conn.drain_mutations(),
-                    &sink_lookup,
-                );
-                Ok(ChunkResubmission::Replace { replaced_uuids })
-            }
-        }
+        Ok(reconstruct_prior_chunk_text(rows, &source_desc_base_lookup))
     })
     .await??;
-    drop(lookup_guard);
+    drop(read_guard);
+
+    let resubmission = match prior_state {
+        PriorState::None => ChunkResubmission::New,
+        PriorState::Reconstructed { text, uuids } if text == chunk_text_for_compare => {
+            ChunkResubmission::NoOp {
+                episode_uuids: uuids,
+            }
+        }
+        PriorState::Reconstructed { uuids, .. } | PriorState::Anomalous { uuids } => {
+            // Delete exactly the UUIDs already known to belong to this chunk_id's own lineage
+            // (never a foreign row from a different endpoint's `name` collision — see the
+            // reconstruction comment above) under a fresh write-lock acquisition.
+            let db_for_delete = load_db(&state)?;
+            let wal_writer_delete = Arc::clone(&state.wal_writer);
+            let sink_delete = Arc::clone(&state.sink);
+            let write_guard = state.write_lock.write().await;
+            let replaced_uuids =
+                tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
+                    let conn = db_for_delete.connect()?;
+                    conn.remove_episodes_by_uuids(&uuids)?;
+                    wal_exec::wal_flush_ungrouped(
+                        &wal_writer_delete,
+                        conn.drain_mutations(),
+                        &sink_delete,
+                    );
+                    Ok(uuids)
+                })
+                .await??;
+            drop(write_guard);
+            ChunkResubmission::Replace { replaced_uuids }
+        }
+    };
 
     let replaced_uuids = match resubmission {
         ChunkResubmission::NoOp { episode_uuids } => {
@@ -607,6 +655,13 @@ async fn handle_knowledge_process_chunk(
                 "idempotent": true,
                 "duration_seconds": start.elapsed().as_secs_f64(),
             });
+            // Shape follows what the *existing* episode(s) are, not the current `oversized`
+            // flag: a chunk_id ingested back when it was never split stays in the singular
+            // `episode_uuid` shape on a no-op, even if `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` has
+            // since been lowered so the same byte-identical text now reads as oversized. That
+            // combination (singular `episode_uuid` shape *and* a `warning` present) is
+            // intentional: the no-op still tells the caller their content exceeds the current
+            // threshold, but it does not retroactively split data that was never split.
             if episode_uuids.len() == 1 {
                 response["episode_uuid"] = json!(episode_uuids[0]);
             } else {

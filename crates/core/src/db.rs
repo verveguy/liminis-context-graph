@@ -607,6 +607,27 @@ impl<'db> Conn<'db> {
         Ok(uuids)
     }
 
+    /// Deletes exactly the Episodic nodes named in `uuids`, no lookup by `name`/`chunk_id`
+    /// involved.
+    ///
+    /// Used by `handle_knowledge_process_chunk`'s replace path (issue #284): unlike
+    /// `remove_episodes_by_chunk_id`, which deletes every Episodic node sharing a `name` (chunk
+    /// identifier is not exclusive to this handler — `knowledge_add_episode` can set an
+    /// unrelated `name`), this only touches the specific episode(s) already determined to
+    /// belong to the chunk_id's own ingest lineage.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
+    pub fn remove_episodes_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
     /// Returns `(uuid, source_description, content)` for every Episodic node whose name
     /// (chunk identifier) matches `chunk_id` within `group_id`. Read-only counterpart to
     /// `remove_episodes_by_chunk_id`, used by `handle_knowledge_process_chunk` (issue #284) to

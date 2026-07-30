@@ -59,18 +59,27 @@ the never-split and split cases into one mechanism (the spec's FR-007): reconstr
 "concatenate however many rows there are, in unit order."
 
 Every `knowledge_process_chunk` call — including a `chunk_id` never seen before — runs this
-lookup first, under the same `write_lock` acquisition used for any resulting delete:
+lookup first, under only a *read* acquisition of `write_lock` (escalated to a write acquisition
+only if a replace-delete actually needs to happen — see Consequences):
 
 1. Query existing `Episodic` rows for `(chunk_id, group_id)`
    (`Db::get_episodes_by_chunk_id`, the read-only counterpart to `remove_episodes_by_chunk_id`).
-2. Reconstruct (`handlers.rs::reconstruct_prior_chunk_text` → `PriorState`):
-   - No rows → `PriorState::None` (first-time ingest, unaffected).
-   - One row with no `#i/N` suffix → its `content` **is** the prior `chunk_text`.
-   - N rows whose suffixes form a complete `1..=N` sequence with consistent `N` → sort by `i`,
-     concatenate `content`.
-   - Anything that doesn't parse cleanly (missing indices, inconsistent `N`, an unparseable
-     suffix) → `PriorState::Anomalous`. Deliberately conservative: an ambiguous prior state is
-     always treated as a mismatch, never guessed into a no-op.
+2. Reconstruct (`handlers.rs::reconstruct_prior_chunk_text` → `PriorState`), counting only rows
+   whose `source_description` matches *this call's own* `"{source_file}:{chunk_id}"` convention
+   — exactly, for the never-split shape, or that exact base plus a parseable `#i/N` suffix for a
+   split unit. `Episodic.name` is not exclusive to this handler (`knowledge_add_episode` lets a
+   caller set an arbitrary `name`), so a row that merely shares the same `name` but doesn't match
+   this handler's own `source_description` convention is a different endpoint's data and is
+   excluded entirely: never reconstructed into, never deleted (see Consequences).
+   - No matching rows → `PriorState::None` (first-time ingest for this lineage, unaffected —
+     any foreign row sharing the `name` is left alone).
+   - One matching row with no `#i/N` suffix → its `content` **is** the prior `chunk_text`.
+   - N matching rows whose suffixes form a complete `1..=N` sequence with consistent `N` → sort
+     by `i`, concatenate `content`.
+   - Anything that doesn't parse cleanly (missing indices, inconsistent `N`, a mix of split and
+     non-split shapes in the same lineage) → `PriorState::Anomalous`, carrying exactly the UUIDs
+     that belong to this lineage. Deliberately conservative: an ambiguous prior state is always
+     treated as a mismatch, never guessed into a no-op.
 3. Compare the reconstructed text to the incoming `chunk_text`:
    - **Equal → no-op.** Skip extraction/embedding entirely and return the existing episode
      UUID(s) with `idempotent: true`. This is the reason the comparison happens *before* any LLM
@@ -78,10 +87,11 @@ lookup first, under the same `write_lock` acquisition used for any resulting del
      is not guaranteed to reproduce the same entities/edges, and `remove_episodes_by_chunk_id`'s
      own doc comment already warns that orphaned entities from a deleted episode are not cleaned
      up — a naive replace-always design would risk both.
-   - **Different (including `Anomalous`) → replace.** Delete the prior episode(s) via the
-     existing `remove_episodes_by_chunk_id`, flush that delete's WAL exactly as
-     `handle_delete_chunk_episode` does today (`wal_exec::wal_flush_ungrouped`), then proceed as
-     a fresh ingest (single episode or split, depending on the incoming text's size).
+   - **Different (including `Anomalous`) → replace.** Delete exactly the UUIDs already known to
+     belong to this lineage via `Db::remove_episodes_by_uuids` (never a name-based delete, so a
+     foreign row is never touched), flush that delete's WAL the same way
+     `handle_delete_chunk_episode` does (`wal_exec::wal_flush_ungrouped`), then proceed as a
+     fresh ingest (single episode or split, depending on the incoming text's size).
 
 **Mid-split partial failure has no explicit rollback — it self-heals via step 2/3 above.** Each
 unit of a split is its own `add_episode` call with its own `write_lock` acquisition and WAL
@@ -107,7 +117,27 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   multi-episode-per-`chunk_id` tolerance they already had is precisely what splitting relies on.
 - **Every `knowledge_process_chunk` call now runs one extra read query** (the chunk_id lookup),
   even for a `chunk_id` never seen before — an unindexed exact-match scan on `Episodic.name`, the
-  same query shape the delete path already runs. Small, but real; not free.
+  same query shape the delete path already runs. Small, but real; not free. This lookup takes
+  only `write_lock.read()`, not `.write()`: the common case (a new chunk_id, or a no-op
+  resubmission) is a pure read, and only the replace branch escalates to `write_lock.write()`
+  for its delete. An earlier revision of this design took the write lock for the whole lookup,
+  which would have serialized *all* concurrent chunk ingestion — including unrelated chunk_ids —
+  behind an exclusive lock up front rather than only at Phase C's brief commit, as review caught.
+- **Reconstruction is anchored to this call's own `source_description` convention, not just
+  `Episodic.name`.** `knowledge_process_chunk` and `knowledge_add_episode` both write to the same
+  `Episodic.name` field with no shared namespace — a caller could coincidentally (or
+  adversarially) `knowledge_add_episode` with `name` equal to a `chunk_id` used elsewhere. Prior
+  to this anchoring, `handle_knowledge_process_chunk` would pick up such a foreign row as
+  `PriorState`, almost certainly find its content didn't match the incoming `chunk_text`, and
+  silently `DETACH DELETE` it as a side effect of a routine ingest call — data loss with no
+  explicit delete action from the caller. Anchoring reconstruction (and the resulting delete) to
+  rows whose `source_description` matches `"{source_file}:{chunk_id}"` (exactly, or plus a
+  parseable `#i/N` suffix) closes this: a foreign row is left untouched, and `chunk_id`
+  resubmission proceeds as a fresh ingest instead. `handle_delete_chunk_episode` (an explicit,
+  caller-invoked deletion) is unaffected by this change and still matches/deletes by `name` alone
+  — that endpoint's contract has always been "delete everything with this name," which is a
+  different, and here still an intentionally accepted, risk from routine ingestion silently
+  destroying data.
 - **`source_description`'s `#{i}/{N}` suffix is now a load-bearing convention**, consumed by
   `reconstruct_prior_chunk_text`. A future change to how `source_description` is built for chunk
   ingests must preserve or explicitly migrate this format, or idempotency reconstruction silently
@@ -124,10 +154,11 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   `write_lock` independently rather than holding it for the whole split (consistent with today's
   single-unit behavior; no correctness property depends on cross-unit atomicity).
 - **Known limitation: two concurrent calls for the *same* `chunk_id` are not mutually exclusive
-  across the lookup-through-insert span.** `write_lock` is held only for the lookup/reconstruct/
-  conditional-delete step (`handlers.rs::handle_knowledge_process_chunk`) and dropped before the
-  fresh ingest runs; `add_episode` only reacquires the lock briefly, per unit, at its own Phase C
-  commit — extraction in between runs unlocked. Two calls racing for one `chunk_id` (e.g. a
+  across the lookup-through-insert span.** `write_lock` is held only for the lookup step (a read
+  acquisition) and, if needed, the delete step (a separate write acquisition) in
+  `handlers.rs::handle_knowledge_process_chunk`, both dropped before the fresh ingest runs;
+  `add_episode` only reacquires the lock briefly, per unit, at its own Phase C commit —
+  extraction in between runs unlocked. Two calls racing for one `chunk_id` (e.g. a
   client retry sent while the original is still blocked on LLM extraction — exactly the case
   this feature is meant to make safe) can both observe the same prior state and both proceed to
   insert, producing duplicate/divergent episodes for that `chunk_id` until a later resubmission
@@ -153,8 +184,11 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   the handler-level self-healing behavior above was needed.
 - `crates/core/src/chunk_split.rs`: the splitter and its concatenation/length-invariant tests.
 - `crates/core/src/handlers.rs`: `chunk_text_advisory_max_chars`, `PriorState`,
-  `parse_unit_suffix`, `reconstruct_prior_chunk_text`, `handle_knowledge_process_chunk`.
+  `reconstruct_prior_chunk_text`, `handle_knowledge_process_chunk`.
 - `crates/core/src/db.rs::get_episodes_by_chunk_id`: the read-only counterpart to
   `remove_episodes_by_chunk_id` this design's reconstruction step depends on.
+- `crates/core/src/db.rs::remove_episodes_by_uuids`: deletes exactly a given set of UUIDs (no
+  `name`-based lookup), used by the replace path instead of `remove_episodes_by_chunk_id` so a
+  foreign row sharing the `name` is never deleted.
 - `docs/telemetry.md`: `chunk_text_oversized` event, emitted whenever `chunk_text` exceeds the
   threshold regardless of created/replaced/no-op outcome.
