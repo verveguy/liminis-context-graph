@@ -562,6 +562,42 @@ fn oversized_warning(chunk_text_chars: usize, threshold_chars: usize) -> Value {
     })
 }
 
+/// Builds the response for an idempotent (byte-identical) chunk_id resubmission. Shape follows
+/// what the *existing* episode(s) are (`episode_uuids.len()`), not `oversized` — see the call
+/// site in `handle_knowledge_process_chunk` for why a chunk_id ingested back when it was never
+/// split can still surface `warning` alongside the singular `episode_uuid` shape (a
+/// since-lowered `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`). Extracted as a pure function so that
+/// combination is directly unit-testable: `chunk_text_advisory_max_chars()` caches its value for
+/// the process lifetime, so no test in this binary can actually flip the threshold between two
+/// calls to exercise this branch end-to-end.
+fn build_noop_response(
+    chunk_id: &str,
+    source_file: &str,
+    episode_uuids: &[String],
+    oversized: bool,
+    chunk_text_chars: usize,
+    threshold: usize,
+    duration_seconds: f64,
+) -> Value {
+    let mut response = json!({
+        "success": true,
+        "chunk_id": chunk_id,
+        "source_file": source_file,
+        "idempotent": true,
+        "duration_seconds": duration_seconds,
+    });
+    if episode_uuids.len() == 1 {
+        response["episode_uuid"] = json!(episode_uuids[0]);
+    } else {
+        response["unit_count"] = json!(episode_uuids.len());
+        response["episode_uuids"] = json!(episode_uuids);
+    }
+    if oversized {
+        response["warning"] = oversized_warning(chunk_text_chars, threshold);
+    }
+    response
+}
+
 async fn handle_knowledge_process_chunk(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -655,28 +691,16 @@ async fn handle_knowledge_process_chunk(
         ChunkResubmission::NoOp { episode_uuids } => {
             // Byte-identical resubmission: skip extraction entirely (avoids reintroducing
             // LLM-extraction nondeterminism on a retry) and return the existing episode(s).
-            let mut response = json!({
-                "success": true,
-                "chunk_id": chunk_id,
-                "source_file": source_file,
-                "idempotent": true,
-                "duration_seconds": start.elapsed().as_secs_f64(),
-            });
-            // Shape follows what the *existing* episode(s) are, not the current `oversized`
-            // flag: a chunk_id ingested back when it was never split stays in the singular
-            // `episode_uuid` shape on a no-op, even if `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` has
-            // since been lowered so the same byte-identical text now reads as oversized. That
-            // combination (singular `episode_uuid` shape *and* a `warning` present) is
-            // intentional: the no-op still tells the caller their content exceeds the current
-            // threshold, but it does not retroactively split data that was never split.
-            if episode_uuids.len() == 1 {
-                response["episode_uuid"] = json!(episode_uuids[0]);
-            } else {
-                response["unit_count"] = json!(episode_uuids.len());
-                response["episode_uuids"] = json!(episode_uuids.clone());
-            }
+            let response = build_noop_response(
+                &chunk_id,
+                &source_file,
+                &episode_uuids,
+                oversized,
+                chunk_text_chars,
+                threshold,
+                start.elapsed().as_secs_f64(),
+            );
             if oversized {
-                response["warning"] = oversized_warning(chunk_text_chars, threshold);
                 state.sink.emit(TelemetryEvent::ChunkTextOversized {
                     ts_ms: now_ms(),
                     chunk_id: chunk_id.clone(),
@@ -703,7 +727,17 @@ async fn handle_knowledge_process_chunk(
         // sharing the caller's chunk_id (FR-003) with a unit index carried only in
         // source_description, never in `name` (Constraint 1 — remove_episodes_by_chunk_id's
         // exact-match deletion must keep working unchanged).
-        let units = chunk_split::split_into_units(&chunk_text, threshold);
+        //
+        // Run off the async worker thread: `split_into_units`'s backward whitespace scan is
+        // CPU-bound, and its worst case (see `chunk_split`'s doc comment — pathological input
+        // with whitespace only near each window's start) can cost O(chars * max_chars) rather
+        // than O(chars). Running that inline on the async executor would block every other
+        // task scheduled on this worker thread for however long it takes; `spawn_blocking`
+        // moves it to the dedicated blocking-task pool instead.
+        let units = tokio::task::spawn_blocking(move || {
+            chunk_split::split_into_units(&chunk_text, threshold)
+        })
+        .await?;
         let unit_count = units.len();
 
         // Emit before the loop, not after: if add_episode fails partway through (e.g. unit 3 of
@@ -3368,4 +3402,59 @@ fn enrich_edge_from_entity_ep_info(
     }
     edge.episode_uuids = ep_uuids;
     edge.source_descriptions = src_descs;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noop_response_singular_shape_carries_warning_when_since_lowered_oversized() {
+        // A chunk_id ingested back when it was never split (below whatever threshold applied
+        // then) stays in the singular `episode_uuid` shape on a byte-identical no-op resubmit,
+        // even if the threshold has since been lowered so the same text now reads as oversized:
+        // the no-op still surfaces `warning`, but does not retroactively split data that was
+        // never split. This combination can't be driven end-to-end through the IPC handler in a
+        // single test binary run, since `chunk_text_advisory_max_chars()` caches its value for
+        // the process lifetime — so it's tested directly against the pure response builder.
+        let response = build_noop_response(
+            "chunk-1",
+            "doc.txt",
+            &["uuid-1".to_string()],
+            true,
+            9_000,
+            8_000,
+            0.001,
+        );
+        assert_eq!(response["episode_uuid"], json!("uuid-1"));
+        assert!(
+            response.get("episode_uuids").is_none(),
+            "singular shape must not also carry episode_uuids: {response}"
+        );
+        assert!(
+            response.get("unit_count").is_none(),
+            "singular shape must not also carry unit_count: {response}"
+        );
+        assert_eq!(response["warning"]["type"], "chunk_text_oversized");
+        assert_eq!(response["warning"]["chunk_text_chars"], 9_000);
+        assert_eq!(response["warning"]["recommended_max_chars"], 8_000);
+        assert_eq!(response["idempotent"], true);
+    }
+
+    #[test]
+    fn noop_response_split_shape_omits_warning_when_not_oversized() {
+        let response = build_noop_response(
+            "chunk-2",
+            "doc.txt",
+            &["uuid-a".to_string(), "uuid-b".to_string()],
+            false,
+            100,
+            8_000,
+            0.001,
+        );
+        assert_eq!(response["unit_count"], 2);
+        assert_eq!(response["episode_uuids"], json!(["uuid-a", "uuid-b"]));
+        assert!(response.get("episode_uuid").is_none());
+        assert!(response.get("warning").is_none());
+    }
 }

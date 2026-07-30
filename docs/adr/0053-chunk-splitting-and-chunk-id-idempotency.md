@@ -189,6 +189,24 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   to `assert_eq!`; `delete_chunk_episode_all_revisions` (`tier1c_deletion.rs`) — which relied on
   resubmission always "appending a revision" — was renamed to
   `delete_chunk_episode_after_idempotent_resubmission` and now asserts 1 episode, not 2.
+- **`chunk_split::split_into_units` runs via `spawn_blocking`, not inline on the async
+  executor.** Its backward whitespace scan is bounded by `max_chars` per unit in the common case,
+  but a pathological input (whitespace only very close to the start of many consecutive windows,
+  each followed by a long whitespace-free run) can push total cost toward
+  `O(chars.len() * max_chars)` — see `chunk_split.rs`'s doc comment. Running that inline in
+  `handle_knowledge_process_chunk` (an `async fn`) would block the Tokio worker thread executing
+  it for however long the scan takes, delaying every other task scheduled on that worker;
+  `spawn_blocking` moves it to the dedicated blocking-task pool instead, consistent with how
+  every other CPU/IO-bound step in this handler (the chunk_id lookup, `add_episode`'s commit
+  phase, the replace-path delete) is already structured.
+- **The no-op response's singular-`episode_uuid`-shape-plus-`warning` combination (when
+  `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` is lowered between an initial below-threshold ingest and a
+  byte-identical resubmission) is covered by a direct unit test against `build_noop_response`, not
+  an end-to-end IPC test.** `chunk_text_advisory_max_chars()` caches its value in a `OnceLock` for
+  the process lifetime (mirroring `episode::hybrid_threshold()`), so no test in the same binary
+  can actually change the threshold between two calls to drive this branch through the full
+  handler — the response-shape logic was extracted into a pure `build_noop_response` helper
+  specifically so this combination has direct regression coverage despite that constraint.
 - **A concurrent `knowledge_process_chunk` call for a *different* `chunk_id` can still interleave
   between units of one split chunk's ingest**, since each unit acquires and releases
   `write_lock` independently rather than holding it for the whole split (consistent with today's

@@ -20,7 +20,10 @@
 /// run past the `max_chars` mark, cuts near `start` and repeats — producing a run of small units
 /// until the whitespace-free stretch is exhausted. Invariants (unit length, lossless
 /// concatenation) still hold; this is a quality/performance caveat for pathological input, not a
-/// correctness issue.
+/// correctness issue. If that pattern repeats across the whole input, each unit's scan still
+/// costs up to `max_chars` steps, so total cost can approach `O(chars.len() * max_chars)` rather
+/// than `O(chars.len())` — the caller (`handlers.rs`) runs this via `spawn_blocking` rather than
+/// inline on the async executor specifically because of this worst case.
 pub fn split_into_units(text: &str, max_chars: usize) -> Vec<String> {
     // A zero-width window never advances `start` below, which would hang the caller forever.
     // Clamp to 1 so `max_chars == 0` degrades to "one unit per char", matching the doc comment.
