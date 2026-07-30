@@ -431,9 +431,16 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>) -> PriorSta
         return PriorState::None;
     }
 
-    // A single row with no unit suffix is the never-split shape: its content is the prior
-    // chunk_text verbatim.
-    if rows.len() == 1 && parse_unit_suffix(&rows[0].1).is_none() {
+    // A single row is always the never-split shape: its content is the prior chunk_text
+    // verbatim, used as-is regardless of what its source_description looks like. Do NOT probe
+    // it with parse_unit_suffix first — a caller-supplied chunk_id or source_file that happens
+    // to end in a "#i/N"-shaped substring (e.g. chunk_id = "page#3/7") would otherwise be
+    // misparsed as a stale split marker, forcing every resubmission of that chunk_id into the
+    // replace path even on a byte-identical retry. This also still self-heals a genuine
+    // single-row leftover from a partial split failure (real `#i/N` suffix, i<N): its content
+    // is only one unit's fragment, so comparing it against the caller's full chunk_text falls
+    // through to the Replace path exactly as the old Anomalous branch did.
+    if rows.len() == 1 {
         let (uuid, _source_description, content) = rows.into_iter().next().unwrap();
         return PriorState::Reconstructed {
             text: content,

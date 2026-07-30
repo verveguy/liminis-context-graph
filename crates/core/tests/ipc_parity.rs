@@ -876,6 +876,43 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
 }
 
 #[tokio::test]
+async fn test_knowledge_process_chunk_duplicate_chunk_id_looks_like_split_suffix() {
+    // Regression test: a caller-supplied chunk_id shaped like "page#3/7" must not be misparsed
+    // as a stale split-unit marker by parse_unit_suffix, which previously scanned the whole
+    // source_description for the last '#' with no knowledge of where the caller-controlled
+    // portion ends. A single non-split episode whose chunk_id happens to look like an "i/N"
+    // suffix must still be idempotent on identical resubmission, not forced into replace.
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let params = json!({
+        "chunk_text": "Alice works at Acme Corp.",
+        "chunk_id": "page#3/7",
+        "source_file": "test.txt",
+        "reference_time": "2024-06-01T12:00:00Z",
+    });
+    let v1 = dispatch_val(
+        33,
+        "knowledge_process_chunk",
+        params.clone(),
+        Arc::clone(&state),
+    )
+    .await;
+    let v2 = dispatch_val(34, "knowledge_process_chunk", params, Arc::clone(&state)).await;
+    assert_ok_resp(&v1, 33);
+    assert_ok_resp(&v2, 34);
+    let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap();
+    let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap();
+    assert_eq!(
+        uuid1, uuid2,
+        "a chunk_id shaped like a split suffix must still be idempotent on identical resubmission: {v2}"
+    );
+    assert_eq!(
+        v2["result"]["idempotent"], true,
+        "second call must be flagged idempotent, not a false-anomalous replace: {v2}"
+    );
+}
+
+#[tokio::test]
 async fn test_knowledge_process_chunk_duplicate_chunk_id_different_text() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);
