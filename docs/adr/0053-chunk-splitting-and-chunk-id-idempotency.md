@@ -111,6 +111,18 @@ together — inconsistent shapes/counts, so still `PriorState::Anomalous` — an
 deletes that whole combined set before re-splitting from scratch. Either way, no separate
 partial-failure-detection code was needed.
 
+Self-healing is retry-triggered, not automatic: the partial-failure detection above only runs the
+next time *this* `chunk_id` is submitted again. If no caller ever resubmits it, units `0..i-1`
+stay committed indefinitely as a permanent, incomplete lineage — silently present in search/graph
+results, representing less content than the original `chunk_text`, with no periodic reconciliation
+job or startup check that would ever surface this to an operator on its own. This is a real change
+in failure mode from the prior single-episode-or-nothing behavior (a failed non-split ingest left
+nothing at all; a failed split ingest now leaves a partial result that looks like ordinary data
+until someone resubmits or goes looking). Accepted here for the same reason the mid-split failure
+itself has no rollback: building active reconciliation is a materially larger operational feature
+(a background sweep or an admin-facing "list incomplete chunk lineages" query), out of scope for
+this issue — tracked as a recommended follow-up alongside the per-`chunk_id` locking gap below.
+
 **Response shape changes only where behavior is new.** The below-threshold,
 never-seen-`chunk_id` path is byte-identical to pre-#284 (`episode_uuid`, `nodes_extracted`,
 `edges_extracted`, `duration_seconds` — no new keys), satisfying FR-001. A split response
@@ -243,8 +255,14 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
     delete the same prior UUIDs via `Db::remove_episodes_by_uuids` — the loser's delete is a
     silent no-op against rows the winner already removed, but the loser's response still reports
     those UUIDs in `replaced_uuids`, naming rows that are already gone by the time the response
-    is returned. Not a data-integrity problem (no unintended deletion), but a response-accuracy
-    one: `replaced_uuids` can name UUIDs the caller can no longer look up.
+    is returned. The bigger consequence is upstream of that response-accuracy issue: since
+    neither ingest depends on or waits for the other, **both callers' fresh episode(s) survive**
+    — only the shared *prior* lineage is deleted (once). The `chunk_id` ends up mapping to the
+    union of both new episode sets, with no stored signal distinguishing which is "current"; this
+    is the multi-episode-per-`chunk_id` invariant splitting relies on being abused by a race
+    rather than by design, and there is no way to tell from the data alone which of the two
+    divergent sets a later reader should trust. Not a *deletion*-correctness problem (no
+    unintended data loss), but a lineage-correctness one.
 
 ## Related
 
