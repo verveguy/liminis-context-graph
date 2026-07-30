@@ -423,6 +423,7 @@ async fn handle_knowledge_process_chunk(
         "episode_uuid": result.episode_uuid,
         "nodes_extracted": result.nodes_extracted,
         "edges_extracted": result.edges_extracted,
+        "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
         "duration_seconds": start.elapsed().as_secs_f64(),
     }))
 }
