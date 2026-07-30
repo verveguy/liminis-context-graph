@@ -1465,6 +1465,50 @@ async fn test_read_only_raw_cypher_does_not_rebuild_name_index() {
     );
 }
 
+/// Index DDL (`CALL CREATE_VECTOR_INDEX(...)`) contains the `CREATE` keyword, which
+/// `looks_like_mutation` alone would treat as an Entity mutation. `log_mutation` (wal.rs) has
+/// always excluded index DDL from its own mutation check via the same `is_index_ddl` filter;
+/// `handle_query_cypher` must apply it too, or a `CREATE_VECTOR_INDEX` call through the raw
+/// Cypher `cypher` MCP scope would trigger a wasted full-Entity-table rebuild scan.
+#[tokio::test]
+async fn test_index_ddl_via_raw_cypher_does_not_rebuild_name_index() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // Bypass insert_entity so the index starts blind to this entity, isolating the
+        // assertion to "did the CREATE_VECTOR_INDEX call trigger a rebuild".
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'raw-4', name: 'StillUntouched', group_id: 'g', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+    let state = make_state_no_wal(Arc::clone(&db));
+
+    let v = dispatch(
+        82,
+        "knowledge_query_cypher",
+        json!({"query": "CALL CREATE_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', \
+             'name_embedding', metric := 'cosine')"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        v.get("error").is_none(),
+        "index-creation DDL should succeed: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_name_ci("StillUntouched", "g")
+            .unwrap()
+            .is_none(),
+        "index DDL must not trigger a NameIndex rebuild that would incidentally pick up the \
+         raw-Cypher-created entity"
+    );
+}
+
 // ── Issue #283 / SC-004: knowledge_status surfaces NameIndex trust + fallback-scan count ──
 
 #[tokio::test]

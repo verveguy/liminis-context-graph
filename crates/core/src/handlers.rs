@@ -661,10 +661,13 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // an Entity row with the index never learning about it. Reuse the WAL's own
         // mutation-keyword heuristic so read-only Cypher through this admin path pays no
         // extra scan cost, and only rebuild (a full Entity scan) when the query looks like a
-        // write. A rebuild failure is non-fatal to this request — it marks the index
-        // untrusted so downstream endpoint-authority lookups fall back to a scan until the
-        // next successful rebuild, matching the two `knowledge_rebuild_from_wal` arms below.
-        if crate::wal::looks_like_mutation(&query) {
+        // write. Index DDL (CREATE/DROP INDEX) is excluded first, matching `log_mutation`'s
+        // own filter — it never touches Entity rows, so it doesn't warrant a rebuild even
+        // though it contains CREATE/DROP keywords. A rebuild failure is non-fatal to this
+        // request — it marks the index untrusted so downstream endpoint-authority lookups
+        // fall back to a scan until the next successful rebuild, matching the two
+        // `knowledge_rebuild_from_wal` arms below.
+        if !crate::wal::is_index_ddl(&query) && crate::wal::looks_like_mutation(&query) {
             if let Err(e) = conn.rebuild_name_index() {
                 eprintln!("[NAME INDEX] rebuild after query_cypher mutation failed: {e}");
                 conn.mark_name_index_untrusted();

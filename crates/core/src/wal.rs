@@ -88,11 +88,7 @@ impl WalWriter {
         database: &str,
     ) -> Result<(), Error> {
         // Filter index DDL before first-token check (higher priority per AD-W7).
-        let upper = cypher.to_uppercase();
-        if upper.contains("CREATE_VECTOR_INDEX")
-            || upper.contains("CREATE INDEX")
-            || upper.contains("DROP INDEX")
-        {
+        if is_index_ddl(cypher) {
             return Ok(());
         }
 
@@ -313,6 +309,18 @@ pub(crate) fn strip_quoted_literals(s: &str) -> String {
     result
 }
 
+/// Whether `cypher` is index DDL (`CREATE_VECTOR_INDEX`, `CREATE INDEX`, `DROP INDEX`), which
+/// `looks_like_mutation` would otherwise misclassify as an `Entity`-mutating write on its
+/// `CREATE`/`DROP` keywords. Checked ahead of `looks_like_mutation` wherever the result decides
+/// whether to pay for `Entity`-related work (WAL logging, `NameIndex` rebuild) — index DDL never
+/// touches `Entity` rows, so neither is needed for it (higher priority per AD-W7).
+pub(crate) fn is_index_ddl(cypher: &str) -> bool {
+    let upper = cypher.to_uppercase();
+    upper.contains("CREATE_VECTOR_INDEX")
+        || upper.contains("CREATE INDEX")
+        || upper.contains("DROP INDEX")
+}
+
 /// Whether `cypher` looks like a write (as opposed to a read-only query), by scanning all
 /// tokens outside single-quoted literals for mutation keywords. MATCH-prefixed writes (e.g.
 /// `"MATCH (...) DETACH DELETE"` or `"MATCH (...) SET ..."`) don't start with the DML verb,
@@ -322,7 +330,9 @@ pub(crate) fn strip_quoted_literals(s: &str) -> String {
 /// Originally `log_mutation`'s inline check (WAL-logging decision); also used by
 /// `handle_query_cypher` (issue #283, FR-004) to decide whether a raw-Cypher call through the
 /// `cypher` MCP scope needs a follow-up `NameIndex` rebuild — reusing this heuristic keeps the
-/// two "does this look like a write" decisions from silently diverging.
+/// two "does this look like a write" decisions from silently diverging. Callers that care about
+/// index DDL specifically (see `is_index_ddl`) should check that first, since this function
+/// alone would classify `CREATE INDEX ...` as a mutation.
 pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
     let upper = cypher.to_uppercase();
     strip_quoted_literals(&upper).split_whitespace().any(|t| {
