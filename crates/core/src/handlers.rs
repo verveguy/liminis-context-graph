@@ -468,7 +468,7 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
         // `name` happens to equal this `chunk_id`). Leave it untouched: not counted, not
         // deleted.
         //
-        // Residual gap, explicitly accepted as a top-level decision (see ADR-0053's Consequences
+        // Residual gap, explicitly accepted as a top-level decision (see ADR-0284's Consequences
         // section): a `knowledge_add_episode` row whose `source_description` *also* happens to
         // end in `":{chunk_id}"` (e.g. a caller mirroring this handler's own convention) still
         // matches the check above and is pulled into this lineage. Closing that fully would need

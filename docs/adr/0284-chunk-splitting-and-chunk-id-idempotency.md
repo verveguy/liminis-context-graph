@@ -1,4 +1,4 @@
-# ADR-0053: Chunk-Splitting and Chunk-ID Idempotency for `knowledge_process_chunk`
+# ADR-0284: Chunk-Splitting and Chunk-ID Idempotency for `knowledge_process_chunk`
 
 **Status**: Accepted
 **Date**: 2026-07-30
