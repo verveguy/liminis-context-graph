@@ -230,7 +230,9 @@ pub async fn add_episode(
     extraction.entities.retain(|e| !e.name.trim().is_empty());
 
     // Load the DB handle here (rather than at Phase B, below) — Phase B's entity-count check
-    // and dedup resolution, and Phase C's commit, all reuse this same Arc.
+    // and dedup resolution reuse this same Arc. Phase C, below, reloads its own handle
+    // (`db_c`) right before acquiring the write lock, deliberately, in case a concurrent
+    // `clear_all` swapped `state.db` in the meantime.
     let db_shared = state.db.load_full().ok_or_else(|| {
         let reason = state
             .degraded_reason
