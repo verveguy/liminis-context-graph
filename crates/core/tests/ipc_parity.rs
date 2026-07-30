@@ -30,7 +30,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
-    telemetry::{NoopSink, TelemetrySink},
+    telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink},
     types::ExtractionResult,
     EntityRow, Ontology, RelatesToEdge,
 };
@@ -408,6 +408,36 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
+}
+
+/// Same as `make_state_with_mock_embed`, but wired to a `CaptureSink` so tests can inspect
+/// emitted telemetry (e.g. `ChunkTextOversized`) alongside the IPC response.
+fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>) {
+    let sink = Arc::new(CaptureSink::new());
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink: Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    });
+    (state, sink)
 }
 
 fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppState> {
@@ -804,6 +834,11 @@ async fn test_knowledge_process_chunk_ok() {
     );
 }
 
+// Supersedes the pre-#284 baseline (previously asserted `assert_ne!` on the two
+// episode_uuids — issue #284 FR-006/FR-009/SC-005): resubmitting the same chunk_id with
+// identical chunk_text is now a documented no-op, not the creation of a second, unrelated
+// episode. See test_knowledge_process_chunk_duplicate_chunk_id_different_text below for the
+// companion "chunk_text changed" case.
 #[tokio::test]
 async fn test_knowledge_process_chunk_duplicate_chunk_id() {
     let (db, _dir) = make_db(4);
@@ -826,9 +861,241 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
     assert_ok_resp(&v2, 32);
     let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap();
     let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap();
+    assert_eq!(
+        uuid1, uuid2,
+        "resubmitting an identical chunk_id + chunk_text pair must be idempotent"
+    );
+    assert_eq!(
+        v2["result"]["idempotent"], true,
+        "second call must be flagged idempotent: {v2}"
+    );
+    assert!(
+        v1["result"].get("idempotent").is_none(),
+        "first (non-resubmission) call must not carry idempotent: {v1}"
+    );
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_duplicate_chunk_id_different_text() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v1 = dispatch_val(
+        41,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "changed-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 41);
+    let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+    let v2 = dispatch_val(
+        42,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Bob works at Widget Inc.",
+            "chunk_id": "changed-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v2, 42);
+    let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap();
     assert_ne!(
         uuid1, uuid2,
-        "duplicate chunk_id must produce distinct episode_uuid values"
+        "a chunk_id resubmitted with different chunk_text must produce a new episode"
+    );
+    assert_eq!(
+        v2["result"]["replaced_uuids"],
+        json!([uuid1]),
+        "replaced_uuids must name the prior episode: {v2}"
+    );
+
+    // knowledge_delete_chunk_episode must now account for exactly the current episode —
+    // the replaced (prior) episode must already be gone, not orphaned.
+    let del = dispatch_val(
+        43,
+        "knowledge_delete_chunk_episode",
+        json!({ "chunk_id": "changed-chunk" }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&del, 43);
+    assert_eq!(del["result"]["deleted_count"], 1, "expected del: {del}");
+    assert_eq!(del["result"]["deleted_uuids"], json!([uuid2]), "{del}");
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_splits_oversized_text() {
+    let (db, _dir) = make_db(4);
+    let (state, sink) = make_state_with_capture_sink(Arc::clone(&db));
+    // Default threshold is 8000 chars; this synthetic text is well above it while staying
+    // fast to generate/extract in a unit test (mirrors #282's 257KB evidence example).
+    let big_text = "The quick brown fox jumps over the lazy dog. ".repeat(300);
+    assert!(big_text.chars().count() > 8_000);
+
+    let v = dispatch_val(
+        50,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": big_text.clone(),
+            "chunk_id": "big-chunk",
+            "source_file": "big.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 50);
+    let r = &v["result"];
+    assert!(r.get("episode_uuid").is_none(), "expected no episode_uuid singular: {v}");
+    let episode_uuids = r["episode_uuids"].as_array().expect("episode_uuids array");
+    let unit_count = r["unit_count"].as_u64().unwrap() as usize;
+    assert_eq!(episode_uuids.len(), unit_count);
+    assert!(unit_count > 1, "expected a multi-unit split: {v}");
+    assert_eq!(r["warning"]["type"], "chunk_text_oversized");
+    assert_eq!(r["warning"]["chunk_text_chars"], big_text.chars().count());
+    assert_eq!(r["warning"]["recommended_max_chars"], 8000);
+
+    // Every stored unit must be at or below the threshold, and the units must concatenate
+    // back to the original text exactly (FR-004's lossless-split invariant).
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .get_episodes_by_chunk_id("big-chunk", "liminis")
+        .unwrap();
+    assert_eq!(rows.len(), unit_count);
+    let mut indexed: Vec<(usize, &str)> = rows
+        .iter()
+        .map(|(uuid, source_description, content)| {
+            assert!(episode_uuids.contains(&json!(uuid)));
+            assert!(content.chars().count() <= 8000, "unit exceeded threshold");
+            let i = source_description
+                .rsplit_once('#')
+                .and_then(|(_, suf)| suf.split_once('/'))
+                .map(|(i, _n)| i.parse::<usize>().unwrap())
+                .expect("unit suffix");
+            (i, content.as_str())
+        })
+        .collect();
+    indexed.sort_by_key(|(i, _)| *i);
+    let reconstructed: String = indexed.into_iter().map(|(_, c)| c).collect();
+    assert_eq!(reconstructed, big_text);
+
+    let mut telemetry_saw_oversized = false;
+    for event in sink.events() {
+        if let TelemetryEvent::ChunkTextOversized {
+            chunk_id,
+            unit_count: reported_unit_count,
+            ..
+        } = event
+        {
+            assert_eq!(chunk_id, "big-chunk");
+            assert_eq!(reported_unit_count, unit_count);
+            telemetry_saw_oversized = true;
+        }
+    }
+    assert!(
+        telemetry_saw_oversized,
+        "expected a ChunkTextOversized telemetry event"
+    );
+
+    // knowledge_delete_chunk_episode must delete every unit sharing the chunk_id (SC-004).
+    let del = dispatch_val(
+        51,
+        "knowledge_delete_chunk_episode",
+        json!({ "chunk_id": "big-chunk" }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&del, 51);
+    assert_eq!(del["result"]["deleted_count"], unit_count, "{del}");
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_oversized_resubmission_is_idempotent() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let big_text = "The quick brown fox jumps over the lazy dog. ".repeat(300);
+    let params = json!({
+        "chunk_text": big_text,
+        "chunk_id": "big-idem-chunk",
+        "source_file": "big.txt",
+        "reference_time": "2024-06-01T12:00:00Z",
+    });
+
+    let v1 = dispatch_val(
+        60,
+        "knowledge_process_chunk",
+        params.clone(),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 60);
+    let uuids1 = v1["result"]["episode_uuids"].clone();
+    let unit_count1 = v1["result"]["unit_count"].as_u64().unwrap();
+
+    let v2 = dispatch_val(61, "knowledge_process_chunk", params, Arc::clone(&state)).await;
+    assert_ok_resp(&v2, 61);
+    assert_eq!(v2["result"]["idempotent"], true, "{v2}");
+    assert_eq!(
+        v2["result"]["episode_uuids"], uuids1,
+        "resubmitting an identical oversized chunk must return the same unit uuids: {v2}"
+    );
+    assert_eq!(v2["result"]["unit_count"], unit_count1);
+    assert!(
+        v2["result"].get("nodes_extracted").is_none(),
+        "no-op must not report an extraction count: {v2}"
+    );
+}
+
+#[tokio::test]
+async fn test_knowledge_process_chunk_splits_unbreakable_token() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(Arc::clone(&db));
+    // One long token with no whitespace anywhere — every unit boundary must hard-cut.
+    let big_token = "a".repeat(20_000);
+
+    let v = dispatch_val(
+        70,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": big_token.clone(),
+            "chunk_id": "token-chunk",
+            "source_file": "token.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 70);
+    let unit_count = v["result"]["unit_count"].as_u64().unwrap() as usize;
+    assert_eq!(unit_count, big_token.len().div_ceil(8000));
+
+    let conn = db.connect().unwrap();
+    let rows = conn.get_episodes_by_chunk_id("token-chunk", None).unwrap();
+    let mut by_index: Vec<(usize, String)> = rows
+        .into_iter()
+        .map(|(_uuid, source_description, content)| {
+            let (i, _n) = source_description
+                .rsplit_once('#')
+                .and_then(|(_, suf)| suf.split_once('/'))
+                .map(|(i, n)| (i.parse::<usize>().unwrap(), n.parse::<usize>().unwrap()))
+                .expect("unit suffix");
+            (i, content)
+        })
+        .collect();
+    by_index.sort_by_key(|(i, _)| *i);
+    let reconstructed: String = by_index.into_iter().map(|(_, c)| c).collect();
+    assert_eq!(
+        reconstructed, big_token,
+        "concatenated unit content must reconstruct the original text exactly"
     );
 }
 
