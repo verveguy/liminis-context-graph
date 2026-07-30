@@ -104,7 +104,7 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
 
 - **A `chunk_id` now maps to multiple episodes by design, not just as a delete-path curiosity.**
   `remove_episodes_by_chunk_id`/`handle_delete_chunk_episode` needed no code change — the
-  multi-episode-per-`chunk_id` tolerance they already had is exactly what splitting relies on.
+  multi-episode-per-`chunk_id` tolerance they already had is precisely what splitting relies on.
 - **Every `knowledge_process_chunk` call now runs one extra read query** (the chunk_id lookup),
   even for a `chunk_id` never seen before — an unindexed exact-match scan on `Episodic.name`, the
   same query shape the delete path already runs. Small, but real; not free.
@@ -123,6 +123,19 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   between units of one split chunk's ingest**, since each unit acquires and releases
   `write_lock` independently rather than holding it for the whole split (consistent with today's
   single-unit behavior; no correctness property depends on cross-unit atomicity).
+- **Known limitation: two concurrent calls for the *same* `chunk_id` are not mutually exclusive
+  across the lookup-through-insert span.** `write_lock` is held only for the lookup/reconstruct/
+  conditional-delete step (`handlers.rs::handle_knowledge_process_chunk`) and dropped before the
+  fresh ingest runs; `add_episode` only reacquires the lock briefly, per unit, at its own Phase C
+  commit — extraction in between runs unlocked. Two calls racing for one `chunk_id` (e.g. a
+  client retry sent while the original is still blocked on LLM extraction — exactly the case
+  this feature is meant to make safe) can both observe the same prior state and both proceed to
+  insert, producing duplicate/divergent episodes for that `chunk_id` until a later resubmission
+  self-heals via the mismatch/`Anomalous` path. The idempotency guarantee above therefore only
+  holds for *serialized* (non-concurrent) resubmissions of a given `chunk_id`; the general fix
+  is per-`(group_id, chunk_id)` locking held for the full request duration, which needs a new
+  `AppState` field and is a larger change than fits this feature — tracked as a recommended
+  follow-up rather than fixed here.
 
 ## Related
 
