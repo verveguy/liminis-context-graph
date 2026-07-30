@@ -274,8 +274,22 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   *serialized* (non-concurrent) calls for a given `chunk_id`, first-time or resubmission alike;
   the general fix is per-`(group_id, chunk_id)` locking held for the full request duration, which
   needs a new `AppState` field and is a larger change than fits this feature — tracked as
-  follow-up issue #288 rather than fixed here. Two further shapes of the same underlying gap,
-  both review-caught and neither fixed for the same reason:
+  follow-up issue #288 rather than fixed here.
+  **Caller-population note (raised in Validate-stage review of PR #286):** the documented
+  callers of `knowledge_process_chunk` are typically LLM agents driving it as a tool, and a
+  single agent's own tool-use loop is turn-by-turn — it waits for one tool result before issuing
+  the next call, so it does not by itself generate concurrent calls for the same `chunk_id`. The
+  realistic sources of the race are therefore (a) a client-side timeout-and-retry racing an
+  original call still blocked on LLM extraction — already the primary scenario this feature
+  targets — and (b) multiple independent agent sessions or a fan-out ingestion pipeline
+  submitting the same `chunk_id` without coordinating between themselves, not ordinary
+  single-agent tool use. This narrows but does not eliminate the exposure, and does not change
+  the conclusion: the failure mode is self-healing (a later resubmission's mismatch/`Anomalous`
+  path corrects it) rather than silent data loss, so deferring the full per-`chunk_id`-lock fix
+  to #288 remains the right call rather than widening `write_lock`'s span here, which would
+  serialize *all* concurrent ingestion — including unrelated `chunk_id`s — behind LLM latency.
+  Two further shapes of the same underlying gap, both review-caught and neither fixed for the
+  same reason:
   - **The split loop itself is not atomic against a concurrent `knowledge_delete_chunk_episode`
     for the same `chunk_id`.** Each unit's `add_episode` call acquires and releases `write_lock`
     independently (no lock is held across the whole split), so an explicit delete landing between
