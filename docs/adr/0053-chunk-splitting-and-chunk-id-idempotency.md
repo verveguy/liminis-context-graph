@@ -139,12 +139,27 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   multi-episode-per-`chunk_id` tolerance they already had is precisely what splitting relies on.
 - **Every `knowledge_process_chunk` call now runs one extra read query** (the chunk_id lookup),
   even for a `chunk_id` never seen before — an unindexed exact-match scan on `Episodic.name`, the
-  same query shape the delete path already runs. Small, but real; not free. This lookup takes
-  only `write_lock.read()`, not `.write()`: the common case (a new chunk_id, or a no-op
-  resubmission) is a pure read, and only the replace branch escalates to `write_lock.write()`
-  for its delete. An earlier revision of this design took the write lock for the whole lookup,
-  which would have serialized *all* concurrent chunk ingestion — including unrelated chunk_ids —
-  behind an exclusive lock up front rather than only at Phase C's brief commit, as review caught.
+  same query shape the delete path already runs. This lookup takes only `write_lock.read()`, not
+  `.write()`: the common case (a new chunk_id, or a no-op resubmission) is a pure read, and only
+  the replace branch escalates to `write_lock.write()` for its delete. An earlier revision of this
+  design took the write lock for the whole lookup, which would have serialized *all* concurrent
+  chunk ingestion — including unrelated chunk_ids — behind an exclusive lock up front rather than
+  only at Phase C's brief commit, as review caught.
+  **Quantified, not just "small, but real": this is a genuine O(episodes-in-group) full-table
+  scan, not a bounded lookup.** `schema.rs` defines `Episodic`'s primary key as `uuid`, not
+  `name`, and lbug has no secondary property index for exact-match equality on an arbitrary field
+  (only FTS and vector indexes exist elsewhere in this schema) — so `ep.name = $name AND
+  ep.group_id = $gid` is necessarily a full scan of every `Episodic` row in the group, same as
+  `remove_episodes_by_chunk_id`'s existing query shape. Because this lookup now runs
+  unconditionally on *every* `knowledge_process_chunk` call (not only replace), a bulk sequential
+  ingest of N chunks into one group is O(N²) overall — the same corpus shape that produced #202
+  (4,374 chunks in one sequential run). This is the identical defect class #219/#283 already fixed
+  for `Entity.name` lookups via an in-process accelerator (`NameIndex`, ADR-0038) rather than a
+  DB-native index, since lbug can't serve this predicate shape from an index either way. Building
+  the `Episodic`-equivalent (`EpisodicNameIndex`) requires threading a new field through
+  `Db`/`AppState` and updating every episode create/delete call site — comparable in size to the
+  already-tracked #288 (per-chunk_id locking) — and was assessed as out of scope for this issue's
+  comment-review pass. Tracked as [#291](https://github.com/verveguy/liminis-context-graph/issues/291).
 - **Reconstruction is anchored to this call's own `source_description` convention, not just
   `Episodic.name`.** `knowledge_process_chunk` and `knowledge_add_episode` both write to the same
   `Episodic.name` field with no shared namespace — a caller could coincidentally (or
@@ -158,18 +173,7 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   fresh ingest instead. `handle_delete_chunk_episode` (an explicit, caller-invoked deletion) is
   unaffected by this change and still matches/deletes by `name` alone — that endpoint's contract
   has always been "delete everything with this name," which is a different, and here still an
-  intentionally accepted, risk from routine ingestion silently destroying data. The
-  `":{chunk_id}"`-suffix anchor narrows, but does not eliminate, the foreign-row risk: a
-  `knowledge_add_episode` caller whose `name` equals a `chunk_id` *and* whose own
-  `source_description` happens to end in `":{chunk_id}"` too (e.g. a caller mirroring this
-  handler's own `"{source_file}:{chunk_id}"` convention, such as `"notes:chunk-42"`) still gets
-  pulled into that chunk_id's reconstructed lineage and is a candidate for deletion on a
-  subsequent replace. This residual collision is accepted for the same reason as the
-  `source_file`-independence tradeoff below: `Episodic.name` has no namespace separating
-  `knowledge_process_chunk` lineages from `knowledge_add_episode` callers, and closing it
-  completely would require either a schema-level provenance marker (a schema change, per
-  Research's Constraint 4) or a reserved delimiter convention enforced across both handlers —
-  out of scope for this issue. Deliberately *not*
+  intentionally accepted, risk from routine ingestion silently destroying data. Deliberately *not*
   anchored to the current call's `source_file`, since a caller may legitimately resubmit a
   `chunk_id` under a renamed/moved `source_file` and idempotency must still recognize that as the
   same lineage — an earlier revision of this design required an exact `"{source_file}:{chunk_id}"`
@@ -182,6 +186,37 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   `source_file` namespacing: callers must treat `chunk_id` as unique per logical document within
   a `group_id`, not merely unique per `source_file`. No enforcement of this uniqueness is done
   (or feasible) server-side — it is a documented caller contract, not a runtime check.
+- **Decision: the `":{chunk_id}"`-suffix anchor narrows the foreign-row hazard above but does not
+  eliminate it, and this residual is kept as fail-destructive rather than made fail-safe.** A
+  `knowledge_add_episode` caller whose `name` equals a `chunk_id` *and* whose own
+  `source_description` happens to end in `":{chunk_id}"` too (e.g. a caller mirroring this
+  handler's own `"{source_file}:{chunk_id}"` convention, such as `"notes:chunk-42"`) still gets
+  pulled into that chunk_id's reconstructed lineage as if it were this handler's own prior write,
+  and becomes a delete candidate on a subsequent replace — the same class of bug this anchoring
+  was introduced to fix, narrowed to a smaller trigger surface rather than closed. There is no
+  positive-attribution signal available to distinguish "this row was written by
+  `handle_knowledge_process_chunk`" from "this row was written by `knowledge_add_episode` with a
+  caller-chosen `name`/`source_description` that happens to match the convention" — `source`
+  (`EpisodicRow.source`) doesn't help either, since it's caller-supplied free text on both
+  endpoints and not a reserved provenance marker. Closing this fully needs a schema-level
+  provenance marker (a schema change, per Research's Constraint 4) or a reserved delimiter
+  convention enforced across both handlers — out of scope for this issue.
+  **Considered and rejected for this pass**: making the ambiguous case fail-safe (skip the delete,
+  or return an actionable error naming the colliding UUID, whenever the reconstructed lineage
+  can't be positively attributed) instead of fail-destructive. Rejected because the never-split,
+  single-row shape that is most exposed to this collision is *also* the shape of the overwhelming
+  common case — every at/below-threshold chunk's replace-on-changed-text path (FR-006's primary
+  scenario) reconstructs to exactly one row with no `#i/N` suffix, which is indistinguishable from
+  the ambiguous case by pattern alone. A blanket fail-safe over "single unsuffixed row" would
+  defeat idempotent replace for the common case to guard a comparatively rare, non-adversarial-by-
+  default collision, which is a worse trade than the one being guarded against. A narrower
+  fail-safe (e.g. only for rows whose `source` value differs from what this handler itself writes)
+  was not pursued in this pass either, since `source` is not a reliable provenance signal per
+  above and a heuristic with unclear guarantees is worse than an explicit, documented gap.
+  **This trade-off is accepted as-is for this issue**: the residual collision requires deliberate
+  or coincidental convention-mirroring by a `knowledge_add_episode` caller (not a default or
+  adversarially-cheap outcome for an unrelated caller), and closing it properly requires the
+  schema-level provenance marker noted above, which is a larger, separate change.
 - **A replace's delete is deferred until after the new ingest succeeds, not performed up front.**
   An earlier revision deleted the prior lineage before starting the fresh ingest; if that ingest
   then failed (e.g. an extraction error partway through a split), the `chunk_id` was left with
