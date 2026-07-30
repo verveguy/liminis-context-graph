@@ -327,7 +327,7 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   Validate-stage review of PR #286; accepted as an extension of the already-documented
   unbounded-chunk_text-size gap (#282's own scope explicitly excludes introducing a size cap, only
   a warning threshold) rather than fixed here — a hard IPC-layer request size limit is a separate,
-  broader decision than this issue's chunk-splitting scope.
+  broader decision than this issue's chunk-splitting scope. Tracked in follow-up issue #293.
 - **`split_into_units` originally collected the entire input into a `Vec<char>` before splitting**
   — for ASCII/Latin1 `chunk_text`, a roughly 4x memory blow-up over the original `String` (1 byte
   per char on the wire vs. `char`'s fixed 4 bytes), held for the whole split regardless of
