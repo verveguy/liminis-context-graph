@@ -219,6 +219,58 @@ async fn test_global_fallback_resolution_is_scoped_to_group_id() {
     );
 }
 
+// ── Issue #283 / SC-001: an entity persisted via a path that bypasses insert_entity ────
+// (and therefore never touched the in-process NameIndex) must still be resolvable by a
+// later edge naming it, via the endpoint-authority scan fallback.
+
+#[tokio::test]
+async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
+    let (db, _dir) = make_db();
+    {
+        let conn = db.connect().unwrap();
+        // Bypasses insert_entity entirely, so the NameIndex has never observed 'Apple' — the
+        // exact scenario issue #283 describes (raw Cypher writes, WAL replay, etc.).
+        conn.run_cypher(&format!(
+            "CREATE (:Entity {{uuid: 'raw-apple', name: 'Apple', group_id: '{GROUP_A}', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{{}}'}})"
+        ))
+        .unwrap();
+    }
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Creator Studio"],
+        &[("Apple", "Creator Studio", "Apple owns Creator Studio")],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(&state, "ep-a", "Apple owns Creator Studio.", GROUP_A).await;
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "edge to a raw-Cypher-created entity must resolve via the scan fallback rather than \
+         be silently dropped, got {}",
+        result.edges_extracted
+    );
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_entities_by_name_ci("Apple", GROUP_A).unwrap(),
+        1,
+        "resolving the edge must not create a duplicate 'Apple' entity"
+    );
+
+    let apple = conn
+        .get_entity_by_name_ci("Apple", GROUP_A)
+        .unwrap()
+        .expect("'Apple' must be resolvable via the plain lookup too, once self-healed");
+    assert_eq!(apple.uuid, "raw-apple");
+
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
+    assert_eq!(rels[0].source_node_uuid, "raw-apple");
+}
+
 // ── Edge case: endpoints resolve independently; drop if either fails ──────────
 
 #[tokio::test]

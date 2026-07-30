@@ -288,6 +288,119 @@ fn wal_replay_only_populates_name_index_after_explicit_rebuild() {
     );
 }
 
+// ── FR-005 (issue #283): verify-on-hit failure falls through to the next candidate ─────
+
+#[test]
+fn verify_on_hit_failure_falls_through_to_next_same_named_candidate() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    // "winner" sorts first (earlier created_at) and is the deterministic winner.
+    conn.insert_entity(&make_entity("winner", "Dana", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity("runner-up", "Dana", "2026-02-01 00:00:00"))
+        .unwrap();
+    assert_eq!(
+        conn.get_entity_by_name_ci("Dana", GROUP)
+            .unwrap()
+            .unwrap()
+            .uuid,
+        "winner"
+    );
+
+    // Delete the winner out-of-band; the index still believes it's the winner.
+    conn.run_cypher("MATCH (e:Entity {uuid: 'winner'}) DETACH DELETE e")
+        .unwrap();
+
+    // Pre-#283 behavior returned None here (lookup only tried the winner). FR-005 requires
+    // falling through to the surviving same-named candidate instead.
+    let found = conn
+        .get_entity_by_name_ci("Dana", GROUP)
+        .unwrap()
+        .expect("the surviving same-named candidate must still resolve");
+    assert_eq!(found.uuid, "runner-up");
+}
+
+// ── SC-002 (issue #283): scan fallback resolves what an untrusted/blind index cannot ───
+
+#[test]
+fn scan_fallback_resolves_replayed_entity_when_index_rebuild_was_skipped() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let wal_dir = TempDir::new().unwrap();
+    let line = r#"{"seq":0,"ts":"2026-05-19T03:00:00.000000+00:00","db":"","cypher":"MERGE (n:Entity {uuid: 'replayed-2'}) ON CREATE SET n.name = 'ReplayedTwo', n.group_id = 'liminis', n.labels = ['Entity'], n.created_at = timestamp('2026-05-19 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'","params":{}}"#;
+    fs::write(
+        wal_dir.path().join("20260519_030000_bbb222_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+    WalReplayer::new(wal_dir.path()).replay(&conn).unwrap();
+
+    // Simulate the FR-003 failure posture directly: a post-replay rebuild attempt failed, so
+    // the caller marks the index untrusted rather than leaving callers to trust stale state.
+    conn.mark_name_index_untrusted();
+    assert!(!conn.name_index_trusted());
+
+    // The plain, index-only lookup misses — replay bypassed insert_entity and no rebuild ran.
+    assert!(conn
+        .get_entity_by_name_ci("ReplayedTwo", GROUP)
+        .unwrap()
+        .is_none());
+
+    // #218's endpoint-authority call sites use the scan-fallback lookup instead, which must
+    // resolve the entity regardless of the index's blind/untrusted state (User Story 1).
+    let found = conn
+        .get_entity_by_name_ci_with_scan_fallback("ReplayedTwo", GROUP)
+        .unwrap()
+        .expect("scan fallback must resolve the replayed entity despite the blind index");
+    assert_eq!(found.uuid, "replayed-2");
+    assert_eq!(
+        conn.name_index_fallback_scan_count(),
+        1,
+        "the fallback scan must be counted for SC-004 telemetry"
+    );
+
+    // Self-healing: the scan hit above must have populated the index, so a second lookup
+    // resolves via the plain index-only path with no additional scan.
+    assert!(conn
+        .get_entity_by_name_ci("ReplayedTwo", GROUP)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        conn.name_index_fallback_scan_count(),
+        1,
+        "a self-healed index must not require a second fallback scan"
+    );
+}
+
+// ── FR-003 (issue #283): rebuild_name_index() can genuinely fail ───────────────────────
+
+#[test]
+fn rebuild_name_index_surfaces_a_genuine_query_failure() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    conn.insert_entity(&make_entity("e1", "Alice", "2026-01-01 00:00:00"))
+        .unwrap();
+    assert!(conn.rebuild_name_index().is_ok());
+
+    // Drop a column rebuild_name_index()'s own scan selects. init_schema in this test never
+    // builds the HNSW/FTS indexes (only build_indices_and_constraints does, which these
+    // coherence tests don't call), and created_at is not part of either index's column set
+    // even when they do exist, so this doesn't require dropping any index first.
+    conn.run_cypher("ALTER TABLE Entity DROP created_at")
+        .unwrap();
+
+    assert!(
+        conn.rebuild_name_index().is_err(),
+        "rebuild_name_index must surface the underlying query failure rather than silently no-op'ing"
+    );
+}
+
 // ── FR-004: Db::open_or_rebuild (used by recovery-equivalent paths) rebuilds eagerly ──
 
 #[test]
