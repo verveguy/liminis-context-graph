@@ -167,15 +167,18 @@ pub fn validate_recorded_cassette(
     Ok(())
 }
 
-/// Two backends `--record-cassette`d in the *same* invocation that end up with
-/// byte-identical content make the noise floor read as 1.000 by construction — the same
-/// invalidation `plan::resolve`'s FR-004 guard rejects pre-flight for pre-existing
-/// `cassette:` replay backends. A freshly recorded pair can't be caught that way: the
-/// files don't exist (or aren't complete) until the run they're part of has finished, so
-/// this is checked here, post-run, alongside [`validate_recorded_cassette`] — before the
-/// report is ever printed or written. Takes precomputed `(backend_name, content_hash)`
-/// pairs so hashing (file I/O) stays at the call site and this stays a pure, testable
-/// check, mirroring `plan::resolve`'s own separation.
+/// Any two backends in this run — a pre-existing `cassette:` replay backend, a freshly
+/// `--record-cassette`d live one, or one of each — that end up with byte-identical cassette
+/// content make the noise floor read as 1.000 by construction. `plan::resolve`'s FR-004
+/// guard only compares pre-existing replay backends against each other, pre-flight; a
+/// freshly recorded cassette doesn't exist to hash until the run it's part of has finished,
+/// and a replay-vs-fresh pair (e.g. `04-full-run.sh`'s baseline replayed, candidate
+/// recorded) is never compared by either the pre-flight guard or a fresh-only post-run
+/// check — only a check over the *union* of both kinds, run once, closes all three shapes.
+/// That's why this is checked here, post-run over every cassette this run touched, alongside
+/// [`validate_recorded_cassette`] — before the report is ever printed or written. Takes
+/// precomputed `(backend_name, content_hash)` pairs so hashing (file I/O) stays at the call
+/// site and this stays a pure, testable check, mirroring `plan::resolve`'s own separation.
 pub fn validate_recorded_cassettes_distinct(cassettes: &[(String, String)]) -> Result<(), String> {
     for i in 0..cassettes.len() {
         for j in (i + 1)..cassettes.len() {

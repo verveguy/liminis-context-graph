@@ -141,9 +141,12 @@ pub struct CassetteRecord {
 
 /// Parses a cassette file into its raw records, rejecting corruption and duplicate keys
 /// rather than tolerating either (#279 FR-002/FR-003). Shared by [`ReplayingExtractor::load`]
-/// and, in `lcg_eval`, by the `--dry-run`/guard resolution path and the post-report
-/// cassette-count check — one implementation of "what is a valid cassette line," used three
-/// ways instead of three times.
+/// and, in `lcg_eval`, by the `--dry-run`/guard resolution path — one implementation of
+/// "what is a valid cassette line," used twice instead of twice over.
+///
+/// Deliberately NOT used for the post-report cassette-count check (FR-006,
+/// `lcg_eval::report::validate_recorded_cassette`) — see [`count_records`] for why that
+/// check needs a different, more permissive function.
 ///
 /// Malformed JSON, a non-object record, a record missing `key`, and a record whose `key` is
 /// not a string are all reported as [`Error::CassetteCorrupt`]. A repeated `key` is reported
@@ -203,6 +206,28 @@ pub fn load_records(path: impl AsRef<Path>) -> Result<Vec<CassetteRecord>, Error
         records.push(record);
     }
     Ok(records)
+}
+
+/// Counts the non-blank lines in a cassette file — no JSON parsing, no uniqueness check.
+///
+/// Used by `lcg_eval::report::validate_recorded_cassette` (FR-006) to check that a
+/// `RecordingExtractor` write completed, which deliberately must NOT go through
+/// [`load_records`]: `classify_entities`/`classify_relations` cassette keys hash only the
+/// extracted entity/edge content, not chunk identity (`request_key` over
+/// `classify_entities_request_value`/`classify_relations_request_value`), so two distinct
+/// chunks that legitimately extract the same content — most commonly two chunks that both
+/// extract nothing — produce the same key. `load_records` correctly rejects that as
+/// unreplayable (FR-002), but rejecting it *here* would abort a live `--record-cassette` run
+/// and discard its already-computed, already-paid-for report over a future-replay concern
+/// that has nothing to do with whether this run's capture completed (handarbeit-pruefer
+/// review finding on PR #280). A cassette this flags as complete may still fail
+/// `load_records` later, at the point where duplicate keys actually matter: being replayed.
+pub fn count_records(path: impl AsRef<Path>) -> Result<usize, Error> {
+    let path = path.as_ref();
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        Error::CassetteCorrupt(format!("failed to read cassette {}: {e}", path.display()))
+    })?;
+    Ok(content.lines().filter(|l| !l.trim().is_empty()).count())
 }
 
 // ── CassetteWriter ───────────────────────────────────────────────────────────
@@ -720,5 +745,70 @@ mod tests {
         let records = load_records(&path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].key, "k1");
+    }
+
+    // ── count_records (#279 FR-006, handarbeit-pruefer review finding on PR #280) ────────
+
+    #[test]
+    fn count_records_counts_non_blank_lines() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[r#"{"key": "a"}"#, "", r#"{"key": "b"}"#]);
+        assert_eq!(count_records(&path).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_records_missing_file_is_corrupt() {
+        let err = count_records("/nonexistent/path/cassette.jsonl").unwrap_err();
+        assert!(matches!(err, Error::CassetteCorrupt(_)));
+    }
+
+    #[test]
+    fn count_records_does_not_reject_duplicate_keys() {
+        // The whole point of this function: two chunks that legitimately extract the same
+        // content (classify_entities/classify_relations keys hash content, not chunk
+        // identity) must not make a freshly recorded, fully-paid-for run's report
+        // unreadable. load_records is right to reject this for replay; count_records must
+        // not, because it answers a different question ("did the capture complete?").
+        let dir = TempDir::new().unwrap();
+        let make = |name: &str| {
+            serde_json::to_string(&CassetteRecord {
+                key: "dup".to_string(),
+                call_type: "classify_entities".to_string(),
+                provider: "mock".to_string(),
+                model: "mock-model".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                request: json!({}),
+                response: json!({"name": name}),
+            })
+            .unwrap()
+        };
+        let path = write_lines(&dir, &[&make("first"), &make("second")]);
+        assert!(
+            load_records(&path).is_err(),
+            "load_records must still reject this"
+        );
+        assert_eq!(
+            count_records(&path).unwrap(),
+            2,
+            "count_records must still count both lines"
+        );
+    }
+
+    #[test]
+    fn count_records_does_not_reject_corrupt_lines() {
+        // Not because corruption is fine, but because FR-006's job is purely "how many lines
+        // did the writer produce" — a truncated/corrupt line is still a line the writer
+        // wrote, and rejecting it here would be the same premature-abort mistake as
+        // rejecting on duplicate keys, just for a different guard.
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[r#"{"key": "a"}"#, "NOT JSON"]);
+        assert_eq!(count_records(&path).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_records_empty_file_is_zero() {
+        let dir = TempDir::new().unwrap();
+        let path = write_lines(&dir, &[]);
+        assert_eq!(count_records(&path).unwrap(), 0);
     }
 }

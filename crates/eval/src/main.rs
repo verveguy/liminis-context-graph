@@ -7,7 +7,9 @@ use std::sync::Arc;
 use lcg_core::ontology::load_ontology_from_path;
 use lcg_core::{CassetteWriter, Extractor, Ontology, RecordingExtractor, TelemetrySink};
 
-use lcg_eval::backend::{build_extractor, parse_backend_spec, provider_label, resolved_model};
+use lcg_eval::backend::{
+    build_extractor, parse_backend_spec, provider_label, resolved_model, BackendKind,
+};
 use lcg_eval::cli::{parse_args, usage, Args, CliMode, JudgeMode};
 use lcg_eval::corpus::{default_corpus_path, load_corpus, select_subset};
 use lcg_eval::judge::{AnthropicJudgeClient, JudgeClient};
@@ -234,7 +236,13 @@ async fn run(cli: Args) -> Result<(), String> {
 
     // FR-006: verify each recorded cassette's record count matches this report's own
     // accounting before printing or writing anything — a truncated capture must never
-    // produce a plausible-looking report artifact.
+    // produce a plausible-looking report artifact. Counted via `count_records`, not
+    // `load_records`: the latter hard-rejects duplicate keys, and `classify_entities`/
+    // `classify_relations` cassette keys hash only extracted content, not chunk identity —
+    // two distinct chunks that legitimately extract the same (often empty) content collide,
+    // and that must not discard an already-paid-for, otherwise-valid report (handarbeit-
+    // pruefer review finding on PR #280). `load_records` still enforces uniqueness where it
+    // actually matters: at replay time.
     let mut recorded_hashes = Vec::with_capacity(cli.record_cassette.len());
     for cassette in &cli.record_cassette {
         let candidate = report
@@ -247,10 +255,17 @@ async fn run(cli: Args) -> Result<(), String> {
                     cassette.backend
                 )
             })?;
-        let actual = lcg_core::cassette::load_records(&cassette.path)
-            .map_err(|e| format!("--record-cassette {}: {e}", cassette.path))?
-            .len();
+        let actual = lcg_core::cassette::count_records(&cassette.path)
+            .map_err(|e| format!("--record-cassette {}: {e}", cassette.path))?;
         validate_recorded_cassette(candidate, actual)?;
+        if let Err(e) = lcg_core::cassette::load_records(&cassette.path) {
+            eprintln!(
+                "lcg-eval: NOTE backend '{}' cassette {} will not replay safely as recorded \
+                 ({e}) — this run's report is unaffected, but fix the cassette before using \
+                 it as a cassette: backend",
+                cassette.backend, cassette.path
+            );
+        }
         let hash = hash_file(&cassette.path).map_err(|e| {
             format!(
                 "--record-cassette {}: cannot hash cassette for the identity check: {e}",
@@ -259,10 +274,28 @@ async fn run(cli: Args) -> Result<(), String> {
         })?;
         recorded_hashes.push((cassette.backend.clone(), hash));
     }
-    // FR-004 (post-run): `plan::resolve`'s pre-flight identity guard only sees pre-existing
-    // `cassette:` replay backends — a pair recorded during THIS run doesn't exist to hash
-    // until it completes, so that half of the check happens here instead.
-    validate_recorded_cassettes_distinct(&recorded_hashes)?;
+    // FR-004 (post-run, full coverage): hash every cassette this run touched — both
+    // pre-existing `cassette:` replay backends and freshly `--record-cassette`d live ones —
+    // and check pairwise distinctness across the whole set. `plan::resolve`'s pre-flight
+    // guard already rejects two pre-existing replay cassettes sharing content before any
+    // outbound call, and a pair recorded during THIS run doesn't exist to hash until it
+    // completes; neither of those alone catches a live backend's fresh output coming out
+    // byte-identical to a replay backend already in play in the same run — exactly
+    // `04-full-run.sh`'s baseline-replayed/candidate-recorded shape (handarbeit-pruefer
+    // review finding on PR #280).
+    let mut all_cassette_hashes = recorded_hashes;
+    for b in &cli.backends {
+        if let Ok(BackendKind::Cassette { path }) = parse_backend_spec(&b.spec) {
+            let hash = hash_file(&path).map_err(|e| {
+                format!(
+                    "backend '{}': cannot hash cassette '{path}' for the identity check: {e}",
+                    b.name
+                )
+            })?;
+            all_cassette_hashes.push((b.name.clone(), hash));
+        }
+    }
+    validate_recorded_cassettes_distinct(&all_cassette_hashes)?;
 
     println!("{}", report.render_human_readable());
     if let Some(path) = &cli.output {
