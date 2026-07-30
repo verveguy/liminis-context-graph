@@ -79,6 +79,17 @@ name lands on a plain index hit, not a fresh scan. A batch with many edges to on
 entity still costs exactly one scan for that name, not one per edge — satisfying FR-002's bound
 without needing a separate deduplicated pre-pass or a name→UUID map threaded in from elsewhere.
 
+Self-healing alone only bounds the *hit* case — there's nothing to insert into `NameIndex` for a
+name that genuinely doesn't exist. A batch with several edges naming the same nonexistent entity
+(a hallucinated extraction, a typo) would otherwise pay a full scan per edge, since each edge
+resolves independently and none of them find anything to cache into `NameIndex`. Phase C's loop
+therefore also keeps its own local `HashMap<normalized name, Option<uuid>>` memo, populated on
+both outcomes, scoped to that single pass — a scan hit is still self-healed into `NameIndex` for
+future requests, while a miss is remembered only for the remainder of this batch (there being
+nothing durable to persist for an entity that isn't there). Together this bounds the loop to at
+most one scan per unique unresolved name, hit or miss, matching FR-002's dedup requirement
+without needing `episode.rs`'s standalone `missing_names` shape from the pre-#281 design.
+
 Threading a resolved name→UUID map forward from an earlier pass (as the original Site 1-based
 design would have required) was considered and rejected: it would replace Phase C's live
 re-verification (a real `MATCH` at commit time) with a cached UUID from earlier in the request,
@@ -165,11 +176,11 @@ itself be a new correctness bug, not a fix. `group_id` non-normalization is like
 ### Negative / Residual risks
 
 - **The FR-002 bound depends on Phase C's per-edge loop running to completion within a single
-  `spawn_blocking` closure**, so a scan hit for one edge is visible to every later edge in the
-  same pass. True today by construction and flagged with a comment at the call site, but a
-  future change that resolved edges outside a single sequential loop (e.g. parallelizing Phase
-  C's edge resolution) would silently reintroduce per-edge scans without the self-heal warm-up.
-  Not enforced by any assertion.
+  `spawn_blocking` closure**, so a scan-fallback result (hit or memoized miss) for one edge is
+  visible to every later edge in the same pass. True today by construction and flagged with a
+  comment at the call site, but a future change that resolved edges outside a single sequential
+  loop (e.g. parallelizing Phase C's edge resolution) would silently reintroduce per-edge scans
+  without the local memo or the `NameIndex` self-heal warm-up. Not enforced by any assertion.
 - **`looks_like_mutation`'s keyword heuristic can have false negatives** — an entity mutation
   that avoids all seven keywords would skip the proactive rebuild. This is the same risk already
   accepted for WAL logging via the same heuristic; FR-001's scan-fallback self-healing at the

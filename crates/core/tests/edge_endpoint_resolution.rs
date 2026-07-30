@@ -271,6 +271,42 @@ async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
     assert_eq!(rels[0].source_node_uuid, "raw-apple");
 }
 
+// ── Issue #283 follow-up: a scan-fallback miss must be memoized per batch too ──────────
+// (not just a hit) — otherwise a batch with several edges naming the same genuinely
+// nonexistent entity would pay a full scan per edge, reintroducing the O(edges × |Entity|)
+// cost ADR-0038 removed. `NameIndex` self-healing only covers the hit case (there's nothing
+// to insert for a name that doesn't exist), so Phase C's own per-batch memo must cover misses.
+
+#[tokio::test]
+async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
+    let (db, _dir) = make_db();
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Alice", "Bob"],
+        &[
+            ("Alice", "Ghost", "Alice mentions Ghost"),
+            ("Bob", "Ghost", "Bob mentions Ghost"),
+        ],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(&state, "ep-a", "Alice and Bob both mention Ghost.", GROUP_A).await;
+
+    assert_eq!(
+        result.edges_dropped_unresolvable, 2,
+        "both edges name a genuinely nonexistent entity and must be dropped, got {}",
+        result.edges_dropped_unresolvable
+    );
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.name_index_fallback_scan_count(),
+        1,
+        "two edges naming the same nonexistent entity in one batch must share a single \
+         fallback scan, not one per edge (FR-002)"
+    );
+}
+
 // ── Edge case: endpoints resolve independently; drop if either fails ──────────
 
 #[tokio::test]

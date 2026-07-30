@@ -591,6 +591,28 @@ pub async fn add_episode(
             .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
             .collect();
 
+        // Per-batch memo of scan-fallback resolutions, keyed by normalized name. Self-healing
+        // `NameIndex` on a scan *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only
+        // bounds the cost of a name that exists; a name that doesn't (a hallucinated or
+        // otherwise never-persisted extraction) has nothing to insert into `NameIndex`, so
+        // without this memo every edge referencing that same missing name in this batch would
+        // re-run its own full scan. This closure caches both outcomes locally, for this Phase C
+        // pass only, so a batch pays at most one scan per unique unresolved name regardless of
+        // whether it resolves (FR-002).
+        let mut scan_cache: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        let mut resolve_via_scan = |raw_name: &str| -> Result<Option<String>, Error> {
+            let key = normalize_name(raw_name);
+            if let Some(cached) = scan_cache.get(&key) {
+                return Ok(cached.clone());
+            }
+            let uuid = conn
+                .get_entity_by_name_ci_with_scan_fallback(raw_name, &gid_owned)?
+                .map(|existing| existing.uuid);
+            scan_cache.insert(key, uuid.clone());
+            Ok(uuid)
+        };
+
         // Insert relationship edges. This is the sole, authoritative point at which an edge's
         // endpoints are finally resolved or the edge is dropped (FR-003, FR-005) — pre-lock,
         // above, only salvage-rewrites an off-list endpoint name; it never drops for endpoint
@@ -603,25 +625,17 @@ pub async fn add_episode(
             //
             // Endpoint-authority resolution (issue #283): a `NameIndex` miss here must not be
             // trusted as "doesn't exist" — see `get_entity_by_name_ci_with_scan_fallback`'s doc
-            // comment. Unlike issue #283's original design, there is no separate pre-lock pass
-            // that resolves against the DB and warms the index ahead of this loop (#281 replaced
-            // that with a DB-independent embedding salvage step) — the self-heal bound instead
-            // comes from *this* loop alone: the first edge naming a given missing entity scans
-            // and, on a hit, inserts the result into `NameIndex`, so every later edge in this
-            // same Phase C pass referencing that same name lands on an index-only hit rather
-            // than a fresh scan. A batch with many edges to one recurring hub entity still costs
-            // exactly one scan, not one per edge.
+            // comment. `resolve_via_scan` above bounds this loop to at most one scan per unique
+            // unresolved name in the batch, for both hits (also self-healed into `NameIndex` for
+            // future requests) and misses (memoized only for this pass, since there's nothing to
+            // persist for a name that doesn't exist).
             let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
                 Some(u) => Some(u.clone()),
-                None => conn
-                    .get_entity_by_name_ci_with_scan_fallback(&edge.source_name, &gid_owned)?
-                    .map(|existing| existing.uuid),
+                None => resolve_via_scan(&edge.source_name)?,
             };
             let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
                 Some(u) => Some(u.clone()),
-                None => conn
-                    .get_entity_by_name_ci_with_scan_fallback(&edge.target_name, &gid_owned)?
-                    .map(|existing| existing.uuid),
+                None => resolve_via_scan(&edge.target_name)?,
             };
             let (src_uuid, dst_uuid) = match (src_uuid, dst_uuid) {
                 (Some(s), Some(d)) => (s, d),
