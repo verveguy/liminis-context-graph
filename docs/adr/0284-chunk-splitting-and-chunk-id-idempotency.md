@@ -314,6 +314,16 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   unbounded-chunk_text-size gap (#282's own scope explicitly excludes introducing a size cap, only
   a warning threshold) rather than fixed here — a hard IPC-layer request size limit is a separate,
   broader decision than this issue's chunk-splitting scope.
+- **`split_into_units` originally collected the entire input into a `Vec<char>` before splitting**
+  — for ASCII/Latin1 `chunk_text`, a roughly 4x memory blow-up over the original `String` (1 byte
+  per char on the wire vs. `char`'s fixed 4 bytes), held for the whole split regardless of
+  pathological input. Unlike the CPU cost above, this amplification applied to *every* oversized
+  call, not just the pathological-whitespace case, and combined with the missing IPC size cap
+  meant a large-but-ordinary multi-megabyte `chunk_text` paid it on every split. Fixed (also raised
+  in Validate-stage review): the splitter now walks `&str` byte offsets directly via
+  `char_indices()` (forward, to find each window's end) and `chars().rev()` (backward, to find the
+  nearest whitespace within a window), so the only materialized `String`s are the output units
+  themselves — peak extra memory is O(1) in the window size, not O(text length).
 
 ## Related
 

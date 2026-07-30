@@ -28,33 +28,45 @@ pub fn split_into_units(text: &str, max_chars: usize) -> Vec<String> {
     // A zero-width window never advances `start` below, which would hang the caller forever.
     // Clamp to 1 so `max_chars == 0` degrades to "one unit per char", matching the doc comment.
     let max_chars = max_chars.max(1);
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= max_chars {
+    if text.chars().count() <= max_chars {
         return vec![text.to_string()];
     }
 
+    // Operates on byte offsets into `text` directly rather than collecting `text.chars()` into
+    // a `Vec<char>` up front: each `char` is a fixed 4 bytes, so for ASCII/Latin1 input (1 byte
+    // on the wire) that collection would hold ~4x the original `String`'s bytes for the entire
+    // splitting pass. `char_indices()`/`chars().rev()` walk `&str` slices directly and only ever
+    // materialize the current window (bounded by `max_chars`), so peak extra memory is O(1)
+    // regardless of `text`'s total size.
     let mut units = Vec::new();
-    let mut start = 0usize;
-    while start < chars.len() {
-        let window_end = (start + max_chars).min(chars.len());
-        if window_end == chars.len() {
-            units.push(chars[start..window_end].iter().collect());
-            break;
-        }
-
-        // Scan backward from window_end for the nearest whitespace, keeping it in this unit.
-        let mut cut = window_end;
-        let mut found_whitespace = false;
-        while cut > start {
-            if chars[cut - 1].is_whitespace() {
-                found_whitespace = true;
+    let mut start = 0usize; // byte offset into `text`
+    while start < text.len() {
+        let remainder = &text[start..];
+        let window_end = match remainder.char_indices().nth(max_chars) {
+            Some((byte_offset, _)) => start + byte_offset,
+            None => {
+                // Fewer than `max_chars` characters remain; this window covers the rest.
+                units.push(remainder.to_string());
                 break;
             }
-            cut -= 1;
+        };
+
+        // Scan backward from window_end for the nearest whitespace, keeping it in this unit.
+        // `cut` is a byte offset relative to `window`; it stays at `window.len()` (no
+        // truncation) unless a whitespace char is found while walking backward.
+        let window = &text[start..window_end];
+        let mut back_bytes = 0usize;
+        let mut cut = window.len();
+        for c in window.chars().rev() {
+            if c.is_whitespace() {
+                cut = window.len() - back_bytes;
+                break;
+            }
+            back_bytes += c.len_utf8();
         }
 
-        let end = if found_whitespace { cut } else { window_end };
-        units.push(chars[start..end].iter().collect());
+        let end = start + cut;
+        units.push(text[start..end].to_string());
         start = end;
     }
     units
