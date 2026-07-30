@@ -149,6 +149,10 @@ pub fn entity_user_prompt_for(
     }
 }
 
+fn strip_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Sanitizes a list of entity names for use in the edge-extraction prompt and tool schema:
 /// strips control characters (including newlines, which would break the bullet-list structure
 /// or a JSON schema `enum` entry), trims whitespace, drops entries that become empty, and
@@ -158,8 +162,7 @@ pub fn sanitize_entity_names(entity_names: &[String]) -> Vec<String> {
     entity_names
         .iter()
         .filter_map(|n| {
-            let sanitized: String = n.chars().filter(|c| !c.is_control()).collect();
-            let sanitized = sanitized.trim().to_string();
+            let sanitized = strip_control_chars(n).trim().to_string();
             if sanitized.is_empty() || !seen.insert(sanitized.clone()) {
                 None
             } else {
@@ -167,6 +170,17 @@ pub fn sanitize_entity_names(entity_names: &[String]) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// Normalizes a name to the key used to match an entity against a model-echoed edge endpoint
+/// name: strips control characters (the same stripping `sanitize_entity_names` applies before a
+/// name ever reaches the model), trims whitespace, and lowercases. An entity name containing a
+/// control character is control-stripped before the model ever sees it (both in the edge
+/// prompt's entity list and the tool schema's `enum`), so any endpoint-resolution key derived
+/// from the *original* entity name must use the same normalization or a genuine batch-local
+/// match will spuriously fail and fall through to salvage or drop.
+pub fn normalize_name(name: &str) -> String {
+    strip_control_chars(name).trim().to_lowercase()
 }
 
 /// Builds the edge extraction user message.

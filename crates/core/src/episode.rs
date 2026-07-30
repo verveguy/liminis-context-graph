@@ -10,6 +10,7 @@ use crate::{
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, OntologyMode},
     ontology_sidecar,
+    prompts::normalize_name,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
@@ -270,7 +271,7 @@ pub async fn add_episode(
     // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`
     // authoritative (FR-003, FR-005) instead of one of two independent, easily-desynced passes.
     extraction.edges.retain(|edge| {
-        if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase() {
+        if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
             eprintln!(
                 "liminis-context-graph: dropping self-referential edge: '{}' → '{}'",
                 edge.source_name, edge.target_name
@@ -281,25 +282,28 @@ pub async fn add_episode(
     });
 
     if !extraction.edges.is_empty() {
+        // Keyed by the same normalization applied to a name before it ever reaches the model
+        // (control-char strip + trim + lowercase, `prompts::normalize_name`) — an entity name
+        // containing a control character is shown to the model with that character stripped, so
+        // matching against the *original* name here would spuriously miss it.
         let entity_name_set: std::collections::HashSet<String> = extraction
             .entities
             .iter()
-            .map(|e| e.name.trim().to_lowercase())
+            .map(|e| normalize_name(&e.name))
             .collect();
 
-        // Collect the unique off-batch endpoint names needing salvage, keyed by lowercase, so a
-        // batch with many edges naming the same missing endpoint costs one embed+match, not one
-        // per edge.
+        // Collect the unique off-batch endpoint names needing salvage, keyed by the normalized
+        // name, so a batch with many edges naming the same missing endpoint costs one
+        // embed+match, not one per edge.
         let mut missing_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for edge in &extraction.edges {
             for name in [&edge.source_name, &edge.target_name] {
-                let trimmed = name.trim();
-                let lower = trimmed.to_lowercase();
-                if !entity_name_set.contains(&lower) {
+                let key = normalize_name(name);
+                if !entity_name_set.contains(&key) {
                     missing_names
-                        .entry(lower)
-                        .or_insert_with(|| trimmed.to_string());
+                        .entry(key)
+                        .or_insert_with(|| name.trim().to_string());
                 }
             }
         }
@@ -336,10 +340,10 @@ pub async fn add_episode(
 
         if !salvage_map.is_empty() {
             for edge in extraction.edges.iter_mut() {
-                if let Some(canonical) = salvage_map.get(&edge.source_name.trim().to_lowercase()) {
+                if let Some(canonical) = salvage_map.get(&normalize_name(&edge.source_name)) {
                     edge.source_name = canonical.clone();
                 }
-                if let Some(canonical) = salvage_map.get(&edge.target_name.trim().to_lowercase()) {
+                if let Some(canonical) = salvage_map.get(&normalize_name(&edge.target_name)) {
                     edge.target_name = canonical.clone();
                 }
             }
@@ -350,8 +354,7 @@ pub async fn add_episode(
             // salvage so a rewritten edge like that doesn't slip past the earlier check and get
             // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
             extraction.edges.retain(|edge| {
-                if edge.source_name.trim().to_lowercase() == edge.target_name.trim().to_lowercase()
-                {
+                if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
                     eprintln!(
                         "liminis-context-graph: dropping self-referential edge after salvage: '{}' → '{}'",
                         edge.source_name, edge.target_name
@@ -576,14 +579,16 @@ pub async fn add_episode(
             }
         }
 
-        // name→uuid map for edge endpoint resolution. Keys are lowercase-normalized so a
-        // batch-internal case mismatch between an entity's extracted name and an edge's
-        // endpoint name doesn't fall through to the global fallback unnecessarily (#209).
+        // name→uuid map for edge endpoint resolution. Keys use `prompts::normalize_name` (control
+        // -char strip + trim + lowercase) — the same normalization a name gets before it reaches
+        // the model — so neither a batch-internal case mismatch (#209) nor a control character
+        // in the original entity name causes a genuine batch-local match to fall through to the
+        // global fallback unnecessarily.
         let name_to_uuid: std::collections::HashMap<String, String> = extraction
             .entities
             .iter()
             .enumerate()
-            .map(|(i, e)| (e.name.trim().to_lowercase(), entity_uuids[i].clone()))
+            .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
             .collect();
 
         // Insert relationship edges. This is the sole, authoritative point at which an edge's
@@ -594,13 +599,13 @@ pub async fn add_episode(
             // An endpoint absent from this batch's name→uuid map may still resolve against the
             // persisted Entity table (e.g. a recurring hub entity created in an earlier ingest
             // batch that survived Site 1's validation via the same fallback) (FR-002, FR-003).
-            let src_uuid = match name_to_uuid.get(&edge.source_name.trim().to_lowercase()) {
+            let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
                     .get_entity_by_name_ci(&edge.source_name, &gid_owned)?
                     .map(|existing| existing.uuid),
             };
-            let dst_uuid = match name_to_uuid.get(&edge.target_name.trim().to_lowercase()) {
+            let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
                     .get_entity_by_name_ci(&edge.target_name, &gid_owned)?

@@ -437,3 +437,53 @@ async fn test_salvage_collapsing_both_endpoints_to_same_entity_is_not_inserted()
         "no self-referential relationship should be persisted after a salvage collision"
     );
 }
+
+// ── Regression: an entity name containing a control character must still resolve
+//    batch-locally, since the model only ever sees the control-stripped form ───────────
+
+#[tokio::test]
+async fn test_edge_endpoint_resolves_when_entity_name_has_control_char() {
+    let (db, _dir) = make_db();
+
+    // The entity's *stored* name has an embedded tab; `sanitize_entity_names` deletes control
+    // characters outright (no separator substituted) before the name ever reaches the
+    // edge-extraction prompt/schema (FR-001, FR-006), so a well-behaved model constrained by the
+    // tool schema's `enum` can only echo back the exact sanitized form — "ClimateChange", not
+    // "Climate Change". With `MockEmbedder`'s zero vectors, salvage can never match (cosine
+    // similarity is always 0.0), so this edge can only resolve via the direct batch-local name
+    // lookup — proving that lookup normalizes the same way the prompt/schema sanitization does.
+    // 'Ocean Acidification' has no control character, so only the control-char-affected
+    // endpoint ('ClimateChange') is exercising the behavior under test.
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Climate\tChange", "Ocean Acidification"],
+        &[(
+            "ClimateChange",
+            "Ocean Acidification",
+            "Climate change causes ocean acidification",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Climate change causes ocean acidification.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "an edge naming the sanitized form of a control-char-containing entity name must \
+         resolve batch-locally, got edges_extracted={}, edges_dropped_unresolvable={}",
+        result.edges_extracted, result.edges_dropped_unresolvable
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "this edge must resolve via direct batch-local match, not be dropped"
+    );
+
+    let conn = db.connect().unwrap();
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
+}
