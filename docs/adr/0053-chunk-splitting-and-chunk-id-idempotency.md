@@ -146,7 +146,18 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   fresh ingest instead. `handle_delete_chunk_episode` (an explicit, caller-invoked deletion) is
   unaffected by this change and still matches/deletes by `name` alone — that endpoint's contract
   has always been "delete everything with this name," which is a different, and here still an
-  intentionally accepted, risk from routine ingestion silently destroying data. Deliberately *not*
+  intentionally accepted, risk from routine ingestion silently destroying data. The
+  `":{chunk_id}"`-suffix anchor narrows, but does not eliminate, the foreign-row risk: a
+  `knowledge_add_episode` caller whose `name` equals a `chunk_id` *and* whose own
+  `source_description` happens to end in `":{chunk_id}"` too (e.g. a caller mirroring this
+  handler's own `"{source_file}:{chunk_id}"` convention, such as `"notes:chunk-42"`) still gets
+  pulled into that chunk_id's reconstructed lineage and is a candidate for deletion on a
+  subsequent replace. This residual collision is accepted for the same reason as the
+  `source_file`-independence tradeoff below: `Episodic.name` has no namespace separating
+  `knowledge_process_chunk` lineages from `knowledge_add_episode` callers, and closing it
+  completely would require either a schema-level provenance marker (a schema change, per
+  Research's Constraint 4) or a reserved delimiter convention enforced across both handlers —
+  out of scope for this issue. Deliberately *not*
   anchored to the current call's `source_file`, since a caller may legitimately resubmit a
   `chunk_id` under a renamed/moved `source_file` and idempotency must still recognize that as the
   same lineage — an earlier revision of this design required an exact `"{source_file}:{chunk_id}"`

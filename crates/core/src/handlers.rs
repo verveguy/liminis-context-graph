@@ -467,6 +467,12 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
         // different endpoint/lineage (e.g. a `knowledge_add_episode` call whose caller-chosen
         // `name` happens to equal this `chunk_id`). Leave it untouched: not counted, not
         // deleted.
+        //
+        // Residual gap (accepted, see ADR-0052): a `knowledge_add_episode` row whose
+        // `source_description` *also* happens to end in `":{chunk_id}"` (e.g. a caller mirroring
+        // this handler's own convention) still matches the check above and is pulled into this
+        // lineage. Closing that fully would need a schema-level provenance marker or a reserved
+        // delimiter shared across both handlers — out of scope here.
     }
 
     if family_uuids.is_empty() {
