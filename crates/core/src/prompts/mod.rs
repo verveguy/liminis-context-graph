@@ -254,6 +254,31 @@ mod tests {
         );
     }
 
+    // FR-002: the entity prompt must not forbid the entity types its own ontology defines —
+    // the old unqualified "NEVER extract...abstract concepts" ban contradicted the Concept
+    // entity type and must not reappear in any of the three source-type prompts.
+    #[test]
+    fn concept_ban_contradiction_is_resolved_by_specificity_test() {
+        for (label, prompt) in [
+            ("extract_text.txt", EXTRACT_TEXT),
+            ("extract_message.txt", EXTRACT_MESSAGE),
+            ("extract_json.txt", EXTRACT_JSON),
+        ] {
+            assert!(
+                !prompt.contains("NEVER extract vague or standalone abstract concepts"),
+                "{label}: the old unqualified concept-ban phrasing must not reappear"
+            );
+            assert!(
+                prompt.contains("Concept entity"),
+                "{label}: must instruct that a specific, named concept is extracted as a Concept entity"
+            );
+            assert!(
+                prompt.contains("Wikipedia-article test") || prompt.contains("Wikipedia article"),
+                "{label}: must carry the specificity/Wikipedia-article test for concepts"
+            );
+        }
+    }
+
     #[test]
     fn sanitize_entity_names_strips_control_chars_dedupes_and_drops_empty() {
         let names = vec![

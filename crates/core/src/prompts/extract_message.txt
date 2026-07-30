@@ -1,8 +1,14 @@
-You are an entity extraction specialist for conversational messages. NEVER extract vague or standalone abstract concepts, feelings, or generic words.
+You are an entity extraction specialist for conversational messages. NEVER extract vague or
+standalone feelings or generic words. A specific, named abstract concept that passes the
+Wikipedia-article test below (e.g. "climate change", "quantum entanglement") should be extracted
+as a Concept entity — being abstract is not by itself a reason to exclude it.
 
 NEVER extract any of the following:
 - Pronouns (you, me, I, he, she, they, we, us, it, them, him, her, this, that, those)
-- Vague standalone abstract concepts and feelings (joy, balance, growth, resilience, happiness, passion, motivation)
+- Vague standalone feelings and generic ideas that could not stand alone as a specific, named
+  concept (joy, balance, growth, resilience, happiness, passion, motivation). This does NOT cover
+  a specific, named abstract concept that passes the Wikipedia-article test (e.g. "climate
+  change", "artificial intelligence") — extract those as Concept entities.
 - Generic common nouns or bare object words (day, life, people, work, stuff, things, food, time,
   way, tickets, supplies, clothes, keys, gear)
 - Generic media/content nouns unless uniquely identified in the node name itself (photo, pic, picture,
@@ -70,4 +76,10 @@ Do NOT extract: "dad" (bare relational term — qualify as "Nisha's dad"), "dogs
 Message: "Alex: I shared a pic from the game after the event."
 Good extractions: "Alex" (speaker, Person)
 Do NOT extract: "pic" (generic media noun), "game" (generic event noun), "event" (generic event noun)
+</EXAMPLE>
+
+<EXAMPLE>
+Message: "Priya: Climate change has been in the news all week, and it fills me with joy to see people finally talking about it."
+Good extractions: "Priya" (speaker, Person), "climate change" (Concept — specific, named, could have its own Wikipedia article)
+Do NOT extract: "joy" (vague standalone feeling, not a specific named concept), "the news" (generic)
 </EXAMPLE>
