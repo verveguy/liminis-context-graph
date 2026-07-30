@@ -598,17 +598,29 @@ pub async fn add_episode(
         for (i, edge) in extraction.edges.iter().enumerate() {
             // An endpoint absent from this batch's name→uuid map may still resolve against the
             // persisted Entity table (e.g. a recurring hub entity created in an earlier ingest
-            // batch that survived Site 1's validation via the same fallback) (FR-002, FR-003).
+            // batch, or salvage-rewritten pre-lock above to a name this batch doesn't itself
+            // contain) (FR-002, FR-003).
+            //
+            // Endpoint-authority resolution (issue #283): a `NameIndex` miss here must not be
+            // trusted as "doesn't exist" — see `get_entity_by_name_ci_with_scan_fallback`'s doc
+            // comment. Unlike issue #283's original design, there is no separate pre-lock pass
+            // that resolves against the DB and warms the index ahead of this loop (#281 replaced
+            // that with a DB-independent embedding salvage step) — the self-heal bound instead
+            // comes from *this* loop alone: the first edge naming a given missing entity scans
+            // and, on a hit, inserts the result into `NameIndex`, so every later edge in this
+            // same Phase C pass referencing that same name lands on an index-only hit rather
+            // than a fresh scan. A batch with many edges to one recurring hub entity still costs
+            // exactly one scan, not one per edge.
             let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
-                    .get_entity_by_name_ci(&edge.source_name, &gid_owned)?
+                    .get_entity_by_name_ci_with_scan_fallback(&edge.source_name, &gid_owned)?
                     .map(|existing| existing.uuid),
             };
             let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
                 Some(u) => Some(u.clone()),
                 None => conn
-                    .get_entity_by_name_ci(&edge.target_name, &gid_owned)?
+                    .get_entity_by_name_ci_with_scan_fallback(&edge.target_name, &gid_owned)?
                     .map(|existing| existing.uuid),
             };
             let (src_uuid, dst_uuid) = match (src_uuid, dst_uuid) {

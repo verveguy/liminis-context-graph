@@ -1126,28 +1126,116 @@ impl<'db> Conn<'db> {
     ///
     /// Resolved via the in-process `NameIndex` accelerator rather than a database query
     /// (issue #219 — `lower(e.name) = $x` is a scalar-function predicate lbug cannot route
-    /// through any index, so this used to be a full `Entity` table scan on every call). A
-    /// hit is always re-verified against the database via `get_entity_by_uuid` before being
-    /// returned (FR-006): if the index is stale — the UUID no longer exists, or no longer
-    /// matches this `name`/`group_id` — this returns `Ok(None)` rather than a wrong result.
-    /// There is deliberately no scan fallback on a miss; see the NameIndex ADR.
+    /// through any index, so this used to be a full `Entity` table scan on every call). Each
+    /// same-named candidate is re-verified against the database via `get_entity_by_uuid`
+    /// before being returned (FR-006); if the winning candidate is stale — deleted, or no
+    /// longer matching this `name`/`group_id` — the remaining candidates for this key are
+    /// tried in turn (FR-005) rather than giving up on the first failure. Returns `Ok(None)`
+    /// only once every candidate the index knows of has failed verification (or it knows of
+    /// none).
+    ///
+    /// There is deliberately no scan fallback on a total miss here — see
+    /// `get_entity_by_name_ci_with_scan_fallback` for the endpoint-authority call sites that
+    /// need one, and the NameIndex ADR / issue #283 for why the two are kept separate.
     pub fn get_entity_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        let Some(uuid) = self.name_index.lookup(name, group_id) else {
-            return Ok(None);
-        };
         let lower_name = name.trim().to_lowercase();
-        match self.get_entity_by_uuid(&uuid)? {
-            Some(row)
-                if row.group_id == group_id && row.name.trim().to_lowercase() == lower_name =>
-            {
-                Ok(Some(row))
+        for uuid in self.name_index.lookup_candidates(name, group_id) {
+            if let Some(row) = self.get_entity_by_uuid(&uuid)? {
+                if row.group_id == group_id && row.name.trim().to_lowercase() == lower_name {
+                    return Ok(Some(row));
+                }
             }
-            _ => Ok(None),
         }
+        Ok(None)
+    }
+
+    /// Case-insensitive, whitespace-normalised name lookup for the endpoint-authority call
+    /// sites (issue #283 / #218): unlike `get_entity_by_name_ci`, a miss here does not mean
+    /// "the entity doesn't exist" — it may mean the `NameIndex` simply hasn't observed it
+    /// (raw Cypher writes, WAL replay whose index rebuild failed, a second writer process).
+    /// Those call sites treat "does this entity exist anywhere in the group" as an authority
+    /// question, so a miss falls back to a bounded, single-row database scan rather than
+    /// trusting the index alone.
+    ///
+    /// On a scan hit, the result is inserted back into the `NameIndex` (self-healing it for
+    /// subsequent lookups in this and later requests). Every fallback scan is counted via
+    /// `NameIndex::record_fallback_scan` regardless of outcome (SC-004), so index desync is
+    /// observable through `knowledge_status` without reproducing the bug.
+    ///
+    /// Callers MUST use this sparingly (FR-002): it is intended for a batch's deduplicated
+    /// set of unresolved names (e.g. `episode.rs`'s `missing_names`), not per-edge/per-entity
+    /// use, or it reintroduces the full-scan cost ADR-0038 removed.
+    pub fn get_entity_by_name_ci_with_scan_fallback(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        if let Some(row) = self.get_entity_by_name_ci(name, group_id)? {
+            return Ok(Some(row));
+        }
+        self.name_index.record_fallback_scan();
+        let scanned = self.scan_entity_by_name_ci(name, group_id)?;
+        if let Some(ref row) = scanned {
+            self.name_index
+                .insert(&row.uuid, &row.name, &row.group_id, &row.created_at);
+        }
+        Ok(scanned)
+    }
+
+    /// Bounded, single-row full scan backing `get_entity_by_name_ci_with_scan_fallback`'s
+    /// miss path. Reproduces the index's own winner-selection rule (`ORDER BY created_at
+    /// ASC, uuid ASC LIMIT 1`) and, per the resolved spec assumption, does not filter out
+    /// `Merged`-labelled tombstones — the index itself resolves through them (see
+    /// `corrections::merge_entities`), so a fallback that filtered them would disagree with
+    /// the index on what "resolves" means for a merged-away alias.
+    fn scan_entity_by_name_ci(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        let lower_name = name.trim().to_lowercase();
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.name_embedding, e.summary, e.attributes \
+             ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
+            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
+        )?;
+        Ok(rows.into_iter().next().map(|row| EntityRow {
+            uuid: value_as_string(&row[0]),
+            name: value_as_string(&row[1]),
+            group_id: value_as_string(&row[2]),
+            labels: value_as_str_list(&row[3]),
+            created_at: value_as_timestamp_str(&row[4]),
+            name_embedding: value_as_float_array(&row[5]),
+            summary: value_as_string(&row[6]),
+            attributes: value_as_string(&row[7]),
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        }))
+    }
+
+    /// Whether the in-process `NameIndex` is currently believed coherent with the database
+    /// (FR-003). Surfaced through `knowledge_status` (SC-004).
+    pub fn name_index_trusted(&self) -> bool {
+        self.name_index.is_trusted()
+    }
+
+    /// Total scan-fallback lookups performed against the `NameIndex` since this `Db` was
+    /// opened (SC-004). Surfaced through `knowledge_status`.
+    pub fn name_index_fallback_scan_count(&self) -> u64 {
+        self.name_index.fallback_scan_count()
+    }
+
+    /// Marks the `NameIndex` as potentially stale (FR-003), e.g. after a failed
+    /// post-replay `rebuild_name_index()` or a raw-Cypher mutation whose follow-up rebuild
+    /// failed. Cleared by the next successful `rebuild_name_index()`.
+    pub fn mark_name_index_untrusted(&self) {
+        self.name_index.mark_untrusted();
     }
 
     /// Counts Entity nodes whose lowercased name matches the given name (case-insensitive)
