@@ -48,11 +48,24 @@ struct NameIndexState {
 }
 
 impl NameIndex {
-    /// Records a newly-inserted entity. Idempotent under retries with the same values.
+    /// Records an entity, upserting it: if `uuid` was already tracked under a different
+    /// `(group_id, lower_name, created_at)` — e.g. `get_entity_by_name_ci_with_scan_fallback`
+    /// self-healing a UUID that was previously indexed under a now-stale name after an
+    /// out-of-band rename or group move — the prior `by_key` entry is removed first, so a
+    /// single UUID never accumulates multiple stale candidates across keys. Idempotent under
+    /// retries with the same values, and a plain insert when `uuid` isn't tracked yet (the
+    /// common case: a brand-new entity from `insert_entity`).
     pub(crate) fn insert(&self, uuid: &str, name: &str, group_id: &str, created_at: &str) {
         let lower_name = name.trim().to_lowercase();
         let created_at = crate::db::canonical_created_at_for_index(created_at);
         let mut state = self.state.write().unwrap_or_else(|e| e.into_inner());
+        if let Some((old_group_id, old_lower_name, old_created_at)) =
+            state.by_uuid.get(uuid).cloned()
+        {
+            if let Some(set) = state.by_key.get_mut(&(old_group_id, old_lower_name)) {
+                set.remove(&(old_created_at, uuid.to_string()));
+            }
+        }
         state
             .by_key
             .entry((group_id.to_string(), lower_name.clone()))
@@ -268,5 +281,40 @@ mod tests {
         idx.record_fallback_scan();
         idx.record_fallback_scan();
         assert_eq!(idx.fallback_scan_count(), 2);
+    }
+
+    #[test]
+    fn insert_upserts_removing_a_prior_entry_under_a_different_key() {
+        let idx = NameIndex::default();
+        idx.insert("u1", "Alice", "g1", "2026-01-01 00:00:00");
+        assert_eq!(winner(&idx, "Alice", "g1"), Some("u1".to_string()));
+
+        // Simulates a self-heal after an out-of-band rename: same UUID, new name, same
+        // created_at. The old ("g1", "alice") key's entry for "u1" must be removed, not left
+        // behind as a permanently stale candidate.
+        idx.insert("u1", "Bob", "g1", "2026-01-01 00:00:00");
+        assert_eq!(
+            winner(&idx, "Bob", "g1"),
+            Some("u1".to_string()),
+            "must resolve under the new name"
+        );
+        assert_eq!(
+            idx.lookup_candidates("Alice", "g1"),
+            Vec::<String>::new(),
+            "the old key must not retain a stale candidate for the renamed uuid"
+        );
+    }
+
+    #[test]
+    fn insert_upserts_across_a_group_move() {
+        let idx = NameIndex::default();
+        idx.insert("u1", "Alice", "g1", "2026-01-01 00:00:00");
+        idx.insert("u1", "Alice", "g2", "2026-01-01 00:00:00");
+        assert_eq!(winner(&idx, "Alice", "g2"), Some("u1".to_string()));
+        assert_eq!(
+            idx.lookup_candidates("Alice", "g1"),
+            Vec::<String>::new(),
+            "the old group's key must not retain a stale candidate after a group move"
+        );
     }
 }

@@ -307,6 +307,64 @@ async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
     );
 }
 
+// ── Issue #283 follow-up: the per-batch scan memo must key on the DB layer's own ───────
+// normalization, not `prompts::normalize_name`. `normalize_name` additionally strips control
+// characters; `get_entity_by_name_ci`/`scan_entity_by_name_ci` only `trim().to_lowercase()`.
+// Keying the memo by the stricter normalization would conflate two names the DB treats as
+// distinct, letting one edge's cached resolution silently serve another, unrelated name.
+
+#[tokio::test]
+async fn test_scan_fallback_memo_does_not_conflate_control_char_variant_with_clean_name() {
+    let (db, _dir) = make_db();
+    {
+        let conn = db.connect().unwrap();
+        // Bypasses insert_entity, so this must resolve via the scan-fallback memo path.
+        conn.run_cypher(&format!(
+            "CREATE (:Entity {{uuid: 'raw-clean', name: 'Apple', group_id: '{GROUP_A}', \
+             labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{{}}'}})"
+        ))
+        .unwrap();
+    }
+
+    // The second edge's source name differs from the first only by an embedded control
+    // character that `normalize_name` strips but the DB's own `trim().to_lowercase()` match
+    // does not — so it must NOT resolve to the same entity as the clean "Apple" edge.
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["Bystander"],
+        &[
+            ("Apple", "Bystander", "Apple relates to Bystander"),
+            (
+                "A\u{0001}pple",
+                "Bystander",
+                "control-char variant relates to Bystander",
+            ),
+        ],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(
+        &state,
+        "ep-a",
+        "Apple and a variant both relate to Bystander.",
+        GROUP_A,
+    )
+    .await;
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "only the clean 'Apple' edge should resolve; a memo keyed by the DB layer's own \
+         normalization must not let it serve the control-char variant, which doesn't exist, \
+         got edges_extracted={}",
+        result.edges_extracted
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 1,
+        "the control-char-variant edge must be dropped as genuinely unresolvable, not \
+         incorrectly resolved via a conflated cache entry"
+    );
+}
+
 // ── Edge case: endpoints resolve independently; drop if either fails ──────────
 
 #[tokio::test]

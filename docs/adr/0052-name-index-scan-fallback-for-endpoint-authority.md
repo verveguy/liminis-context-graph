@@ -108,6 +108,34 @@ out-of-band) falls through to the next-best same-named candidate instead of degr
 to a miss. This is a small, self-contained change inside `NameIndex`/`get_entity_by_name_ci`;
 no call site needed to change.
 
+### `NameIndex::insert` upserts instead of appending, so self-healing can't leave stale candidates
+
+Before this issue, `insert` was only ever called for a UUID that had never been indexed before
+(`insert_entity`, for a brand-new entity) — a genuinely new `(created_at, uuid)` tuple. The
+self-heal path this issue adds is the first caller that can call `insert` for a UUID that *was*
+already tracked, just under a different key: a scan hit for an entity that was renamed or moved
+groups out-of-band (bypassing the index) resolves under its *current* name, and self-healing
+that result would otherwise leave the *old* `(group_id, lower_name)` key's stale entry for the
+same UUID sitting in `by_key` forever, accumulating one extra stale/duplicate candidate per
+missed rename. `insert` now checks `by_uuid` for a prior entry first and removes it from its old
+key's set before inserting under the new key — the same reconciliation `update_created_at`
+already did for the narrower "same key, new timestamp" case, generalized to "any key change."
+This was accepted as a real (if narrow) gap rather than dismissed: FR-005's fall-through already
+prevented it from returning a *wrong* entity, but left an unbounded, ever-growing set of stale
+candidates behind every self-heal after a rename, which is worth closing directly rather than
+relying on FR-005 to keep masking it.
+
+### `resolve_via_scan`'s per-batch memo keys on the DB layer's own normalization, not `normalize_name`
+
+The Phase C memo (previous section) originally keyed its cache by `prompts::normalize_name`
+(control-char strip + trim + lowercase) — the same key `name_to_uuid` uses for batch-local
+matches. But `get_entity_by_name_ci`/`scan_entity_by_name_ci` only ever match by
+`trim().to_lowercase()`, without stripping control characters. Keying the memo by the stricter
+`normalize_name` would conflate two names the DB layer treats as distinct — e.g. `"Apple"` and
+`"A\u{0001}pple"` — letting a cached resolution (or cached miss) for one silently serve the
+other. The memo now keys on `raw_name.trim().to_lowercase()`, matching the DB layer's own
+normalization exactly.
+
 ### Trust state and fallback-scan counter live on `NameIndex`/`Db`, not `AppState` (FR-003, SC-004)
 
 `NameIndex` gains an `AtomicBool` trust flag (default `true`) and an `AtomicU64` fallback-scan
@@ -186,9 +214,14 @@ itself be a new correctness bug, not a fix. `group_id` non-normalization is like
   accepted for WAL logging via the same heuristic; FR-001's scan-fallback self-healing at the
   two endpoint-authority call sites still recovers correctness even if FR-004's proactive
   rebuild misses a mutation, just not as promptly.
-- **`rebuild_name_index()` after every raw-Cypher mutation is a full `Entity` table scan** on an
-  administrative, not hot-ingest, path. Acceptable given `handle_query_cypher`'s expected call
-  volume, but would need revisiting if that path became a high-frequency write channel.
+- **`rebuild_name_index()` after every raw-Cypher mutation is a full `Entity` table scan, run
+  while `handle_query_cypher` still holds the global `state.write_lock` write guard** —
+  `handle_query_cypher` already held that lock for its `cypher_query`/WAL-flush before this
+  issue; the rebuild extends how long every other writer is blocked by the scan's duration, on
+  top of the scan cost itself. Accepted for the same reason as the scan cost: this is an
+  administrative, not hot-ingest, path, so the added lock-hold time is expected to be rare and
+  short-lived relative to ingest traffic. Would need revisiting (e.g. rebuilding after releasing
+  the lock) if this path became a high-frequency or highly concurrent write channel.
 - **The trust flag is coarse**: it is a single boolean for the entire index, not scoped to which
   names/groups might be affected. A single failed rebuild marks everything untrusted until the
   next successful rebuild, even though most of the index may still be coherent. This matches

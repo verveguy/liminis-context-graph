@@ -325,7 +325,12 @@ pub(crate) fn is_index_ddl(cypher: &str) -> bool {
 /// tokens outside single-quoted literals for mutation keywords. MATCH-prefixed writes (e.g.
 /// `"MATCH (...) DETACH DELETE"` or `"MATCH (...) SET ..."`) don't start with the DML verb,
 /// so a first-token check would miss them. Stripping quoted literals first prevents entity
-/// names that happen to contain DML words from being misclassified as mutations.
+/// names that happen to contain DML words from being misclassified as mutations. Parentheses
+/// are also treated as token boundaries (in addition to whitespace) so a keyword directly
+/// touching punctuation with no space — `"CREATE(:Entity"`, `"MATCH (n)SET"` — still tokenizes
+/// as a standalone word instead of being swallowed into one run that never matches exactly.
+/// This can only ever turn a prior false negative into a (correct) match, never the reverse,
+/// since it splits existing tokens further rather than merging any together.
 ///
 /// Originally `log_mutation`'s inline check (WAL-logging decision); also used by
 /// `handle_query_cypher` (issue #283, FR-004) to decide whether a raw-Cypher call through the
@@ -335,7 +340,18 @@ pub(crate) fn is_index_ddl(cypher: &str) -> bool {
 /// alone would classify `CREATE INDEX ...` as a mutation.
 pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
     let upper = cypher.to_uppercase();
-    strip_quoted_literals(&upper).split_whitespace().any(|t| {
+    let stripped = strip_quoted_literals(&upper);
+    let spaced: String = stripped
+        .chars()
+        .flat_map(|c| {
+            if c == '(' || c == ')' {
+                vec![' ', c, ' ']
+            } else {
+                vec![c]
+            }
+        })
+        .collect();
+    spaced.split_whitespace().any(|t| {
         matches!(
             t,
             "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
@@ -359,4 +375,26 @@ fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn looks_like_mutation_detects_keywords_touching_parentheses() {
+        // Regression for a punctuation-adjacency gap: split_whitespace alone treats
+        // "CREATE(:Entity" and "N)SET" as single opaque tokens that never equal "CREATE"/"SET"
+        // exactly, silently missing real mutations that happen to have no space before/after
+        // a paren.
+        assert!(looks_like_mutation("CREATE(:Entity {uuid: 'x'})"));
+        assert!(looks_like_mutation("MATCH (n)SET n.x = 1"));
+        assert!(looks_like_mutation("MATCH (n)DETACH DELETE n"));
+    }
+
+    #[test]
+    fn looks_like_mutation_still_ignores_read_only_queries() {
+        assert!(!looks_like_mutation("MATCH (n) RETURN n"));
+        assert!(!looks_like_mutation("MATCH(n)RETURN n"));
+    }
 }

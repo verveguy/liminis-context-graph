@@ -591,18 +591,25 @@ pub async fn add_episode(
             .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
             .collect();
 
-        // Per-batch memo of scan-fallback resolutions, keyed by normalized name. Self-healing
-        // `NameIndex` on a scan *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only
-        // bounds the cost of a name that exists; a name that doesn't (a hallucinated or
-        // otherwise never-persisted extraction) has nothing to insert into `NameIndex`, so
-        // without this memo every edge referencing that same missing name in this batch would
-        // re-run its own full scan. This closure caches both outcomes locally, for this Phase C
-        // pass only, so a batch pays at most one scan per unique unresolved name regardless of
-        // whether it resolves (FR-002).
+        // Per-batch memo of scan-fallback resolutions. Self-healing `NameIndex` on a scan
+        // *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only bounds the cost of a
+        // name that exists; a name that doesn't (a hallucinated or otherwise never-persisted
+        // extraction) has nothing to insert into `NameIndex`, so without this memo every edge
+        // referencing that same missing name in this batch would re-run its own full scan.
+        // This closure caches both outcomes locally, for this Phase C pass only, so a batch
+        // pays at most one scan per unique unresolved name regardless of whether it resolves
+        // (FR-002).
+        //
+        // Keyed by `raw_name.trim().to_lowercase()` — the exact normalization
+        // `get_entity_by_name_ci`/`scan_entity_by_name_ci` match on — not `normalize_name`
+        // (which additionally strips control characters). Keying on the stricter
+        // `normalize_name` would conflate e.g. `"Apple"` and `"A\u{0001}pple"` into one cache
+        // entry despite the DB layer treating them as distinct names, letting a cached result
+        // for one silently serve the other.
         let mut scan_cache: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         let mut resolve_via_scan = |raw_name: &str| -> Result<Option<String>, Error> {
-            let key = normalize_name(raw_name);
+            let key = raw_name.trim().to_lowercase();
             if let Some(cached) = scan_cache.get(&key) {
                 return Ok(cached.clone());
             }
