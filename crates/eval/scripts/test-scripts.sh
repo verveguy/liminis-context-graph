@@ -74,7 +74,15 @@ with open(p, 'w') as f:
 make_fake_repo() {
   local root="$1"
   mkdir -p "$root/target/release" "$root/crates/core/tests/fixtures/real_corpus_wal"
-  printf '#!/bin/sh\nexit 0\n' > "$root/target/release/lcg-eval"
+  # Records its argv so tests can assert the binary was actually REACHED, and with which
+  # flags. A stub that merely exits 0 lets an "this error is absent" assertion pass even when
+  # the script crashed before invoking it — which is how a bash 3.2 empty-array crash on the
+  # freeform and all-replay paths shipped past a green suite.
+  cat > "$root/target/release/lcg-eval" <<'STUB'
+#!/bin/sh
+echo "STUB-INVOKED $*" >> "$(dirname "$0")/../../stub-argv.log"
+exit 0
+STUB
   chmod +x "$root/target/release/lcg-eval"
   echo "mode: strict" > "$root/crates/core/tests/fixtures/real_corpus_wal/ontology.yaml"
 }
@@ -221,6 +229,52 @@ out="$(run06 "$REPO1" MODES="open" DRY_RUN=1)"
 assert_contains "04/05 default to 'reference'" "$out" "the differing judge-mode default is called out"
 out="$(run06 "$REPO1" MODES="open" LCG_EVAL_JUDGE_MODE=reference DRY_RUN=1)"
 assert_not_contains "includes pairwise" "$out" "no pairwise cost warning when reference is chosen"
+
+echo "== 06: the binary is actually reached (bash 3.2 empty-array regression) =="
+# macOS ships bash 3.2, where expanding an EMPTY array as "${arr[@]}" is an unbound-variable
+# error under set -u (fixed in 4.4) — so it fails where the script is run and never on CI.
+# ONT_ARGS is empty for freeform; RECORD is empty when every leg replays. Both crashed before
+# invoking the binary, and nothing noticed because every reachability assertion here was
+# "this error message is absent", which passes when the script dies of something else.
+#
+# These drive the REPLAY path deliberately: it needs no model server, so they are hermetic
+# and behave identically on CI. It is also the only way to reach an empty RECORD at all (a
+# live leg always records), while freeform gives an empty ONT_ARGS either way.
+REPO_R1="$WORKROOT/reach1"; make_fake_repo "$REPO_R1"
+make_cassette "$REPO_R1/anthropic-$H.jsonl" 228 b
+make_cassette "$REPO_R1/anthropic-$H.candidate.jsonl" 228 c
+make_cassette "$REPO_R1/qwen3.6-27b.jsonl" 228 q
+rm -f "$REPO_R1/stub-argv.log"
+out="$(run06 "$REPO_R1" MODES="freeform" ANTHROPIC_API_KEY=dummy)"
+argv="$(cat "$REPO_R1/stub-argv.log" 2>/dev/null)"
+assert_contains "STUB-INVOKED" "$argv" "freeform all-replay REACHES the binary (empty ONT_ARGS and RECORD)"
+assert_not_contains "unbound variable" "$out" "no unbound-variable crash on freeform"
+assert_not_contains "--ontology" "$argv" "freeform passes no --ontology flag"
+assert_contains "--all" "$argv" "freeform passes the full-corpus scope"
+assert_not_contains "--record-cassette" "$argv" "an all-replay run records nothing (empty RECORD)"
+
+REPO_R2="$WORKROOT/reach2"; make_fake_repo "$REPO_R2"
+make_cassette "$REPO_R2/anthropic-strict-baseline-$H.jsonl" 228 b
+make_cassette "$REPO_R2/anthropic-strict-candidate-$H.jsonl" 228 c
+make_cassette "$REPO_R2/qwen3.6-27b-strict.jsonl" 228 q
+rm -f "$REPO_R2/stub-argv.log"
+out="$(run06 "$REPO_R2" MODES="strict" ANTHROPIC_API_KEY=dummy)"
+argv="$(cat "$REPO_R2/stub-argv.log" 2>/dev/null)"
+assert_contains "--ontology-mode strict" "$argv" "strict passes its ontology mode"
+assert_not_contains "unbound variable" "$out" "no unbound-variable crash on strict"
+
+# The LIVE path additionally needs a reachable model server, which CI does not have. Run it
+# when one is present so the dev machine still covers it; skip visibly rather than silently.
+if curl -fsS --max-time 3 "http://127.0.0.1:${LCG_EVAL_PORT:-8765}/v1/models" >/dev/null 2>&1; then
+  REPO_R3="$WORKROOT/reach3"; make_fake_repo "$REPO_R3"
+  rm -f "$REPO_R3/stub-argv.log"
+  out="$(run06 "$REPO_R3" MODES="freeform" ANTHROPIC_API_KEY=dummy)"
+  argv="$(cat "$REPO_R3/stub-argv.log" 2>/dev/null)"
+  assert_contains "STUB-INVOKED" "$argv" "freeform LIVE run reaches the binary"
+  assert_contains "--record-cassette" "$argv" "a live run records its cassettes"
+else
+  ok "freeform LIVE run reaches the binary (skipped: no model server on this host)"
+fi
 
 # The identity/duplicate-key-under-LIMIT guard cases formerly tested here, and the
 # validate_report.py report-accounting cases, both moved to lcg-eval itself (#279

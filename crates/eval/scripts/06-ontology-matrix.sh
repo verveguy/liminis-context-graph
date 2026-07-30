@@ -275,12 +275,19 @@ for mode in $MODES; do
   backup_if_present "$REPORT"
 
   echo "    started $(date '+%H:%M:%S')"
+  # ${arr[@]+"${arr[@]}"} rather than "${arr[@]}" for the arrays that can legitimately be
+  # EMPTY. macOS ships bash 3.2, where expanding an empty array as "${arr[@]}" is an
+  # unbound-variable error under `set -u` (fixed in bash 4.4) — so this fails on the machine
+  # the script is run from and never on a Linux CI runner. ONT_ARGS is empty for freeform and
+  # RECORD is empty when every leg replays, i.e. the two most ordinary paths through this
+  # script both crashed before reaching the binary. BACKENDS and SCOPE are provably non-empty
+  # (one backend per leg; --all or --limit N), so they are left plain.
   "$BIN" \
     "${BACKENDS[@]}" \
-    "${RECORD[@]}" \
+    ${RECORD[@]+"${RECORD[@]}"} \
     --reference baseline \
     "${SCOPE[@]}" \
-    "${ONT_ARGS[@]}" \
+    ${ONT_ARGS[@]+"${ONT_ARGS[@]}"} \
     --judge-mode "$JUDGE_MODE" \
     --judge-cache "$JUDGE_CACHE" \
     --judge-model "$JUDGE_MODEL" \
@@ -305,7 +312,7 @@ echo "==> done. Reports:"
 # to advertise `eval_report_266_$mode.json` — the very name the REPORT_PREFIX rename exists
 # to avoid, belonging to run_mode_matrix.sh's output — while the run wrote something else,
 # and it ignored a custom REPORT_PREFIX entirely.
-for r in "${REPORTS[@]}"; do echo "    $r"; done
+for r in ${REPORTS[@]+"${REPORTS[@]}"}; do echo "    $r"; done
 echo
 echo "    Compare each mode against ITS OWN baseline-vs-candidate noise floor, not against"
 echo "    the other modes' raw F1. The ceiling is expected to differ per mode — that shift"
