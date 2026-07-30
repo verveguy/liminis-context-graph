@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    backfill, canonicalize, corrections,
+    backfill, canonicalize, chunk_split, corrections,
     db::Db,
     episode,
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
@@ -25,6 +25,21 @@ use crate::{
 };
 
 const DEFAULT_GROUP_ID: &str = "liminis";
+
+/// Advisory threshold above which `knowledge_process_chunk` splits `chunk_text` into
+/// threshold-sized units sharing the caller's `chunk_id` (issue #284, subsuming #282's
+/// originally-scoped warn-only threshold). Mirrors `episode::hybrid_threshold()`'s
+/// `OnceLock`-cached env-var pattern.
+static CHUNK_TEXT_ADVISORY_MAX_CHARS: OnceLock<usize> = OnceLock::new();
+
+fn chunk_text_advisory_max_chars() -> usize {
+    *CHUNK_TEXT_ADVISORY_MAX_CHARS.get_or_init(|| {
+        std::env::var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8_000)
+    })
+}
 
 /// Interval (in processed items) between periodic progress sends for long-running
 /// reprocess passes. Mirrors `reprocess_relations::PROGRESS_EVERY`.
@@ -370,6 +385,121 @@ fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
     (true, file_count, byte_size)
 }
 
+// ── knowledge_process_chunk: idempotency reconstruction (issue #284) ──────────
+//
+// `Episodic.source_description` is `"{source_file}:{chunk_id}"` for a never-split chunk, or
+// `"{source_file}:{chunk_id}#{unit_1_based}/{unit_count}"` for each unit of a split chunk (see
+// ADR for the full convention). Reconstruction parses that suffix back off so a resubmitted
+// chunk_id's prior chunk_text can be compared against the incoming one, uniformly across both
+// shapes (FR-007).
+
+/// What a chunk_id's existing `Episodic` row(s) represent, reconstructed from a
+/// `get_episodes_by_chunk_id` lookup.
+enum PriorState {
+    /// No existing episodes for this chunk_id — first-time ingest.
+    None,
+    /// Existing episode(s) parsed cleanly into a single ordered `chunk_text`, plus their
+    /// UUIDs in unit order (or the sole UUID for a never-split chunk).
+    Reconstructed { text: String, uuids: Vec<String> },
+    /// Existing rows don't parse into a complete, consistent unit set (mismatched counts,
+    /// missing indices, unparseable suffix, ...) — includes a mid-split partial-failure
+    /// leftover. Treated as a mismatch: the safe default is to replace, per Plan. The caller
+    /// re-deletes by chunk_id (not by these rows' UUIDs specifically), so no UUIDs are carried.
+    Anomalous,
+}
+
+/// Parses a trailing `#{i}/{N}` unit marker off a `source_description`, if present.
+/// Returns `None` for a source_description with no such suffix (the never-split shape) or one
+/// that fails to parse as `i/N` with `1 <= i <= N`.
+fn parse_unit_suffix(source_description: &str) -> Option<(usize, usize)> {
+    let hash_idx = source_description.rfind('#')?;
+    let suffix = &source_description[hash_idx + 1..];
+    let (i_str, n_str) = suffix.split_once('/')?;
+    let i: usize = i_str.parse().ok()?;
+    let n: usize = n_str.parse().ok()?;
+    if i == 0 || n == 0 || i > n {
+        return None;
+    }
+    Some((i, n))
+}
+
+/// Reconstructs the prior `chunk_text` (if any) that a chunk_id's existing `Episodic` rows
+/// represent, from `(uuid, source_description, content)` triples returned by
+/// `Db::get_episodes_by_chunk_id`.
+fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>) -> PriorState {
+    if rows.is_empty() {
+        return PriorState::None;
+    }
+
+    // A single row with no unit suffix is the never-split shape: its content is the prior
+    // chunk_text verbatim.
+    if rows.len() == 1 && parse_unit_suffix(&rows[0].1).is_none() {
+        let (uuid, _source_description, content) = rows.into_iter().next().unwrap();
+        return PriorState::Reconstructed {
+            text: content,
+            uuids: vec![uuid],
+        };
+    }
+
+    let mut parsed: Vec<(usize, usize, String, String)> = Vec::with_capacity(rows.len());
+    for (uuid, source_description, content) in rows {
+        match parse_unit_suffix(&source_description) {
+            Some((i, n)) => parsed.push((i, n, uuid, content)),
+            None => return PriorState::Anomalous,
+        }
+    }
+
+    let unit_count = parsed[0].1;
+    let consistent_n = parsed.iter().all(|(_, n, _, _)| *n == unit_count);
+    if !consistent_n || parsed.len() != unit_count {
+        return PriorState::Anomalous;
+    }
+
+    parsed.sort_by_key(|(i, _, _, _)| *i);
+    let mut seen = std::collections::HashSet::new();
+    let all_unique = parsed.iter().all(|(i, _, _, _)| seen.insert(*i));
+    let complete_sequence = parsed.iter().map(|(i, _, _, _)| *i).eq(1..=unit_count);
+    if !all_unique || !complete_sequence {
+        return PriorState::Anomalous;
+    }
+
+    let uuids: Vec<String> = parsed.iter().map(|(_, _, uuid, _)| uuid.clone()).collect();
+    let text: String = parsed
+        .iter()
+        .map(|(_, _, _, content)| content.as_str())
+        .collect::<Vec<_>>()
+        .concat();
+    PriorState::Reconstructed { text, uuids }
+}
+
+/// Outcome of resolving a `knowledge_process_chunk` call against any existing episode(s) for
+/// its chunk_id (FR-006/FR-007). Computed once, always, before any ingest happens — including
+/// for chunk_ids never seen before, so the same code path governs the split and non-split cases.
+enum ChunkResubmission {
+    /// No prior episodes for this chunk_id — proceed with a fresh ingest.
+    New,
+    /// Prior episode(s) reconstruct to exactly the incoming `chunk_text` — no-op, return the
+    /// existing episode UUID(s) without re-running extraction.
+    NoOp { episode_uuids: Vec<String> },
+    /// Prior episode(s) were deleted because they reconstructed to different text (or didn't
+    /// reconstruct cleanly at all) — proceed with a fresh ingest of the incoming `chunk_text`.
+    Replace { replaced_uuids: Vec<String> },
+}
+
+/// Builds the `warning` response object for an oversized `chunk_text` (mirrors #282's
+/// originally-designed shape).
+fn oversized_warning(chunk_text_chars: usize, threshold_chars: usize) -> Value {
+    json!({
+        "type": "chunk_text_oversized",
+        "chunk_text_chars": chunk_text_chars,
+        "recommended_max_chars": threshold_chars,
+        "message": format!(
+            "chunk_text ({chunk_text_chars} chars) exceeds the advisory threshold \
+             ({threshold_chars} chars); split into threshold-sized units sharing chunk_id.",
+        ),
+    })
+}
+
 async fn handle_knowledge_process_chunk(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -409,36 +539,170 @@ async fn handle_knowledge_process_chunk(
     };
 
     let start = Instant::now();
-    let source_desc = format!("{}:{}", source_file, chunk_id);
+    let source_desc_base = format!("{}:{}", source_file, chunk_id);
     let source_type = if source_file.to_lowercase().ends_with(".json") {
         SourceType::Json
     } else {
         SourceType::Text
     };
-    let result = episode::add_episode(
-        state,
-        &chunk_id,
-        &chunk_text,
-        "text",
-        &source_desc,
-        &ref_time,
-        &group_id,
-        source_type,
-        None,
-    )
-    .await?;
 
-    Ok(json!({
+    let threshold = chunk_text_advisory_max_chars();
+    let chunk_text_chars = chunk_text.chars().count();
+    let oversized = chunk_text_chars > threshold;
+
+    // Resolve against any existing episode(s) for this chunk_id first (FR-006/FR-007) — this
+    // always runs, even for a chunk_id seen for the first time, so the never-split and split
+    // cases share one idempotency path. A mismatch (including an unparseable/partial prior
+    // split) deletes the prior episode(s) here, under the same write-lock acquisition, before
+    // any fresh ingest proceeds.
+    let db_for_lookup = load_db(&state)?;
+    let wal_writer_lookup = Arc::clone(&state.wal_writer);
+    let sink_lookup = Arc::clone(&state.sink);
+    let chunk_id_lookup = chunk_id.clone();
+    let group_id_lookup = group_id.clone();
+    let chunk_text_for_compare = chunk_text.clone();
+    let lookup_guard = state.write_lock.write().await;
+    let resubmission = tokio::task::spawn_blocking(move || -> Result<ChunkResubmission, Error> {
+        let conn = db_for_lookup.connect()?;
+        let rows = conn.get_episodes_by_chunk_id(&chunk_id_lookup, &group_id_lookup)?;
+        match reconstruct_prior_chunk_text(rows) {
+            PriorState::None => Ok(ChunkResubmission::New),
+            PriorState::Reconstructed { text, uuids } if text == chunk_text_for_compare => {
+                Ok(ChunkResubmission::NoOp {
+                    episode_uuids: uuids,
+                })
+            }
+            PriorState::Reconstructed { .. } | PriorState::Anomalous => {
+                let replaced_uuids = conn.remove_episodes_by_chunk_id(
+                    &chunk_id_lookup,
+                    Some(&[group_id_lookup.as_str()]),
+                )?;
+                wal_exec::wal_flush_ungrouped(
+                    &wal_writer_lookup,
+                    conn.drain_mutations(),
+                    &sink_lookup,
+                );
+                Ok(ChunkResubmission::Replace { replaced_uuids })
+            }
+        }
+    })
+    .await??;
+    drop(lookup_guard);
+
+    let replaced_uuids = match resubmission {
+        ChunkResubmission::NoOp { episode_uuids } => {
+            // Byte-identical resubmission: skip extraction entirely (avoids reintroducing
+            // LLM-extraction nondeterminism on a retry) and return the existing episode(s).
+            let mut response = json!({
+                "success": true,
+                "chunk_id": chunk_id,
+                "source_file": source_file,
+                "idempotent": true,
+                "duration_seconds": start.elapsed().as_secs_f64(),
+            });
+            if episode_uuids.len() == 1 {
+                response["episode_uuid"] = json!(episode_uuids[0]);
+            } else {
+                response["unit_count"] = json!(episode_uuids.len());
+                response["episode_uuids"] = json!(episode_uuids.clone());
+            }
+            if oversized {
+                response["warning"] = oversized_warning(chunk_text_chars, threshold);
+                state.sink.emit(TelemetryEvent::ChunkTextOversized {
+                    ts_ms: now_ms(),
+                    chunk_id: chunk_id.clone(),
+                    source_file: source_file.clone(),
+                    chunk_text_chars,
+                    threshold_chars: threshold,
+                    unit_count: episode_uuids.len(),
+                });
+            }
+            return Ok(response);
+        }
+        ChunkResubmission::New => None,
+        ChunkResubmission::Replace { replaced_uuids } => Some(replaced_uuids),
+    };
+
+    let mut response = json!({
         "success": true,
         "chunk_id": chunk_id,
         "source_file": source_file,
-        "episode_uuid": result.episode_uuid,
-        "nodes_extracted": result.nodes_extracted,
-        "edges_extracted": result.edges_extracted,
-        "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
-        "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
-        "duration_seconds": start.elapsed().as_secs_f64(),
-    }))
+    });
+    if let Some(ref replaced) = replaced_uuids {
+        response["replaced_uuids"] = json!(replaced);
+    }
+
+    if oversized {
+        // FR-002: split into threshold-sized units rather than accept-and-warn as-is, all
+        // sharing the caller's chunk_id (FR-003) with a unit index carried only in
+        // source_description, never in `name` (Constraint 1 — remove_episodes_by_chunk_id's
+        // exact-match deletion must keep working unchanged).
+        let units = chunk_split::split_into_units(&chunk_text, threshold);
+        let unit_count = units.len();
+        let mut episode_uuids = Vec::with_capacity(unit_count);
+        let mut nodes_extracted = 0usize;
+        let mut edges_extracted = 0usize;
+        let mut edges_dropped_unresolvable = 0usize;
+        let mut edges_reclassified_unclassified = 0usize;
+        for (idx, unit) in units.into_iter().enumerate() {
+            let unit_source_desc = format!("{}#{}/{}", source_desc_base, idx + 1, unit_count);
+            let result = episode::add_episode(
+                Arc::clone(&state),
+                &chunk_id,
+                &unit,
+                "text",
+                &unit_source_desc,
+                &ref_time,
+                &group_id,
+                source_type,
+                None,
+            )
+            .await?;
+            episode_uuids.push(result.episode_uuid);
+            nodes_extracted += result.nodes_extracted;
+            edges_extracted += result.edges_extracted;
+            edges_dropped_unresolvable += result.edges_dropped_unresolvable;
+            edges_reclassified_unclassified += result.edges_reclassified_unclassified;
+        }
+
+        response["unit_count"] = json!(unit_count);
+        response["episode_uuids"] = json!(episode_uuids);
+        response["nodes_extracted"] = json!(nodes_extracted);
+        response["edges_extracted"] = json!(edges_extracted);
+        response["edges_dropped_unresolvable"] = json!(edges_dropped_unresolvable);
+        response["edges_reclassified_unclassified"] = json!(edges_reclassified_unclassified);
+        response["warning"] = oversized_warning(chunk_text_chars, threshold);
+
+        state.sink.emit(TelemetryEvent::ChunkTextOversized {
+            ts_ms: now_ms(),
+            chunk_id: chunk_id.clone(),
+            source_file: source_file.clone(),
+            chunk_text_chars,
+            threshold_chars: threshold,
+            unit_count,
+        });
+    } else {
+        let result = episode::add_episode(
+            state,
+            &chunk_id,
+            &chunk_text,
+            "text",
+            &source_desc_base,
+            &ref_time,
+            &group_id,
+            source_type,
+            None,
+        )
+        .await?;
+        response["episode_uuid"] = json!(result.episode_uuid);
+        response["nodes_extracted"] = json!(result.nodes_extracted);
+        response["edges_extracted"] = json!(result.edges_extracted);
+        response["edges_dropped_unresolvable"] = json!(result.edges_dropped_unresolvable);
+        response["edges_reclassified_unclassified"] = json!(result.edges_reclassified_unclassified);
+    }
+
+    response["duration_seconds"] = json!(start.elapsed().as_secs_f64());
+    Ok(response)
 }
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────
