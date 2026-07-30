@@ -23,7 +23,7 @@ use crate::cli::Args;
 /// What a real run would do with a backend — distinct from whether it *should* (that's
 /// `guard_violations`). An unparseable spec is neither `Live` nor `Replay`: it isn't a
 /// backend a real run could dispatch to at all, so `render()` must not print it as either
-/// (see ADR-0051 — a preview that mislabels an aborting backend as `LIVE` is exactly the
+/// (see ADR-0052 — a preview that mislabels an aborting backend as `LIVE` is exactly the
 /// kind of drift this module exists to prevent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -125,6 +125,11 @@ pub fn resolve(cli: &Args, chunks_len: usize) -> ResolvedPlan {
             seen_paths.insert(path.clone(), b.name.clone());
         }
 
+        // Re-reads the same file for every backend alias pointing at `path`, including one
+        // already flagged via `seen_paths` above — deliberate, not an oversight: each backend
+        // still needs its own `BackendPlan` entry (record count, coverage shortfall) for the
+        // `--dry-run` plan, and cassette files are local and small relative to the double-read
+        // ADR-0052 already accepts between `resolve` and the real run.
         match load_records(&path) {
             Ok(records) => {
                 if !same_path_already_flagged {
