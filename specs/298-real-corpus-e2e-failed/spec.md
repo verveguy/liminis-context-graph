@@ -26,7 +26,7 @@ For context going into Research/Plan, the repo's non-PR-gate workflows as they e
 - **`real-corpus-e2e.yml`** — triggers on `push: branches: [main]` and `workflow_dispatch`. Runs automatically on every merge to `main`. This is the workflow that has been silently red for 24 runs.
 - **`bench.yml`** — `workflow_dispatch` only; its nightly `schedule` trigger is present but commented out. Does not currently run automatically against `main`.
 - **`eval.yml`** — `workflow_dispatch` only. Does not currently run automatically against `main`.
-- **`swift.yml`** — triggers on `push` (path-filtered to `native/local-inference/**` and its own workflow file) and `pull_request`. Can run against `main` automatically, but only when those paths change.
+- **`swift.yml`** — triggers exist for `push` (path-filtered to `native/local-inference/**` and its own workflow file) and `pull_request`, but the workflow's only job carries `if: false` and is currently dormant (waiting on GitHub's `macos-latest` runner image to gain macOS 26 / Swift 6.2 support — see the workflow's own header comment). It does not execute today even when its trigger paths change, so it produces no signal to cover and is out of scope until re-enabled; the mechanism should pick it up as part of coverage at that point.
 - **`claude-review.yml`** — triggers on `pull_request` events and `workflow_dispatch`; does not run against `main` directly (it targets PR branches).
 
 Per GitHub branch protection on `main` (`required_status_checks.contexts`), the only currently-required PR check is `test (ubuntu-latest)` (from `ci.yml`). Every workflow above is therefore "non-gating" in the sense FR-006 means: none of them block a merge today, and this issue's mechanism must not change that.
@@ -116,6 +116,7 @@ Someone preparing a release currently has no prompt to check whether `real-corpu
 
 - GitHub Actions' native notifications are insufficient here, since they did not surface 24 consecutive failures to anyone actively working in the repo.
 - "Non-gating" / "outside the PR gate" is defined by GitHub branch protection's required status checks on `main`. As of this spec, the only required check is `test (ubuntu-latest)` (from `ci.yml`); every other workflow — `real-corpus-e2e.yml`, `bench.yml`, `eval.yml`, `swift.yml`, `claude-review.yml` — is non-gating by this definition. The PR's FR-004 enumeration is expected to confirm or update this list, not take it as final.
+- `swift.yml`'s only job is currently disabled (`if: false`, pending a GitHub Actions macOS runner image update per its own header comment), so it produces no runs to monitor today and is not part of the mechanism's initial coverage. It should be added once re-enabled — this is a follow-up, not part of this issue's delivered scope.
 - The specific notification mechanism (GitHub issue vs. board item vs. some other durable artifact) is a technical decision left to Research/Plan, not fixed by this spec — the Edge Cases note that *if* a GitHub issue is chosen, it needs an owner and label convention, without mandating that choice.
 - "Records why the release proceeds anyway" (FR-005) means the runbook step is a check-and-decide gate for the human running it, not an automated release blocker — consistent with FR-006's constraint that these suites stay off the enforced gate.
 
