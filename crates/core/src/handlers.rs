@@ -2773,6 +2773,19 @@ async fn recover_drop_lbug_wal(
             }
         }
 
+        // drop_lbug_wal's entire premise is reopening an existing, already-indexed checkpoint
+        // (issue #297's trust assumption) — but Db::open has open-or-create semantics (see
+        // Db::open_or_rebuild's doc comment), so if the checkpoint file itself is missing, it
+        // would silently create a fresh, unindexed DB rather than fail, and init_schema() below
+        // never calls build_indices_and_constraints(). handle_knowledge_recover's shared success
+        // arm would then report indices_built: true for a DB with no indices at all. Fail fast
+        // instead: no checkpoint to reopen means this strategy doesn't apply.
+        if !std::path::Path::new(&db_path).exists() {
+            return Err(Error::Ipc(format!(
+                "drop_lbug_wal requires an existing checkpoint file; none found at {db_path}"
+            )));
+        }
+
         let db = Db::open(&db_path)?;
         {
             let conn = db.connect()?;

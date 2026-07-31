@@ -167,7 +167,16 @@ async fn test_recovery_drop_lbug_wal() {
     let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
     let wal_path = format!("{}.wal", db_path);
 
-    // Write garbage bytes to simulate a corrupt WAL
+    // Create a real checkpoint first — drop_lbug_wal's premise is reopening an existing,
+    // already-indexed checkpoint after discarding a corrupt WAL tail (issue #297), not creating
+    // a fresh DB from nothing.
+    {
+        let db = Db::open(&db_path).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+    }
+
+    // Write garbage bytes to simulate a torn WAL tail on top of that checkpoint
     std::fs::write(&wal_path, b"CORRUPT_WAL_DATA").unwrap();
 
     // Verify the WAL file exists before recovery
@@ -200,10 +209,15 @@ async fn test_recovery_drop_lbug_wal() {
     assert_eq!(result["strategy"], "drop_lbug_wal");
     assert_eq!(result["success"], true, "Recovery should succeed: {result}");
 
-    // (a) The original .wal file should be renamed (not exist at original path)
-    assert!(
-        !std::path::Path::new(&wal_path).exists(),
-        "Original WAL file should be renamed after drop_lbug_wal"
+    // (a) The corrupt WAL bytes must have been moved aside — a fresh `.wal` legitimately
+    // reappears at the original path once the reopened checkpoint is written to again (e.g. by
+    // init_schema's idempotent DDL), so the invariant is "corrupt content is gone", not
+    // "no file ever exists at this path again".
+    let wal_contents_after = std::fs::read(&wal_path).ok();
+    assert_ne!(
+        wal_contents_after.as_deref(),
+        Some(b"CORRUPT_WAL_DATA".as_slice()),
+        "Corrupt WAL bytes should no longer be at the original path after drop_lbug_wal"
     );
 
     // A .wal.corrupt-* file should exist in the same directory
@@ -417,6 +431,57 @@ async fn test_failed_drop_lbug_wal_leaves_indices_built_unchanged() {
                 .load(std::sync::atomic::Ordering::Acquire),
             prior,
             "indices_built should remain unchanged ({prior}) after a failed drop_lbug_wal call"
+        );
+    }
+}
+
+/// CodeRabbit review finding on PR #302 (issue #297): drop_lbug_wal's premise is reopening an
+/// existing, already-indexed checkpoint. If the checkpoint file itself is missing — parent dir
+/// present, but no db file — Db::open has open-or-create semantics and would otherwise silently
+/// create a fresh, unindexed DB, which handle_knowledge_recover's shared success arm would then
+/// mislabel indices_built: true for. The strategy must fail instead of masking this as success,
+/// and indices_built must remain unchanged (matching the reopen-based failure regime).
+#[tokio::test]
+async fn test_failed_drop_lbug_wal_missing_checkpoint_leaves_indices_built_unchanged() {
+    for prior in [true, false] {
+        let dir = TempDir::new().unwrap();
+        // Parent dir exists, but no db file at db_path, and no .wal sibling either — there is no
+        // checkpoint to reopen.
+        let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+        let state = make_degraded_state_with_capture(
+            "lbug_wal_corrupt",
+            db_path.clone(),
+            Arc::clone(&sink),
+        );
+        state
+            .indices_built
+            .store(prior, std::sync::atomic::Ordering::Release);
+
+        let recover_resp = dispatch_val(
+            45,
+            "knowledge_recover",
+            json!({"strategy": "drop_lbug_wal"}),
+            Arc::clone(&state),
+        )
+        .await;
+
+        let result = &recover_resp["result"];
+        assert_eq!(
+            result["success"], false,
+            "recovery should fail when there is no checkpoint file to reopen: {result}"
+        );
+        assert!(
+            !std::path::Path::new(&db_path).exists(),
+            "drop_lbug_wal must not silently create a fresh DB file when no checkpoint exists"
+        );
+        assert_eq!(
+            state
+                .indices_built
+                .load(std::sync::atomic::Ordering::Acquire),
+            prior,
+            "indices_built should remain unchanged ({prior}) when no checkpoint exists to reopen"
         );
     }
 }
