@@ -423,7 +423,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         // FR-015: WAL rebuild round trip.
         let rebuild = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us4-rebuild",
             Duration::from_secs(300),
         );
@@ -700,7 +700,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         );
         let rebuild = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us1-rebuild",
             Duration::from_secs(300),
         );
@@ -1018,7 +1018,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         );
         let rebuild = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us2-rebuild",
             Duration::from_secs(300),
         );
@@ -1219,7 +1219,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         );
         let rebuild = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us3a-rebuild",
             Duration::from_secs(300),
         );
@@ -1307,7 +1307,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         );
         let rebuild = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us3b-rebuild",
             Duration::from_secs(300),
         );
