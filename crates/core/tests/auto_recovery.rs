@@ -454,9 +454,7 @@ async fn test_knowledge_recover_full_indices_built_false_on_build_failure() {
 
     // WAL contains only an entity mutation — it never touches RelatesToNode_, so replay itself
     // is unaffected by the dropped column; only the subsequent index build should fail.
-    let entity_line = format!(
-        "{{\"seq\":1,\"ts\":\"2026-07-30T00:00:00.000000+00:00\",\"db\":\"\",\"cypher\":\"MERGE (n:Entity {{uuid: 'sc002-entity'}}) ON CREATE SET n.name = 'sc002-entity', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-07-30 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{{}}'\",\"params\":{{}}}}\n"
-    );
+    let entity_line = "{\"seq\":1,\"ts\":\"2026-07-30T00:00:00.000000+00:00\",\"db\":\"\",\"cypher\":\"MERGE (n:Entity {uuid: 'sc002-entity'}) ON CREATE SET n.name = 'sc002-entity', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-07-30 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{}'\",\"params\":{}}\n";
     std::fs::write(wal_dir.join("0001.jsonl"), entity_line).unwrap();
 
     // Corrupt the lbug WAL so run_full_recovery_sequence's checkpoint-drop step reopens the DB.
