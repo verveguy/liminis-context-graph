@@ -1,3 +1,7 @@
+> **Superseded by [`extraction-eval-2026-07.md`](extraction-eval-2026-07.md)** for absolute
+> numbers — that eval runs against this repository's Rust pipeline and its own prompts. The
+> model-family rankings and methodology notes below still hold and are still cited.
+>
 > ## Historical context — please read before relying on the numbers
 >
 > This document was written in April 2026 against an **earlier implementation** of Liminis's knowledge-graph pipeline — a Python service built on the [graphiti](https://github.com/getzep/graphiti) framework, which `liminis-context-graph` (this repository, Rust) was created to replace. The eval pre-dates `liminis-context-graph`'s existence.
