@@ -1,0 +1,153 @@
+name: CI Failure Notify
+
+# Turns a failing run of one of this repo's non-gating workflows (real-corpus-e2e,
+# bench, eval — see docs/adr/0298-ci-failure-notification.md) into a durable,
+# human-visible GitHub issue instead of a result that only shows up if someone opens
+# the Actions tab. #298: real-corpus-e2e failed 24 consecutive runs over 4 days with
+# no signal to anyone, and the first any human noticed was during v0.11.0 release
+# smoke-testing, after the tag had already been pushed.
+#
+# Deliberately NOT a required PR check (FR-006) — it is a workflow_run listener that
+# fires strictly after the watched workflows complete, so it cannot appear in branch
+# protection's required_status_checks and cannot block a merge. Coverage today:
+# real-corpus-e2e.yml, bench.yml, eval.yml. swift.yml is excluded because it is
+# currently `if: false` (dormant pending a GHA macOS image update) — add "Swift" to
+# the `workflows:` list below when it's re-enabled. claude-review.yml is excluded
+# because it only triggers on pull_request and never runs against main directly.
+on:
+  workflow_run:
+    workflows:
+      - "Real-Corpus E2E"
+      - "Perf Benchmarks"
+      - "Extraction-Quality Eval"
+    types: [completed]
+
+permissions:
+  issues: write
+  actions: read
+  contents: read
+
+jobs:
+  notify:
+    name: notify (${{ github.event.workflow_run.name }})
+    runs-on: ubuntu-latest
+    # real-corpus-e2e.yml only ever triggers on push to main, so this is a no-op
+    # guard for it — but bench.yml/eval.yml are workflow_dispatch-only and can be
+    # run against any ref. Without this guard, a developer's manual `bench` dispatch
+    # on a feature branch would file a "main is broken" issue.
+    if: github.event.workflow_run.head_branch == 'main'
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+      WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+    steps:
+      # cancel-in-progress: true on real-corpus-e2e.yml means a superseded run
+      # reports 'cancelled' — that must never be treated as a failure signal.
+      - name: Skip cancelled/superseded runs
+        if: env.CONCLUSION == 'cancelled' || env.CONCLUSION == 'skipped'
+        run: echo "Run concluded '$CONCLUSION' (superseded or skipped) — not a signal, no-op."
+
+      - name: Derive workflow slug and labels
+        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        id: labels
+        run: |
+          slug=$(basename "$WORKFLOW_PATH" .yml)
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+          echo "workflow_label=workflow:$slug" >> "$GITHUB_OUTPUT"
+
+      # Defensive on every run (not a one-time setup step): gh issue create/list
+      # fails outright against a label that doesn't exist yet, so the very first
+      # real failure could otherwise be dropped silently — exactly the kind of gap
+      # this workflow exists to close.
+      - name: Ensure labels exist
+        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        env:
+          WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
+        run: |
+          gh label create "ci-failure" --color B60205 \
+            --description "Auto-filed: a non-gating workflow failed on main" 2>/dev/null || true
+          gh label create "$WORKFLOW_LABEL" --color B60205 \
+            --description "Auto-filed failures for $WORKFLOW_NAME" 2>/dev/null || true
+
+      - name: Find existing tracking issue
+        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        id: existing
+        env:
+          WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
+        run: |
+          number=$(gh issue list --state open --label "ci-failure" --label "$WORKFLOW_LABEL" \
+            --json number --jq '.[0].number // empty')
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve on success
+        if: env.CONCLUSION == 'success' && steps.existing.outputs.number != ''
+        env:
+          ISSUE_NUMBER: ${{ steps.existing.outputs.number }}
+        run: |
+          gh issue close "$ISSUE_NUMBER" \
+            --comment "✅ [$WORKFLOW_NAME run]($RUN_URL) passed — resolving."
+
+      - name: Gather failing job detail
+        if: env.CONCLUSION != 'success' && env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        id: detail
+        run: |
+          jobs_json=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs")
+          failing_names=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
+          first_failing_id=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion == "failure")][0].id // empty')
+          echo "failing_names=$failing_names" >> "$GITHUB_OUTPUT"
+          {
+            echo "log_excerpt<<EOF_$RUN_ID"
+            if [ -n "$first_failing_id" ]; then
+              # Bounded excerpt from the first failing job only — real-corpus-e2e.yml
+              # can have several of its 5 jobs fail at once, and a full dump from all
+              # of them would make the issue body unreadable. Full detail is always
+              # one click away via $RUN_URL.
+              gh run view "$RUN_ID" --job "$first_failing_id" --log-failed 2>/dev/null \
+                | tail -n 100 | tail -c 8000
+            else
+              echo "(no individual job reported failure — see run for detail)"
+            fi
+            echo "EOF_$RUN_ID"
+          } >> "$GITHUB_OUTPUT"
+
+      # Everything interpolated here is routed through env: (not inline ${{ }} in
+      # the script body) so log content pulled from a test run is never re-parsed
+      # as shell syntax by the heredoc it's substituted into.
+      - name: File or update failure issue
+        if: env.CONCLUSION != 'success' && env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        env:
+          ISSUE_NUMBER: ${{ steps.existing.outputs.number }}
+          WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
+          FAILING_NAMES: ${{ steps.detail.outputs.failing_names }}
+          LOG_EXCERPT: ${{ steps.detail.outputs.log_excerpt }}
+        run: |
+          failing_display="${FAILING_NAMES:-(none reported — see run for detail)}"
+          body=$(cat <<BODYEOF
+          **Workflow**: $WORKFLOW_NAME
+          **Conclusion**: $CONCLUSION
+          **Run**: $RUN_URL
+          **Failing jobs**: $failing_display
+
+          <details><summary>Log excerpt (first failing job, tail)</summary>
+
+          \`\`\`
+          $LOG_EXCERPT
+          \`\`\`
+
+          </details>
+          BODYEOF
+          )
+          if [ -n "$ISSUE_NUMBER" ]; then
+            gh issue comment "$ISSUE_NUMBER" --body "$body"
+          else
+            gh issue create \
+              --title "ci-failure: $WORKFLOW_NAME failing on main" \
+              --label "ci-failure" \
+              --label "$WORKFLOW_LABEL" \
+              --assignee verveguy \
+              --body "$body"
+          fi
