@@ -278,6 +278,19 @@ async fn test_knowledge_recover_full_on_degraded_engine() {
         "degraded_reason should be cleared"
     );
 
+    // issue #297: indices_built should be true after knowledge_recover_full succeeds.
+    assert!(
+        state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built should be true after successful knowledge_recover_full"
+    );
+    let status_v = dispatch(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_v["result"]["indices_built"], true,
+        "knowledge_status should report indices_built: true after knowledge_recover_full: {status_v}"
+    );
+
     // Recovery telemetry should have been emitted
     let events = capture_sink.events();
     let has_healthy = events.iter().any(|e| {
@@ -336,6 +349,15 @@ async fn test_knowledge_recover_full_idempotent_on_healthy_engine() {
     assert_eq!(result["indexes_rebuilt"], false);
     assert_eq!(result["episodes_before"], episodes_before as i64);
     assert_eq!(result["episodes_after"], episodes_before as i64);
+
+    // issue #297: the idempotency no-op path performs no rebuild, so it must not touch
+    // indices_built either way — it's left exactly as make_healthy_state initialized it.
+    assert!(
+        !state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built must be left untouched by the idempotent no-op path"
+    );
 }
 
 // ── FR-012 (f): fallback to full rebuild when drop_lbug_wal fails ────────────
@@ -392,5 +414,85 @@ async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
     assert!(
         state.db.load_full().is_some(),
         "DB should be Some after fallback recovery"
+    );
+
+    // issue #297: indices_built should be true after the fallback (full-rebuild) path succeeds.
+    assert!(
+        state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built should be true after successful fallback recovery"
+    );
+}
+
+// ── issue #297 SC-002: indices_built: false on a genuine build failure ───────
+
+/// SC-002: run_full_recovery_sequence's index build can genuinely fail (not merely an
+/// "already exists" no-op) — e.g. a required column is missing from a prior schema drift.
+/// indices_built must land on `false`, proving the fix isn't an unconditional store(true).
+///
+/// Technique mirrors handlers_wal_admin.rs's test_rebuild_reports_indices_built_false_on_genuine_build_failure:
+/// drop the existing vector/FTS indexes, then drop the `fact_embedding` column from
+/// `RelatesToNode_` so `create_vector_indexes` hits a real error. attempt_checkpoint_drop
+/// reopens the same on-disk DB file (init_schema/migrate don't restore dropped columns), so the
+/// gap survives the checkpoint-drop reopen inside run_full_recovery_sequence.
+#[tokio::test]
+async fn test_knowledge_recover_full_indices_built_false_on_build_failure() {
+    let dir = TempDir::new().unwrap();
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+
+    let (db, db_path) = make_db(&dir);
+    {
+        let conn = db.connect().unwrap();
+        conn.drop_vector_indexes();
+        lcg_core::schema::drop_fts_indexes(&conn);
+        conn.run_cypher("ALTER TABLE RelatesToNode_ DROP fact_embedding")
+            .expect("drop fact_embedding column");
+    }
+    drop(db);
+
+    // WAL contains only an entity mutation — it never touches RelatesToNode_, so replay itself
+    // is unaffected by the dropped column; only the subsequent index build should fail.
+    let entity_line = format!(
+        "{{\"seq\":1,\"ts\":\"2026-07-30T00:00:00.000000+00:00\",\"db\":\"\",\"cypher\":\"MERGE (n:Entity {{uuid: 'sc002-entity'}}) ON CREATE SET n.name = 'sc002-entity', n.group_id = 'g', n.labels = ['t'], n.created_at = timestamp('2026-07-30 00:00:00'), n.name_embedding = [1.0, 0.0, 0.0, 0.0], n.summary = 's', n.attributes = '{{}}'\",\"params\":{{}}}}\n"
+    );
+    std::fs::write(wal_dir.join("0001.jsonl"), entity_line).unwrap();
+
+    // Corrupt the lbug WAL so run_full_recovery_sequence's checkpoint-drop step reopens the DB.
+    corrupt_lbug_wal(&db_path);
+
+    let capture_sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+    let state = make_degraded_state(
+        &db_path,
+        wal_dir.clone(),
+        Arc::clone(&capture_sink) as Arc<dyn TelemetrySink>,
+    );
+    // Preset a stale prior `true` so the test only passes if the failure path actively forces
+    // it back to false, rather than a preexisting false coincidentally surviving.
+    state
+        .indices_built
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    let resp = dispatch(1, "knowledge_recover_full", json!({}), Arc::clone(&state)).await;
+
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert!(resp.get("result").is_some(), "Expected result: {resp}");
+    let result = &resp["result"];
+    assert_eq!(
+        result["success"], false,
+        "recovery should report failure when the index build genuinely fails: {result}"
+    );
+
+    assert!(
+        !state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built must be false after a genuine build failure, not left at the stale prior true"
+    );
+    let status_v = dispatch(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_v["result"]["indices_built"], false,
+        "knowledge_status must report indices_built: false after the failed recovery: {status_v}"
     );
 }
