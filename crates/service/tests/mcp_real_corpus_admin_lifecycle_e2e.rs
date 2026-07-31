@@ -333,9 +333,9 @@ fn mcp_admin_lifecycle_operations_over_real_corpus_fixture() {
             "{recover_result}"
         );
 
-        // `drop_lbug_wal` does not itself set the in-memory indices_built flag — the first
-        // search after recovery self-heals it (ADR-0025) — so the golden search must be issued
-        // *before* asserting on knowledge_status's indices_built, not after.
+        // The golden search below exercises the recovered indices directly; it is not what
+        // makes indices_built true — handle_knowledge_recover now sets the flag itself in its
+        // shared success arm for every strategy, including drop_lbug_wal (issue #297).
         let entity_queries = expected["golden_entity_queries"].as_array().unwrap();
         let q = &entity_queries[0];
         let query = q["query"].as_str().unwrap();
@@ -423,9 +423,9 @@ fn mcp_admin_lifecycle_operations_over_real_corpus_fixture() {
             "{recover_full_result}"
         );
 
-        // Same auto-heal ordering caveat as the drop_lbug_wal scenario above: issue the golden
-        // search before checking indices_built, since knowledge_recover_full doesn't itself set
-        // the in-memory flag even though the underlying indices were rebuilt.
+        // The golden search below exercises the rebuilt indices directly; it is not what makes
+        // indices_built true — handle_knowledge_recover_full now stores report.indexes_rebuilt
+        // into AppState.indices_built itself on success (issue #297).
         let entity_queries = expected["golden_entity_queries"].as_array().unwrap();
         let q = &entity_queries[0];
         let query = q["query"].as_str().unwrap();
