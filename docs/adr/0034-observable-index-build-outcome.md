@@ -123,14 +123,19 @@ functionally harmless inconsistency (a subsequent search succeeds directly, sinc
 genuinely exist and never trip the auto-heal path) — flagged here as a candidate follow-up, not
 fixed in this change.
 
-> **The follow-up flagged here was taken — see [ADR-0036](0036-eager-index-build-at-startup.md).**
-> #208 closed this gap, though not inside `recovery.rs`: `bootstrap_app_state` now tracks an
-> `indices_ready` flag — true on direct-open success and on recovery success — and stores it into
-> `AppState.indices_built` after construction. `run_full_recovery_sequence` already performed the
-> build, so no new call was needed there; what was missing was reflecting that build in the flag.
-> `knowledge_status` therefore no longer under-reports readiness immediately after a successful
-> **startup** auto-recovery. The runtime `knowledge_recover` path this section places out of scope
-> is unchanged and still out of scope. The rest of this ADR stands.
+> **The follow-up flagged here was taken in two parts, and both are now closed.**
+> #208 closed the **startup** half — see [ADR-0036](0036-eager-index-build-at-startup.md):
+> `bootstrap_app_state` now tracks an `indices_ready` flag — true on direct-open success and on
+> recovery success — and stores it into `AppState.indices_built` after construction.
+> `run_full_recovery_sequence` already performed the build, so no new call was needed there; what
+> was missing was reflecting that build in the flag. That left the **runtime** `knowledge_recover`/
+> `knowledge_recover_full` handlers unfixed — a call made after startup still left `indices_built`
+> stale, which is exactly the gap issue #297 covers. `handle_knowledge_recover` now stores
+> `indices_built = true` in its shared success arm (all three strategies), presetting `false`
+> before `rebuild_from_workspace_wal`'s fatal index-build call so a failure there doesn't leave a
+> stale prior `true` in place; `handle_knowledge_recover_full` mirrors the same discipline around
+> `run_full_recovery_sequence`. `knowledge_status` no longer under-reports readiness after either a
+> startup or a runtime recovery. The rest of this ADR stands.
 
 ## Consequences
 
