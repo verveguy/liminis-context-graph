@@ -116,6 +116,18 @@ impl ExtractionFailureWriter {
         &self.base_path
     }
 
+    /// Appends `record` as one JSONL line, rotating first if it would push the current file
+    /// over `max_bytes_per_file`.
+    ///
+    /// Rotation only ever triggers *before* a write, based on the current file's size so far —
+    /// never mid-record. So a single record whose own serialized size already exceeds
+    /// `max_bytes_per_file` (review finding: possible when several ~90KB+ bodies land
+    /// back-to-back right after a rotation) is still written in full to the file that's active
+    /// at the time (per FR-002, individual records are never truncated to hit the cap), and
+    /// that file's on-disk size can therefore exceed `max_bytes_per_file` by up to one record's
+    /// worth. The *next* append sees the now-oversized file and rotates away from it before
+    /// writing — the cap bounds what a file grows to before rotation is next considered, not a
+    /// hard ceiling on any single file's final size.
     pub fn append(&self, record: &ExtractionFailureRecord) -> Result<(), Error> {
         let line = serde_json::to_string(record)?;
         let chunk_bytes = (line.len() + 1) as u64;
