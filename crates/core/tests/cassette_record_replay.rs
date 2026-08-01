@@ -13,10 +13,12 @@ use std::sync::{Arc, Mutex};
 
 use lcg_core::cassette::{CassetteWriter, RecordingExtractor, ReplayingExtractor};
 use lcg_core::error::Error;
+use lcg_core::extraction_failures::{ExtractionFailureSink, ExtractionFailureWriter};
 use lcg_core::extractor::{AnthropicExtractor, ExtractOptions, Extractor};
 use lcg_core::llm_router::LlmRouter;
 use lcg_core::telemetry::{NoopSink, TelemetrySink};
 use lcg_core::types::SourceType;
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinHandle;
 
 // ── Stub Anthropic /v1/messages server ──────────────────────────────────────
@@ -148,6 +150,41 @@ async fn spawn_stub_anthropic_server() -> (SocketAddr, JoinHandle<()>, Arc<Mutex
     (addr, handle, captured_headers)
 }
 
+/// Spawns a stub `/v1/messages` server that always responds with the same fixed
+/// `status_line`/`body`, regardless of request content (#306: used to force each of the three
+/// `ExtractionFailure` classes deterministically).
+async fn spawn_stub_server_with_fixed_response(
+    status_line: &'static str,
+    body: &'static str,
+) -> (SocketAddr, JoinHandle<()>) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let _ = read_http_request(&mut reader).await;
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = write_half.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+
+    (addr, handle)
+}
+
 /// Binds then immediately drops a TCP listener, returning a `/v1/messages` URL that is
 /// guaranteed to refuse connections — used to simulate an unreachable primary extractor
 /// without relying on a slow, unpredictable external timeout.
@@ -170,6 +207,14 @@ fn opts(episode_body: &str) -> ExtractOptions<'_> {
         custom_instructions: None,
         reference_time: "2026-01-01T00:00:00Z",
         ontology: None,
+        chunk_key: None,
+    }
+}
+
+fn opts_with_chunk_key<'a>(episode_body: &'a str, chunk_key: &'a str) -> ExtractOptions<'a> {
+    ExtractOptions {
+        chunk_key: Some(chunk_key),
+        ..opts(episode_body)
     }
 }
 
@@ -419,4 +464,307 @@ async fn recorded_cassette_contains_no_credential_material() {
         !raw_str.to_lowercase().contains("authorization"),
         "cassette must never contain an Authorization header"
     );
+}
+
+// ── (e) #306 FR-001/FR-002/FR-007: failure-record sidecar ──────────────────
+
+/// Builds the sidecar-writing sink and its base path, mirroring how `main.rs` wires
+/// `ExtractionFailureSink` alongside a `RecordingExtractor`/`CassetteWriter` pair in
+/// production.
+fn failure_sink_and_path(
+    cassette_path: &std::path::Path,
+) -> (Arc<dyn TelemetrySink>, std::path::PathBuf) {
+    let writer =
+        ExtractionFailureWriter::open(cassette_path, lcg_core::DEFAULT_MAX_BYTES_PER_FILE).unwrap();
+    let sidecar_path = writer.base_path().to_path_buf();
+    (Arc::new(ExtractionFailureSink::new(writer)), sidecar_path)
+}
+
+fn read_sidecar_records(path: &std::path::Path) -> Vec<serde_json::Value> {
+    let content = std::fs::read_to_string(path).unwrap();
+    content
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn http_error_produces_one_complete_sidecar_record() {
+    let (addr, _server) = spawn_stub_server_with_fixed_response(
+        "HTTP/1.1 503 Service Unavailable",
+        "upstream overloaded",
+    )
+    .await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-http",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_)), "got {err:?}");
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one failure record must be written"
+    );
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-http");
+    assert_eq!(r["classification"], "http_error");
+    assert_eq!(
+        r["raw_body"], "upstream overloaded",
+        "the complete raw body must be stored, not dropped"
+    );
+    assert!(r["finish_reason"].is_null());
+    assert!(r["completion_tokens"].is_null());
+    assert_eq!(r["max_tokens"], 8192);
+
+    // FR-007: the failure goes to the sidecar, not the cassette — RecordingExtractor's
+    // success-only invariant is unaffected.
+    assert_eq!(
+        std::fs::read_to_string(&cassette_path).unwrap(),
+        "",
+        "a failed extract() call must never produce a cassette record"
+    );
+}
+
+#[tokio::test]
+async fn malformed_response_produces_one_complete_sidecar_record() {
+    // A 200 OK response with a well-formed JSON envelope but no extract_entities tool_use
+    // block — parse_entity_response returns ParseError, distinct from an HTTP-level failure.
+    let malformed_body = serde_json::json!({
+        "stop_reason": "end_turn",
+        "content": [],
+        "usage": {"input_tokens": 10, "output_tokens": 7}
+    })
+    .to_string();
+    let (addr, _server) = spawn_stub_server_with_fixed_response(
+        "HTTP/1.1 200 OK",
+        Box::leak(malformed_body.into_boxed_str()),
+    )
+    .await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-malformed",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_) | Error::Json(_)), "got {err:?}");
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-malformed");
+    assert_eq!(r["classification"], "malformed");
+    assert_eq!(r["finish_reason"], "end_turn");
+    assert_eq!(r["completion_tokens"], 7);
+    // The complete raw response (the full JSON envelope) must be recoverable from the
+    // stored body, not a prefix of it — SC-004's tail-defect rationale for FR-002.
+    let stored: serde_json::Value = serde_json::from_str(r["raw_body"].as_str().unwrap()).unwrap();
+    assert_eq!(stored["stop_reason"], "end_turn");
+}
+
+#[tokio::test]
+async fn a_2xx_response_with_invalid_json_is_classified_malformed_not_http_error() {
+    // A response was received and the HTTP layer itself succeeded — the failure is in the
+    // body's syntax, not the transport. Must not be classified "http_error" (which would also
+    // produce a misleading "HTTP 200" error message) — review finding from Copilot/CodeRabbit
+    // on PR #308.
+    let (addr, _server) =
+        spawn_stub_server_with_fixed_response("HTTP/1.1 200 OK", "not valid json {").await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-invalid-json",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_)), "got {err:?}");
+    assert!(
+        !format!("{err}").contains("HTTP 200"),
+        "error must not claim a successful status failed: {err}"
+    );
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-invalid-json");
+    assert_eq!(r["classification"], "malformed");
+    assert_eq!(
+        r["raw_body"], "not valid json {",
+        "the complete raw body must be stored, not dropped"
+    );
+}
+
+#[tokio::test]
+async fn budget_exhaustion_after_retry_produces_one_complete_sidecar_record() {
+    // Always responds with stop_reason: max_tokens, regardless of the (doubled) max_tokens
+    // sent — forces exhaustion after exactly one retry, matching do_extract_entities' own
+    // give-up-after-one-retry policy.
+    let truncated_body = serde_json::json!({
+        "stop_reason": "max_tokens",
+        "content": [],
+        "usage": {"input_tokens": 10, "output_tokens": 8192}
+    })
+    .to_string();
+    let (addr, _server) = spawn_stub_server_with_fixed_response(
+        "HTTP/1.1 200 OK",
+        Box::leak(truncated_body.into_boxed_str()),
+    )
+    .await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-truncated",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_)), "got {err:?}");
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one record — the retry itself must not double-emit"
+    );
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-truncated");
+    assert_eq!(r["classification"], "truncation");
+    assert_eq!(r["finish_reason"], "max_tokens");
+    assert_eq!(r["completion_tokens"], 8192);
+    // The doubled max_tokens (16384), not the initial 8192 — the max_tokens "in force" at
+    // the moment of the failing call (FR-001).
+    assert_eq!(r["max_tokens"], 16384);
+}
+
+#[tokio::test]
+async fn replay_mode_never_creates_a_failure_sidecar() {
+    // Edge Case: a cassette in replay mode, where no live failure can occur — the sidecar
+    // must simply not be created. Record one successful call first (so a cassette exists to
+    // replay from), then replay it purely through ReplayingExtractor — which never
+    // constructs a RecordingExtractor, a CassetteWriter, or an ExtractionFailureWriter.
+    let (addr, _server, _headers) = spawn_stub_anthropic_server().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        sink(),
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", Arc::clone(&writer));
+    recorder
+        .extract(opts("Alice works at Acme Corp."))
+        .await
+        .unwrap();
+
+    let replayer = ReplayingExtractor::load(&cassette_path).unwrap();
+    replayer
+        .extract(opts("Alice works at Acme Corp."))
+        .await
+        .unwrap();
+
+    let sidecar_path = dir.path().join("cassette.jsonl.failures.jsonl");
+    assert!(
+        !sidecar_path.exists(),
+        "replay mode must never create a failures sidecar, since no ExtractionFailureWriter \
+         is ever constructed for it"
+    );
+}
+
+#[tokio::test]
+async fn chunk_key_does_not_affect_the_cassette_request_hash() {
+    // #306 Plan Key Decision: chunk_key is observational metadata, excluded from
+    // cassette.rs's request_key hash — two calls differing only in chunk_key must still be
+    // treated as the exact same request for replay-matching purposes.
+    let (addr, _server, _headers) = spawn_stub_anthropic_server().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        sink(),
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", Arc::clone(&writer));
+    recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "recorded-under-this-key",
+        ))
+        .await
+        .unwrap();
+
+    // Replaying with a *different* chunk_key over the same episode_body must still hit —
+    // proving chunk_key plays no role in the match.
+    let replayer = ReplayingExtractor::load(&cassette_path).unwrap();
+    let replayed = replayer
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "a-completely-different-key",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(replayed.entities.len(), 2);
 }

@@ -55,6 +55,7 @@ async fn llm_router_fallback_emitted_once_per_session() {
             custom_instructions: None,
             reference_time: "2026-01-01T00:00:00Z",
             ontology: None,
+            chunk_key: None,
         })
         .await;
     let _ = router
@@ -65,6 +66,7 @@ async fn llm_router_fallback_emitted_once_per_session() {
             custom_instructions: None,
             reference_time: "2026-01-01T00:00:00Z",
             ontology: None,
+            chunk_key: None,
         })
         .await;
 

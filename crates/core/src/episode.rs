@@ -155,6 +155,7 @@ pub async fn add_episode(
         custom_instructions,
         reference_time,
         ontology: ontology_ref,
+        chunk_key: Some(name),
     };
     let (content_embedding, mut extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
         result = async {

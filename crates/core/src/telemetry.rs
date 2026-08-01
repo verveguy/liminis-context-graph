@@ -1,4 +1,4 @@
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -61,6 +61,10 @@ pub enum TelemetryEvent {
         chunk_len_bytes: usize,
         initial_max_tokens: u32,
         retry_succeeded: bool,
+        /// Identifies which chunk produced this truncation (#306 FR-004) — `chunk.title` in
+        /// the eval harness, the episode `name` in production. `None` when the caller's
+        /// `ExtractOptions.chunk_key` was itself `None`.
+        chunk_key: Option<String>,
     },
     /// Emitted by `OaiExtractor` for every entity/edge extraction response, distinguishing
     /// whether the structured-output JSON was well-formed as-is (`"clean"`), required
@@ -71,6 +75,27 @@ pub enum TelemetryEvent {
         model: String,
         call_type: String,
         outcome: String,
+    },
+    /// The heavier, complete-body sibling of `ExtractionTruncated`/`StructuredOutputParse`
+    /// (#306 FR-001/FR-002) — emitted at all three extraction-call failure sites (HTTP error,
+    /// budget-exhaustion-after-retry, and parse/malformed error) from inside
+    /// `AnthropicExtractor`/`OaiExtractor`. Consumed only by the sidecar-writing
+    /// `extraction_failures::ExtractionFailureSink`; `StructuredOutputParse`/
+    /// `ExtractionTruncated` stay lightweight, counting-only events for `CountingSink`.
+    ExtractionFailure {
+        ts_ms: u64,
+        model: String,
+        /// `"entities"` or `"edges"`.
+        call_type: String,
+        chunk_key: Option<String>,
+        /// `"http_error"`, `"truncation"`, or `"malformed"`.
+        classification: String,
+        /// The complete raw response body — never truncated to a prefix (FR-002). A UTF-8
+        /// decoding failure is stored lossily rather than dropping the record.
+        raw_body: String,
+        finish_reason: Option<String>,
+        completion_tokens: Option<u64>,
+        max_tokens: u32,
     },
     WalRotated {
         ts_ms: u64,
@@ -153,6 +178,35 @@ impl Default for CaptureSink {
 impl TelemetrySink for CaptureSink {
     fn emit(&self, event: TelemetryEvent) {
         self.events.lock().unwrap().push(event);
+    }
+}
+
+// ── TeeSink ──────────────────────────────────────────────────────────────────
+
+/// Fans out every event to each sink in `sinks`, in order. Lets a `RecordingExtractor`
+/// construction site install both the pre-existing telemetry sink and a new
+/// `extraction_failures::ExtractionFailureSink` without either needing to know about the
+/// other (#306 FR-001).
+pub struct TeeSink {
+    sinks: Vec<Arc<dyn TelemetrySink>>,
+}
+
+impl TeeSink {
+    pub fn new(sinks: Vec<Arc<dyn TelemetrySink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl TelemetrySink for TeeSink {
+    fn emit(&self, event: TelemetryEvent) {
+        // Clone for every sink but the last, which takes the original — avoids one needless
+        // clone of a potentially-large `ExtractionFailure` payload per `emit` call.
+        if let Some((last, rest)) = self.sinks.split_last() {
+            for sink in rest {
+                sink.emit(event.clone());
+            }
+            last.emit(event);
+        }
     }
 }
 
@@ -252,6 +306,33 @@ mod tests {
     fn noop_sink_does_not_panic() {
         let sink = NoopSink;
         sink.emit(TelemetryEvent::WalAppend {
+            ts_ms: 0,
+            duration_us: 1,
+            bytes: 512,
+        });
+    }
+
+    #[test]
+    fn tee_sink_forwards_to_every_sink() {
+        let a = Arc::new(CaptureSink::new());
+        let b = Arc::new(CaptureSink::new());
+        let tee = TeeSink::new(vec![
+            Arc::clone(&a) as Arc<dyn TelemetrySink>,
+            Arc::clone(&b) as Arc<dyn TelemetrySink>,
+        ]);
+        tee.emit(TelemetryEvent::WalAppend {
+            ts_ms: 0,
+            duration_us: 1,
+            bytes: 512,
+        });
+        assert_eq!(a.events().len(), 1);
+        assert_eq!(b.events().len(), 1);
+    }
+
+    #[test]
+    fn tee_sink_with_no_sinks_does_not_panic() {
+        let tee = TeeSink::new(vec![]);
+        tee.emit(TelemetryEvent::WalAppend {
             ts_ms: 0,
             duration_us: 1,
             bytes: 512,

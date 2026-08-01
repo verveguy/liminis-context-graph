@@ -116,21 +116,44 @@ impl VocabularyComplianceCounts {
     }
 }
 
-/// A `TelemetrySink` that tallies `StructuredOutputParse` events and discards everything
-/// else — the harness's seam for FR-007's structured-output-reliability metric.
+/// #306 FR-005: tallies `TelemetryEvent::ExtractionTruncated` events, distinguishing a retry
+/// that ultimately succeeded from one that remained exhausted after retry — the report must
+/// never collapse the two into a single count, since only `exhausted` represents data the
+/// candidate's `ExtractionResult` is silently missing.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TruncationCounts {
+    pub retry_succeeded: u64,
+    pub exhausted: u64,
+}
+
+impl TruncationCounts {
+    pub fn total(&self) -> u64 {
+        self.retry_succeeded + self.exhausted
+    }
+}
+
+/// A `TelemetrySink` that tallies `StructuredOutputParse` and `ExtractionTruncated` events and
+/// discards everything else — the harness's seam for FR-007's structured-output-reliability
+/// metric and FR-005's truncation-visibility metric.
 pub struct CountingSink {
     counts: Mutex<StructuredOutputCounts>,
+    truncated: Mutex<TruncationCounts>,
 }
 
 impl CountingSink {
     pub fn new() -> Self {
         Self {
             counts: Mutex::new(StructuredOutputCounts::default()),
+            truncated: Mutex::new(TruncationCounts::default()),
         }
     }
 
     pub fn snapshot(&self) -> StructuredOutputCounts {
         *self.counts.lock().unwrap()
+    }
+
+    pub fn truncated_snapshot(&self) -> TruncationCounts {
+        *self.truncated.lock().unwrap()
     }
 }
 
@@ -142,14 +165,27 @@ impl Default for CountingSink {
 
 impl TelemetrySink for CountingSink {
     fn emit(&self, event: TelemetryEvent) {
-        if let TelemetryEvent::StructuredOutputParse { outcome, .. } = event {
-            let mut counts = self.counts.lock().unwrap();
-            match outcome.as_str() {
-                "clean" => counts.clean += 1,
-                "recovered" => counts.recovered += 1,
-                "malformed" => counts.malformed += 1,
-                _ => {}
+        match event {
+            TelemetryEvent::StructuredOutputParse { outcome, .. } => {
+                let mut counts = self.counts.lock().unwrap();
+                match outcome.as_str() {
+                    "clean" => counts.clean += 1,
+                    "recovered" => counts.recovered += 1,
+                    "malformed" => counts.malformed += 1,
+                    _ => {}
+                }
             }
+            TelemetryEvent::ExtractionTruncated {
+                retry_succeeded, ..
+            } => {
+                let mut truncated = self.truncated.lock().unwrap();
+                if retry_succeeded {
+                    truncated.retry_succeeded += 1;
+                } else {
+                    truncated.exhausted += 1;
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -171,6 +207,9 @@ pub struct BackendRunResult {
     /// `Some` only for a `Strict`-mode ontology run (FR-007); `None` for freeform/`Open` runs,
     /// where the metric is not applicable rather than trivially zero.
     pub vocabulary_compliance: Option<VocabularyComplianceCounts>,
+    /// #306 FR-005: aggregate truncation visibility for this candidate — never per-chunk;
+    /// chunk-level attribution lives solely in the `<cassette>.failures.jsonl` sidecar.
+    pub truncated: TruncationCounts,
 }
 
 /// Runs `extractor` over every chunk in `chunks`, sequentially (a corpus run is already
@@ -200,6 +239,7 @@ pub async fn run_backend(
             custom_instructions: None,
             reference_time: REFERENCE_TIME,
             ontology,
+            chunk_key: Some(&chunk.title),
         };
         let start = Instant::now();
         let result = extractor.extract(opts).await;
@@ -223,6 +263,7 @@ pub async fn run_backend(
         chunk_results,
         structured_output: sink.snapshot(),
         vocabulary_compliance,
+        truncated: sink.truncated_snapshot(),
     }
 }
 
@@ -370,6 +411,45 @@ mod tests {
     fn malformed_rate_is_zero_with_no_events() {
         let counts = StructuredOutputCounts::default();
         assert_eq!(counts.malformed_rate(), 0.0);
+    }
+
+    fn truncated_event(retry_succeeded: bool) -> TelemetryEvent {
+        TelemetryEvent::ExtractionTruncated {
+            ts_ms: 0,
+            model: "test".to_string(),
+            chunk_len_bytes: 10,
+            initial_max_tokens: 8192,
+            retry_succeeded,
+            chunk_key: Some("chunk-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn counting_sink_tallies_truncation_distinguishing_retry_outcome() {
+        let sink = CountingSink::new();
+        sink.emit(truncated_event(true));
+        sink.emit(truncated_event(false));
+        sink.emit(truncated_event(false));
+
+        let truncated = sink.truncated_snapshot();
+        assert_eq!(truncated.retry_succeeded, 1);
+        assert_eq!(truncated.exhausted, 2);
+        assert_eq!(truncated.total(), 3);
+    }
+
+    #[test]
+    fn counting_sink_truncation_and_structured_output_tallies_are_independent() {
+        let sink = CountingSink::new();
+        sink.emit(TelemetryEvent::StructuredOutputParse {
+            ts_ms: 0,
+            model: "test".to_string(),
+            call_type: "entities".to_string(),
+            outcome: "clean".to_string(),
+        });
+        sink.emit(truncated_event(false));
+
+        assert_eq!(sink.snapshot().total(), 1);
+        assert_eq!(sink.truncated_snapshot().total(), 1);
     }
 
     fn mixed_vocab_extraction() -> ExtractionResult {

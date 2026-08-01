@@ -517,6 +517,40 @@ Because cassettes are plain JSONL with no credential material, they're safe to c
 fixtures — see `crates/core/tests/fixtures/README.md` for this repo's fixture-capture
 conventions.
 
+### Failure-record sidecar
+
+A failed extraction call — an HTTP error, a malformed/unparseable response, or budget
+exhaustion that persists after one retry — appends one record to a sidecar file,
+`<cassette-path>.failures.jsonl`. A call that ends in an error never produces a cassette record
+(the cassette's success-only invariant is unaffected). Edge-budget exhaustion is the one
+non-fatal class: the call still succeeds with an empty edge list, so it produces both a cassette
+record and a sidecar record — entity-budget exhaustion, by contrast, is fatal to the call and
+produces only the sidecar record. This is created wherever a cassette is being recorded (both
+`LCG_RECORD_LLM` and `lcg-eval --record-cassette`) — never in replay mode, since no live failure
+can occur there. The file is created eagerly (empty, if no failures occur) alongside the
+cassette itself.
+
+Each record is a JSON object with:
+
+| Field | Description |
+|-------|-------------|
+| `ts_ms` | Unix epoch milliseconds |
+| `model` | The model name in force for this call |
+| `call_type` | `"entities"` or `"edges"` |
+| `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
+| `raw_body` | The **complete** raw response body — never truncated to a prefix |
+| `finish_reason` | The provider's stop/finish reason, or `null` for an HTTP-level failure |
+| `completion_tokens` | Output token count, or `null` if unavailable |
+| `max_tokens` | The `max_tokens` value in force for the failing call |
+
+A single sidecar file is capped at 20MB; once appending would exceed that, it's rotated to a
+numbered `<cassette-path>.failures.N.jsonl` file (matching the WAL's own byte-size rotation
+convention) so a long-running service's sidecar can't grow without limit. Individual records are
+never truncated to hit this cap — only the aggregate is bounded. See [ADR
+0306](docs/adr/0306-extraction-failure-sidecar-and-truncation-visibility.md) for the design
+rationale.
+
 ## Extraction-quality eval harness
 
 The `lcg-eval` binary (`crates/eval`) measures extraction quality directly against this
@@ -546,6 +580,16 @@ for entities/edges/summaries, latency percentiles, error rate, and structured-ou
 reliability (clean/recovered/malformed JSON parse counts — FR-007). Pass `--output
 report.json` to also write the report as JSON. Run `cargo run -p lcg-eval -- --help` for the
 full flag reference.
+
+Each candidate also carries a `truncated` count — `retry_succeeded` (a doubled `max_tokens`
+retry recovered) and `exhausted` (it didn't) — surfaced separately from `clean`/`recovered`/
+`malformed`. Edge-budget exhaustion is deliberately non-fatal (it returns an empty edge list
+rather than erroring), which is otherwise indistinguishable in the report from a chunk where the
+model genuinely extracted zero edges; a non-zero `exhausted` count on a chunk means the low
+count is suppressed output, not a quality signal. The human-readable report only prints a
+`truncated:` line when the count is non-zero, so a clean run's output is unchanged. Pair this
+with `--record-cassette` to get the exact raw response for any exhausted call from the
+[failure-record sidecar](#failure-record-sidecar).
 
 To validate the judge itself rather than compare backends, point `--reference` and a second
 `--backend` at the *same* spec (a baseline-vs-itself run): the judged score should land near

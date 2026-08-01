@@ -29,6 +29,12 @@ pub struct ExtractOptions<'a> {
     pub custom_instructions: Option<&'a str>,
     pub reference_time: &'a str,
     pub ontology: Option<&'a Ontology>,
+    /// Human-correlatable identifier for this call (#306 FR-004/User Story 3) — `chunk.title`
+    /// in the eval harness, the episode `name` in production. Attached to
+    /// `TelemetryEvent::ExtractionTruncated`/`ExtractionFailure` so a truncation or failure
+    /// event can be traced back to the chunk that produced it. Purely observational: excluded
+    /// from `cassette.rs`'s request-key hash, so it never affects cassette matching.
+    pub chunk_key: Option<&'a str>,
 }
 
 // ── Extractor trait ───────────────────────────────────────────────────────────
@@ -170,6 +176,57 @@ impl AnthropicExtractor {
         self.model.to_lowercase().contains("sonnet")
     }
 
+    /// Sends `body` to the Anthropic Messages API, retrying up to 3 times on 429/529 with
+    /// exponential backoff. Reads the response body as text before checking status (#306
+    /// FR-001: `.error_for_status()` used to discard the body on a non-2xx status before any
+    /// caller could see it), so a caller can capture the complete raw body for
+    /// `TelemetryEvent::ExtractionFailure` on failure. A connection-level failure (no response
+    /// ever received) propagates directly as `SendOutcome::Transport` — there is no body to
+    /// capture for that case, distinct from a *received* response with an empty or malformed
+    /// body, which lands in `SendOutcome::HttpFailure`.
+    async fn send_with_retry(&self, body: &Value) -> SendOutcome {
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+
+            let http_resp = match req.json(body).send().await {
+                Ok(r) => r,
+                Err(e) => return SendOutcome::Transport(Error::from(e)),
+            };
+            let status = http_resp.status();
+
+            if (status == 429 || status == 529) && attempt < 3 {
+                let delay = Duration::from_secs(1u64 << attempt);
+                sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+
+            let text = match http_resp.text().await {
+                Ok(t) => t,
+                Err(e) => format!("<failed to read response body: {e}>"),
+            };
+            if !status.is_success() {
+                return SendOutcome::HttpFailure {
+                    status: status.as_u16(),
+                    body: text,
+                };
+            }
+            return match serde_json::from_str::<Value>(&text) {
+                Ok(v) => SendOutcome::Ok(v),
+                Err(_) => SendOutcome::MalformedBody { body: text },
+            };
+        }
+    }
+
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
@@ -212,6 +269,7 @@ impl AnthropicExtractor {
 
         const INITIAL_MAX_TOKENS: u32 = 8192;
         let chunk_len_bytes = opts.episode_body.len();
+        let chunk_key = opts.chunk_key.map(|s| s.to_string());
 
         let mut body = json!({
             "model": &self.model,
@@ -222,31 +280,47 @@ impl AnthropicExtractor {
             "messages": [{"role": "user", "content": user_text}]
         });
 
-        let mut attempt = 0u32;
         let mut max_tokens_retried = false;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-
-            let http_resp = req.json(&body).send().await?;
-            let status = http_resp.status();
-
-            if (status == 429 || status == 529) && attempt < 3 {
-                let delay = Duration::from_secs(1u64 << attempt);
-                sleep(delay).await;
-                attempt += 1;
-                continue;
-            }
-
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let current_max_tokens = body["max_tokens"]
+                .as_u64()
+                .unwrap_or(INITIAL_MAX_TOKENS as u64) as u32;
+            let resp = match self.send_with_retry(&body).await {
+                SendOutcome::Ok(v) => v,
+                SendOutcome::HttpFailure { status, body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "http_error".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
+                }
+                SendOutcome::MalformedBody { body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "entity extraction: response body was not valid JSON".to_string(),
+                    ));
+                }
+                SendOutcome::Transport(e) => return Err(e),
+            };
             self.emit_token_usage(&resp);
+            let resp_for_failure = resp.clone();
 
             match parse_entity_response(resp) {
                 EntityOutcome::Success(entities) => {
@@ -257,6 +331,7 @@ impl AnthropicExtractor {
                             chunk_len_bytes,
                             initial_max_tokens: INITIAL_MAX_TOKENS,
                             retry_succeeded: true,
+                            chunk_key: chunk_key.clone(),
                         });
                     }
                     return Ok(entities);
@@ -268,7 +343,6 @@ impl AnthropicExtractor {
                             .unwrap_or(INITIAL_MAX_TOKENS as u64);
                         body["max_tokens"] = json!(current * 2);
                         max_tokens_retried = true;
-                        attempt = 0;
                         continue;
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
@@ -277,12 +351,29 @@ impl AnthropicExtractor {
                         chunk_len_bytes,
                         initial_max_tokens: INITIAL_MAX_TOKENS,
                         retry_succeeded: false,
+                        chunk_key: chunk_key.clone(),
                     });
+                    self.emit_extraction_failure(
+                        "entities",
+                        chunk_key.clone(),
+                        "truncation",
+                        &resp_for_failure,
+                        current_max_tokens,
+                    );
                     return Err(Error::Ipc(
                         "entity extraction budget exhausted after retry".to_string(),
                     ));
                 }
-                EntityOutcome::ParseError(e) => return Err(e),
+                EntityOutcome::ParseError(e) => {
+                    self.emit_extraction_failure(
+                        "entities",
+                        chunk_key.clone(),
+                        "malformed",
+                        &resp_for_failure,
+                        current_max_tokens,
+                    );
+                    return Err(e);
+                }
             }
         }
     }
@@ -317,6 +408,7 @@ impl AnthropicExtractor {
 
         const INITIAL_MAX_TOKENS: u32 = 8192;
         let chunk_len_bytes = opts.episode_body.len();
+        let chunk_key = opts.chunk_key.map(|s| s.to_string());
 
         let mut body = json!({
             "model": &self.model,
@@ -327,31 +419,47 @@ impl AnthropicExtractor {
             "messages": [{"role": "user", "content": user_text}]
         });
 
-        let mut attempt = 0u32;
         let mut max_tokens_retried = false;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-
-            let http_resp = req.json(&body).send().await?;
-            let status = http_resp.status();
-
-            if (status == 429 || status == 529) && attempt < 3 {
-                let delay = Duration::from_secs(1u64 << attempt);
-                sleep(delay).await;
-                attempt += 1;
-                continue;
-            }
-
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let current_max_tokens = body["max_tokens"]
+                .as_u64()
+                .unwrap_or(INITIAL_MAX_TOKENS as u64) as u32;
+            let resp = match self.send_with_retry(&body).await {
+                SendOutcome::Ok(v) => v,
+                SendOutcome::HttpFailure { status, body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "http_error".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
+                }
+                SendOutcome::MalformedBody { body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "edge extraction: response body was not valid JSON".to_string(),
+                    ));
+                }
+                SendOutcome::Transport(e) => return Err(e),
+            };
             self.emit_token_usage(&resp);
+            let resp_for_failure = resp.clone();
 
             match parse_edge_response(resp) {
                 EdgeOutcome::Success(mut edges) => {
@@ -362,6 +470,7 @@ impl AnthropicExtractor {
                             chunk_len_bytes,
                             initial_max_tokens: INITIAL_MAX_TOKENS,
                             retry_succeeded: true,
+                            chunk_key: chunk_key.clone(),
                         });
                     }
                     // Normalize relation_type to SCREAMING_SNAKE_CASE.
@@ -397,7 +506,6 @@ impl AnthropicExtractor {
                             .unwrap_or(INITIAL_MAX_TOKENS as u64);
                         body["max_tokens"] = json!(current * 2);
                         max_tokens_retried = true;
-                        attempt = 0;
                         continue;
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
@@ -406,12 +514,29 @@ impl AnthropicExtractor {
                         chunk_len_bytes,
                         initial_max_tokens: INITIAL_MAX_TOKENS,
                         retry_succeeded: false,
+                        chunk_key: chunk_key.clone(),
                     });
+                    self.emit_extraction_failure(
+                        "edges",
+                        chunk_key.clone(),
+                        "truncation",
+                        &resp_for_failure,
+                        current_max_tokens,
+                    );
                     // Edge budget exhaustion is not fatal — return empty list.
                     eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
                     return Ok(vec![]);
                 }
-                EdgeOutcome::ParseError(e) => return Err(e),
+                EdgeOutcome::ParseError(e) => {
+                    self.emit_extraction_failure(
+                        "edges",
+                        chunk_key.clone(),
+                        "malformed",
+                        &resp_for_failure,
+                        current_max_tokens,
+                    );
+                    return Err(e);
+                }
             }
         }
     }
@@ -671,6 +796,32 @@ impl AnthropicExtractor {
             estimated_cost_usd,
         });
     }
+
+    /// Emits `TelemetryEvent::ExtractionFailure` for a truncation or malformed-parse failure
+    /// (#306 FR-001) — the HTTP-error case is emitted directly by callers, since it has no
+    /// `resp` value to read `stop_reason`/`usage` from. `raw_resp` must be the pre-mutation
+    /// clone of the response `parse_entity_response`/`parse_edge_response` would otherwise
+    /// destructively consume.
+    fn emit_extraction_failure(
+        &self,
+        call_type: &str,
+        chunk_key: Option<String>,
+        classification: &str,
+        raw_resp: &Value,
+        max_tokens: u32,
+    ) {
+        self.sink.emit(TelemetryEvent::ExtractionFailure {
+            ts_ms: now_ms(),
+            model: self.model.clone(),
+            call_type: call_type.to_string(),
+            chunk_key,
+            classification: classification.to_string(),
+            raw_body: serde_json::to_string(raw_resp).unwrap_or_default(),
+            finish_reason: raw_resp["stop_reason"].as_str().map(String::from),
+            completion_tokens: raw_resp["usage"]["output_tokens"].as_u64(),
+            max_tokens,
+        });
+    }
 }
 
 impl Extractor for AnthropicExtractor {
@@ -696,6 +847,26 @@ impl Extractor for AnthropicExtractor {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
     }
+}
+
+// ── SendOutcome (AnthropicExtractor::send_with_retry) ─────────────────────────
+
+/// Outcome of one `AnthropicExtractor::send_with_retry` call, after the internal 429/529
+/// backoff loop has already run its course.
+enum SendOutcome {
+    /// A 2xx response with a valid JSON body.
+    Ok(Value),
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002),
+    /// even when it's empty (Edge Case: "HTTP-level failures with no body").
+    HttpFailure { status: u16, body: String },
+    /// A 2xx status whose body isn't valid JSON — distinct from `HttpFailure` because the HTTP
+    /// layer itself succeeded; classified `"malformed"`, not `"http_error"`, so the sidecar and
+    /// any error message don't claim a successful status failed.
+    MalformedBody { body: String },
+    /// No response was ever received (connection refused, timeout, etc.) — there is nothing
+    /// to capture as a raw body, so this propagates directly rather than through
+    /// `TelemetryEvent::ExtractionFailure`.
+    Transport(Error),
 }
 
 // ── EntityOutcome / EdgeOutcome ───────────────────────────────────────────────
@@ -786,6 +957,32 @@ fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
 
 // ── OaiExtractor ──────────────────────────────────────────────────────────────
 
+/// Outcome of a failed `OaiExtractor::send_chat`/`send_chat_uds` call.
+enum ChatFailure {
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002).
+    Http { status: u16, body: String },
+    /// A 2xx status whose body isn't valid JSON — distinct from `Http` because the HTTP layer
+    /// itself succeeded; classified `"malformed"`, not `"http_error"`, at the call site.
+    Malformed { body: String },
+    /// No response was ever received (connection refused, dial failure, etc.) — there is
+    /// nothing to capture as a raw body.
+    Transport(Error),
+}
+
+impl From<ChatFailure> for Error {
+    fn from(e: ChatFailure) -> Self {
+        match e {
+            ChatFailure::Http { status, body } => {
+                Error::Ipc(format!("chat completion HTTP {status}: {body}"))
+            }
+            ChatFailure::Malformed { body } => Error::Ipc(format!(
+                "chat completion: response body was not valid JSON: {body}"
+            )),
+            ChatFailure::Transport(e) => e,
+        }
+    }
+}
+
 enum ExtractTransport {
     Http {
         client: Client,
@@ -869,6 +1066,18 @@ async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
 #[cfg(unix)]
 enum UdsAttemptError {
     ConnectionBroken(Error),
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002),
+    /// read lossily if it isn't valid UTF-8 (Edge Case).
+    HttpStatus {
+        status: u16,
+        body: String,
+    },
+    /// A 2xx status whose body isn't valid JSON — distinct from `HttpStatus` because the HTTP
+    /// layer itself succeeded; classified `"malformed"`, not `"http_error"`, at the call site.
+    /// Read lossily if it isn't valid UTF-8 (Edge Case).
+    Malformed {
+        body: String,
+    },
     Other(Error),
 }
 
@@ -896,17 +1105,11 @@ async fn send_and_read_uds(
         UdsAttemptError::ConnectionBroken(Error::Ipc(format!("UDS send request: {e}")))
     })?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        // Drain the body before returning: with HTTP/1.1 keep-alive, leaving
-        // it unread would desync framing for the next request reusing this
-        // pooled connection.
-        let _ = resp.into_body().collect().await;
-        return Err(UdsAttemptError::Other(Error::Ipc(format!(
-            "UDS extractor returned status {status}"
-        ))));
-    }
-
+    let status = resp.status();
+    // Read the body before checking status (#306 FR-001): with HTTP/1.1 keep-alive, leaving
+    // it unread would desync framing for the next request reusing this pooled connection —
+    // and a non-2xx/malformed body must still be preserved for `ExtractionFailure` rather
+    // than discarded.
     let bytes = resp
         .into_body()
         .collect()
@@ -914,10 +1117,15 @@ async fn send_and_read_uds(
         .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("UDS read response body: {e}"))))?
         .to_bytes();
 
-    serde_json::from_slice(&bytes).map_err(|e| {
-        UdsAttemptError::Other(Error::Ipc(format!(
-            "parse UDS chat completion response: {e}"
-        )))
+    if !status.is_success() {
+        return Err(UdsAttemptError::HttpStatus {
+            status: status.as_u16(),
+            body: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    }
+
+    serde_json::from_slice(&bytes).map_err(|_| UdsAttemptError::Malformed {
+        body: String::from_utf8_lossy(&bytes).into_owned(),
     })
 }
 
@@ -1048,7 +1256,7 @@ impl OaiExtractor {
         system_text: &str,
         user_text: &str,
         max_tokens: u32,
-    ) -> Result<Value, Error> {
+    ) -> Result<Value, ChatFailure> {
         let body = json!({
             "model": &self.model,
             "max_tokens": max_tokens,
@@ -1060,15 +1268,27 @@ impl OaiExtractor {
         });
         match &self.transport {
             ExtractTransport::Http { client, url } => {
-                let resp: Value = client
+                let resp = client
                     .post(url)
                     .json(&body)
                     .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
-                Ok(resp)
+                    .await
+                    .map_err(|e| ChatFailure::Transport(Error::from(e)))?;
+                // Read the body before checking status (#306 FR-001): `.error_for_status()`
+                // discards it on a non-2xx status before any caller could see it.
+                let status = resp.status();
+                let text = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => format!("<failed to read response body: {e}>"),
+                };
+                if !status.is_success() {
+                    return Err(ChatFailure::Http {
+                        status: status.as_u16(),
+                        body: text,
+                    });
+                }
+                serde_json::from_str::<Value>(&text)
+                    .map_err(|_| ChatFailure::Malformed { body: text })
             }
             #[cfg(unix)]
             ExtractTransport::Uds { path, pool } => self.send_chat_uds(path, pool, &body).await,
@@ -1086,20 +1306,21 @@ impl OaiExtractor {
         path: &str,
         pool: &UdsPool,
         body: &Value,
-    ) -> Result<Value, Error> {
+    ) -> Result<Value, ChatFailure> {
         let idx = pool
             .cursor
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % pool.slots.len();
         let mut slot = pool.slots[idx].lock().await;
 
-        let body_bytes = hyper::body::Bytes::from(
-            serde_json::to_vec(body)
-                .map_err(|e| Error::Ipc(format!("serialize chat completion request: {e}")))?,
-        );
+        let body_bytes = hyper::body::Bytes::from(serde_json::to_vec(body).map_err(|e| {
+            ChatFailure::Transport(Error::Ipc(format!(
+                "serialize chat completion request: {e}"
+            )))
+        })?);
 
         if slot.is_none() {
-            *slot = Some(dial_uds(path).await?);
+            *slot = Some(dial_uds(path).await.map_err(ChatFailure::Transport)?);
         }
 
         let first = {
@@ -1115,23 +1336,33 @@ impl OaiExtractor {
 
         match first {
             Ok(resp) => Ok(resp),
-            Err(UdsAttemptError::Other(e)) => Err(e),
+            Err(UdsAttemptError::HttpStatus { status, body }) => {
+                Err(ChatFailure::Http { status, body })
+            }
+            Err(UdsAttemptError::Malformed { body }) => Err(ChatFailure::Malformed { body }),
+            Err(UdsAttemptError::Other(e)) => Err(ChatFailure::Transport(e)),
             Err(UdsAttemptError::ConnectionBroken(_)) => {
                 *slot = None;
-                *slot = Some(dial_uds(path).await?);
+                *slot = Some(dial_uds(path).await.map_err(ChatFailure::Transport)?);
                 let mut guard = PoisonGuard::new(&mut slot);
                 let result = send_and_read_uds(guard.sender_mut(), body_bytes).await;
                 guard.disarm();
                 drop(guard);
                 match result {
                     Ok(resp) => Ok(resp),
-                    Err(UdsAttemptError::Other(e)) => Err(e),
+                    Err(UdsAttemptError::HttpStatus { status, body }) => {
+                        Err(ChatFailure::Http { status, body })
+                    }
+                    Err(UdsAttemptError::Malformed { body }) => {
+                        Err(ChatFailure::Malformed { body })
+                    }
+                    Err(UdsAttemptError::Other(e)) => Err(ChatFailure::Transport(e)),
                     Err(UdsAttemptError::ConnectionBroken(e)) => {
                         // The redial-and-retry also failed against a fresh
                         // connection — don't leave the known-bad sender in
                         // the slot for the next unrelated call to trip over.
                         *slot = None;
-                        Err(e)
+                        Err(ChatFailure::Transport(e))
                     }
                 }
             }
@@ -1163,6 +1394,32 @@ impl OaiExtractor {
         });
     }
 
+    /// Emits `TelemetryEvent::ExtractionFailure` for a truncation or malformed-parse failure
+    /// (#306 FR-001) — the HTTP-error case is emitted directly by callers via `ChatFailure`,
+    /// since it has no `resp` value to read `finish_reason`/`usage` from. `raw_resp` is a
+    /// borrow, not a destructive-consumed value, since `parse_oai_entity_response`/
+    /// `parse_oai_edge_response` take `&Value` and never mutate it.
+    fn emit_extraction_failure(
+        &self,
+        call_type: &str,
+        chunk_key: Option<String>,
+        classification: &str,
+        raw_resp: &Value,
+        max_tokens: u32,
+    ) {
+        self.sink.emit(TelemetryEvent::ExtractionFailure {
+            ts_ms: now_ms(),
+            model: self.model.clone(),
+            call_type: call_type.to_string(),
+            chunk_key,
+            classification: classification.to_string(),
+            raw_body: serde_json::to_string(raw_resp).unwrap_or_default(),
+            finish_reason: oai_finish_reason(raw_resp).map(String::from),
+            completion_tokens: raw_resp["usage"]["completion_tokens"].as_u64(),
+            max_tokens,
+        });
+    }
+
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
@@ -1180,11 +1437,45 @@ impl OaiExtractor {
 
         const INITIAL_MAX_TOKENS: u32 = 8192;
         let chunk_len_bytes = opts.episode_body.len();
+        let chunk_key = opts.chunk_key.map(|s| s.to_string());
         let mut max_tokens = INITIAL_MAX_TOKENS;
         let mut max_tokens_retried = false;
 
         loop {
-            let resp = self.send_chat(&system_text, &user_text, max_tokens).await?;
+            let resp = match self.send_chat(&system_text, &user_text, max_tokens).await {
+                Ok(v) => v,
+                Err(ChatFailure::Http { status, body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "http_error".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
+                }
+                Err(ChatFailure::Malformed { body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "entity extraction: response body was not valid JSON".to_string(),
+                    ));
+                }
+                Err(ChatFailure::Transport(e)) => return Err(e),
+            };
             self.emit_token_usage(&resp);
 
             match parse_oai_entity_response(&resp) {
@@ -1210,6 +1501,7 @@ impl OaiExtractor {
                             chunk_len_bytes,
                             initial_max_tokens: INITIAL_MAX_TOKENS,
                             retry_succeeded: true,
+                            chunk_key: chunk_key.clone(),
                         });
                     }
                     return Ok(entities);
@@ -1226,7 +1518,15 @@ impl OaiExtractor {
                         chunk_len_bytes,
                         initial_max_tokens: INITIAL_MAX_TOKENS,
                         retry_succeeded: false,
+                        chunk_key: chunk_key.clone(),
                     });
+                    self.emit_extraction_failure(
+                        "entities",
+                        chunk_key.clone(),
+                        "truncation",
+                        &resp,
+                        max_tokens,
+                    );
                     return Err(Error::Ipc(
                         "entity extraction budget exhausted after retry".to_string(),
                     ));
@@ -1238,6 +1538,13 @@ impl OaiExtractor {
                         call_type: "entities".to_string(),
                         outcome: "malformed".to_string(),
                     });
+                    self.emit_extraction_failure(
+                        "entities",
+                        chunk_key.clone(),
+                        "malformed",
+                        &resp,
+                        max_tokens,
+                    );
                     return Err(e);
                 }
             }
@@ -1263,11 +1570,45 @@ impl OaiExtractor {
 
         const INITIAL_MAX_TOKENS: u32 = 8192;
         let chunk_len_bytes = opts.episode_body.len();
+        let chunk_key = opts.chunk_key.map(|s| s.to_string());
         let mut max_tokens = INITIAL_MAX_TOKENS;
         let mut max_tokens_retried = false;
 
         loop {
-            let resp = self.send_chat(&system_text, &user_text, max_tokens).await?;
+            let resp = match self.send_chat(&system_text, &user_text, max_tokens).await {
+                Ok(v) => v,
+                Err(ChatFailure::Http { status, body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "http_error".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
+                }
+                Err(ChatFailure::Malformed { body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "edge extraction: response body was not valid JSON".to_string(),
+                    ));
+                }
+                Err(ChatFailure::Transport(e)) => return Err(e),
+            };
             self.emit_token_usage(&resp);
 
             match parse_oai_edge_response(&resp) {
@@ -1293,6 +1634,7 @@ impl OaiExtractor {
                             chunk_len_bytes,
                             initial_max_tokens: INITIAL_MAX_TOKENS,
                             retry_succeeded: true,
+                            chunk_key: chunk_key.clone(),
                         });
                     }
                     // Normalize relation_type to SCREAMING_SNAKE_CASE (FR-012).
@@ -1330,7 +1672,15 @@ impl OaiExtractor {
                         chunk_len_bytes,
                         initial_max_tokens: INITIAL_MAX_TOKENS,
                         retry_succeeded: false,
+                        chunk_key: chunk_key.clone(),
                     });
+                    self.emit_extraction_failure(
+                        "edges",
+                        chunk_key.clone(),
+                        "truncation",
+                        &resp,
+                        max_tokens,
+                    );
                     // Edge budget exhaustion is not fatal — return empty list (matches Anthropic).
                     eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
                     return Ok(vec![]);
@@ -1342,6 +1692,13 @@ impl OaiExtractor {
                         call_type: "edges".to_string(),
                         outcome: "malformed".to_string(),
                     });
+                    self.emit_extraction_failure(
+                        "edges",
+                        chunk_key.clone(),
+                        "malformed",
+                        &resp,
+                        max_tokens,
+                    );
                     return Err(e);
                 }
             }
@@ -1797,6 +2154,7 @@ mod tests {
             chunk_len_bytes,
             initial_max_tokens,
             retry_succeeded: false,
+            chunk_key: None,
         });
 
         let events = sink.events();
@@ -2203,6 +2561,7 @@ mod tests {
             custom_instructions: None,
             reference_time: "2026-01-01T00:00:00Z",
             ontology: None,
+            chunk_key: Some("test-chunk"),
         }
     }
 
