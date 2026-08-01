@@ -405,7 +405,12 @@ async fn budget_exhaustion_after_retry_produces_non_zero_truncated_count_sc002()
     assert_eq!(result.truncated.exhausted, 1);
     assert_eq!(result.truncated.retry_succeeded, 0);
     assert_eq!(result.truncated.total(), 1);
-    assert!(result.chunk_results[0].result.as_ref().unwrap().edges.is_empty());
+    assert!(result.chunk_results[0]
+        .result
+        .as_ref()
+        .unwrap()
+        .edges
+        .is_empty());
 }
 
 #[tokio::test]
@@ -456,7 +461,12 @@ async fn genuinely_empty_result_without_truncation_is_reported_clean() {
     let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks, None).await;
 
     assert_eq!(result.truncated.total(), 0);
-    assert!(result.chunk_results[0].result.as_ref().unwrap().edges.is_empty());
+    assert!(result.chunk_results[0]
+        .result
+        .as_ref()
+        .unwrap()
+        .edges
+        .is_empty());
 }
 
 // ── cassette record→replay round trip via the real backend pipeline (#263) ────
