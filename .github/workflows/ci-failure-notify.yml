@@ -149,7 +149,7 @@ jobs:
           LOG_EXCERPT: ${{ steps.detail.outputs.log_excerpt }}
         run: |
           failing_display="${FAILING_NAMES:-(none reported — see run for detail)}"
-          body=$(cat <<BODYEOF
+          body=$(cat <<BODYEOF_$RUN_ID
           **Workflow**: $WORKFLOW_NAME
           **Conclusion**: $CONCLUSION
           **Run**: $RUN_URL
@@ -162,7 +162,7 @@ jobs:
           \`\`\`
 
           </details>
-          BODYEOF
+          BODYEOF_$RUN_ID
           )
           if [ -n "$ISSUE_NUMBER" ]; then
             gh issue comment "$ISSUE_NUMBER" --body "$body"

@@ -81,8 +81,9 @@ be dropped silently, which is the kind of gap this mechanism exists to close.
   `concurrency: cancel-in-progress: true`, so a superseded run reports `cancelled` — treating that
   as a failure would file spurious issues every time two pushes land close together.
 - anything else (`failure`, `timed_out`, `action_required`, …) → create or comment-update the
-  tracking issue, listing every job with `conclusion == failure` by name (so a 3-of-5 fan-out
-  failure in `real-corpus-e2e.yml` isn't reduced to one arbitrary job name) and a bounded
+  tracking issue, listing every job whose `conclusion` is neither `success` nor `skipped` by name
+  (so a `timed_out`/`action_required` job isn't silently dropped, and a 3-of-5 fan-out failure in
+  `real-corpus-e2e.yml` isn't reduced to one arbitrary job name) and a bounded
   `--log-failed` excerpt from the *first* failing job only, so the issue body stays readable —
   full detail is always one click away via the run URL.
 
