@@ -200,6 +200,7 @@ pub async fn run_backend(
             custom_instructions: None,
             reference_time: REFERENCE_TIME,
             ontology,
+            chunk_key: Some(&chunk.title),
         };
         let start = Instant::now();
         let result = extractor.extract(opts).await;
