@@ -534,11 +534,10 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
         .iter()
         .map(|(_, _, uuid, _)| uuid.clone())
         .collect();
-    let text: String = split_units
-        .iter()
-        .map(|(_, _, _, content)| content.as_str())
-        .collect::<Vec<_>>()
-        .concat();
+    let mut text = String::with_capacity(split_units.iter().map(|(_, _, _, c)| c.len()).sum());
+    for (_, _, _, content) in &split_units {
+        text.push_str(content);
+    }
     PriorState::Reconstructed { text, uuids }
 }
 

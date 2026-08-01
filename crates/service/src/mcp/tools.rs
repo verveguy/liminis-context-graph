@@ -285,10 +285,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            `chunk_text` above the advisory threshold \
                            (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 chars) \
                            is split internally into threshold-sized units that all share the \
-                           caller's `chunk_id`; the response then carries `episode_uuids` and \
-                           `unit_count` instead of a single `episode_uuid`, plus a `warning` \
-                           describing the split. Resubmitting a `chunk_id` is idempotent: \
-                           identical `chunk_text` no-ops (`idempotent: true`, no new episodes), \
+                           caller's `chunk_id`; when a split runs, the response carries \
+                           `episode_uuids` and `unit_count` instead of a single `episode_uuid`, \
+                           plus a `warning` describing the split. Resubmitting a `chunk_id` is \
+                           idempotent: identical `chunk_text` no-ops (`idempotent: true`, no new \
+                           episodes, no re-splitting — the response reuses whichever shape the \
+                           existing episode(s) already have), \
                            different `chunk_text` replaces the prior episode(s) for that \
                            `chunk_id` (`replaced_uuids` names what was deleted) — a `chunk_id` \
                            never accumulates unrelated episodes across calls. This guarantee \
