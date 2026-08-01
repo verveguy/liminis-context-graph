@@ -77,7 +77,7 @@ An operator running a verbose local model whose responses legitimately need more
 
 ---
 
-### Edge Cases
+## Edge Cases
 
 - A chunk whose input alone approaches the model's context window — the output budget cannot simply scale linearly, since input + output together are bounded by the same context window.
 - Models with very different context windows behind the same OAI-compatible endpoint — there is currently no per-model context-window registry in the codebase (`crates/core/src/extractor.rs`) for a proportional ceiling to consult.
