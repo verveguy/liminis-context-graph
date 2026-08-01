@@ -5,6 +5,14 @@
 //! extractor at all — it serves calls purely from a cassette file loaded into memory, making
 //! "no network access" (FR-002) true by construction rather than by discipline.
 //!
+//! `RecordingExtractor::extract` only ever records on success (its `?` on the inner call
+//! returns before `record()` runs) — a failed call never produces a cassette entry, by design
+//! (#306 FR-007). Failure data (the complete raw response body, `finish_reason`,
+//! `completion_tokens`, and a classification) goes to a separate sidecar instead — see
+//! [`crate::extraction_failures`] and ADR-0306 — written from inside `AnthropicExtractor`/
+//! `OaiExtractor` themselves via `TelemetryEvent::ExtractionFailure`, a layer this module's
+//! trait-boundary-only seam (ADR-0044) cannot see.
+//!
 //! # What is (and isn't) in the matching hash — FR-005
 //!
 //! Cassette records are matched by a SHA-256 hash of a canonical JSON value built from the
