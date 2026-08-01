@@ -27,6 +27,7 @@ pub mod reprocess_relations;
 pub mod schema;
 pub mod search;
 pub mod telemetry;
+pub mod token_budget;
 pub mod types;
 pub mod wal;
 pub(crate) mod wal_exec;

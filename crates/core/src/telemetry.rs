@@ -96,6 +96,13 @@ pub enum TelemetryEvent {
         finish_reason: Option<String>,
         completion_tokens: Option<u64>,
         max_tokens: u32,
+        /// #307 FR-007: the count of entities already extracted for this chunk before the edge
+        /// call failed, so an edge-exhaustion `Err` (which discards those entities from the
+        /// caller's return value) still leaves them recoverable for forensics. `Some(count)` at
+        /// every `call_type: "edges"` failure site (entities always succeed before edges run);
+        /// `None` at every `call_type: "entities"` site, where there is nothing to report yet.
+        #[serde(default)]
+        entities_extracted: Option<usize>,
     },
     WalRotated {
         ts_ms: u64,

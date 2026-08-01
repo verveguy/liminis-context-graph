@@ -372,11 +372,14 @@ async fn structured_output_reliability_is_independent_of_extraction_f1() {
 async fn budget_exhaustion_after_retry_produces_non_zero_truncated_count_sc002() {
     use lcg_core::TelemetryEvent;
 
-    // Edge budget exhaustion is non-fatal (extractor.rs returns Ok(vec![]) — FR-006), so the
-    // ExtractionResult here is indistinguishable from a model that genuinely emitted zero
-    // edges. Simulate what AnthropicExtractor/OaiExtractor emit internally in that case: an
-    // ExtractionTruncated event with retry_succeeded: false, once the doubled max_tokens
-    // retry still didn't fit.
+    // This exercises only the report's ExtractionTruncated aggregation, independent of the
+    // extractor's actual return value. As of #307 FR-004, real edge-budget exhaustion returns
+    // Err (excluding the chunk, counted as an error) rather than Ok(vec![]) — the ConfigurableExtractor
+    // mock here still returns Ok with empty edges to keep this test focused on the
+    // retry_succeeded/exhausted counters, which are tracked independently of that return-value
+    // change. Simulate what AnthropicExtractor/OaiExtractor emit internally before that Err: an
+    // ExtractionTruncated event with retry_succeeded: false, once the doubled max_tokens retry
+    // still didn't fit.
     let extractor: Arc<dyn Extractor> =
         Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
             entities: vec![ExtractedEntity {

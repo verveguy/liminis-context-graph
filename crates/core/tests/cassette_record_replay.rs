@@ -533,7 +533,9 @@ async fn http_error_produces_one_complete_sidecar_record() {
     );
     assert!(r["finish_reason"].is_null());
     assert!(r["completion_tokens"].is_null());
-    assert_eq!(r["max_tokens"], 8192);
+    // "Alice works at Acme Corp." (26 bytes) lands on the token-budget floor (#307 FR-002),
+    // not the old uniform 8192 default.
+    assert_eq!(r["max_tokens"], lcg_core::token_budget::MAX_TOKENS_FLOOR);
 
     // FR-007: the failure goes to the sidecar, not the cassette — RecordingExtractor's
     // success-only invariant is unaffected.
@@ -691,9 +693,13 @@ async fn budget_exhaustion_after_retry_produces_one_complete_sidecar_record() {
     assert_eq!(r["classification"], "truncation");
     assert_eq!(r["finish_reason"], "max_tokens");
     assert_eq!(r["completion_tokens"], 8192);
-    // The doubled max_tokens (16384), not the initial 8192 — the max_tokens "in force" at
-    // the moment of the failing call (FR-001).
-    assert_eq!(r["max_tokens"], 16384);
+    // The doubled max_tokens (2x the floor, since "Alice works at Acme Corp." starts at the
+    // #307 FR-002 floor), not the initial value — the max_tokens "in force" at the moment of
+    // the failing call (FR-001).
+    assert_eq!(
+        r["max_tokens"],
+        lcg_core::token_budget::MAX_TOKENS_FLOOR * 2
+    );
 }
 
 #[tokio::test]
