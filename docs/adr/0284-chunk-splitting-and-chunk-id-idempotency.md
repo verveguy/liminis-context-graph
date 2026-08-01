@@ -236,7 +236,8 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   **This trade-off is accepted as-is for this issue**: the residual collision requires deliberate
   or coincidental convention-mirroring by a `knowledge_add_episode` caller (not a default or
   adversarially-cheap outcome for an unrelated caller), and closing it properly requires the
-  schema-level provenance marker noted above, which is a larger, separate change.
+  schema-level provenance marker noted above, which is a larger, separate change. Tracked as
+  [#292](https://github.com/verveguy/liminis-context-graph/issues/292).
 - **A replace's delete is deferred until after the new ingest succeeds, not performed up front.**
   An earlier revision deleted the prior lineage before starting the fresh ingest; if that ingest
   then failed (e.g. an extraction error partway through a split), the `chunk_id` was left with

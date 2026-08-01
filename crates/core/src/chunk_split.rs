@@ -11,6 +11,12 @@
 /// earlier unit. Falls back to a hard cut at exactly `max_chars` only when no whitespace exists
 /// in that window (e.g. one long unbreakable token).
 ///
+/// Any `char::is_whitespace()` counts as a valid boundary — a plain space is not preferred over
+/// an embedded newline, and there is no separate preference for paragraph/sentence boundaries.
+/// This is intentional: FR-004 (issue #284) requires only "prefer whitespace over a hard
+/// character cut," not a boundary-kind hierarchy, and per-boundary-kind scoring would add
+/// complexity this issue's scope doesn't call for.
+///
 /// Text at or below `max_chars` returns a single unit equal to the input. `max_chars == 0` is
 /// not an expected input (the advisory threshold is always a positive char count), but is
 /// clamped to 1 rather than left to loop forever, degrading to one unit per char.
