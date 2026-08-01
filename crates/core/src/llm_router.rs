@@ -279,3 +279,203 @@ impl Extractor for LlmRouter {
         Box::pin(self.do_classify_relations(edges, allowed_types))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::telemetry::CaptureSink;
+    use crate::types::{ExtractedEntity, SourceType};
+    use std::sync::atomic::AtomicUsize;
+
+    /// Always fails `extract()` with the given message, counting how many times it was called
+    /// — used to stand in for real edge-budget-exhaustion (#307 FR-004 now returns `Err` from
+    /// that path, same as any other extraction failure) without needing a live HTTP stub.
+    struct FailingExtractor {
+        message: &'static str,
+        calls: AtomicUsize,
+    }
+
+    impl FailingExtractor {
+        fn new(message: &'static str) -> Self {
+            Self {
+                message,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Extractor for FailingExtractor {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Err(Error::Ipc(self.message.to_string())) })
+        }
+
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc(self.message.to_string())) })
+        }
+
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc(self.message.to_string())) })
+        }
+    }
+
+    /// Always succeeds `extract()` with a fixed one-entity result, counting how many times it
+    /// was called — used as the fallback in the permanent-switch tests below.
+    struct SucceedingExtractor {
+        calls: AtomicUsize,
+    }
+
+    impl SucceedingExtractor {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Extractor for SucceedingExtractor {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Ok(ExtractionResult {
+                    entities: vec![ExtractedEntity {
+                        name: "Alice".to_string(),
+                        entity_type: "Person".to_string(),
+                        summary: "a person".to_string(),
+                    }],
+                    edges: vec![],
+                })
+            })
+        }
+
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+    }
+
+    fn opts(episode_body: &str) -> ExtractOptions<'_> {
+        ExtractOptions {
+            episode_body,
+            group_id: "g1",
+            source_type: SourceType::Text,
+            custom_instructions: None,
+            reference_time: "2026-01-01T00:00:00Z",
+            ontology: None,
+            chunk_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn edge_budget_exhaustion_error_triggers_the_permanent_fallback_switch() {
+        // #307 Research's top-flagged risk, resolved as a deliberate no-op in llm_router.rs
+        // (Plan's "LlmRouter interaction" decision): edge-budget exhaustion now returns Err
+        // like any other extraction failure (FR-004), and this Err is treated exactly like any
+        // other primary failure — it trips the same one-shot permanent-fallback switch. This is
+        // intentional, not an oversight: FR-002's proportional budget should make exhaustion
+        // rare, so treating it identically to a transport/HTTP failure is the same choice
+        // FR-004 already made when it said "matches the entity path".
+        let primary = Arc::new(FailingExtractor::new(
+            "edge extraction budget exhausted after retry",
+        ));
+        let fallback = Arc::new(SucceedingExtractor::new());
+        let sink = Arc::new(CaptureSink::new());
+
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "fallback-model".to_string(),
+            Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        );
+
+        // First call: primary's edge-exhaustion Err triggers the switch; the fallback serves
+        // this call and every one after it.
+        let first = router.extract(opts("chunk one")).await.unwrap();
+        assert_eq!(first.entities.len(), 1);
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
+
+        let fallback_events: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, TelemetryEvent::LlmFallback { .. }))
+            .collect();
+        assert_eq!(
+            fallback_events.len(),
+            1,
+            "exactly one LlmFallback event for the switch"
+        );
+
+        // Second call: primary is never retried — the switch is permanent for the rest of the
+        // process lifetime, even though the second call has nothing to do with the original
+        // edge-truncation event.
+        let second = router.extract(opts("chunk two")).await.unwrap();
+        assert_eq!(second.entities.len(), 1);
+        assert_eq!(
+            primary.calls.load(Ordering::SeqCst),
+            1,
+            "primary must not be called again once the switch has tripped"
+        );
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 2);
+
+        // No second LlmFallback event — the switch fires exactly once per session.
+        let fallback_events_after: Vec<_> = sink
+            .events()
+            .into_iter()
+            .filter(|e| matches!(e, TelemetryEvent::LlmFallback { .. }))
+            .collect();
+        assert_eq!(fallback_events_after.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn primary_failure_without_fallback_returns_err_without_latching() {
+        // Sanity check for the no-fallback branch this test module otherwise doesn't touch:
+        // an edge-exhaustion-shaped Err with no fallback configured must propagate to the
+        // caller and must not set primary_failed (there being no fallback to switch to).
+        let primary = Arc::new(FailingExtractor::new(
+            "edge extraction budget exhausted after retry",
+        ));
+        let sink = Arc::new(CaptureSink::new());
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            None,
+            String::new(),
+            Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        );
+
+        let err = router.extract(opts("chunk one")).await.unwrap_err();
+        assert!(matches!(err, Error::Ipc(_)));
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            sink.events().is_empty(),
+            "no fallback means no LlmFallback event"
+        );
+    }
+}
