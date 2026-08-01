@@ -31,8 +31,17 @@ permissions:
 # issue" step below) isn't atomic, so two failing runs of the same workflow that
 # complete close together could both observe "no existing issue" and both create
 # one, violating FR-002. Queuing (not cancelling) same-workflow listener runs
-# closes that race; cancel-in-progress stays false so no failure/resolution event
-# is ever dropped.
+# closes that race. Note this only protects against the *concurrent-create* race,
+# not event loss: GitHub cancels a *pending* (queued, not-yet-started) run in a
+# concurrency group when a newer run is queued behind it, regardless of
+# cancel-in-progress — only the currently-running run is exempt from that. So a
+# fast burst of events for the same workflow (e.g. fail, succeed, fail again) can
+# skip the intermediate ones; only the last-queued run for the group is guaranteed
+# to eventually execute. That's sufficient here because each run re-derives state
+# from GitHub (gh issue list) rather than carrying it forward, so the one event
+# that does run always reconciles the issue to the correct end state — it's the
+# concurrent double-create that must be prevented, not every individual event
+# being processed.
 concurrency:
   group: ci-failure-notify-${{ github.event.workflow_run.workflow_id }}
   cancel-in-progress: false
