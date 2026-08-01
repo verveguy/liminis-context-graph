@@ -131,8 +131,7 @@ one — so `IS_LOCATED_IN` counts as `LOCATED_IN`. Freeform, the two differ by *
 (baseline 12.1, candidate 10.9, qwen 14.6): a large share of "compliance" is only near-miss
 naming, which is what makes 836 names unqueryable. Under the ontology the two columns
 converge to within 0.8pp, because the model is emitting the declared string rather than a
-paraphrase of it. Both columns are computed
-over every edge in the cassettes, not sampled; the harness's own `vocabulary_compliance`
+paraphrase of it. Both columns are computed over every edge in the cassettes, not sampled; the harness's own `vocabulary_compliance`
 field is `null` for these runs, so these are recomputed from the cassettes directly.
 
 Entity-type conformance was already 97.5–98.9% freeform and reached 99.9% under the
@@ -274,7 +273,8 @@ succeed. The chunk rate is the one that matters operationally and the one quoted
 
 ⚠ **The edge comparison has a known defect — do not quote the edge gap.** qwen35 returned
 **zero edges on two chunks where Haiku found 36 and 38 and qwen27b found 49 each**. Zero is
-not plausible extraction on those chunks, so ~98 edges (~3.5% of its total) are missing. Its
+not plausible extraction on those chunks, so ~98 edges — 3.2% of the 3,036 it extracted
+— are missing. Its
 edge recall is 0.878 against qwen27b's 0.900 — a 2.2pp gap that these two chunks could
 account for entirely. Treat edges as *unresolved* rather than tied.
 
