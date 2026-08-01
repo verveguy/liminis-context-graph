@@ -366,6 +366,99 @@ async fn structured_output_reliability_is_independent_of_extraction_f1() {
     );
 }
 
+// ── truncation visibility (#306 FR-005/FR-006/SC-002) ──────────────────────────
+
+#[tokio::test]
+async fn budget_exhaustion_after_retry_produces_non_zero_truncated_count_sc002() {
+    use lcg_core::TelemetryEvent;
+
+    // Edge budget exhaustion is non-fatal (extractor.rs returns Ok(vec![]) — FR-006), so the
+    // ExtractionResult here is indistinguishable from a model that genuinely emitted zero
+    // edges. Simulate what AnthropicExtractor/OaiExtractor emit internally in that case: an
+    // ExtractionTruncated event with retry_succeeded: false, once the doubled max_tokens
+    // retry still didn't fit.
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "a person".to_string(),
+            }],
+            edges: vec![],
+        }]));
+    let sink = Arc::new(CountingSink::new());
+    sink.emit(TelemetryEvent::ExtractionTruncated {
+        ts_ms: 0,
+        model: "test-model".to_string(),
+        chunk_len_bytes: 4096,
+        initial_max_tokens: 8192,
+        retry_succeeded: false,
+        chunk_key: Some("A".to_string()),
+    });
+
+    let chunks = vec![chunk("A", "prose a")];
+    let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks, None).await;
+
+    // Today, before this event existed, this chunk's zero edges would report as clean —
+    // exactly the defect the issue's Background names. The report must instead show a
+    // non-zero exhausted count, distinguishable from a retry that ultimately succeeded.
+    assert_eq!(result.truncated.exhausted, 1);
+    assert_eq!(result.truncated.retry_succeeded, 0);
+    assert_eq!(result.truncated.total(), 1);
+    assert!(result.chunk_results[0].result.as_ref().unwrap().edges.is_empty());
+}
+
+#[tokio::test]
+async fn retry_succeeded_truncation_is_distinguished_from_exhausted() {
+    use lcg_core::TelemetryEvent;
+
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities: vec![],
+            edges: vec![],
+        }]));
+    let sink = Arc::new(CountingSink::new());
+    // The doubled max_tokens retry succeeded this time — a materially different situation
+    // from exhausted-after-retry, and the report must never conflate the two.
+    sink.emit(TelemetryEvent::ExtractionTruncated {
+        ts_ms: 0,
+        model: "test-model".to_string(),
+        chunk_len_bytes: 4096,
+        initial_max_tokens: 8192,
+        retry_succeeded: true,
+        chunk_key: Some("A".to_string()),
+    });
+
+    let chunks = vec![chunk("A", "prose a")];
+    let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks, None).await;
+
+    assert_eq!(result.truncated.retry_succeeded, 1);
+    assert_eq!(result.truncated.exhausted, 0);
+}
+
+#[tokio::test]
+async fn genuinely_empty_result_without_truncation_is_reported_clean() {
+    // Acceptance Scenario 2: a chunk where the model genuinely emits zero edges (no
+    // truncation occurred) must be reported clean, not truncated — no ExtractionTruncated
+    // event is ever emitted in this scenario.
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "a person".to_string(),
+            }],
+            edges: vec![],
+        }]));
+    let sink = Arc::new(CountingSink::new());
+
+    let chunks = vec![chunk("A", "prose a")];
+    let result = run_backend("backend", extractor, Arc::clone(&sink), &chunks, None).await;
+
+    assert_eq!(result.truncated.total(), 0);
+    assert!(result.chunk_results[0].result.as_ref().unwrap().edges.is_empty());
+}
+
 // ── cassette record→replay round trip via the real backend pipeline (#263) ────
 // User Story 1 / SC-001: replaying a `cassette:path=<PATH>` backend through the same
 // `parse_backend_spec`/`build_extractor` pipeline `main.rs` uses must reproduce the
