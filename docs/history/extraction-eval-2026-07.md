@@ -198,10 +198,11 @@ corpus:
 | Haiku edges | 2289 | 2552 (+11.5%) |
 
 **"Spread" here is `(max − min) / min`** across the two independent samples: `(60−38)/38 =
-58%` before, `(154−147)/147 = 5%` after. The convention matters — the same data over `mean`
-would read 36% rather than 58%, which sounds like a materially smaller problem. `min` is
-used because the question being asked is "how much more did the larger run find than the
-smaller one".
+58%` before, `(154−147)/147 = 5%` after. The convention matters — the *same* pre-fix data
+reads **44.9%** against the mean (`22/49`, the standard relative-percent-difference formula)
+or **36.7%** against the max (`22/60`). Both sound like a materially smaller problem than
+58%. `min` is used because the question being asked is "how much more did the larger run
+find than the smaller one".
 
 The new `Concept` entities came almost entirely **out of** Product (−37), Event (−33) and
 Organization (−17), while Person and Location — unambiguously concrete — did not move. The
