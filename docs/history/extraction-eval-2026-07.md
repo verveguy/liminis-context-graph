@@ -25,13 +25,14 @@ comparable to what the service actually does.
    without that ceiling is uninterpretable — qwen's strict edge F1 of 0.219 reads as a
    catastrophe against 1.0 and as 58% of achievable against 0.380.
 
-3. **An ontology collapses relation vocabulary 9–11× at no measurable quality cost.**
-   836–1203 distinct relation names become 80–131; in-vocabulary edge share goes 33–43% →
-   94–98%; edge *counts* are unchanged. Judged F1 moves <1pp — because the judge already
-   normalises name variants — while **strict-string edge F1 rises 36–60%**.
+3. **An ontology collapses relation vocabulary 8.9–11.1× at no measurable quality cost.**
+   836–1203 distinct relation names become 80–131; in-vocabulary edge share goes 18.7–24.1%
+   → 93.1–97.4%; edge *counts* stay approximately stable, moving −1.0% to +5.5%. Judged F1
+   moves <1pp — because the judge already normalises name variants — while **strict-string
+   edge F1 rises 36–60%**.
 
-4. **Local models comply with a declared vocabulary.** qwen sits at 94.6% in-vocabulary
-   against Haiku's ~97%, in `open` mode where the types are only a *preference*. Its
+4. **Local models comply with a declared vocabulary.** qwen sits at 93.1% in-vocabulary
+   against Haiku's 96.5–97.4%, in `open` mode where the types are only a *preference*. Its
    escapes are mostly relations the fixture doesn't model, not defiance.
 
 5. **A self-contradictory prompt cost more than accuracy: it cost reproducibility.** Before
@@ -85,9 +86,13 @@ pairwise measures *quality*, with no privileged backend.
 | Haiku (2nd sample) | 0.949 | 0.974 | 0.884 | 0.902 |
 | **qwen** | **0.767** | **0.986** | **0.694** | 0.900 |
 
-**qwen's recall exceeds the hosted model's own second sample.** Its precision is much lower.
-It finds essentially everything Haiku finds, plus ~32% more — and is penalised for the
-surplus because the reference is Haiku, not truth.
+**On entities, qwen's recall exceeds the hosted model's own second sample** (0.986 vs
+0.974). Its precision is much lower. It finds essentially everything Haiku finds, plus ~32%
+more — and is penalised for the surplus because the reference is Haiku, not truth.
+
+**On edges the recall claim does not hold**: 0.900 vs 0.902 is a tie, not an advantage. The
+qwen story is an entity-recall story; on edges it matches Haiku's recall while giving up
+19pp of precision.
 
 ### Blind pairwise — qwen's win rate over decisive comparisons
 
@@ -102,11 +107,21 @@ figures as unreliable.** Entities and edges passed in both arms.
 
 ### Extraction volume and vocabulary
 
-| leg | mode | entities | edges | distinct relation names | edges in-vocabulary |
+| leg | mode | entities | edges | distinct relation names | edges in-vocabulary (exact / variant-tolerant) |
 |---|---|---:|---:|---:|---:|
-| Haiku baseline | freeform → open | 2611 → 2709 | 2552 → 2692 | **836 → 94** | 43% → **96.8%** |
-| Haiku candidate | freeform → open | 2639 → 2711 | 2582 → 2704 | **887 → 80** | 41% → **97.5%** |
-| qwen | freeform → open | 3481 → 3596 | 3398 → 3363 | **1203 → 131** | 33% → **93.9%** |
+| Haiku baseline | freeform → open | 2611 → 2709 | 2552 → 2692 | **836 → 94** | 24.1% / 36.2% → **96.5% / 96.7%** |
+| Haiku candidate | freeform → open | 2639 → 2711 | 2582 → 2704 | **887 → 80** | 23.2% / 34.1% → **97.4% / 97.4%** |
+| qwen | freeform → open | 3481 → 3596 | 3398 → 3363 | **1203 → 131** | 18.7% / 33.3% → **93.1% / 93.9%** |
+
+**Read the two vocabulary columns together — the gap between them is the finding.** *Exact*
+counts an edge as in-vocabulary only if its type string is one of the fixture's 25 relation
+types. *Variant-tolerant* also accepts a type that contains, or is contained by, a declared
+one — so `IS_LOCATED_IN` counts as `LOCATED_IN`. Freeform, the two differ by 12–15pp: a
+large share of "compliance" is only near-miss naming, which is exactly what makes 836 names
+unqueryable. Under the ontology the two columns converge to within 0.8pp, because the model
+is emitting the declared string rather than a paraphrase of it. Both columns are computed
+over every edge in the cassettes, not sampled; the harness's own `vocabulary_compliance`
+field is `null` for these runs, so these are recomputed from the cassettes directly.
 
 Entity-type conformance was already 97.5–98.9% freeform and reached 99.9% under the
 ontology — **the intervention is almost entirely about edges**, which matches the prompt
@@ -151,8 +166,10 @@ compares literal type strings — rises 36–60%.
 
 The operational difference is large and unscored by this harness: **836 relation names is
 not a schema you can query, aggregate over, or write Cypher against. 94, with 25 covering
-97% of edges, is.** Edge counts were unchanged, so the constraint disciplined *naming*
-without suppressing *content*.
+97% of edges, is.** Edge counts stayed approximately stable across the three legs — +5.5%,
++4.7%, −1.0% — so the constraint disciplined *naming* without suppressing *content*. The
+point is the absence of a large drop, not exact equality: a vocabulary constraint that
+worked by making the model emit fewer edges would be a cost, and that is not what happened.
 
 **Trap for future readers:** running this matrix and concluding "the ontology did nothing"
 from flat judged F1 would be wrong. Look at strict F1 and at the vocabulary table.
@@ -182,10 +199,14 @@ document could type the same subject differently.
 
 ### Local-model compliance is not the obstacle
 
-qwen diverges hardest freeform (1203 distinct relation names, only 56.7% covered by the
-fixture) yet reaches **94.6% in-vocabulary** under `open` — against Haiku's ~97%. Its
-genuine escapes are `ALSO_KNOWN_AS` (18), `NAMED_AFTER` (11), `CARRIES_TO` (7) — relations
-a 25-type fixture simply doesn't model, not the model ignoring instruction.
+qwen diverges hardest freeform — 1203 distinct relation names, of which only 1.9% are
+declared types (10.1% allowing variants), covering 18.7% of edges (33.3% allowing variants)
+— yet reaches **93.1% in-vocabulary** under `open`, against Haiku's 96.5–97.4%. Its
+escapes are `ALSO_KNOWN_AS` (29), `LAUNCHED_BY` (21), `NAMED_AFTER` (13), `CARRIES_TO` (7),
+`OCCURS_WHEN` (6). Only one of those is defiance: `LAUNCHED_BY` is the declared `LAUNCHED`
+with an inverted direction. The rest are relations a 25-type fixture simply doesn't model.
+The gap to Haiku is ~3.4pp, which is a smaller effect than the choice of ontology mode —
+compliance is not what limits the local model.
 
 ### Latency
 
@@ -199,7 +220,7 @@ So the local model is roughly **4.5× slower at p50**, and far worse in the tail
 
 ## What was not tested
 
-- **`strict` mode.** Not run. `open` already reaches 94–98% compliance at no quality cost,
+- **`strict` mode.** Not run. `open` already reaches 93.1–97.4% compliance at no quality cost,
   so strict's remaining case is *guaranteeing* 100% rather than improving quality — at the
   risk of dropping relations the fixture doesn't model. Note `vocabulary_compliance` in the
   report only populates in strict mode, so that metric is still unmeasured.
