@@ -185,6 +185,51 @@ async fn spawn_stub_server_with_fixed_response(
     (addr, handle)
 }
 
+/// Spawns a stub `/v1/messages` server that dispatches on `tools[0].name` like
+/// `spawn_stub_anthropic_server`, but always truncates the edge call (`stop_reason:
+/// max_tokens`, regardless of the doubled `max_tokens` sent) while the entity call succeeds
+/// normally — #307 FR-004's edge-path truncation scenario, which `spawn_stub_anthropic_server`
+/// cannot exercise since it always succeeds.
+async fn spawn_stub_server_entities_succeed_edges_exhaust() -> (SocketAddr, JoinHandle<()>) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let entity_body = entity_tool_response();
+    let truncated_edge_body = serde_json::json!({
+        "stop_reason": "max_tokens",
+        "content": [],
+        "usage": {"input_tokens": 10, "output_tokens": 8192}
+    })
+    .to_string();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let entity_body = entity_body.clone();
+            let truncated_edge_body = truncated_edge_body.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let (_headers, body) = read_http_request(&mut reader).await;
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let tool_name = json["tools"][0]["name"].as_str().unwrap_or("");
+                let response = match tool_name {
+                    "extract_entities" => &entity_body,
+                    "extract_edges" => &truncated_edge_body,
+                    other => panic!("stub: unexpected tool name {other:?}"),
+                };
+                write_http_response(&mut write_half, response).await;
+            });
+        }
+    });
+
+    (addr, handle)
+}
+
 /// Binds then immediately drops a TCP listener, returning a `/v1/messages` URL that is
 /// guaranteed to refuse connections — used to simulate an unreachable primary extractor
 /// without relying on a slow, unpredictable external timeout.
@@ -773,4 +818,52 @@ async fn chunk_key_does_not_affect_the_cassette_request_hash() {
         .await
         .unwrap();
     assert_eq!(replayed.entities.len(), 2);
+}
+
+// ── (f) #307 FR-004/FR-007: edge-path budget exhaustion returns Err ────────
+
+#[tokio::test]
+async fn edge_budget_exhaustion_after_retry_returns_err_with_entities_extracted_count() {
+    // User Story 1's Independent Test: entity extraction succeeds (2 entities), then edge
+    // extraction exhausts its token budget after the doubling retry. Before #307 FR-004 this
+    // returned `Ok(vec![])` — a success indistinguishable from a model that genuinely found no
+    // edges. It must now return `Err`, and the already-extracted entity count must survive in
+    // the ExtractionFailureRecord sidecar via FR-007's `entities_extracted` field.
+    let (addr, _server) = spawn_stub_server_entities_succeed_edges_exhaust().await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+
+    let extractor = AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    );
+
+    let err = extractor
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-edge-truncated",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_)), "got {err:?}");
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(
+        records.len(),
+        1,
+        "exactly one failure record — for the edge call; the entity call succeeded and must \
+         not itself produce a sidecar record"
+    );
+    let r = &records[0];
+    assert_eq!(r["call_type"], "edges");
+    assert_eq!(r["chunk_key"], "chunk-edge-truncated");
+    assert_eq!(r["classification"], "truncation");
+    assert_eq!(
+        r["entities_extracted"], 2,
+        "the 2 entities extracted before the edge call failed must be recoverable for \
+         forensics even though Err discards them from extract()'s return value"
+    );
 }
