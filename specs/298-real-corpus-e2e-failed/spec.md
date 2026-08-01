@@ -41,7 +41,7 @@ A workflow that runs automatically after merge to `main` (starting with `real-co
 
 **Why this priority**: This is the core defect the issue reports — a real regression was caught and then effectively discarded because nothing surfaced it. Without this, every other part of the fix is moot.
 
-**Independent Test**: Force a failure in `real-corpus-e2e` on a branch/PR built for this purpose (or by temporarily breaking the workflow on a test push to a throwaway ref), observe that a durable artifact (issue, board item, or equivalent) is created, then fix the failure and observe the artifact resolves.
+**Independent Test**: Force a failure in `real-corpus-e2e` with `head_branch == 'main'` (the delivered mechanism filters on this), observe that a durable artifact (issue, board item, or equivalent) is created, then fix the failure and observe the artifact resolves.
 
 **Acceptance Scenarios**:
 
@@ -85,7 +85,7 @@ Someone preparing a release currently has no prompt to check whether `real-corpu
 - `concurrency: cancel-in-progress: true` (set on `real-corpus-e2e.yml`) means a superseded run reports as `cancelled`; a cancelled run must not be treated as a failure.
 - If the notification target is a GitHub issue, it needs an owner and a label convention so it does not sit unassigned the way the underlying failure did.
 - `bench.yml` and `eval.yml` do not currently run automatically on push to `main` — they are `workflow_dispatch`-only. For these, "fails on `main`" means a manual dispatch run against `main` fails; the mechanism should still apply in that case even though the trigger is manual rather than automatic.
-- A workflow that has never had a successful run on `main` (as `real-corpus-e2e` currently has not) should not be treated differently from one that regressed from green — both need the same visible artifact.
+- A workflow that has never had a successful run on `main` should not be treated differently from one that regressed from green — both need the same visible artifact.
 
 ## Requirements *(mandatory)*
 
@@ -106,7 +106,7 @@ Someone preparing a release currently has no prompt to check whether `real-corpu
 
 ### Measurable Outcomes
 
-- **SC-001**: Forcing a `real-corpus-e2e` failure on a branch produces the artifact described in FR-001 within one run.
+- **SC-001**: Forcing a `real-corpus-e2e` failure on `main` produces the artifact described in FR-001 within one run.
 - **SC-002**: A second failure updates rather than duplicates it.
 - **SC-003**: A passing run resolves it.
 - **SC-004**: `README.md`'s release runbook lists the non-gating-workflow check as an explicit pre-flight step.

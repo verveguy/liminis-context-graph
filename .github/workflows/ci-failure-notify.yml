@@ -41,10 +41,11 @@ jobs:
   notify:
     name: notify (${{ github.event.workflow_run.name }})
     runs-on: ubuntu-latest
-    # real-corpus-e2e.yml only ever triggers on push to main, so this is a no-op
-    # guard for it — but bench.yml/eval.yml are workflow_dispatch-only and can be
-    # run against any ref. Without this guard, a developer's manual `bench` dispatch
-    # on a feature branch would file a "main is broken" issue.
+    # real-corpus-e2e.yml also declares workflow_dispatch with no branch restriction
+    # (in addition to push: branches: [main]), and bench.yml/eval.yml are
+    # workflow_dispatch-only — all three can be run against any ref. Without this
+    # guard, a developer's manual dispatch of any of them on a feature branch would
+    # file a "main is broken" issue.
     if: github.event.workflow_run.head_branch == 'main'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -114,9 +115,12 @@ jobs:
         if: env.CONCLUSION != 'success' && env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
         id: detail
         run: |
+          # Match anything but success/skipped, not just "failure" — a timed-out or
+          # action_required job reports conclusion: "timed_out"/"action_required",
+          # not "failure", and would otherwise be silently dropped from the report.
           jobs_json=$(gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs")
-          failing_names=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")')
-          first_failing_id=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion == "failure")][0].id // empty')
+          failing_names=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | .name] | join(", ")')
+          first_failing_id=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")][0].id // empty')
           echo "failing_names=$failing_names" >> "$GITHUB_OUTPUT"
           {
             echo "log_excerpt<<EOF_$RUN_ID"

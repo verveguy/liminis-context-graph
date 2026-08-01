@@ -6,11 +6,11 @@
 
 ## Context
 
-`real-corpus-e2e.yml` runs on every push to `main`. It failed every run from `db27471`
-(2026-07-26, the same afternoon it introduced `mcp_real_corpus_admin_lifecycle_e2e.rs` as part
-of #236) through 24 consecutive failures spanning four days and roughly a dozen merges. Nobody
-noticed until the failure was found by hand while smoke-testing the `v0.11.0` release, after the
-tag had already been pushed.
+`real-corpus-e2e.yml` runs on every push to `main`. Commit `db27471` introduced
+`mcp_real_corpus_admin_lifecycle_e2e.rs` as part of #236 on 2026-07-26. The first failed run was
+`ed90d489` at 20:02 that evening, followed by 24 consecutive failures spanning four days and
+roughly a dozen merges. Nobody noticed until the failure was found by hand while smoke-testing
+the `v0.11.0` release, after the tag had already been pushed.
 
 The underlying test failure was real but minor (a status-flag assertion; filed separately). The
 process defect was the serious one: `real-corpus-e2e.yml`'s own header comment states it exists
@@ -67,11 +67,11 @@ match, which is unavoidable since GitHub's `workflow_run` trigger keys on `name:
 The listener searches for an open issue carrying both labels before creating a new one. A repeat
 failure appends a comment to the existing issue rather than rewriting its body, so the issue's
 comment history preserves *when* a workflow flapped versus stayed broken continuously — only
-creation and closure touch the issue's body/state directly. Both labels are created defensively
-(`gh label create ... || true`) on every invocation, not as a one-time setup step, because
-`gh issue create --label <label>` fails outright against a label that doesn't exist yet — without
-this, the very first real failure could be dropped silently, which is exactly the kind of gap
-this mechanism exists to close.
+creation and closure touch the issue's body/state directly. Both labels are created on every
+invocation, not as a one-time setup step. An "already exists" error is ignored; any other
+label-creation error fails the workflow loudly, because `gh issue create --label <label>` fails
+outright against a label that doesn't exist yet — without this, the very first real failure could
+be dropped silently, which is the kind of gap this mechanism exists to close.
 
 ### Lifecycle mapping from `conclusion`
 
@@ -88,11 +88,12 @@ this mechanism exists to close.
 
 ### `main`-only filter
 
-The job runs under `if: github.event.workflow_run.head_branch == 'main'`. This is a no-op guard
-for `real-corpus-e2e.yml`, which only ever triggers on `push: branches: [main]`, but it's
-load-bearing for `bench.yml`/`eval.yml`, which are `workflow_dispatch`-only and can be dispatched
-against any ref. Without the guard, a developer's manual `bench` dispatch on a feature branch
-would file a "main is broken" issue.
+The job runs under `if: github.event.workflow_run.head_branch == 'main'`. `real-corpus-e2e.yml`
+also declares `workflow_dispatch` with no branch restriction (in addition to
+`push: branches: [main]`), and `bench.yml`/`eval.yml` are `workflow_dispatch`-only — all three
+can be dispatched against any ref, so this guard is load-bearing for all of them, not just
+`bench.yml`/`eval.yml`. Without it, a developer's manual dispatch of any of them on a feature
+branch would file a "main is broken" issue.
 
 ### Ownership, and deliberately no `fabrik:yolo`/`fabrik:cruise`
 
