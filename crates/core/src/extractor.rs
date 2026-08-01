@@ -210,7 +210,10 @@ impl AnthropicExtractor {
                 continue;
             }
 
-            let text = http_resp.text().await.unwrap_or_default();
+            let text = match http_resp.text().await {
+                Ok(t) => t,
+                Err(e) => format!("<failed to read response body: {e}>"),
+            };
             if !status.is_success() {
                 return SendOutcome::HttpFailure {
                     status: status.as_u16(),
@@ -219,10 +222,7 @@ impl AnthropicExtractor {
             }
             return match serde_json::from_str::<Value>(&text) {
                 Ok(v) => SendOutcome::Ok(v),
-                Err(_) => SendOutcome::HttpFailure {
-                    status: status.as_u16(),
-                    body: text,
-                },
+                Err(_) => SendOutcome::MalformedBody { body: text },
             };
         }
     }
@@ -300,6 +300,22 @@ impl AnthropicExtractor {
                         max_tokens: current_max_tokens,
                     });
                     return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
+                }
+                SendOutcome::MalformedBody { body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "entity extraction: response body was not valid JSON".to_string(),
+                    ));
                 }
                 SendOutcome::Transport(e) => return Err(e),
             };
@@ -423,6 +439,22 @@ impl AnthropicExtractor {
                         max_tokens: current_max_tokens,
                     });
                     return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
+                }
+                SendOutcome::MalformedBody { body: raw } => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: raw,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens: current_max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "edge extraction: response body was not valid JSON".to_string(),
+                    ));
                 }
                 SendOutcome::Transport(e) => return Err(e),
             };
@@ -824,10 +856,13 @@ impl Extractor for AnthropicExtractor {
 enum SendOutcome {
     /// A 2xx response with a valid JSON body.
     Ok(Value),
-    /// A response was received but wasn't usable — a non-2xx status, or a 2xx status whose
-    /// body isn't valid JSON. Carries the complete raw body either way (#306 FR-002), even
-    /// when it's empty (Edge Case: "HTTP-level failures with no body").
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002),
+    /// even when it's empty (Edge Case: "HTTP-level failures with no body").
     HttpFailure { status: u16, body: String },
+    /// A 2xx status whose body isn't valid JSON — distinct from `HttpFailure` because the HTTP
+    /// layer itself succeeded; classified `"malformed"`, not `"http_error"`, so the sidecar and
+    /// any error message don't claim a successful status failed.
+    MalformedBody { body: String },
     /// No response was ever received (connection refused, timeout, etc.) — there is nothing
     /// to capture as a raw body, so this propagates directly rather than through
     /// `TelemetryEvent::ExtractionFailure`.
@@ -924,9 +959,11 @@ fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
 
 /// Outcome of a failed `OaiExtractor::send_chat`/`send_chat_uds` call.
 enum ChatFailure {
-    /// A response was received but wasn't usable — non-2xx status, or 2xx status with a body
-    /// that isn't valid JSON. Carries the complete raw body either way (#306 FR-002).
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002).
     Http { status: u16, body: String },
+    /// A 2xx status whose body isn't valid JSON — distinct from `Http` because the HTTP layer
+    /// itself succeeded; classified `"malformed"`, not `"http_error"`, at the call site.
+    Malformed { body: String },
     /// No response was ever received (connection refused, dial failure, etc.) — there is
     /// nothing to capture as a raw body.
     Transport(Error),
@@ -938,6 +975,9 @@ impl From<ChatFailure> for Error {
             ChatFailure::Http { status, body } => {
                 Error::Ipc(format!("chat completion HTTP {status}: {body}"))
             }
+            ChatFailure::Malformed { body } => Error::Ipc(format!(
+                "chat completion: response body was not valid JSON: {body}"
+            )),
             ChatFailure::Transport(e) => e,
         }
     }
@@ -1026,11 +1066,16 @@ async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
 #[cfg(unix)]
 enum UdsAttemptError {
     ConnectionBroken(Error),
-    /// A response was received but wasn't usable — non-2xx status, or 2xx status with a body
-    /// that isn't valid JSON. Carries the complete raw body either way (#306 FR-002), read
-    /// lossily if it isn't valid UTF-8 (Edge Case).
+    /// A non-2xx status was returned. Carries the complete raw body either way (#306 FR-002),
+    /// read lossily if it isn't valid UTF-8 (Edge Case).
     HttpStatus {
         status: u16,
+        body: String,
+    },
+    /// A 2xx status whose body isn't valid JSON — distinct from `HttpStatus` because the HTTP
+    /// layer itself succeeded; classified `"malformed"`, not `"http_error"`, at the call site.
+    /// Read lossily if it isn't valid UTF-8 (Edge Case).
+    Malformed {
         body: String,
     },
     Other(Error),
@@ -1079,8 +1124,7 @@ async fn send_and_read_uds(
         });
     }
 
-    serde_json::from_slice(&bytes).map_err(|_| UdsAttemptError::HttpStatus {
-        status: status.as_u16(),
+    serde_json::from_slice(&bytes).map_err(|_| UdsAttemptError::Malformed {
         body: String::from_utf8_lossy(&bytes).into_owned(),
     })
 }
@@ -1233,17 +1277,18 @@ impl OaiExtractor {
                 // Read the body before checking status (#306 FR-001): `.error_for_status()`
                 // discards it on a non-2xx status before any caller could see it.
                 let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
+                let text = match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => format!("<failed to read response body: {e}>"),
+                };
                 if !status.is_success() {
                     return Err(ChatFailure::Http {
                         status: status.as_u16(),
                         body: text,
                     });
                 }
-                serde_json::from_str::<Value>(&text).map_err(|_| ChatFailure::Http {
-                    status: status.as_u16(),
-                    body: text,
-                })
+                serde_json::from_str::<Value>(&text)
+                    .map_err(|_| ChatFailure::Malformed { body: text })
             }
             #[cfg(unix)]
             ExtractTransport::Uds { path, pool } => self.send_chat_uds(path, pool, &body).await,
@@ -1294,6 +1339,7 @@ impl OaiExtractor {
             Err(UdsAttemptError::HttpStatus { status, body }) => {
                 Err(ChatFailure::Http { status, body })
             }
+            Err(UdsAttemptError::Malformed { body }) => Err(ChatFailure::Malformed { body }),
             Err(UdsAttemptError::Other(e)) => Err(ChatFailure::Transport(e)),
             Err(UdsAttemptError::ConnectionBroken(_)) => {
                 *slot = None;
@@ -1306,6 +1352,9 @@ impl OaiExtractor {
                     Ok(resp) => Ok(resp),
                     Err(UdsAttemptError::HttpStatus { status, body }) => {
                         Err(ChatFailure::Http { status, body })
+                    }
+                    Err(UdsAttemptError::Malformed { body }) => {
+                        Err(ChatFailure::Malformed { body })
                     }
                     Err(UdsAttemptError::Other(e)) => Err(ChatFailure::Transport(e)),
                     Err(UdsAttemptError::ConnectionBroken(e)) => {
@@ -1408,6 +1457,22 @@ impl OaiExtractor {
                         max_tokens,
                     });
                     return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
+                }
+                Err(ChatFailure::Malformed { body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "entity extraction: response body was not valid JSON".to_string(),
+                    ));
                 }
                 Err(ChatFailure::Transport(e)) => return Err(e),
             };
@@ -1525,6 +1590,22 @@ impl OaiExtractor {
                         max_tokens,
                     });
                     return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
+                }
+                Err(ChatFailure::Malformed { body }) => {
+                    self.sink.emit(TelemetryEvent::ExtractionFailure {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        chunk_key: chunk_key.clone(),
+                        classification: "malformed".to_string(),
+                        raw_body: body,
+                        finish_reason: None,
+                        completion_tokens: None,
+                        max_tokens,
+                    });
+                    return Err(Error::Ipc(
+                        "edge extraction: response body was not valid JSON".to_string(),
+                    ));
                 }
                 Err(ChatFailure::Transport(e)) => return Err(e),
             };

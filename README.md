@@ -519,10 +519,13 @@ conventions.
 
 ### Failure-record sidecar
 
-A failed extraction call — an HTTP error, a malformed/unparseable response, or edge-budget
-exhaustion that persists after one retry — is never written to the cassette (its success-only
-invariant is unaffected); instead, one record is appended to a sidecar file,
-`<cassette-path>.failures.jsonl`. This is created wherever a cassette is being recorded (both
+A failed extraction call — an HTTP error, a malformed/unparseable response, or budget
+exhaustion that persists after one retry — appends one record to a sidecar file,
+`<cassette-path>.failures.jsonl`. A call that ends in an error never produces a cassette record
+(the cassette's success-only invariant is unaffected). Edge-budget exhaustion is the one
+non-fatal class: the call still succeeds with an empty edge list, so it produces both a cassette
+record and a sidecar record — entity-budget exhaustion, by contrast, is fatal to the call and
+produces only the sidecar record. This is created wherever a cassette is being recorded (both
 `LCG_RECORD_LLM` and `lcg-eval --record-cassette`) — never in replay mode, since no live failure
 can occur there. The file is created eagerly (empty, if no failures occur) alongside the
 cassette itself.

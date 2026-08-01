@@ -121,12 +121,28 @@ impl ExtractionFailureWriter {
             && state.bytes_in_current_file > 0
             && state.bytes_in_current_file + chunk_bytes > self.max_bytes_per_file
         {
-            state.file_seq += 1;
-            let rotated_path = numbered_path(&self.base_path, state.file_seq);
-            state.file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&rotated_path)?;
+            // `create_new` (not `create` + `append`) so rotation always lands on a genuinely
+            // fresh file: if a numbered file this instance doesn't know about already exists
+            // (a stale file from a prior run `open()` didn't resume from, or a concurrent
+            // writer), appending to it would silently grow it past `max_bytes_per_file` since
+            // `bytes_in_current_file` would be reset to 0 without accounting for its real,
+            // possibly near-cap size.
+            loop {
+                state.file_seq += 1;
+                let rotated_path = numbered_path(&self.base_path, state.file_seq);
+                match OpenOptions::new()
+                    .create_new(true)
+                    .append(true)
+                    .open(&rotated_path)
+                {
+                    Ok(f) => {
+                        state.file = f;
+                        break;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
             state.bytes_in_current_file = 0;
         }
         writeln!(state.file, "{line}")?;
@@ -407,6 +423,42 @@ mod tests {
             std::fs::read_to_string(&rotated_2).unwrap().lines().count(),
             1,
             "the post-restart record must land in a fresh rotated file, not file .1"
+        );
+    }
+
+    #[test]
+    fn rotation_skips_past_a_numbered_file_it_did_not_create() {
+        // Review finding (Copilot): rotation must not silently grow a numbered file it didn't
+        // itself just create — e.g. one that appeared after this writer's `open()` scan ran
+        // (a concurrent writer, or any other reason a `.1.jsonl` exists that this in-memory
+        // `file_seq` doesn't yet know about).
+        let dir = TempDir::new().unwrap();
+        let cassette_path = dir.path().join("run.cassette.jsonl");
+        let record = record_n(1);
+        let one_line_bytes = serde_json::to_string(&record).unwrap().len() as u64 + 1;
+        let writer = ExtractionFailureWriter::open(&cassette_path, one_line_bytes + 1).unwrap();
+
+        // Simulate a file appearing after open()'s scan — this writer's in-memory file_seq is
+        // still 0, so its next rotation will target `.1.jsonl`.
+        let rotated_1 = dir.path().join("run.cassette.jsonl.failures.1.jsonl");
+        std::fs::write(&rotated_1, "{\"pre-existing\":\"content\"}\n").unwrap();
+
+        writer.append(&record).unwrap(); // fills the base file to the cap
+        writer.append(&record_n(2)).unwrap(); // forces rotation
+
+        let rotated_2 = dir.path().join("run.cassette.jsonl.failures.2.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&rotated_1).unwrap(),
+            "{\"pre-existing\":\"content\"}\n",
+            "a numbered file this writer didn't create must be left untouched"
+        );
+        assert!(
+            rotated_2.exists(),
+            "rotation must skip past the colliding file and land on a fresh one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&rotated_2).unwrap().lines().count(),
+            1
         );
     }
 

@@ -199,8 +199,13 @@ impl TeeSink {
 
 impl TelemetrySink for TeeSink {
     fn emit(&self, event: TelemetryEvent) {
-        for sink in &self.sinks {
-            sink.emit(event.clone());
+        // Clone for every sink but the last, which takes the original — avoids one needless
+        // clone of a potentially-large `ExtractionFailure` payload per `emit` call.
+        if let Some((last, rest)) = self.sinks.split_last() {
+            for sink in rest {
+                sink.emit(event.clone());
+            }
+            last.emit(event);
         }
     }
 }

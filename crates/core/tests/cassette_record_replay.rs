@@ -596,6 +596,52 @@ async fn malformed_response_produces_one_complete_sidecar_record() {
 }
 
 #[tokio::test]
+async fn a_2xx_response_with_invalid_json_is_classified_malformed_not_http_error() {
+    // A response was received and the HTTP layer itself succeeded — the failure is in the
+    // body's syntax, not the transport. Must not be classified "http_error" (which would also
+    // produce a misleading "HTTP 200" error message) — review finding from Copilot/CodeRabbit
+    // on PR #308.
+    let (addr, _server) =
+        spawn_stub_server_with_fixed_response("HTTP/1.1 200 OK", "not valid json {").await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-invalid-json",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Ipc(_)), "got {err:?}");
+    assert!(
+        !format!("{err}").contains("HTTP 200"),
+        "error must not claim a successful status failed: {err}"
+    );
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-invalid-json");
+    assert_eq!(r["classification"], "malformed");
+    assert_eq!(
+        r["raw_body"], "not valid json {",
+        "the complete raw body must be stored, not dropped"
+    );
+}
+
+#[tokio::test]
 async fn budget_exhaustion_after_retry_produces_one_complete_sidecar_record() {
     // Always responds with stop_reason: max_tokens, regardless of the (doubled) max_tokens
     // sent — forces exhaustion after exactly one retry, matching do_extract_entities' own
