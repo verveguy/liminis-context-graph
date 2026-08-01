@@ -64,7 +64,7 @@ the workflow's human-readable `name:`. The filename-derived slug stays stable if
 name is edited later; the `name:` values themselves are only used for the `workflow_run` trigger
 match, which is unavoidable since GitHub's `workflow_run` trigger keys on `name:`, not path.
 
-The listener searches for an open issue carrying both labels before creating a new one. A repeat
+The listener searches for an *open* issue carrying both labels before creating a new one. A repeat
 failure appends a comment to the existing issue rather than rewriting its body, so the issue's
 comment history preserves *when* a workflow flapped versus stayed broken continuously — only
 creation and closure touch the issue's body/state directly. Both labels are created on every
@@ -72,6 +72,14 @@ invocation, not as a one-time setup step. An "already exists" error is ignored; 
 label-creation error fails the workflow loudly, because `gh issue create --label <label>` fails
 outright against a label that doesn't exist yet — without this, the very first real failure could
 be dropped silently, which is the kind of gap this mechanism exists to close.
+
+The `--state open` scoping is deliberate but has a known gap: if a human closes a tracking issue
+manually (e.g. "won't fix", or closed by mistake) while the underlying workflow keeps failing, the
+next failing run won't find it — closed issues aren't searched — and will file a fresh issue rather
+than reopening the old one. This is an accepted tradeoff, not an oversight: reopening a closed
+issue by matching labels risks reviving something a human deliberately closed for a reason the
+mechanism can't see (e.g. "known flaky, tracked elsewhere"). A fresh issue on the next failure is
+the safer default.
 
 ### Lifecycle mapping from `conclusion`
 
