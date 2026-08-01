@@ -240,11 +240,12 @@ measured on one corpus should not be quoted as a property of a model.
 
 **The real trade is reliability, not quality.** The MoE runs 1.7× faster (55.9 vs 33 tok/s;
 1.87h vs ~4h for the corpus) and errors **3.5× more often** (7 chunks vs 2). Its tail is also
-worse: p50 16.8s but **p99 321s**, a five-minute worst chunk. All 7 failures were malformed
-parses (`structured_output.malformed: 7`, equal to `errors`), with no budget-exhaustion
-events — so the `max_tokens` doubling retry never fired and 3.1% is the raw parse-failure
-rate. (A direct probe at 17000 chars *does* truncate, but that bypasses the retry path;
-don't quote it as the pipeline's behaviour.)
+worse: p50 16.8s but **p99 321s**, a five-minute worst chunk. All 7 *counted* failures were
+malformed parses (`structured_output.malformed: 7`, equal to `errors`). Because entity-side
+budget exhaustion returns `Err` and would appear in `errors`, that equality rules truncation
+out **on the entity path only** — it says nothing about edges, for the reason in the warning
+below. (A direct probe at 17000 chars *does* truncate, but it bypasses the retry path; don't
+quote it as the pipeline's behaviour.)
 
 Two rates are easy to confuse here. Per **call**, malformed is 7/446 = **1.57%**; per
 **chunk** it is 7/228 = **3.07%**, because a chunk needs both its entity and edge call to
