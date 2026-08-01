@@ -82,15 +82,18 @@ impl ExtractionFailureWriter {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        // Ensure the unnumbered path exists even when rotation resumes elsewhere — the User
-        // Story 1 acceptance scenario expects `<cassette>.failures.jsonl` to exist.
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&base_path)?;
-
         let (file_seq, active_path) =
             highest_existing_numbered_file(&base_path).unwrap_or((0, base_path.clone()));
+        // Ensure the unnumbered path exists even when rotation resumes elsewhere — the User
+        // Story 1 acceptance scenario expects `<cassette>.failures.jsonl` to exist. Skipped
+        // when it's also the active write target (the common, no-prior-rotation case), since
+        // the open below already creates it.
+        if active_path != base_path {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&base_path)?;
+        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
