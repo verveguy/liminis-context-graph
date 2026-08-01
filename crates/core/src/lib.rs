@@ -10,6 +10,7 @@ pub mod embedder;
 pub mod env;
 pub mod episode;
 pub mod error;
+pub mod extraction_failures;
 pub mod extractor;
 pub mod handlers;
 pub mod ipc;
@@ -36,6 +37,10 @@ pub use db::{Conn, Db};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;
+pub use extraction_failures::{
+    ExtractionFailureRecord, ExtractionFailureSink, ExtractionFailureWriter,
+    DEFAULT_MAX_BYTES_PER_FILE,
+};
 pub use extractor::{
     AnthropicExtractor, ConfigurableExtractor, ExtractOptions, Extractor, MockExtractor,
     OaiExtractor,
@@ -46,7 +51,7 @@ pub use ontology::{Ontology, OntologyMode};
 pub use rebuild_job::{JobStatus, RebuildJob};
 pub use replay::{FailureSample, ReplayOptions, ReplayProgress, ReplayStats, WalReplayer};
 pub use schema::init as init_schema;
-pub use telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink};
+pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
 pub use types::{
     EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionResult, MentionsEdge,
     RelatesToEdge, SourceType,
