@@ -39,6 +39,11 @@ pub struct ExtractionFailureRecord {
     pub finish_reason: Option<String>,
     pub completion_tokens: Option<u64>,
     pub max_tokens: u32,
+    /// #307 FR-007: count of entities already extracted for this chunk before an edge-call
+    /// failure discarded them from the caller's return value. `#[serde(default)]` so sidecar
+    /// files written before this field existed still deserialize.
+    #[serde(default)]
+    pub entities_extracted: Option<usize>,
 }
 
 struct WriterState {
@@ -235,6 +240,7 @@ impl TelemetrySink for ExtractionFailureSink {
             finish_reason,
             completion_tokens,
             max_tokens,
+            entities_extracted,
         } = event
         {
             let record = ExtractionFailureRecord {
@@ -247,6 +253,7 @@ impl TelemetrySink for ExtractionFailureSink {
                 finish_reason,
                 completion_tokens,
                 max_tokens,
+                entities_extracted,
             };
             if let Err(e) = self.writer.append(&record) {
                 eprintln!(
@@ -274,6 +281,7 @@ mod tests {
             finish_reason: Some("max_tokens".to_string()),
             completion_tokens: Some(8192),
             max_tokens: 8192,
+            entities_extracted: None,
         }
     }
 
@@ -307,6 +315,7 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             completion_tokens: Some(100),
             max_tokens: 8192,
+            entities_extracted: Some(63),
         };
         writer.append(&record).unwrap();
 
@@ -320,6 +329,7 @@ mod tests {
             parsed.raw_body, record.raw_body,
             "body must be stored whole, not truncated"
         );
+        assert_eq!(parsed.entities_extracted, Some(63));
     }
 
     #[test]
@@ -356,6 +366,7 @@ mod tests {
             finish_reason: None,
             completion_tokens: None,
             max_tokens: 8192,
+            entities_extracted: None,
         }
     }
 

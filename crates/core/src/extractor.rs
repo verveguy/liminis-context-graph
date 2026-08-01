@@ -13,6 +13,10 @@ use crate::{
     ontology::{normalize_relation_type, Ontology},
     prompts,
     telemetry::{cost_for_usage, now_ms, TelemetryEvent, TelemetrySink},
+    token_budget::{
+        compute_initial_max_tokens, next_retry_max_tokens, resolve_max_tokens_ceiling,
+        ExtractionCallType,
+    },
     types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
 };
 
@@ -267,13 +271,15 @@ impl AnthropicExtractor {
             }
         });
 
-        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let ceiling = resolve_max_tokens_ceiling();
         let chunk_len_bytes = opts.episode_body.len();
+        let initial_max_tokens =
+            compute_initial_max_tokens(chunk_len_bytes, ExtractionCallType::Entities, ceiling);
         let chunk_key = opts.chunk_key.map(|s| s.to_string());
 
         let mut body = json!({
             "model": &self.model,
-            "max_tokens": INITIAL_MAX_TOKENS,
+            "max_tokens": initial_max_tokens,
             "system": system_value,
             "tools": [entity_tool],
             "tool_choice": {"type": "tool", "name": "extract_entities"},
@@ -284,7 +290,7 @@ impl AnthropicExtractor {
         loop {
             let current_max_tokens = body["max_tokens"]
                 .as_u64()
-                .unwrap_or(INITIAL_MAX_TOKENS as u64) as u32;
+                .unwrap_or(initial_max_tokens as u64) as u32;
             let resp = match self.send_with_retry(&body).await {
                 SendOutcome::Ok(v) => v,
                 SendOutcome::HttpFailure { status, body: raw } => {
@@ -298,6 +304,7 @@ impl AnthropicExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens: current_max_tokens,
+                        entities_extracted: None,
                     });
                     return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
                 }
@@ -312,6 +319,7 @@ impl AnthropicExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens: current_max_tokens,
+                        entities_extracted: None,
                     });
                     return Err(Error::Ipc(
                         "entity extraction: response body was not valid JSON".to_string(),
@@ -329,7 +337,7 @@ impl AnthropicExtractor {
                             ts_ms: now_ms(),
                             model: self.model.clone(),
                             chunk_len_bytes,
-                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            initial_max_tokens,
                             retry_succeeded: true,
                             chunk_key: chunk_key.clone(),
                         });
@@ -338,18 +346,17 @@ impl AnthropicExtractor {
                 }
                 EntityOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
-                        let current = body["max_tokens"]
-                            .as_u64()
-                            .unwrap_or(INITIAL_MAX_TOKENS as u64);
-                        body["max_tokens"] = json!(current * 2);
-                        max_tokens_retried = true;
-                        continue;
+                        if let Some(next) = next_retry_max_tokens(current_max_tokens, ceiling) {
+                            body["max_tokens"] = json!(next);
+                            max_tokens_retried = true;
+                            continue;
+                        }
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         chunk_len_bytes,
-                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        initial_max_tokens,
                         retry_succeeded: false,
                         chunk_key: chunk_key.clone(),
                     });
@@ -359,6 +366,7 @@ impl AnthropicExtractor {
                         "truncation",
                         &resp_for_failure,
                         current_max_tokens,
+                        None,
                     );
                     return Err(Error::Ipc(
                         "entity extraction budget exhausted after retry".to_string(),
@@ -371,6 +379,7 @@ impl AnthropicExtractor {
                         "malformed",
                         &resp_for_failure,
                         current_max_tokens,
+                        None,
                     );
                     return Err(e);
                 }
@@ -406,13 +415,16 @@ impl AnthropicExtractor {
 
         let edge_tool = build_edge_tool_schema(&sanitized_names);
 
-        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let ceiling = resolve_max_tokens_ceiling();
         let chunk_len_bytes = opts.episode_body.len();
+        let initial_max_tokens =
+            compute_initial_max_tokens(chunk_len_bytes, ExtractionCallType::Edges, ceiling);
         let chunk_key = opts.chunk_key.map(|s| s.to_string());
+        let entities_extracted = Some(entity_names.len());
 
         let mut body = json!({
             "model": &self.model,
-            "max_tokens": INITIAL_MAX_TOKENS,
+            "max_tokens": initial_max_tokens,
             "system": system_value,
             "tools": [edge_tool],
             "tool_choice": {"type": "tool", "name": "extract_edges"},
@@ -423,7 +435,7 @@ impl AnthropicExtractor {
         loop {
             let current_max_tokens = body["max_tokens"]
                 .as_u64()
-                .unwrap_or(INITIAL_MAX_TOKENS as u64) as u32;
+                .unwrap_or(initial_max_tokens as u64) as u32;
             let resp = match self.send_with_retry(&body).await {
                 SendOutcome::Ok(v) => v,
                 SendOutcome::HttpFailure { status, body: raw } => {
@@ -437,6 +449,7 @@ impl AnthropicExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens: current_max_tokens,
+                        entities_extracted,
                     });
                     return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
                 }
@@ -451,6 +464,7 @@ impl AnthropicExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens: current_max_tokens,
+                        entities_extracted,
                     });
                     return Err(Error::Ipc(
                         "edge extraction: response body was not valid JSON".to_string(),
@@ -468,7 +482,7 @@ impl AnthropicExtractor {
                             ts_ms: now_ms(),
                             model: self.model.clone(),
                             chunk_len_bytes,
-                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            initial_max_tokens,
                             retry_succeeded: true,
                             chunk_key: chunk_key.clone(),
                         });
@@ -501,18 +515,17 @@ impl AnthropicExtractor {
                 }
                 EdgeOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
-                        let current = body["max_tokens"]
-                            .as_u64()
-                            .unwrap_or(INITIAL_MAX_TOKENS as u64);
-                        body["max_tokens"] = json!(current * 2);
-                        max_tokens_retried = true;
-                        continue;
+                        if let Some(next) = next_retry_max_tokens(current_max_tokens, ceiling) {
+                            body["max_tokens"] = json!(next);
+                            max_tokens_retried = true;
+                            continue;
+                        }
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         chunk_len_bytes,
-                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        initial_max_tokens,
                         retry_succeeded: false,
                         chunk_key: chunk_key.clone(),
                     });
@@ -522,10 +535,16 @@ impl AnthropicExtractor {
                         "truncation",
                         &resp_for_failure,
                         current_max_tokens,
+                        entities_extracted,
                     );
-                    // Edge budget exhaustion is not fatal — return empty list.
-                    eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
-                    return Ok(vec![]);
+                    // #307 FR-004: edge budget exhaustion is now fatal, matching the entity
+                    // path — Ok(vec![]) made a truncated chunk indistinguishable from one where
+                    // the model genuinely found zero edges, corrupting eval measurement (see
+                    // ADR-0307). The already-extracted entities are not lost: they are captured
+                    // above via `entities_extracted` in the ExtractionFailure record/sidecar.
+                    return Err(Error::Ipc(
+                        "edge extraction budget exhausted after retry".to_string(),
+                    ));
                 }
                 EdgeOutcome::ParseError(e) => {
                     self.emit_extraction_failure(
@@ -534,6 +553,7 @@ impl AnthropicExtractor {
                         "malformed",
                         &resp_for_failure,
                         current_max_tokens,
+                        entities_extracted,
                     );
                     return Err(e);
                 }
@@ -809,6 +829,7 @@ impl AnthropicExtractor {
         classification: &str,
         raw_resp: &Value,
         max_tokens: u32,
+        entities_extracted: Option<usize>,
     ) {
         self.sink.emit(TelemetryEvent::ExtractionFailure {
             ts_ms: now_ms(),
@@ -820,6 +841,7 @@ impl AnthropicExtractor {
             finish_reason: raw_resp["stop_reason"].as_str().map(String::from),
             completion_tokens: raw_resp["usage"]["output_tokens"].as_u64(),
             max_tokens,
+            entities_extracted,
         });
     }
 }
@@ -1406,6 +1428,7 @@ impl OaiExtractor {
         classification: &str,
         raw_resp: &Value,
         max_tokens: u32,
+        entities_extracted: Option<usize>,
     ) {
         self.sink.emit(TelemetryEvent::ExtractionFailure {
             ts_ms: now_ms(),
@@ -1417,6 +1440,7 @@ impl OaiExtractor {
             finish_reason: oai_finish_reason(raw_resp).map(String::from),
             completion_tokens: raw_resp["usage"]["completion_tokens"].as_u64(),
             max_tokens,
+            entities_extracted,
         });
     }
 
@@ -1435,10 +1459,12 @@ impl OaiExtractor {
             opts.custom_instructions,
         );
 
-        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let ceiling = resolve_max_tokens_ceiling();
         let chunk_len_bytes = opts.episode_body.len();
+        let initial_max_tokens =
+            compute_initial_max_tokens(chunk_len_bytes, ExtractionCallType::Entities, ceiling);
         let chunk_key = opts.chunk_key.map(|s| s.to_string());
-        let mut max_tokens = INITIAL_MAX_TOKENS;
+        let mut max_tokens = initial_max_tokens;
         let mut max_tokens_retried = false;
 
         loop {
@@ -1455,6 +1481,7 @@ impl OaiExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens,
+                        entities_extracted: None,
                     });
                     return Err(Error::Ipc(format!("entity extraction HTTP {status}")));
                 }
@@ -1469,6 +1496,7 @@ impl OaiExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens,
+                        entities_extracted: None,
                     });
                     return Err(Error::Ipc(
                         "entity extraction: response body was not valid JSON".to_string(),
@@ -1499,7 +1527,7 @@ impl OaiExtractor {
                             ts_ms: now_ms(),
                             model: self.model.clone(),
                             chunk_len_bytes,
-                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            initial_max_tokens,
                             retry_succeeded: true,
                             chunk_key: chunk_key.clone(),
                         });
@@ -1508,15 +1536,17 @@ impl OaiExtractor {
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
-                        max_tokens *= 2;
-                        max_tokens_retried = true;
-                        continue;
+                        if let Some(next) = next_retry_max_tokens(max_tokens, ceiling) {
+                            max_tokens = next;
+                            max_tokens_retried = true;
+                            continue;
+                        }
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         chunk_len_bytes,
-                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        initial_max_tokens,
                         retry_succeeded: false,
                         chunk_key: chunk_key.clone(),
                     });
@@ -1526,6 +1556,7 @@ impl OaiExtractor {
                         "truncation",
                         &resp,
                         max_tokens,
+                        None,
                     );
                     return Err(Error::Ipc(
                         "entity extraction budget exhausted after retry".to_string(),
@@ -1544,6 +1575,7 @@ impl OaiExtractor {
                         "malformed",
                         &resp,
                         max_tokens,
+                        None,
                     );
                     return Err(e);
                 }
@@ -1568,10 +1600,13 @@ impl OaiExtractor {
             opts.custom_instructions,
         );
 
-        const INITIAL_MAX_TOKENS: u32 = 8192;
+        let ceiling = resolve_max_tokens_ceiling();
         let chunk_len_bytes = opts.episode_body.len();
+        let initial_max_tokens =
+            compute_initial_max_tokens(chunk_len_bytes, ExtractionCallType::Edges, ceiling);
         let chunk_key = opts.chunk_key.map(|s| s.to_string());
-        let mut max_tokens = INITIAL_MAX_TOKENS;
+        let entities_extracted = Some(entity_names.len());
+        let mut max_tokens = initial_max_tokens;
         let mut max_tokens_retried = false;
 
         loop {
@@ -1588,6 +1623,7 @@ impl OaiExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens,
+                        entities_extracted,
                     });
                     return Err(Error::Ipc(format!("edge extraction HTTP {status}")));
                 }
@@ -1602,6 +1638,7 @@ impl OaiExtractor {
                         finish_reason: None,
                         completion_tokens: None,
                         max_tokens,
+                        entities_extracted,
                     });
                     return Err(Error::Ipc(
                         "edge extraction: response body was not valid JSON".to_string(),
@@ -1632,7 +1669,7 @@ impl OaiExtractor {
                             ts_ms: now_ms(),
                             model: self.model.clone(),
                             chunk_len_bytes,
-                            initial_max_tokens: INITIAL_MAX_TOKENS,
+                            initial_max_tokens,
                             retry_succeeded: true,
                             chunk_key: chunk_key.clone(),
                         });
@@ -1662,15 +1699,17 @@ impl OaiExtractor {
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
-                        max_tokens *= 2;
-                        max_tokens_retried = true;
-                        continue;
+                        if let Some(next) = next_retry_max_tokens(max_tokens, ceiling) {
+                            max_tokens = next;
+                            max_tokens_retried = true;
+                            continue;
+                        }
                     }
                     self.sink.emit(TelemetryEvent::ExtractionTruncated {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         chunk_len_bytes,
-                        initial_max_tokens: INITIAL_MAX_TOKENS,
+                        initial_max_tokens,
                         retry_succeeded: false,
                         chunk_key: chunk_key.clone(),
                     });
@@ -1680,10 +1719,16 @@ impl OaiExtractor {
                         "truncation",
                         &resp,
                         max_tokens,
+                        entities_extracted,
                     );
-                    // Edge budget exhaustion is not fatal — return empty list (matches Anthropic).
-                    eprintln!("liminis-context-graph: edge extraction budget exhausted; returning empty edge list");
-                    return Ok(vec![]);
+                    // #307 FR-004: edge budget exhaustion is now fatal, matching the entity
+                    // path — Ok(vec![]) made a truncated chunk indistinguishable from one where
+                    // the model genuinely found zero edges, corrupting eval measurement (see
+                    // ADR-0307). The already-extracted entities are not lost: they are captured
+                    // above via `entities_extracted` in the ExtractionFailure record/sidecar.
+                    return Err(Error::Ipc(
+                        "edge extraction budget exhausted after retry".to_string(),
+                    ));
                 }
                 OaiChatOutcome::ParseError(e) => {
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
@@ -1698,6 +1743,7 @@ impl OaiExtractor {
                         "malformed",
                         &resp,
                         max_tokens,
+                        entities_extracted,
                     );
                     return Err(e);
                 }
