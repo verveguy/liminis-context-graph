@@ -225,10 +225,31 @@ So the local model is roughly **4.5× slower at p50**, and far worse in the tail
   risk of dropping relations the fixture doesn't model. Note `vocabulary_compliance` in the
   report only populates in strict mode, so that metric is still unmeasured.
   **"Open beats freeform" is established; "open beats strict" is not.**
-- **Other local models.** `gemma-4-26b-a4b` was available but not run. The April eval ranked
-  `gemma-3-27b` well behind qwen (edges 0.634 vs 0.852) with a 3.1% error rate, and MoE
-  architectures there traded edge quality for speed (`qwen3.6-35b-a3b`: 3.6× faster, 9pp
-  worse on edges). Both priors point the same way; neither is a measurement of gemma-4.
+- **Other local models.** `gemma-4-26b-a4b` **was run, and could not be scored** — it never
+  reached the quality stage, so its extraction quality remains unmeasured. Three builds
+  across two runtimes all emit malformed JSON at rates far above the incumbent's:
+
+  | build / runtime | measured | failure rate |
+  |---|---|---:|
+  | `mlx-community/…-4bit` (mlx_lm) | full 228-chunk capture | **34.2%** |
+  | `lmstudio-community/…-4bit` (mlx_lm) | 10 distinct 3000-char windows | **~10%** (1/10; n is small, interval roughly 2–40%) |
+  | `gemma4:26b` GGUF (Ollama) | 4 sizes | degenerate both directions — 8192-token runaway on a 1500-char input, near-empty elsewhere |
+
+  Incumbent `qwen3.6-27b` measures 0.4–2.2% on the same corpus. The failure is corrupt JSON
+  *mid-document* (`Expecting ':' delimiter`), not truncation — which matters because the OAI
+  path retries only HTTP 429/529 and budget exhaustion, so a corrupt body is an unrecoverable
+  chunk error. The `lmstudio` build is markedly healthier than the `mlx-community` one
+  (34.2% → ~10%), which points at conversion quality rather than the weights alone.
+
+  **This is a build/runtime observation, not a verdict on gemma-4.** Sampling parameters,
+  context length, and prompt shape were all excluded as causes; the behaviour is consistent
+  with open upstream reports against this model on MLX. A fair quality comparison needs a
+  build that emits valid JSON, and we do not currently have one.
+
+  Priors from the April eval pointed the same way but do not substitute for measurement:
+  `gemma-3-27b` ranked well behind qwen (edges 0.634 vs 0.852) at a 3.1% error rate, and MoE
+  architectures traded edge quality for speed (`qwen3.6-35b-a3b`: 3.6× faster, 9pp worse on
+  edges).
 - **Downstream graph quality.** The judge was asked which extraction better captures the
   source, not which produces a better graph. qwen's ~32% surplus means more dedup pressure,
   more storage, more retrieval noise. Unmeasured here.
@@ -257,6 +278,16 @@ scoring phase will hit transient faults; making one fatal discards hours
 spend limit fails *every* call — a circuit breaker after 10 consecutive failures
 ([#275](https://github.com/verveguy/liminis-context-graph/issues/275)) turned one such event
 into a complete report plus 2233 calls not made.
+
+**A local server can be deterministic, which silently invalidates repeat-sampling.**
+`mlx_lm.server` returned byte-identical output for three identical calls at `temperature:
+1.0` (sha256 `d61e717b…`), and an explicit `seed` changed nothing. Temperature is not
+ignored — `0.0` and `1.0` give different outputs — but neither varies across repeats. So
+sending the same prompt N times measures **one draw counted N times**, and a "0/6 failures"
+result carries exactly as much information as 0/1. This is easy to miss because the
+arithmetic looks like a sample size. Estimate reliability across **distinct inputs**
+instead; that is what the 228-chunk corpus already does, and why per-chunk error rate is
+the number to trust. The same caution applies to any hosted endpoint with caching enabled.
 
 **Reasoning/thinking modes hurt this task.** The April eval measured
 `qwen3.6-27b-thinking-only` at 112.7s p50 versus 10.9s, *and* scoring worse on enumeration.
