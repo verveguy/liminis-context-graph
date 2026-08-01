@@ -66,6 +66,15 @@ impl ExtractionFailureWriter {
     /// `run.jsonl.failures.jsonl`. Created eagerly, empty if no failures ever occur, matching
     /// `CassetteWriter::open`'s own eager-creation behavior. Re-opening an existing path
     /// resumes appending to it rather than truncating.
+    ///
+    /// If rotation already happened in a previous process (FR-003's "long-running service" —
+    /// e.g. this writer is reconstructed across a service restart), resumes appending to the
+    /// highest-numbered rotated file already on disk rather than the unnumbered base file: the
+    /// base file was already rotated away from and its on-disk size is stale, so reopening it
+    /// here would silently resume writing into a file this writer previously closed, and the
+    /// next rotation would reuse `file_seq = 1` and treat an existing, possibly near-cap
+    /// `<cassette>.failures.1.jsonl` as empty — letting it silently grow past
+    /// `max_bytes_per_file`.
     pub fn open(cassette_path: impl AsRef<Path>, max_bytes_per_file: u64) -> Result<Self, Error> {
         let base_path = sidecar_path(cassette_path.as_ref());
         if let Some(parent) = base_path.parent() {
@@ -73,17 +82,26 @@ impl ExtractionFailureWriter {
                 std::fs::create_dir_all(parent)?;
             }
         }
-        let file = OpenOptions::new()
+        // Ensure the unnumbered path exists even when rotation resumes elsewhere — the User
+        // Story 1 acceptance scenario expects `<cassette>.failures.jsonl` to exist.
+        OpenOptions::new()
             .create(true)
             .append(true)
             .open(&base_path)?;
+
+        let (file_seq, active_path) =
+            highest_existing_numbered_file(&base_path).unwrap_or((0, base_path.clone()));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&active_path)?;
         let bytes_in_current_file = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
             base_path,
             max_bytes_per_file,
             inner: Mutex::new(WriterState {
                 file,
-                file_seq: 0,
+                file_seq,
                 bytes_in_current_file,
             }),
         })
@@ -131,6 +149,34 @@ fn numbered_path(base_path: &Path, seq: u32) -> PathBuf {
     let base_str = base_path.to_string_lossy();
     let stripped = base_str.strip_suffix(".jsonl").unwrap_or(&base_str);
     PathBuf::from(format!("{stripped}.{seq}.jsonl"))
+}
+
+/// Scans `base_path`'s directory for the highest-numbered `<cassette>.failures.N.jsonl` file
+/// already on disk, returning `(seq, path)` — `None` if no rotation has ever happened for this
+/// sidecar. Used by [`ExtractionFailureWriter::open`] to resume rotation state across a process
+/// restart instead of assuming `file_seq: 0`.
+fn highest_existing_numbered_file(base_path: &Path) -> Option<(u32, PathBuf)> {
+    let parent = base_path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let base_str = base_path.to_string_lossy();
+    let stripped = base_str.strip_suffix(".jsonl").unwrap_or(&base_str);
+    let stem = Path::new(stripped).file_name()?.to_str()?;
+    let prefix = format!("{stem}.");
+
+    let mut max_seq = None;
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name
+            .strip_prefix(&prefix)
+            .and_then(|r| r.strip_suffix(".jsonl"))
+        else {
+            continue;
+        };
+        if let Ok(seq) = rest.parse::<u32>() {
+            max_seq = Some(max_seq.map_or(seq, |m: u32| m.max(seq)));
+        }
+    }
+    max_seq.map(|seq| (seq, numbered_path(base_path, seq)))
 }
 
 /// `TelemetrySink` that writes only `TelemetryEvent::ExtractionFailure` events to the sidecar
@@ -316,6 +362,51 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&rotated_2).unwrap().lines().count(),
             1
+        );
+    }
+
+    #[test]
+    fn reopening_after_rotation_resumes_from_the_highest_numbered_file_not_the_base() {
+        // FR-003 names a "long-running service" — a process restart is a normal part of that
+        // lifetime. A writer reopened after rotation already happened must not silently resume
+        // writing into the (already rotated-away-from, stale-sized) base file, and must not
+        // treat an existing near-cap numbered file as empty on the next rotation decision.
+        let dir = TempDir::new().unwrap();
+        let cassette_path = dir.path().join("run.cassette.jsonl");
+        let record = record_n(1);
+        let one_line_bytes = serde_json::to_string(&record).unwrap().len() as u64 + 1;
+        let max_bytes = one_line_bytes + 1;
+
+        {
+            let writer = ExtractionFailureWriter::open(&cassette_path, max_bytes).unwrap();
+            writer.append(&record).unwrap();
+            writer.append(&record_n(2)).unwrap();
+            // Now: base has 1 record, run.cassette.jsonl.failures.1.jsonl has 1 record and is
+            // already at the rotation cap.
+        }
+
+        // Simulate a process restart: a brand-new writer instance for the same cassette path.
+        let writer = ExtractionFailureWriter::open(&cassette_path, max_bytes).unwrap();
+        writer.append(&record_n(3)).unwrap();
+
+        let base = dir.path().join("run.cassette.jsonl.failures.jsonl");
+        let rotated_1 = dir.path().join("run.cassette.jsonl.failures.1.jsonl");
+        let rotated_2 = dir.path().join("run.cassette.jsonl.failures.2.jsonl");
+
+        assert_eq!(
+            std::fs::read_to_string(&base).unwrap().lines().count(),
+            1,
+            "the base file must not be silently resumed once rotation already moved past it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&rotated_1).unwrap().lines().count(),
+            1,
+            "the already-full rotated file must not silently grow past the cap"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&rotated_2).unwrap().lines().count(),
+            1,
+            "the post-restart record must land in a fresh rotated file, not file .1"
         );
     }
 
