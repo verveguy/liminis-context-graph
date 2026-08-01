@@ -266,6 +266,22 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
   `spawn_blocking` moves it to the dedicated blocking-task pool instead, consistent with how
   every other CPU/IO-bound step in this handler (the chunk_id lookup, `add_episode`'s commit
   phase, the replace-path delete) is already structured.
+- **Known limitation: splitting is purely whitespace-based and has no awareness of
+  `SourceType::Json`.** `source_type` is derived from `source_file`'s `.json` extension a few
+  lines before splitting happens, and is used to select a JSON-specific extraction prompt
+  (`prompts::entity_system_prompt`) — but `chunk_split::split_into_units` never sees it. An
+  oversized `.json`-sourced `chunk_text` is split at whitespace boundaries with no regard for JSON
+  structure, so a unit boundary can (and typically will) land mid-string, mid-object, or
+  mid-array, handing syntactically broken JSON to a prompt built to expect well-formed JSON. This
+  is a materially worse degradation than the general prose case this ADR otherwise discusses
+  (extraction quality declining "sublinearly," not structural breakage) and is silent — nothing in
+  the response signals it. A structure-aware splitter for `SourceType::Json` (e.g. splitting on
+  top-level array/object boundaries rather than character windows) is a larger, format-specific
+  design than this issue's whitespace/hard-cut-fallback splitter and is out of scope here; this is
+  documented as an accepted gap for a follow-up rather than fixed in this pass. Practical
+  mitigation today: callers ingesting large structured/JSON documents should keep `chunk_text`
+  under the advisory threshold so splitting never triggers, same as the general size-contract
+  guidance already in the README.
 - **The no-op response's singular-`episode_uuid`-shape-plus-`warning` combination (when
   `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` is lowered between an initial below-threshold ingest and a
   byte-identical resubmission) is covered by a direct unit test against `build_noop_response`, not
