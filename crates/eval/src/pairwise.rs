@@ -402,6 +402,7 @@ mod tests {
             chunk_results,
             structured_output: StructuredOutputCounts::default(),
             vocabulary_compliance: None,
+            truncated: Default::default(),
         }
     }
 

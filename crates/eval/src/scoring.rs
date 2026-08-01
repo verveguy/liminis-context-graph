@@ -8,9 +8,10 @@ use crate::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
 use crate::judge_cache::{cache_key, JudgeCache};
 use crate::metrics::{edge_strict_prf1, entity_strict_prf1};
 use crate::report::{
-    percentiles, CandidateReport, StructuredOutputReliability, VocabularyComplianceReport,
+    percentiles, CandidateReport, StructuredOutputReliability, TruncationReport,
+    VocabularyComplianceReport,
 };
-use crate::runner::{BackendRunResult, VocabularyComplianceCounts};
+use crate::runner::{BackendRunResult, TruncationCounts, VocabularyComplianceCounts};
 
 pub async fn score_candidate(
     run_result: &BackendRunResult,
@@ -166,6 +167,7 @@ pub async fn score_candidate(
         error_rate,
         latency: percentiles(latencies),
         structured_output,
+        truncated: truncation_report(run_result.truncated),
         vocabulary_compliance: run_result.vocabulary_compliance.map(vocab_report),
         strict_entity_f1: strict_entity.f1,
         strict_edge_f1: strict_edge.f1,
@@ -178,6 +180,14 @@ pub async fn score_candidate(
         judged_summary_f1: average(&judged_summary_f1s),
         judge_errors,
     })
+}
+
+/// Maps the harness-internal #306 FR-005 tally to the report's serializable shape.
+fn truncation_report(t: TruncationCounts) -> TruncationReport {
+    TruncationReport {
+        retry_succeeded: t.retry_succeeded,
+        exhausted: t.exhausted,
+    }
 }
 
 /// Maps the harness-internal FR-007 tally to the report's serializable shape.
@@ -352,6 +362,7 @@ mod tests {
             chunk_results,
             structured_output: Default::default(),
             vocabulary_compliance: None,
+            truncated: Default::default(),
         }
     }
 
@@ -481,6 +492,27 @@ mod tests {
         assert_eq!(report.judged_edge_precision, None);
         assert_eq!(report.judged_edge_recall, None);
         assert_eq!(report.judged_summary_f1, None);
+    }
+
+    // ── truncated (#306 FR-005) ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn score_candidate_maps_truncation_counts_into_the_report() {
+        let judge = ScriptedJudge::never_fails();
+        let (_dir, cache) = fresh_cache();
+        let reference = backend_run_result("reference", 1);
+        let mut candidate = backend_run_result("candidate", 1);
+        candidate.truncated = TruncationCounts {
+            retry_succeeded: 2,
+            exhausted: 3,
+        };
+
+        let report = score_candidate(&candidate, &reference, Some(&judge), &cache, "test-model")
+            .await
+            .unwrap();
+
+        assert_eq!(report.truncated.retry_succeeded, 2);
+        assert_eq!(report.truncated.exhausted, 3);
     }
 
     #[cfg(unix)]

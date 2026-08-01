@@ -41,6 +41,23 @@ pub struct StructuredOutputReliability {
     pub malformed_rate: f64,
 }
 
+/// #306 FR-005: per-candidate truncation visibility — distinguishes a retry that ultimately
+/// succeeded from a call that remained exhausted after retry, so edge-budget exhaustion (which
+/// stays non-fatal — FR-006) is never silently reported as a clean, genuinely-empty result.
+/// Aggregate-only, like `StructuredOutputReliability`: chunk-level attribution lives in the
+/// `<cassette>.failures.jsonl` sidecar, not in this report.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
+pub struct TruncationReport {
+    pub retry_succeeded: u64,
+    pub exhausted: u64,
+}
+
+impl TruncationReport {
+    pub fn total(&self) -> u64 {
+        self.retry_succeeded + self.exhausted
+    }
+}
+
 /// FR-007: how often a `Strict`-mode candidate emitted an entity or relation type outside
 /// the ontology's declared vocabulary — a distinct failure mode from JSON-syntax validity
 /// (`StructuredOutputReliability`), never folded into it (SC-003).
@@ -67,6 +84,8 @@ pub struct CandidateReport {
     pub error_rate: f64,
     pub latency: LatencyPercentiles,
     pub structured_output: StructuredOutputReliability,
+    /// #306 FR-005/SC-002: aggregate truncation visibility — see `TruncationReport`.
+    pub truncated: TruncationReport,
     /// `Some` only for a `Strict`-mode run (FR-007); `None` for freeform/`Open` runs.
     pub vocabulary_compliance: Option<VocabularyComplianceReport>,
     pub strict_entity_f1: f64,
@@ -233,6 +252,17 @@ impl Report {
                 c.structured_output.malformed,
                 c.structured_output.malformed_rate * 100.0,
             ));
+            // #306 FR-005/FR-006: rendered only when non-zero, matching `judge_errors`'
+            // convention below — a clean run's output stays unchanged (SC-004), and a
+            // truncated chunk is never silently folded into "clean".
+            if c.truncated.total() > 0 {
+                out.push_str(&format!(
+                    "  truncated: {} (retry succeeded: {}, exhausted after retry: {})\n",
+                    c.truncated.total(),
+                    c.truncated.retry_succeeded,
+                    c.truncated.exhausted,
+                ));
+            }
             // Vocabulary compliance (FR-007) is a distinct metric from structured-output
             // reliability above — rendered as its own line, only when applicable (Strict).
             if let Some(v) = &c.vocabulary_compliance {
@@ -370,6 +400,10 @@ mod tests {
                     malformed: 0,
                     malformed_rate: 0.0,
                 },
+                truncated: TruncationReport {
+                    retry_succeeded: 0,
+                    exhausted: 0,
+                },
                 vocabulary_compliance: None,
                 strict_entity_f1: 0.771,
                 strict_edge_f1: 0.771,
@@ -426,9 +460,12 @@ mod tests {
     /// addition, not the regression this guards — SC-004 is about *pairwise* not perturbing
     /// reference-mode output, and those fields are unrelated to pairwise. Update this golden
     /// when you mean to change the schema; never to make a red test go away.
+    ///
+    /// Moved a second time in #306: `truncated` (FR-005) was added to `CandidateReport`,
+    /// another intentional schema addition unrelated to pairwise.
     #[test]
     fn json_report_is_byte_identical_to_pre_pairwise_golden_sc004() {
-        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
+        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"truncated\": {\n        \"retry_succeeded\": 0,\n        \"exhausted\": 0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
         assert_eq!(sample_report().to_json(), golden);
     }
 
@@ -462,6 +499,51 @@ mod tests {
         assert!(out.contains("0.978"));
         assert!(out.contains("n/a"));
         assert!(out.contains("chunks scored"));
+    }
+
+    // ── truncated (#306 FR-005/FR-006/SC-002) ──────────────────────────────────────
+
+    #[test]
+    fn human_readable_report_omits_truncated_line_when_clean() {
+        // Acceptance Scenario 2: a chunk with no truncation must render as clean, not
+        // truncated — the line is entirely absent, not present-and-zero.
+        let out = sample_report().render_human_readable();
+        assert!(!out.contains("truncated:"));
+    }
+
+    #[test]
+    fn human_readable_report_renders_truncated_line_distinguishing_retry_outcome() {
+        let mut report = sample_report();
+        report.candidates[0].truncated = TruncationReport {
+            retry_succeeded: 2,
+            exhausted: 3,
+        };
+        let out = report.render_human_readable();
+        assert!(out.contains("truncated: 5"));
+        assert!(out.contains("retry succeeded: 2"));
+        assert!(out.contains("exhausted after retry: 3"));
+    }
+
+    #[test]
+    fn json_report_records_truncated_counts() {
+        let mut report = sample_report();
+        report.candidates[0].truncated = TruncationReport {
+            retry_succeeded: 1,
+            exhausted: 4,
+        };
+        let json = report.to_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["candidates"][0]["truncated"]["retry_succeeded"], 1);
+        assert_eq!(value["candidates"][0]["truncated"]["exhausted"], 4);
+    }
+
+    #[test]
+    fn truncation_report_total_sums_both_outcomes() {
+        let t = TruncationReport {
+            retry_succeeded: 2,
+            exhausted: 3,
+        };
+        assert_eq!(t.total(), 5);
     }
 
     #[test]
