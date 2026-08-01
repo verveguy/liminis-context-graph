@@ -113,6 +113,16 @@ floor) exceeds its `max` (the ceiling) — `compute_initial_max_tokens` addition
 floor as authoritative if it is ever called directly with an out-of-range ceiling, so the panic
 is unreachable from either entry point, not just the env-var path.
 
+A ceiling *at or just above* the floor is a distinct, non-panicking case that is intentionally
+left unvalidated: `clamp(chunk_len_bytes * ratio, FLOOR, ceiling)` collapses to a near-constant
+`FLOOR` for every call once `ceiling` is close to `MAX_TOKENS_FLOOR`, which silently defeats
+FR-002's proportional scaling (though not FR-006's runaway guard — the ceiling still bounds
+generation, just at a smaller value). This is documented as an operator-facing caveat in
+README.md's `LCG_EXTRACTION_MAX_TOKENS_CEILING` row rather than enforced in code: unlike the
+below-floor case, it cannot panic, and a hard minimum-above-floor policy would need its own
+arbitrary threshold with no corpus-derived basis (Decision 2 already treats the floor and ratios
+as fixed, non-operator-tunable shape parameters for exactly this reason).
+
 ### 3. `entities_extracted: Option<usize>` on the failure record answers Decision 1's real cost (FR-007)
 
 `TelemetryEvent::ExtractionFailure` and `ExtractionFailureRecord` (both from #306) gain a new
