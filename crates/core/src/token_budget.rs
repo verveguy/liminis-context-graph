@@ -37,15 +37,22 @@ const EDGE_TOKENS_PER_INPUT_BYTE: f64 = 1.5;
 pub fn resolve_max_tokens_ceiling() -> u32 {
     std::env::var("LCG_EXTRACTION_MAX_TOKENS_CEILING")
         .ok()
-        .and_then(|v| {
-            v.parse::<u32>()
-                .map_err(|_| {
-                    eprintln!(
-                        "liminis-context-graph: LCG_EXTRACTION_MAX_TOKENS_CEILING={v:?} is not a \
-                         valid u32; using default {MAX_TOKENS_CEILING_DEFAULT}"
-                    );
-                })
-                .ok()
+        .and_then(|v| match v.parse::<u32>() {
+            Ok(parsed) if parsed >= MAX_TOKENS_FLOOR => Some(parsed),
+            Ok(parsed) => {
+                eprintln!(
+                    "liminis-context-graph: LCG_EXTRACTION_MAX_TOKENS_CEILING={parsed} is below \
+                     the {MAX_TOKENS_FLOOR}-token floor; using default {MAX_TOKENS_CEILING_DEFAULT}"
+                );
+                None
+            }
+            Err(_) => {
+                eprintln!(
+                    "liminis-context-graph: LCG_EXTRACTION_MAX_TOKENS_CEILING={v:?} is not a \
+                     valid u32; using default {MAX_TOKENS_CEILING_DEFAULT}"
+                );
+                None
+            }
         })
         .unwrap_or(MAX_TOKENS_CEILING_DEFAULT)
 }
@@ -67,7 +74,12 @@ pub fn compute_initial_max_tokens(
     } else {
         u32::MAX
     };
-    scaled.clamp(MAX_TOKENS_FLOOR, ceiling)
+    // A ceiling below the floor would make `u32::clamp`'s min > max invariant panic; treat the
+    // floor as authoritative in that case rather than trusting an out-of-range caller-supplied
+    // ceiling (`resolve_max_tokens_ceiling` already rejects such values, but this function takes
+    // `ceiling` directly and must not panic regardless of what its caller passes).
+    let effective_ceiling = ceiling.max(MAX_TOKENS_FLOOR);
+    scaled.clamp(MAX_TOKENS_FLOOR, effective_ceiling)
 }
 
 /// Computes the next `max_tokens` value for the existing one-shot doubling retry, clamped to
@@ -122,6 +134,18 @@ mod tests {
         let edges = compute_initial_max_tokens(16_670, ExtractionCallType::Edges, ceiling);
         assert!(entities < ceiling, "entities budget must have headroom");
         assert!(edges < ceiling, "edges budget must have headroom");
+    }
+
+    #[test]
+    fn compute_initial_max_tokens_does_not_panic_when_ceiling_is_below_floor() {
+        // Regression: `u32::clamp` panics if min > max. A ceiling below MAX_TOKENS_FLOOR must
+        // not reach that clamp call — `resolve_max_tokens_ceiling` rejects such values before
+        // they get here, but this function takes `ceiling` directly and must be safe regardless.
+        let got = compute_initial_max_tokens(1_000_000, ExtractionCallType::Edges, 100);
+        assert_eq!(
+            got, MAX_TOKENS_FLOOR,
+            "floor wins over an out-of-range ceiling"
+        );
     }
 
     #[test]

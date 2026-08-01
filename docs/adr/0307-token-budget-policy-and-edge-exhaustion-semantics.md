@@ -103,11 +103,15 @@ Only the ceiling is configurable (FR-003), matching User Story 3's acceptance sc
 the floor and both ratios are corpus-derived shape parameters, not operator knobs. The env var is
 re-read per call rather than cached in a `OnceLock`, matching the existing WAL-knobs precedent in
 `app_state.rs` — the cost is negligible next to the network round-trip it precedes, and it avoids
-test-isolation problems a cached value would introduce. An invalid (non-numeric) value logs a
-warning and falls back to the default (soft fallback, not a hard `Error::Config`) — same shape as
-`LCG_WAL_MAX_BYTES_PER_FILE`, chosen over `LCG_REPLAY_BATCH_SIZE`'s hard-error shape because an
-extraction call is not worth aborting outright over a malformed ceiling override when a safe
-default exists.
+test-isolation problems a cached value would introduce. An invalid value — non-numeric, or below
+the compiled-in `MAX_TOKENS_FLOOR` — logs a warning and falls back to the default (soft fallback,
+not a hard `Error::Config`) — same shape as `LCG_WAL_MAX_BYTES_PER_FILE`, chosen over
+`LCG_REPLAY_BATCH_SIZE`'s hard-error shape because an extraction call is not worth aborting
+outright over a malformed ceiling override when a safe default exists. The below-floor case is
+rejected rather than silently accepted because `u32::clamp` panics if its `min` argument (the
+floor) exceeds its `max` (the ceiling) — `compute_initial_max_tokens` additionally treats the
+floor as authoritative if it is ever called directly with an out-of-range ceiling, so the panic
+is unreachable from either entry point, not just the env-var path.
 
 ### 3. `entities_extracted: Option<usize>` on the failure record answers Decision 1's real cost (FR-007)
 
