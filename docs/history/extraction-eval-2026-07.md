@@ -218,6 +218,44 @@ So the local model is roughly **4.5× slower at p50**, and far worse in the tail
 
 ---
 
+## qwen3.6-35b-a3b — the MoE is a wash on quality, and the trade is reliability
+
+Added 2026-08-01. The April eval ranked this MoE ~8.8pp behind `qwen3.6-27b` on edges and
+sold it as the speed-for-quality option. **On this corpus that deficit does not reproduce.**
+
+| leg | judged entities | judged edges | judged summaries | strict edges | error rate |
+|---|---:|---:|---:|---:|---:|
+| Haiku 2nd sample (**ceiling**) | 0.956 | 0.882 | 0.942 | 0.380 | 0.0% |
+| `qwen3.6-27b` (incumbent) | 0.850 | 0.765 | 0.842 | 0.219 | **0.9%** |
+| `qwen3.6-35b-a3b` | **0.861** | 0.762 | **0.857** | 0.208 | **3.1%** |
+
+As a share of the achievable ceiling: entities **90.0% vs 88.9%**, edges **86.4% vs 86.8%**,
+summaries **91.0% vs 89.4%**. Those gaps are smaller than the ceiling's own width. Treat the
+two as tied on quality.
+
+Note the MoE's edge F1 is essentially unchanged between the two evals (0.764 April → 0.762
+here); what moved is the **27b's**, on a different corpus. So this is not the MoE improving —
+it is a reminder that cross-corpus rank ordering is not transitive, and that a quality gap
+measured on one corpus should not be quoted as a property of a model.
+
+**The real trade is reliability, not quality.** The MoE runs 1.7× faster (55.9 vs 33 tok/s;
+1.87h vs ~4h for the corpus) and errors **3.5× more often** (7 chunks vs 2). Its tail is also
+worse: p50 16.8s but **p99 321s**, a five-minute worst chunk. Its failure mode is truncation
+at the 8192-token cap (`Unterminated string`), not the mid-document corruption that made
+gemma unusable — and truncation is the one failure the OAI path already retries by doubling
+`max_tokens`, so the 3.1% is measured *after* that recovery.
+
+⚠ **Read the quality numbers with the scoring asymmetry in mind.** Failed chunks are excluded
+from scoring, so the MoE is scored over 220 chunks against the 27b's 225 and Haiku's 227. The
+excluded chunks are exactly the ones it could not parse, which flatters it — most likely the
+longest, densest chunks, which are also the hardest. A 1.1pp entity advantage should not
+survive that caveat as a claim of superiority; "tied" is the defensible reading.
+
+**Operationally:** the MoE is the right pick only where throughput dominates and a 3.1%
+chunk-loss rate is acceptable — bulk backfill, for instance. For interactive ingest the 27b's
+0.9% and tighter tail are worth more than the 1.7× speed, since a lost chunk is silent
+missing knowledge rather than a visible error.
+
 ## What was not tested
 
 - **`strict` mode.** Not run. `open` already reaches 93.1–97.4% compliance at no quality cost,
@@ -247,9 +285,10 @@ So the local model is roughly **4.5× slower at p50**, and far worse in the tail
   build that emits valid JSON, and we do not currently have one.
 
   Priors from the April eval pointed the same way but do not substitute for measurement:
-  `gemma-3-27b` ranked well behind qwen (edges 0.634 vs 0.852) at a 3.1% error rate, and MoE
-  architectures traded edge quality for speed (`qwen3.6-35b-a3b`: 3.6× faster, 9pp worse on
-  edges).
+  `gemma-3-27b` ranked well behind qwen (edges 0.634 vs 0.852) at a 3.1% error rate. Note the
+  other April prior — that MoE architectures trade edge quality for speed — **was tested here
+  and did not hold** (see the `qwen3.6-35b-a3b` section above), which is the point: a prior is
+  a reason to measure, not a substitute for it.
 - **Downstream graph quality.** The judge was asked which extraction better captures the
   source, not which produces a better graph. qwen's ~32% surplus means more dedup pressure,
   more storage, more retrieval noise. Unmeasured here.
