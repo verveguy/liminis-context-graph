@@ -43,9 +43,9 @@ comparable to what the service actually does.
 
 ## What was measured
 
-| | |
+| item | detail |
 |---|---|
-| corpus | `crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl` — 228 chunks of Wikipedia spaceflight/Apollo prose. p50 741 chars, p95 6411, max 16,670 |
+| corpus | `crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl` — 228 chunks of Wikipedia spaceflight/Apollo prose. Median 743 chars, p95 6,411, max 16,670 |
 | hosted | `claude-haiku-4-5-20251001`, run **twice independently** (`baseline`, `candidate`) |
 | local | `mlx-community/Qwen3.6-27B-4bit` via `mlx_lm.server`, **thinking disabled** |
 | judge | `claude-sonnet-4-6`, thinking explicitly disabled |
@@ -76,19 +76,30 @@ pairwise measures *quality*, with no privileged backend.
 | axis | freeform qwen | ceiling | % achievable | open qwen | ceiling | % achievable |
 |---|---:|---:|---:|---:|---:|---:|
 | entities | 0.850 | 0.956 | **88.9%** | 0.853 | 0.953 | **89.5%** |
-| edges | 0.765 | 0.882 | **86.8%** | 0.774 | 0.884 | **87.6%** |
-| summaries | 0.842 | 0.942 | 89.3% | 0.850 | 0.945 | 89.9% |
+| edges | 0.765 | 0.882 | **86.7%** | 0.774 | 0.884 | **87.6%** |
+| summaries | 0.842 | 0.942 | 89.4% | 0.850 | 0.945 | 89.9% |
 
 ### Precision / recall — the diagnostic split
+
+**Freeform arm, scored against the `baseline` Haiku sample.**
 
 | leg | entities P | entities R | edges P | edges R |
 |---|---:|---:|---:|---:|
 | Haiku (2nd sample) | 0.949 | 0.974 | 0.884 | 0.902 |
 | **qwen** | **0.767** | **0.986** | **0.694** | 0.900 |
 
+> **These will not reproduce the F1s above via the harmonic-mean formula, and that is
+> expected.** Every figure in this doc is a **mean of per-chunk values** — `scoring.rs:172`
+> is `average(&judged_entity_f1s)`, and P and R are averaged the same way. The mean of
+> per-chunk harmonic means is always ≤ the harmonic mean of the averaged P and R, so the
+> reported F1 sits ~1pp below what these columns suggest, consistently and for every leg
+> including the Haiku pair (0.956 vs 0.961; 0.850 vs 0.863). It is an artifact of
+> macro-averaging, not of pooling across arms.
+
 **On entities, qwen's recall exceeds the hosted model's own second sample** (0.986 vs
-0.974). Its precision is much lower. It finds essentially everything Haiku finds, plus ~32%
-more — and is penalised for the surplus because the reference is Haiku, not truth.
+0.974). Its precision is much lower. It finds essentially everything Haiku finds while
+**emitting ~32% more entity nodes** (3,481 vs the Haiku sample's 2,639) — and is penalised
+for the surplus because the reference is Haiku, not truth.
 
 **On edges the recall claim does not hold**: 0.900 vs 0.902 is a tie, not an advantage. The
 qwen story is an entity-recall story; on edges it matches Haiku's recall while giving up
@@ -116,10 +127,11 @@ figures as unreliable.** Entities and edges passed in both arms.
 **Read the two vocabulary columns together — the gap between them is the finding.** *Exact*
 counts an edge as in-vocabulary only if its type string is one of the fixture's 25 relation
 types. *Variant-tolerant* also accepts a type that contains, or is contained by, a declared
-one — so `IS_LOCATED_IN` counts as `LOCATED_IN`. Freeform, the two differ by 12–15pp: a
-large share of "compliance" is only near-miss naming, which is exactly what makes 836 names
-unqueryable. Under the ontology the two columns converge to within 0.8pp, because the model
-is emitting the declared string rather than a paraphrase of it. Both columns are computed
+one — so `IS_LOCATED_IN` counts as `LOCATED_IN`. Freeform, the two differ by **10.9–14.6pp**
+(baseline 12.1, candidate 10.9, qwen 14.6): a large share of "compliance" is only near-miss
+naming, which is what makes 836 names unqueryable. Under the ontology the two columns
+converge to within 0.8pp, because the model is emitting the declared string rather than a
+paraphrase of it. Both columns are computed
 over every edge in the cassettes, not sampled; the harness's own `vocabulary_compliance`
 field is `null` for these runs, so these are recomputed from the cassettes directly.
 
@@ -186,6 +198,12 @@ corpus:
 | Haiku `Concept` entities (two samples) | 38 and 60 — **58% spread** | 154 and 147 — **5% spread** |
 | Haiku edges | 2289 | 2552 (+11.5%) |
 
+**"Spread" here is `(max − min) / min`** across the two independent samples: `(60−38)/38 =
+58%` before, `(154−147)/147 = 5%` after. The convention matters — the same data over `mean`
+would read 36% rather than 58%, which sounds like a materially smaller problem. `min` is
+used because the question being asked is "how much more did the larger run find than the
+smaller one".
+
 The new `Concept` entities came almost entirely **out of** Product (−37), Event (−33) and
 Organization (−17), while Person and Location — unambiguously concrete — did not move. The
 model was extracting these subjects all along and **forcing them into whichever concrete
@@ -229,7 +247,7 @@ sold it as the speed-for-quality option. **On this corpus that deficit does not 
 | `qwen3.6-27b` (incumbent) | 0.850 | 0.765 | 0.842 | 0.219 | **0.9%** |
 | `qwen3.6-35b-a3b` | **0.861** | 0.762 | **0.857** | 0.208 | **3.1%** |
 
-As a share of the achievable ceiling: entities **90.0% vs 88.9%**, edges **86.4% vs 86.8%**,
+As a share of the achievable ceiling: entities **90.0% vs 88.9%**, edges **86.4% vs 86.7%**,
 summaries **91.0% vs 89.4%**. Those gaps are smaller than the ceiling's own width. Treat the
 two as tied on quality.
 
@@ -238,8 +256,11 @@ here); what moved is the **27b's**, on a different corpus. So this is not the Mo
 it is a reminder that cross-corpus rank ordering is not transitive, and that a quality gap
 measured on one corpus should not be quoted as a property of a model.
 
-**The real trade is reliability, not quality.** The MoE runs 1.7× faster (55.9 vs 33 tok/s;
-1.87h vs ~4h for the corpus) and errors **3.5× more often** (7 chunks vs 2). Its tail is also
+**The real trade is reliability, not quality.** The MoE is **1.7× faster on token throughput**
+(55.9 vs 33 tok/s) and **~2.1× faster in corpus wall-clock** (1.87h vs ~4h). Those are
+different ratios and should not be quoted as one: wall-clock also absorbs queuing, retries
+and the per-call latency tail, so it outruns the raw token rate. It errors **3.5× more
+often** (7 chunks vs 2). Its tail is also
 worse: p50 16.8s but **p99 321s**, a five-minute worst chunk. All 7 *counted* failures were
 malformed parses (`structured_output.malformed: 7`, equal to `errors`). Because entity-side
 budget exhaustion returns `Err` and would appear in `errors`, that equality rules truncation
@@ -267,10 +288,19 @@ nothing" from "we gave up". Entity-side truncation *is* caught (it returns `Err`
 why `errors == malformed == 7` is trustworthy for entities and silent for edges.
 
 ⚠ **Read the quality numbers with the scoring asymmetry in mind.** Failed chunks are excluded
-from scoring, so the MoE is scored over 220 chunks against the 27b's 225 and Haiku's 227. The
-excluded chunks are exactly the ones it could not parse, which flatters it — most likely the
-longest, densest chunks, which are also the hardest. A 1.1pp entity advantage should not
-survive that caveat as a claim of superiority; "tied" is the defensible reading.
+from scoring, so the MoE is scored over 220 chunks against the 27b's 225 and Haiku's 227.
+
+Those counts look off-by-one against the error counts, and the missing chunk is real:
+**`scored = 228 − own_errors − 1`**, because the `baseline` reference arm itself failed one
+chunk, and a chunk with no scorable reference is unscorable for *every* leg. So 228−1−1=226
+would be wrong too — the baseline's own row is 228−1=227, and every other leg pays that same
+1 on top of its own errors: candidate 228−0−1=227, qwen27b 228−2−1=225, MoE 228−7−1=220. The
+`0.0%` error rate shown for the ceiling row is the *candidate* sample, which genuinely failed
+nothing; the lost chunk belongs to `baseline`.
+
+The excluded chunks are exactly the ones the MoE could not parse, which flatters it — most
+likely the longest, densest chunks, which are also the hardest. A 1.1pp entity advantage
+should not survive that caveat as a claim of superiority; "tied" is the defensible reading.
 
 **Operationally:** the MoE is the right pick only where throughput dominates and a 3.1%
 chunk-loss rate is acceptable — bulk backfill, for instance. For interactive ingest the 27b's
