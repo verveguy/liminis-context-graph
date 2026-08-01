@@ -161,7 +161,8 @@ positive and **penalised for being right**. The precision/recall split shows thi
 qwen's recall is *higher* than the hosted model's own second sample.
 
 We tested whether qwen's surplus was fabrication by checking every extracted name against
-the source chunk it came from. **Untraceable-name rates were identical: 0.6% / 0.5% / 0.6%**,
+the source chunk it came from. **Untraceable-name rates agreed to within 0.1pp: 0.6% / 0.5%
+/ 0.6%**,
 and the residue was benign normalisation (`Houston` → `Houston, Texas`). The extra output is
 real content, not noise.
 
