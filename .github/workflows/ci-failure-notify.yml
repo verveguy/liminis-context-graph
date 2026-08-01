@@ -27,6 +27,16 @@ permissions:
   actions: read
   contents: read
 
+# Serialized per source workflow: label-based dedup (the "Find existing tracking
+# issue" step below) isn't atomic, so two failing runs of the same workflow that
+# complete close together could both observe "no existing issue" and both create
+# one, violating FR-002. Queuing (not cancelling) same-workflow listener runs
+# closes that race; cancel-in-progress stays false so no failure/resolution event
+# is ever dropped.
+concurrency:
+  group: ci-failure-notify-${{ github.event.workflow_run.workflow_id }}
+  cancel-in-progress: false
+
 jobs:
   notify:
     name: notify (${{ github.event.workflow_run.name }})
@@ -62,16 +72,25 @@ jobs:
       # Defensive on every run (not a one-time setup step): gh issue create/list
       # fails outright against a label that doesn't exist yet, so the very first
       # real failure could otherwise be dropped silently — exactly the kind of gap
-      # this workflow exists to close.
+      # this workflow exists to close. Only "already exists" is swallowed; any
+      # other failure (permissions, rate limiting, API error) fails the run loudly
+      # instead of silently defeating the notification mechanism downstream.
       - name: Ensure labels exist
         if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
         env:
           WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
         run: |
-          gh label create "ci-failure" --color B60205 \
-            --description "Auto-filed: a non-gating workflow failed on main" 2>/dev/null || true
-          gh label create "$WORKFLOW_LABEL" --color B60205 \
-            --description "Auto-filed failures for $WORKFLOW_NAME" 2>/dev/null || true
+          create_label() {
+            local name="$1" desc="$2" out
+            if ! out=$(gh label create "$name" --color B60205 --description "$desc" 2>&1); then
+              if ! grep -qi "already exists" <<<"$out"; then
+                echo "::error::gh label create failed for '$name': $out"
+                exit 1
+              fi
+            fi
+          }
+          create_label "ci-failure" "Auto-filed: a non-gating workflow failed on main"
+          create_label "$WORKFLOW_LABEL" "Auto-filed failures for $WORKFLOW_NAME"
 
       - name: Find existing tracking issue
         if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
