@@ -5,7 +5,10 @@
 use std::sync::Arc;
 
 use lcg_core::ontology::load_ontology_from_path;
-use lcg_core::{CassetteWriter, Extractor, Ontology, RecordingExtractor, TelemetrySink};
+use lcg_core::{
+    CassetteWriter, ExtractionFailureSink, ExtractionFailureWriter, Extractor, Ontology,
+    RecordingExtractor, TeeSink, TelemetrySink, DEFAULT_MAX_BYTES_PER_FILE,
+};
 
 use lcg_eval::backend::{
     build_extractor, parse_backend_spec, provider_label, resolved_model, BackendKind,
@@ -126,8 +129,27 @@ async fn run(cli: Args) -> Result<(), String> {
     for b in &cli.backends {
         let kind = parse_backend_spec(&b.spec)?;
         let sink = Arc::new(CountingSink::new());
-        let mut extractor = build_extractor(&kind, Arc::clone(&sink) as Arc<dyn TelemetrySink>)?;
-        if let Some(cassette) = cli.record_cassette.iter().find(|c| c.backend == b.name) {
+        let cassette = cli.record_cassette.iter().find(|c| c.backend == b.name);
+
+        // #306 FR-001: the failure-record sidecar is installed alongside `CassetteWriter`
+        // (this backend is being recorded), fed from the *same* telemetry sink passed into
+        // the leaf extractor — `TelemetryEvent::ExtractionFailure` is emitted from inside
+        // `AnthropicExtractor`/`OaiExtractor` itself, a layer `RecordingExtractor` (which only
+        // ever sees the whole `extract()` call's success value) cannot observe.
+        let telemetry_sink: Arc<dyn TelemetrySink> = match cassette {
+            Some(cassette) => {
+                let failure_writer =
+                    ExtractionFailureWriter::open(&cassette.path, DEFAULT_MAX_BYTES_PER_FILE)
+                        .map_err(|e| e.to_string())?;
+                Arc::new(TeeSink::new(vec![
+                    Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+                    Arc::new(ExtractionFailureSink::new(failure_writer)) as Arc<dyn TelemetrySink>,
+                ]))
+            }
+            None => Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        };
+        let mut extractor = build_extractor(&kind, telemetry_sink)?;
+        if let Some(cassette) = cassette {
             let writer = Arc::new(CassetteWriter::open(&cassette.path).map_err(|e| e.to_string())?);
             extractor = Arc::new(RecordingExtractor::new(
                 extractor,

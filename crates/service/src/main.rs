@@ -17,11 +17,15 @@ use lcg_core::{
     db::Db,
     embedder::{is_transport_error, Embedder, OaiEmbedder},
     env::lcg_env_var,
+    error::Error as CoreError,
+    extraction_failures::{
+        ExtractionFailureSink, ExtractionFailureWriter, DEFAULT_MAX_BYTES_PER_FILE,
+    },
     extractor::{Extractor, OaiExtractor, ANTHROPIC_API_URL},
     handlers,
     ipc::IpcRequest,
     llm_router::LlmRouter,
-    telemetry::{now_ms, TelemetryEvent, TelemetrySink},
+    telemetry::{now_ms, TeeSink, TelemetryEvent, TelemetrySink},
     IpcResponse,
 };
 use rmcp::ServiceExt;
@@ -125,6 +129,23 @@ async fn handle_streaming_request(
         dispatch_handle.abort();
         None
     }
+}
+
+/// Fans `telemetry_sink` out to also feed the `<cassette>.failures.jsonl` sidecar (#306
+/// FR-001) for a `LCG_RECORD_LLM` cassette at `cassette_path`. `TelemetryEvent::ExtractionFailure`
+/// is emitted from inside `AnthropicExtractor`/`OaiExtractor` themselves — a layer
+/// `RecordingExtractor` (which only ever observes the whole `extract()` call's success value)
+/// cannot see — so the combined sink must be passed to the *leaf* extractor's constructor, not
+/// installed on `RecordingExtractor`.
+fn recording_sink(
+    telemetry_sink: &Arc<dyn TelemetrySink>,
+    cassette_path: &str,
+) -> Result<Arc<dyn TelemetrySink>, CoreError> {
+    let failure_writer = ExtractionFailureWriter::open(cassette_path, DEFAULT_MAX_BYTES_PER_FILE)?;
+    Ok(Arc::new(TeeSink::new(vec![
+        Arc::clone(telemetry_sink),
+        Arc::new(ExtractionFailureSink::new(failure_writer)) as Arc<dyn TelemetrySink>,
+    ])))
 }
 
 /// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
@@ -398,9 +419,10 @@ async fn bootstrap_app_state(
                 match &record_llm_path {
                     Some(path) => {
                         let writer = Arc::new(CassetteWriter::open(path)?);
+                        let leaf_sink = recording_sink(&telemetry_sink, path)?;
                         eprintln!("extractor: recording cassette to {path}");
                         Arc::new(LlmRouter::from_env_with(
-                            Arc::clone(&telemetry_sink),
+                            leaf_sink,
                             move |inner, model_name| {
                                 Arc::new(RecordingExtractor::new(
                                     inner,
@@ -414,50 +436,66 @@ async fn bootstrap_app_state(
                     None => Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink))),
                 }
             }
-            ResolvedExtractor::Http(url) => {
-                let ext = OaiExtractor::new_http(url, extractor_model, Arc::clone(&telemetry_sink));
-                let (transport_label, endpoint) = ext.transport_info();
-                let model_name = ext.model_name().to_string();
-                eprintln!(
-                    "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
-                );
-                match &record_llm_path {
-                    Some(path) => {
-                        let writer = Arc::new(CassetteWriter::open(path)?);
-                        eprintln!("extractor: recording cassette to {path}");
-                        Arc::new(RecordingExtractor::new(
-                            Arc::new(ext),
-                            "local",
-                            model_name,
-                            writer,
-                        ))
-                    }
-                    None => Arc::new(ext),
+            ResolvedExtractor::Http(url) => match &record_llm_path {
+                Some(path) => {
+                    let leaf_sink = recording_sink(&telemetry_sink, path)?;
+                    let ext = OaiExtractor::new_http(url, extractor_model, leaf_sink);
+                    let (transport_label, endpoint) = ext.transport_info();
+                    let model_name = ext.model_name().to_string();
+                    eprintln!(
+                            "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                        );
+                    let writer = Arc::new(CassetteWriter::open(path)?);
+                    eprintln!("extractor: recording cassette to {path}");
+                    Arc::new(RecordingExtractor::new(
+                        Arc::new(ext),
+                        "local",
+                        model_name,
+                        writer,
+                    ))
                 }
-            }
+                None => {
+                    let ext =
+                        OaiExtractor::new_http(url, extractor_model, Arc::clone(&telemetry_sink));
+                    let (transport_label, endpoint) = ext.transport_info();
+                    eprintln!(
+                            "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                        );
+                    Arc::new(ext)
+                }
+            },
             #[cfg(unix)]
-            ResolvedExtractor::Uds(uds_path) => {
-                let ext =
-                    OaiExtractor::new_uds(uds_path, extractor_model, Arc::clone(&telemetry_sink));
-                let (transport_label, endpoint) = ext.transport_info();
-                let model_name = ext.model_name().to_string();
-                eprintln!(
-                    "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
-                );
-                match &record_llm_path {
-                    Some(path) => {
-                        let writer = Arc::new(CassetteWriter::open(path)?);
-                        eprintln!("extractor: recording cassette to {path}");
-                        Arc::new(RecordingExtractor::new(
-                            Arc::new(ext),
-                            "local",
-                            model_name,
-                            writer,
-                        ))
-                    }
-                    None => Arc::new(ext),
+            ResolvedExtractor::Uds(uds_path) => match &record_llm_path {
+                Some(path) => {
+                    let leaf_sink = recording_sink(&telemetry_sink, path)?;
+                    let ext = OaiExtractor::new_uds(uds_path, extractor_model, leaf_sink);
+                    let (transport_label, endpoint) = ext.transport_info();
+                    let model_name = ext.model_name().to_string();
+                    eprintln!(
+                            "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                        );
+                    let writer = Arc::new(CassetteWriter::open(path)?);
+                    eprintln!("extractor: recording cassette to {path}");
+                    Arc::new(RecordingExtractor::new(
+                        Arc::new(ext),
+                        "local",
+                        model_name,
+                        writer,
+                    ))
                 }
-            }
+                None => {
+                    let ext = OaiExtractor::new_uds(
+                        uds_path,
+                        extractor_model,
+                        Arc::clone(&telemetry_sink),
+                    );
+                    let (transport_label, endpoint) = ext.transport_info();
+                    eprintln!(
+                            "extractor: provider=local, transport={transport_label}, endpoint={endpoint}"
+                        );
+                    Arc::new(ext)
+                }
+            },
         }
     };
 

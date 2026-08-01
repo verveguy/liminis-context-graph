@@ -204,8 +204,8 @@ mod tests {
     fn open_creates_sidecar_file_eagerly() {
         let dir = TempDir::new().unwrap();
         let cassette_path = dir.path().join("run.cassette.jsonl");
-        let writer = ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE)
-            .unwrap();
+        let writer =
+            ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE).unwrap();
         assert!(writer.base_path().exists());
         assert_eq!(
             writer.base_path(),
@@ -218,8 +218,8 @@ mod tests {
     fn append_writes_one_jsonl_line_with_complete_body() {
         let dir = TempDir::new().unwrap();
         let cassette_path = dir.path().join("run.cassette.jsonl");
-        let writer = ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE)
-            .unwrap();
+        let writer =
+            ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE).unwrap();
         let record = ExtractionFailureRecord {
             ts_ms: 1,
             model: "m".to_string(),
@@ -239,7 +239,10 @@ mod tests {
         let parsed: ExtractionFailureRecord = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed.chunk_key, Some("chunk-42".to_string()));
         assert_eq!(parsed.classification, "malformed");
-        assert_eq!(parsed.raw_body, record.raw_body, "body must be stored whole, not truncated");
+        assert_eq!(
+            parsed.raw_body, record.raw_body,
+            "body must be stored whole, not truncated"
+        );
     }
 
     #[test]
@@ -258,7 +261,11 @@ mod tests {
         }
         let sidecar_path = dir.path().join("run.cassette.jsonl.failures.jsonl");
         let content = std::fs::read_to_string(&sidecar_path).unwrap();
-        assert_eq!(content.lines().count(), 2, "re-opening must append, not truncate");
+        assert_eq!(
+            content.lines().count(),
+            2,
+            "re-opening must append, not truncate"
+        );
     }
 
     fn record_n(n: u32) -> ExtractionFailureRecord {
@@ -283,8 +290,7 @@ mod tests {
         // fits (FR-003: bound the aggregate, never the individual record).
         let record = record_n(1);
         let one_line_bytes = serde_json::to_string(&record).unwrap().len() as u64 + 1;
-        let writer =
-            ExtractionFailureWriter::open(&cassette_path, one_line_bytes + 1).unwrap();
+        let writer = ExtractionFailureWriter::open(&cassette_path, one_line_bytes + 1).unwrap();
 
         writer.append(&record).unwrap();
         writer.append(&record_n(2)).unwrap();
@@ -294,11 +300,23 @@ mod tests {
         let rotated_1 = dir.path().join("run.cassette.jsonl.failures.1.jsonl");
         let rotated_2 = dir.path().join("run.cassette.jsonl.failures.2.jsonl");
         assert!(base.exists());
-        assert!(rotated_1.exists(), "expected a rotated file after the 2nd record");
-        assert!(rotated_2.exists(), "expected a second rotated file after the 3rd record");
+        assert!(
+            rotated_1.exists(),
+            "expected a rotated file after the 2nd record"
+        );
+        assert!(
+            rotated_2.exists(),
+            "expected a second rotated file after the 3rd record"
+        );
         assert_eq!(std::fs::read_to_string(&base).unwrap().lines().count(), 1);
-        assert_eq!(std::fs::read_to_string(&rotated_1).unwrap().lines().count(), 1);
-        assert_eq!(std::fs::read_to_string(&rotated_2).unwrap().lines().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&rotated_1).unwrap().lines().count(),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&rotated_2).unwrap().lines().count(),
+            1
+        );
     }
 
     #[test]
@@ -311,15 +329,18 @@ mod tests {
         }
         let content = std::fs::read_to_string(writer.base_path()).unwrap();
         assert_eq!(content.lines().count(), 5);
-        assert!(!dir.path().join("run.cassette.jsonl.failures.1.jsonl").exists());
+        assert!(!dir
+            .path()
+            .join("run.cassette.jsonl.failures.1.jsonl")
+            .exists());
     }
 
     #[test]
     fn sink_writes_only_extraction_failure_events() {
         let dir = TempDir::new().unwrap();
         let cassette_path = dir.path().join("run.cassette.jsonl");
-        let writer = ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE)
-            .unwrap();
+        let writer =
+            ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE).unwrap();
         let sidecar_path = writer.base_path().to_path_buf();
         let sink = ExtractionFailureSink::new(writer);
 
@@ -332,7 +353,11 @@ mod tests {
 
         let content = std::fs::read_to_string(&sidecar_path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert_eq!(lines.len(), 1, "only the ExtractionFailure event should be written");
+        assert_eq!(
+            lines.len(),
+            1,
+            "only the ExtractionFailure event should be written"
+        );
         let parsed: ExtractionFailureRecord = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(parsed.call_type, "entities");
         assert_eq!(parsed.classification, "http_error");
@@ -347,8 +372,8 @@ mod tests {
     fn sink_ignores_extraction_truncated_and_structured_output_parse() {
         let dir = TempDir::new().unwrap();
         let cassette_path = dir.path().join("run.cassette.jsonl");
-        let writer = ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE)
-            .unwrap();
+        let writer =
+            ExtractionFailureWriter::open(&cassette_path, DEFAULT_MAX_BYTES_PER_FILE).unwrap();
         let sidecar_path = writer.base_path().to_path_buf();
         let sink = ExtractionFailureSink::new(writer);
 
