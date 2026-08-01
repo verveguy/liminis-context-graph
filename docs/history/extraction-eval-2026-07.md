@@ -250,6 +250,21 @@ Two rates are easy to confuse here. Per **call**, malformed is 7/446 = **1.57%**
 **chunk** it is 7/228 = **3.07%**, because a chunk needs both its entity and edge call to
 succeed. The chunk rate is the one that matters operationally and the one quoted above.
 
+⚠ **The edge comparison has a known defect — do not quote the edge gap.** qwen35 returned
+**zero edges on two chunks where Haiku found 36 and 38 and qwen27b found 49 each**. Zero is
+not plausible extraction on those chunks, so ~98 edges (~3.5% of its total) are missing. Its
+edge recall is 0.878 against qwen27b's 0.900 — a 2.2pp gap that these two chunks could
+account for entirely. Treat edges as *unresolved* rather than tied.
+
+The cause cannot currently be determined, and that is the real finding: on edge budget
+exhaustion the extractor returns `Ok(vec![])` (extractor.rs:410, 1334 — deliberate, "not
+fatal"), which is byte-identical in the cassette to a model genuinely emitting
+`{"edges": []}`. The one signal that would separate them, `ExtractionTruncated`, is discarded
+by the eval's sink (`crates/eval/src/runner.rs:145` matches only `StructuredOutputParse`). So
+a truncated chunk is recorded as **clean**, and the harness cannot distinguish "found
+nothing" from "we gave up". Entity-side truncation *is* caught (it returns `Err`), which is
+why `errors == malformed == 7` is trustworthy for entities and silent for edges.
+
 ⚠ **Read the quality numbers with the scoring asymmetry in mind.** Failed chunks are excluded
 from scoring, so the MoE is scored over 220 chunks against the 27b's 225 and Haiku's 227. The
 excluded chunks are exactly the ones it could not parse, which flatters it — most likely the
