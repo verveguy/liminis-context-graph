@@ -61,6 +61,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
 | [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |
+| [0310](0310-strict-mode-reclassifies-not-drops.md) | Strict-Mode Relation-Type Filtering Reclassifies, Never Drops | 2026-08-02 |
 
 ## Historical numbering
 
