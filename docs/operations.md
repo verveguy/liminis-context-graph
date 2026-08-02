@@ -13,7 +13,7 @@ Everything the service manages lives under `.lcg/` in the workspace:
 .lcg/
 ├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
 ├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL
-├── ontology.yaml       # optional extraction vocabulary (yours to edit)
+├── ontology.yaml      # optional extraction vocabulary (yours to edit)
 └── service.sock       # JSON-RPC 2.0 endpoint while the service runs
 ```
 

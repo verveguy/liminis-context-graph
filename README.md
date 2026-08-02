@@ -77,13 +77,17 @@ def call(method, params, id=1):
     s.sendall((json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}) + "\n").encode())
     return json.loads(f.readline())["result"]
 
+# ingest a chunk of text
 call("knowledge_process_chunk", {
     "chunk_text": "Ada Lovelace wrote the first program for Babbage's Analytical Engine.",
     "chunk_id": "notes-0001",
     "source_file": "notes.md",
 })
 
+# hybrid (full-text + vector) entity search
 print(call("knowledge_find_entities", {"query": "early computing pioneers", "num_results": 5}, id=2))
+
+# graph + WAL health at a glance
 print(call("knowledge_status", {}, id=3))
 ```
 

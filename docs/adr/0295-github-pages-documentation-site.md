@@ -143,9 +143,14 @@ once that one-time step is taken.
 - The maintainer-only release runbook moved from `README.md` into `CONTRIBUTING.md`, gaining a
   step to keep `docs/_config.yml`'s version and `docs/llms-full.txt` in sync with the
   `Cargo.toml` bump.
-- `docs/telemetry.md` gained the previously-missing `extraction_failure` section — the variant
-  that brought `TelemetryEvent` to 12 total (SC-003) — closing the same class of drift PR #294
-  fixed once already, found again independently during this issue's own research pass.
+- `docs/telemetry.md` gained the previously-missing `extraction_failure` section, closing the
+  same class of drift PR #294 fixed once already, found again independently during this issue's
+  own research pass. It also picked up `entities_missing_summary` and the `schema_invalid`
+  classification value, both added to `main` by issue #314 after this branch's last rebase.
+  `TelemetryEvent` has 13 variants as of this PR's last commit (SC-003) — a count this ADR
+  intentionally does not restate elsewhere, since `docs/telemetry.md` is the enumeration's one
+  canonical, mechanically-checked home and a second hand-maintained count here would itself be a
+  drift risk.
 - Every future doc change that touches a published page must run
   `scripts/generate-docs-llms-full.sh` before committing, or `docs-drift.yml` fails the PR. This
   is intentional friction in exchange for the property the original README never had: a stale
@@ -178,9 +183,13 @@ separate hand-maintained bundle that could itself drift from either.
 - PR #294 — the documentation-drift audit that motivated this issue; also the origin of the
   26-env-var/11-telemetry-event baselines this issue's SC-002/SC-003 make permanently checked
   rather than one-time counts (both baselines had already drifted by the time of this Research
-  pass — 27 env vars, 12 telemetry events — which this PR's `configuration.md`/`telemetry.md`
-  reflect).
+  pass — 27 env vars, 12 telemetry events — and drifted again before this PR's final commit, to
+  36 documented vars including deprecated aliases and 13 telemetry events; `configuration.md`/
+  `telemetry.md` reflect whatever `main` currently has, not either snapshot).
 - ADR-0306 — introduced `TelemetryEvent::ExtractionFailure`, the previously-undocumented event
   closed by this issue's `docs/telemetry.md` update.
+- ADR-0314 — introduced `TelemetryEvent::EntitiesMissingSummary` and the `schema_invalid`
+  classification value, merged to `main` after this branch's last rebase and documented in the
+  same pass as the fixes above.
 - ADR-0009, ADR-0027, ADR-0035, ADR-0038, ADR-0283 — content sources for the new Operations and
   IPC & MCP Reference pages; unchanged by this issue.
