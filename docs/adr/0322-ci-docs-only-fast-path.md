@@ -29,8 +29,10 @@ faster; this one asks not to run it at all when it cannot be affected by the dif
 
 A new `changes` job runs on every `pull_request` and `push` trigger — the `on:` block
 is untouched. It computes `code_changed` and the two expensive jobs (`build-lbug`,
-`test`) are gated with `needs: changes` plus `if: needs.changes.outputs.code_changed
-== 'true'`.
+`test`) are gated with `needs: changes` plus `if: !cancelled() &&
+(needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')`
+— see Decision 3 for why the `needs.changes.result != 'success'` clause is there
+alongside the `code_changed` check.
 
 This is the load-bearing choice in the whole design. If `ci.yml` gained a
 `paths-ignore` on its `pull_request` trigger instead, the workflow itself would never
@@ -110,13 +112,15 @@ any non-`pull_request` event.
 
 ### 6. `test`'s gate restates the implicit `build-lbug` success dependency
 
-`test`'s `if:` is `needs.changes.outputs.code_changed == 'true' &&
-needs.build-lbug.result == 'success'`, not just the first clause. Without the second
-clause, adding a custom `if:` to `test` would silently drop the implicit default
-behavior GitHub Actions applies when a job has `needs:` but no custom `if:` — "only run
-if all needed jobs succeeded." Omitting it would let `test` attempt to run even after a
-genuine `build-lbug` failure on the code-touching path, changing today's behavior in
-exactly the case this issue promises not to touch (FR-003/User Story 2).
+`test`'s full `if:` is `!cancelled() && (needs.changes.result != 'success' ||
+needs.changes.outputs.code_changed == 'true') && needs.build-lbug.result == 'success'`
+— the trailing `needs.build-lbug.result == 'success'` clause is what this decision is
+about, on top of the `changes`-related clauses from Decision 3. Without it, adding a
+custom `if:` to `test` would silently drop the implicit default behavior GitHub Actions
+applies when a job has `needs:` but no custom `if:` — "only run if all needed jobs
+succeeded." Omitting it would let `test` attempt to run even after a genuine
+`build-lbug` failure on the code-touching path, changing today's behavior in exactly the
+case this issue promises not to touch (FR-003/User Story 2).
 
 ## Consequences
 

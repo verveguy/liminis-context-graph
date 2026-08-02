@@ -73,6 +73,12 @@ jobs:
           # unrelated commits landed on the base branch after this PR branched,
           # over-classifying stale/long-lived PRs as code-touching for reasons
           # unrelated to their own diff.
+          # For a fork-based PR, HEAD_SHA only exists on the fork; fetching it by raw
+          # SHA from `origin` (the base repo) works because GitHub materializes an open
+          # PR's head commit under the base repo's hidden refs/pull/<n>/head ref, making
+          # it fetchable there too — not verified against a live fork PR in this repo's
+          # validation, but the fail-safe below covers the failure mode either way: a
+          # fetch failure defaults to running the full suite, never to a silent skip.
           if ! git fetch origin "$BASE_SHA" "$HEAD_SHA"; then
             emit true "WARNING: git fetch of base/head SHA failed, defaulting to full suite (fail-safe)"
             exit 0
