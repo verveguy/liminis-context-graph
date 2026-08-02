@@ -29,7 +29,7 @@ So the cost is believed to concentrate in a small number of release-linked integ
 - **#298** ("`real-corpus-e2e` failed 24 consecutive runs with no signal to anyone", open as of this spec) is building a post-merge failure-signalling mechanism for non-gating workflows. FR-003's "post-merge gate with visible failure signalling" option assumes that mechanism (or an equivalent) exists — if #298 has not merged by the time this issue reaches Plan, the Plan stage must either sequence behind it, use the "separate required check" alternative instead, or design a self-contained signalling mechanism scoped to this issue. This spec does not mandate which.
 - **#315** (open as of this spec) is also editing `CLAUDE.md`'s long-task/local-gate guidance. Both issues touch the same section; whichever merges first, the other should rebase rather than silently conflict. This is a merge-sequencing note, not a scope change for either issue.
 
-## User Scenarios & Testing *(mandatory)*
+## User Scenarios & Testing
 
 ### User Story 1 - The common-path check fits the budget (Priority: P1)
 
@@ -67,7 +67,7 @@ A contributor or maintainer opens a PR. Today, the required `test (ubuntu-latest
 - The integration tests that require release-mode linking may not have equivalent debug-mode code paths — a debug-profile-only split may silently stop exercising code the release suite currently covers.
 - The true count and composition of "slow" targets is unknown at spec time (see the "six" note above) — any FR-004 target-layout property must be derived from measurement, not assumed from the stale figure.
 
-## Requirements *(mandatory)*
+## Requirements
 
 ### Functional Requirements
 
@@ -77,7 +77,7 @@ A contributor or maintainer opens a PR. Today, the required `test (ubuntu-latest
 - **FR-004**: If integration tests are separated into fast/slow groups, the separation MUST be a property of the target layout (e.g. directory structure, a Cargo feature, a naming convention enforced by tooling) rather than a hand-maintained list that drifts as tests are added.
 - **FR-005**: Document the resulting contract in `CLAUDE.md` and `CONTRIBUTING.md` — what an agent or contributor runs locally, what CI owns, and the expected duration of each. `CONTRIBUTING.md`'s existing "Pre-commit gate" section (currently: `cargo fmt --all && cargo test && cargo clippy --all-targets -- -D warnings`) must be updated if the commands change.
 
-## Success Criteria *(mandatory)*
+## Success Criteria
 
 ### Measurable Outcomes
 

@@ -35,8 +35,12 @@ actually trying to measure.
 
 ## Decision
 
-Split `search.rs` into five separate bench source files, one per former `criterion_group!`
-boundary, each with its own `[[bench]]` Cargo target and its own `criterion_main!`:
+Split `search.rs` into five separate bench source files, each with its own `[[bench]]` Cargo
+target and its own `criterion_main!`. Four map one-to-one onto a former `criterion_group!`
+(`benches` → `hybrid_search.rs`, `dedup_50k` → `dedup_50k.rs`, `name_lookup` → `name_lookup.rs`);
+the fifth, `dedup_overlap_check.rs`, carves `bench_dedup_overlap_check` out of the former `dedup`
+group into its own target, since it's the one function that's actually PR-gating — the rest of
+that group's functions move to `dedup_search.rs`:
 
 - `dedup_overlap_check.rs` — `bench_dedup_overlap_check` only (the R-003 gate)
 - `dedup_search.rs` — the four 1k/10k dedup functions
