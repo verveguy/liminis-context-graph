@@ -145,9 +145,12 @@ async fn no_ontology_all_entities_pass() {
     );
 }
 
-// SC-001: Strict-mode with {Person} drops Acme Corp (Organization not in vocabulary).
+// SC-001 (issue #312 supersedes the old drop expectation): Strict-mode with {Person}
+// reclassifies Acme Corp (Organization not in vocabulary) to Unclassified rather than dropping
+// it. See `strict_mode_entity_type_reclassifies_not_drops` below for the full disposition
+// assertions (labels, attributes).
 #[tokio::test]
-async fn strict_mode_entity_filtering_drops_out_of_vocab() {
+async fn strict_mode_entity_filtering_reclassifies_out_of_vocab() {
     let (db, _dir) = make_db();
     let ontology = Ontology {
         mode: OntologyMode::Strict,
@@ -176,8 +179,8 @@ async fn strict_mode_entity_filtering_drops_out_of_vocab() {
     .unwrap();
 
     assert_eq!(
-        result.nodes_extracted, 1,
-        "strict mode with {{Person}}: expected 1 entity (Alice only), got {}",
+        result.nodes_extracted, 2,
+        "strict mode with {{Person}}: expected 2 entities (Alice + reclassified Acme Corp), got {}",
         result.nodes_extracted
     );
 }
@@ -428,11 +431,13 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
                     name: "Rocket".to_string(),
                     entity_type: "Vehicle".to_string(),
                     summary: "A rocket".to_string(),
+                    original_entity_type: None,
                 },
                 ExtractedEntity {
                     name: "Alice".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "A person".to_string(),
+                    original_entity_type: None,
                 },
             ],
             edges: vec![ExtractedEdge {
@@ -521,11 +526,13 @@ async fn strict_mode_alias_case_variant_recognized() {
                     name: "Rocket".to_string(),
                     entity_type: "Vehicle".to_string(),
                     summary: "A rocket".to_string(),
+                    original_entity_type: None,
                 },
                 ExtractedEntity {
                     name: "Alice".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "A person".to_string(),
+                    original_entity_type: None,
                 },
             ],
             edges: vec![ExtractedEdge {
@@ -658,21 +665,25 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
             name: "Alice".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
         ExtractedEntity {
             name: "Bob".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
         ExtractedEntity {
             name: "Carol".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
         ExtractedEntity {
             name: "Dave".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
     ];
     let edges = vec![
@@ -766,11 +777,13 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
             name: "Alice".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
         ExtractedEntity {
             name: "Bob".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
     ];
     let edges = vec![ExtractedEdge {
@@ -859,6 +872,7 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "A person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![ExtractedEdge {
                 source_name: "Alice".to_string(),
@@ -927,11 +941,13 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
             name: "Alice".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
         ExtractedEntity {
             name: "Bob".to_string(),
             entity_type: "Person".to_string(),
             summary: "A person".to_string(),
+            original_entity_type: None,
         },
     ];
     let edges = vec![ExtractedEdge {
@@ -995,12 +1011,13 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
     );
 }
 
-// FR-006 regression: the entity-side strict-mode filter still hard-drops out-of-vocabulary
-// entities rather than reclassifying them — unlike the edge-side filter, this is unchanged by
-// issue #310 because EntityTypeDef has no aliases/keywords concept to be alias-blind about (see
-// the doc comment at the entity filter in episode.rs).
+// FR-001/FR-002/FR-003 (issue #312): the entity-side strict-mode filter reclassifies
+// out-of-vocabulary entities to `Unclassified` rather than dropping them, preserving the
+// original type in `attributes.original_entity_type` — mirroring ADR-0310's edge-side
+// treatment. Supersedes the old `strict_mode_entity_type_still_drops_not_reclassifies`, which
+// locked in the drop behavior this issue changes.
 #[tokio::test]
-async fn strict_mode_entity_type_still_drops_not_reclassifies() {
+async fn strict_mode_entity_type_reclassifies_not_drops() {
     let (db, _dir) = make_db();
     let ontology = Ontology {
         mode: OntologyMode::Strict,
@@ -1012,11 +1029,11 @@ async fn strict_mode_entity_type_still_drops_not_reclassifies() {
         relation_types: vec![],
         ancestor_map: HashMap::new(),
     };
-    let state = make_state(db, Some(ontology));
+    let state = make_state(db.clone(), Some(ontology));
 
     let result = episode::add_episode(
         Arc::clone(&state),
-        "test-ep-entity-drop",
+        "test-ep-entity-reclassify",
         "Alice works at Acme Corp",
         "test",
         "test source",
@@ -1029,8 +1046,376 @@ async fn strict_mode_entity_type_still_drops_not_reclassifies() {
     .unwrap();
 
     assert_eq!(
-        result.nodes_extracted, 1,
-        "Acme Corp (Organization, out of vocabulary) must still be dropped outright, not reclassified"
+        result.nodes_extracted, 2,
+        "Acme Corp (Organization, out of vocabulary) must be retained, not dropped"
+    );
+    assert_eq!(
+        result.entities_reclassified_unclassified, 1,
+        "exactly Acme Corp must be counted as reclassified"
+    );
+
+    let conn = db.connect().unwrap();
+    let acme = conn
+        .get_entity_by_name_ci("Acme Corp", "grp")
+        .unwrap()
+        .expect("Acme Corp must be persisted");
+    assert!(
+        acme.labels.contains(&"Unclassified".to_string()),
+        "Acme Corp's labels must include Unclassified, not Organization: {:?}",
+        acme.labels
+    );
+    assert!(
+        !acme.labels.contains(&"Organization".to_string()),
+        "the raw out-of-vocabulary type must not leak into labels: {:?}",
+        acme.labels
+    );
+    let attrs: Value = serde_json::from_str(&acme.attributes).unwrap();
+    assert_eq!(
+        attrs["original_entity_type"], "Organization",
+        "original type must be recoverable from attributes: {}",
+        acme.attributes
+    );
+
+    let alice = conn
+        .get_entity_by_name_ci("Alice", "grp")
+        .unwrap()
+        .expect("Alice must be persisted");
+    assert!(
+        !alice.labels.contains(&"Unclassified".to_string()),
+        "an in-vocabulary entity must not be reclassified: {:?}",
+        alice.labels
+    );
+}
+
+// User Story 1 (issue #312): the extractor returning the same out-of-vocabulary type across
+// multiple entities in one run — every one of them is retained under Unclassified, none dropped.
+#[tokio::test]
+async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_entities() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+            original_entity_type: None,
+        },
+        ExtractedEntity {
+            name: "Rocket".to_string(),
+            entity_type: "Spacecraft".to_string(),
+            summary: "A rocket".to_string(),
+            original_entity_type: None,
+        },
+        ExtractedEntity {
+            name: "Capsule".to_string(),
+            entity_type: "Spacecraft".to_string(),
+            summary: "A capsule".to_string(),
+            original_entity_type: None,
+        },
+    ];
+    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities,
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Bob".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "A person".to_string(),
+                original_entity_type: None,
+            }],
+            edges: vec![],
+        },
+    ]));
+    let state = make_state_with_extractor(db, Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-count",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.nodes_extracted, 3,
+        "all 3 entities must be retained (reclassify-not-drop)"
+    );
+    assert_eq!(
+        result.entities_reclassified_unclassified, 2,
+        "exactly the 2 out-of-vocabulary entities (Rocket, Capsule) must be counted"
+    );
+
+    let result2 = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-count-zero",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result2.entities_reclassified_unclassified, 0,
+        "a run with zero out-of-vocabulary entities must report 0, distinguishable from absent"
+    );
+}
+
+// User Story 2 (issue #312): an edge referencing an out-of-vocabulary-typed entity is inserted
+// with both endpoints resolved, since the entity now survives reclassification instead of being
+// dropped — and the edge is not counted in edges_dropped_unresolvable.
+#[tokio::test]
+async fn strict_mode_edge_survives_when_endpoint_entity_is_reclassified() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+            original_entity_type: None,
+        },
+        ExtractedEntity {
+            name: "Rocket".to_string(),
+            entity_type: "Spacecraft".to_string(),
+            summary: "A rocket".to_string(),
+            original_entity_type: None,
+        },
+    ];
+    let edges = vec![ExtractedEdge {
+        source_name: "Alice".to_string(),
+        target_name: "Rocket".to_string(),
+        fact: "Alice piloted Rocket".to_string(),
+        relation_type: None,
+        valid_at: None,
+        invalid_at: None,
+        original_relation_type: None,
+    }];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges,
+        }]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-edge-survives",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "the edge must be inserted; its out-of-vocabulary-typed endpoint is not treated as missing"
+    );
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "the reclassified entity is a resolvable endpoint, not an unresolvable one"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query("MATCH (n:RelatesToNode_) WHERE n.name = 'Alice → Rocket' RETURN n.name")
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the edge must resolve to both endpoints");
+}
+
+// FR-007 (issue #312): an entity with an empty/absent type must continue to resolve as a plain,
+// untyped Entity under strict — not routed through the Unclassified reclassification path.
+#[tokio::test]
+async fn strict_mode_empty_entity_type_resolves_as_plain_entity() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Mystery".to_string(),
+            entity_type: "".to_string(),
+            summary: "An untyped thing".to_string(),
+            original_entity_type: None,
+        },
+        ExtractedEntity {
+            name: "AlsoMystery".to_string(),
+            entity_type: "Entity".to_string(),
+            summary: "Another untyped thing".to_string(),
+            original_entity_type: None,
+        },
+    ];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges: vec![],
+        }]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-empty-type",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.nodes_extracted, 2);
+    assert_eq!(
+        result.entities_reclassified_unclassified, 0,
+        "empty/'Entity' type must not be reclassified"
+    );
+
+    let conn = db.connect().unwrap();
+    for name in ["Mystery", "AlsoMystery"] {
+        let row = conn
+            .get_entity_by_name_ci(name, "grp")
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name} must be persisted"));
+        assert_eq!(
+            row.labels,
+            vec!["Entity".to_string()],
+            "{name} must carry only the base Entity label, no Unclassified: {:?}",
+            row.labels
+        );
+        assert_eq!(
+            row.attributes, "{}",
+            "{name} must not carry a spurious original_entity_type: {}",
+            row.attributes
+        );
+    }
+}
+
+// FR-008/SC-006 (issue #312): a reclassified entity must dedup correctly against a
+// pre-existing entity of the same subject already stored under its correct declared type — no
+// second, permanently-separate copy is created.
+#[tokio::test]
+async fn strict_mode_reclassified_entity_dedups_against_declared_type() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Spacecraft".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Rocket".to_string(),
+                entity_type: "Spacecraft".to_string(),
+                summary: "A rocket".to_string(),
+                original_entity_type: None,
+            }],
+            edges: vec![],
+        },
+        ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Rocket".to_string(),
+                entity_type: "Vehicle".to_string(),
+                summary: "Also a rocket".to_string(),
+                original_entity_type: None,
+            }],
+            edges: vec![],
+        },
+    ]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-dedup-1",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let result2 = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-dedup-2",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result2.nodes_extracted, 1,
+        "the second extraction must dedup-merge against the existing Rocket, not create a new node"
+    );
+    assert_eq!(
+        result2.entities_reclassified_unclassified, 1,
+        "the second extraction's out-of-vocabulary type still counts toward the tally even though it merges"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query("MATCH (n:Entity) WHERE n.name = 'Rocket' RETURN n.uuid")
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "there must be exactly one Rocket entity, not a second permanently-separate copy"
     );
 }
 
