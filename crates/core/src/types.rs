@@ -109,6 +109,11 @@ pub struct ExtractedEdge {
     pub valid_at: Option<String>,
     #[serde(default)]
     pub invalid_at: Option<String>,
+    /// The relation type as originally extracted, before strict-mode alias normalisation or
+    /// out-of-vocabulary reclassification overwrote `relation_type` (FR-001/FR-004). `None`
+    /// unless a strict-mode filter rewrote `relation_type` away from what the model produced.
+    #[serde(default)]
+    pub original_relation_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

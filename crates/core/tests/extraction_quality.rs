@@ -319,6 +319,7 @@ impl Extractor for SelfRefExtractor {
                     relation_type: Some("KNOWS".to_string()),
                     valid_at: None,
                     invalid_at: None,
+                    original_relation_type: None,
                 }],
             })
         })
@@ -365,6 +366,7 @@ impl Extractor for BadEndpointExtractor {
                     relation_type: Some("KNOWS".to_string()),
                     valid_at: None,
                     invalid_at: None,
+                    original_relation_type: None,
                 }],
             })
         })

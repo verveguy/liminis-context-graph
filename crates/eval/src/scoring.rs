@@ -339,6 +339,7 @@ mod tests {
                 relation_type: None,
                 valid_at: None,
                 invalid_at: None,
+                original_relation_type: None,
             }],
         }
     }
