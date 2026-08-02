@@ -643,6 +643,60 @@ async fn malformed_response_produces_one_complete_sidecar_record() {
 }
 
 #[tokio::test]
+async fn schema_invalid_response_produces_one_complete_sidecar_record() {
+    // A 200 OK response with a well-formed JSON tool_use block, but one entity in it is missing
+    // the genuinely required `name` field. This is valid JSON that fails schema validation —
+    // distinct from `malformed_response_produces_one_complete_sidecar_record`'s missing
+    // tool_use block, which has no JSON to validate against at all (#314 FR-003/US2 AS2).
+    let schema_invalid_body = serde_json::json!({
+        "stop_reason": "tool_use",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_01",
+            "name": "extract_entities",
+            "input": {
+                "entities": [{"entity_type": "Mission", "summary": "no name here"}]
+            }
+        }],
+        "usage": {"input_tokens": 10, "output_tokens": 7}
+    })
+    .to_string();
+    let (addr, _server) = spawn_stub_server_with_fixed_response(
+        "HTTP/1.1 200 OK",
+        Box::leak(schema_invalid_body.into_boxed_str()),
+    )
+    .await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("cassette.jsonl");
+    let (failure_sink, sidecar_path) = failure_sink_and_path(&cassette_path);
+    let cassette_writer = Arc::new(CassetteWriter::open(&cassette_path).unwrap());
+
+    let inner = Arc::new(AnthropicExtractor::with_url(
+        "test-model".to_string(),
+        "sk-test-key".to_string(),
+        format!("http://{addr}/v1/messages"),
+        failure_sink,
+    ));
+    let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
+
+    let err = recorder
+        .extract(opts_with_chunk_key(
+            "Alice works at Acme Corp.",
+            "chunk-schema-invalid",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::Json(_)), "got {err:?}");
+
+    let records = read_sidecar_records(&sidecar_path);
+    assert_eq!(records.len(), 1);
+    let r = &records[0];
+    assert_eq!(r["call_type"], "entities");
+    assert_eq!(r["chunk_key"], "chunk-schema-invalid");
+    assert_eq!(r["classification"], "schema_invalid");
+}
+
+#[tokio::test]
 async fn a_2xx_response_with_invalid_json_is_classified_malformed_not_http_error() {
     // A response was received and the HTTP layer itself succeeded — the failure is in the
     // body's syntax, not the transport. Must not be classified "http_error" (which would also

@@ -68,8 +68,10 @@ pub enum TelemetryEvent {
     },
     /// Emitted by `OaiExtractor` for every entity/edge extraction response, distinguishing
     /// whether the structured-output JSON was well-formed as-is (`"clean"`), required
-    /// `extract_json_block`'s fence/prefix stripping to parse (`"recovered"`), or was
-    /// unparseable (`"malformed"`). `call_type` is `"entities"` or `"edges"`.
+    /// `extract_json_block`'s fence/prefix stripping to parse (`"recovered"`), was not valid
+    /// JSON at all (`"malformed"`), or parsed as valid JSON but failed schema/field validation
+    /// on a genuinely required field (`"schema_invalid"`, #314 FR-003). `call_type` is
+    /// `"entities"` or `"edges"`.
     StructuredOutputParse {
         ts_ms: u64,
         model: String,
@@ -88,7 +90,9 @@ pub enum TelemetryEvent {
         /// `"entities"` or `"edges"`.
         call_type: String,
         chunk_key: Option<String>,
-        /// `"http_error"`, `"truncation"`, or `"malformed"`.
+        /// `"http_error"`, `"truncation"`, `"malformed"`, or `"schema_invalid"` (#314 FR-003:
+        /// valid JSON that failed schema/field validation, as opposed to `"malformed"`, which is
+        /// content that never parsed as JSON at all).
         classification: String,
         /// The complete raw response body — never truncated to a prefix (FR-002). A UTF-8
         /// decoding failure is stored lossily rather than dropping the record.
@@ -103,6 +107,22 @@ pub enum TelemetryEvent {
         /// `None` at every `call_type: "entities"` site, where there is nothing to report yet.
         #[serde(default)]
         entities_extracted: Option<usize>,
+    },
+    /// Emitted by `OaiExtractor::do_extract_entities` on a successful parse (#314 FR-004) —
+    /// the Anthropic path can never produce this, since its `tool_use` schema's `"required":
+    /// ["name", "entity_type", "summary"]` structurally prevents an empty summary from reaching
+    /// this point. Surfaces the missing-summary rate as its own signal, separate from the
+    /// pass/fail classification in `StructuredOutputParse`/`ExtractionFailure`: an empty summary
+    /// is a degraded entity, not a failed extraction.
+    EntitiesMissingSummary {
+        ts_ms: u64,
+        model: String,
+        chunk_key: Option<String>,
+        entities_extracted: usize,
+        /// Count of entities in this chunk whose `summary` is empty — absent, explicit `null`,
+        /// or explicit `""` in the source JSON are all indistinguishable after parsing (#314
+        /// Edge Cases) and all count here.
+        missing_summary: usize,
     },
     WalRotated {
         ts_ms: u64,

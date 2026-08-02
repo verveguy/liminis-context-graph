@@ -32,7 +32,9 @@ pub struct ExtractionFailureRecord {
     /// `"entities"` or `"edges"`.
     pub call_type: String,
     pub chunk_key: Option<String>,
-    /// `"http_error"`, `"truncation"`, or `"malformed"`.
+    /// `"http_error"`, `"truncation"`, `"malformed"`, or `"schema_invalid"` (#314 FR-003: valid
+    /// JSON that failed schema/field validation, as opposed to `"malformed"`, which is content
+    /// that never parsed as JSON at all).
     pub classification: String,
     /// The complete raw response body — never truncated to a prefix (FR-002).
     pub raw_body: String,

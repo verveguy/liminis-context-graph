@@ -24,11 +24,14 @@ pub struct StructuredOutputCounts {
     pub clean: u64,
     pub recovered: u64,
     pub malformed: u64,
+    /// Valid JSON that failed schema/field validation on a genuinely required field — distinct
+    /// from `malformed` (content that never parsed as JSON at all), per #314 FR-003.
+    pub schema_invalid: u64,
 }
 
 impl StructuredOutputCounts {
     pub fn total(&self) -> u64 {
-        self.clean + self.recovered + self.malformed
+        self.clean + self.recovered + self.malformed + self.schema_invalid
     }
 
     pub fn malformed_rate(&self) -> f64 {
@@ -36,6 +39,14 @@ impl StructuredOutputCounts {
             0.0
         } else {
             self.malformed as f64 / self.total() as f64
+        }
+    }
+
+    pub fn schema_invalid_rate(&self) -> f64 {
+        if self.total() == 0 {
+            0.0
+        } else {
+            self.schema_invalid as f64 / self.total() as f64
         }
     }
 }
@@ -132,12 +143,32 @@ impl TruncationCounts {
     }
 }
 
+/// #314 FR-004: tallies `TelemetryEvent::EntitiesMissingSummary` — the OAI-only, empty-summary
+/// degradation rate, independent of `StructuredOutputCounts` (a chunk can be entirely `clean`
+/// while some of its entities carry no summary text).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MissingSummaryCounts {
+    pub entities_extracted: u64,
+    pub missing_summary: u64,
+}
+
+impl MissingSummaryCounts {
+    pub fn rate(&self) -> f64 {
+        if self.entities_extracted == 0 {
+            0.0
+        } else {
+            self.missing_summary as f64 / self.entities_extracted as f64
+        }
+    }
+}
+
 /// A `TelemetrySink` that tallies `StructuredOutputParse` and `ExtractionTruncated` events and
 /// discards everything else — the harness's seam for FR-007's structured-output-reliability
 /// metric and FR-005's truncation-visibility metric.
 pub struct CountingSink {
     counts: Mutex<StructuredOutputCounts>,
     truncated: Mutex<TruncationCounts>,
+    missing_summary: Mutex<MissingSummaryCounts>,
 }
 
 impl CountingSink {
@@ -145,6 +176,7 @@ impl CountingSink {
         Self {
             counts: Mutex::new(StructuredOutputCounts::default()),
             truncated: Mutex::new(TruncationCounts::default()),
+            missing_summary: Mutex::new(MissingSummaryCounts::default()),
         }
     }
 
@@ -154,6 +186,10 @@ impl CountingSink {
 
     pub fn truncated_snapshot(&self) -> TruncationCounts {
         *self.truncated.lock().unwrap()
+    }
+
+    pub fn missing_summary_snapshot(&self) -> MissingSummaryCounts {
+        *self.missing_summary.lock().unwrap()
     }
 }
 
@@ -172,6 +208,7 @@ impl TelemetrySink for CountingSink {
                     "clean" => counts.clean += 1,
                     "recovered" => counts.recovered += 1,
                     "malformed" => counts.malformed += 1,
+                    "schema_invalid" => counts.schema_invalid += 1,
                     _ => {}
                 }
             }
@@ -184,6 +221,15 @@ impl TelemetrySink for CountingSink {
                 } else {
                     truncated.exhausted += 1;
                 }
+            }
+            TelemetryEvent::EntitiesMissingSummary {
+                entities_extracted,
+                missing_summary,
+                ..
+            } => {
+                let mut tally = self.missing_summary.lock().unwrap();
+                tally.entities_extracted += entities_extracted as u64;
+                tally.missing_summary += missing_summary as u64;
             }
             _ => {}
         }
@@ -210,6 +256,9 @@ pub struct BackendRunResult {
     /// #306 FR-005: aggregate truncation visibility for this candidate — never per-chunk;
     /// chunk-level attribution lives solely in the `<cassette>.failures.jsonl` sidecar.
     pub truncated: TruncationCounts,
+    /// #314 FR-004: aggregate missing-summary visibility for this candidate. Always zero for
+    /// the Anthropic path (SC-004: its tool_use schema structurally prevents an empty summary).
+    pub missing_summary: MissingSummaryCounts,
 }
 
 /// Runs `extractor` over every chunk in `chunks`, sequentially (a corpus run is already
@@ -264,6 +313,7 @@ pub async fn run_backend(
         structured_output: sink.snapshot(),
         vocabulary_compliance,
         truncated: sink.truncated_snapshot(),
+        missing_summary: sink.missing_summary_snapshot(),
     }
 }
 
