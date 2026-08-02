@@ -95,9 +95,10 @@ fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
     section.push_str("</FACT_TYPES>\n");
     match onto.mode {
         OntologyMode::Strict => section.push_str(
-            "Only use relation types from the list above. If a fact matches one of a listed \
-             type's aliases or keywords, use that type's canonical name, not the alias itself; \
-             do not invent or use relation types not in this list or its declared aliases.\n",
+            "Only use relation types from the list above, identified by their canonical name. \
+             Aliases and keywords are listed to help you recognize a matching fact — always \
+             output the canonical name, never the alias or keyword itself. Do not invent \
+             relation types outside this list.\n",
         ),
         OntologyMode::Open => {}
     }

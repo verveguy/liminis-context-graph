@@ -23,12 +23,13 @@ pub struct AddEpisodeResult {
     pub nodes_extracted: usize,
     pub edges_extracted: usize,
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
-    /// the persisted graph, and were dropped at Phase C commit time (FR-004, FR-005).
+    /// the persisted graph, and were dropped at Phase C commit time (issue #281 FR-004/FR-005).
     pub edges_dropped_unresolvable: usize,
     /// Strict-mode edges whose relation type was outside the ontology's vocabulary even after
     /// alias normalisation, reclassified to `UNCLASSIFIED` rather than dropped (issue #310
-    /// FR-004/FR-005). The original relation type is preserved in the stored edge's
-    /// `attributes` field, not lost.
+    /// FR-004/FR-005 — distinct from `edges_dropped_unresolvable`'s issue #281 FR-004/FR-005
+    /// above). The original relation type is preserved in the stored edge's `attributes` field,
+    /// not lost.
     pub edges_reclassified_unclassified: usize,
 }
 
@@ -223,7 +224,13 @@ pub async fn add_episode(
     // normalisation is reclassified to `UNCLASSIFIED`, with the original label preserved on
     // `original_relation_type` for later storage in `attributes` (FR-004) — never deleted,
     // consistent with ADR-0033/ADR-0037/ADR-0310.
-    let mut edges_reclassified_unclassified = 0usize;
+    //
+    // This pass only rewrites `relation_type`/`original_relation_type`; it deliberately does not
+    // tally `edges_reclassified_unclassified` here. An edge marked here can still be dropped
+    // afterward as self-referential or (in Phase C) for an unresolvable endpoint, and counting
+    // here would desync the tally from what's actually persisted — the same failure mode
+    // ADR-0051 fixed for `edges_dropped_unresolvable` by making Phase C the sole authoritative
+    // counting point. The tally is instead taken in Phase C, alongside `edges_inserted`.
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
             let alias_map = build_alias_map(onto);
@@ -248,7 +255,6 @@ pub async fn add_episode(
                         } else {
                             original
                         };
-                        edges_reclassified_unclassified += 1;
                     }
                 }
             }
@@ -581,11 +587,15 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
-    let (edges_inserted, edges_dropped_unresolvable) = tokio::task::spawn_blocking(
-        move || -> Result<(usize, usize), Error> {
+    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
+        // Authoritative count of edges persisted with `relation_type = UNCLASSIFIED` (FR-005) —
+        // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
+        // reclassified but then dropped as self-referential or unresolvable is never counted.
+        let mut edges_reclassified_unclassified = 0usize;
 
         // Apply dedup decisions → collect entity UUIDs
         let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
@@ -708,6 +718,9 @@ pub async fn add_episode(
                 source_descriptions: vec![],
             })?;
             edges_inserted += 1;
+            if edge.original_relation_type.is_some() {
+                edges_reclassified_unclassified += 1;
+            }
         }
 
         // Insert episodic node
@@ -735,7 +748,11 @@ pub async fn add_episode(
 
         wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
 
-        Ok((edges_inserted, edges_dropped_unresolvable))
+        Ok((
+            edges_inserted,
+            edges_dropped_unresolvable,
+            edges_reclassified_unclassified,
+        ))
     })
     .await??;
     drop(_write_guard);

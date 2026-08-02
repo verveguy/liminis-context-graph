@@ -735,6 +735,74 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
     );
 }
 
+// PR #311 review finding: an edge reclassified to UNCLASSIFIED by the pre-lock strict-mode pass
+// must NOT be counted in edges_reclassified_unclassified if it's subsequently dropped as
+// self-referential — the tally must reflect what's actually persisted (mirroring how
+// edges_dropped_unresolvable is only ever counted authoritatively at Phase C, per ADR-0051).
+// This out-of-vocabulary, self-referential edge must be dropped and must not inflate the count.
+#[tokio::test]
+async fn strict_mode_reclassified_self_referential_edge_not_counted() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "KNOWS".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities: vec![ExtractedEntity {
+                name: "Alice".to_string(),
+                entity_type: "Person".to_string(),
+                summary: "A person".to_string(),
+            }],
+            edges: vec![ExtractedEdge {
+                source_name: "Alice".to_string(),
+                target_name: "Alice".to_string(),
+                fact: "Alice also known as Alice".to_string(),
+                relation_type: Some("ALSO_KNOWN_AS".to_string()),
+                valid_at: None,
+                invalid_at: None,
+                original_relation_type: None,
+            }],
+        }]));
+    let state = make_state_with_extractor(db, Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-reclassify-self-ref",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "the self-referential edge must still be dropped, even though it was also reclassified"
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 0,
+        "a reclassified edge that's later dropped as self-referential must not inflate the tally"
+    );
+}
+
 // FR-006 regression: the entity-side strict-mode filter still hard-drops out-of-vocabulary
 // entities rather than reclassifying them — unlike the edge-side filter, this is unchanged by
 // issue #310 because EntityTypeDef has no aliases/keywords concept to be alias-blind about (see
