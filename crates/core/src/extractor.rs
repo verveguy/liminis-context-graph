@@ -2044,11 +2044,13 @@ impl Extractor for MockExtractor {
                         name: "Alice".to_string(),
                         entity_type: "Person".to_string(),
                         summary: "A person named Alice".to_string(),
+                        original_entity_type: None,
                     },
                     ExtractedEntity {
                         name: "Acme Corp".to_string(),
                         entity_type: "Organization".to_string(),
                         summary: "A company called Acme Corp".to_string(),
+                        original_entity_type: None,
                     },
                 ],
                 edges: vec![ExtractedEdge {

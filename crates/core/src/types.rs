@@ -97,6 +97,13 @@ pub struct ExtractedEntity {
     pub entity_type: String,
     #[serde(default, deserialize_with = "deserialize_summary_or_default")]
     pub summary: String,
+    /// The entity type as originally extracted, set only when the strict-mode filter
+    /// reclassifies an out-of-vocabulary `entity_type` to `Unclassified` (FR-002/FR-003).
+    /// `None` in every other case — including when the type normalizes to a declared type,
+    /// which rewrites `entity_type` but does not touch this field, since the canonical name is
+    /// not "lost" information the way an out-of-vocabulary label is.
+    #[serde(default)]
+    pub original_entity_type: Option<String>,
 }
 
 /// Deserializes `summary` as `""` when the field is absent or explicitly `null`, rather than
