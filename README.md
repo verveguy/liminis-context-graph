@@ -177,3 +177,5 @@ Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to f
 ## Security
 
 To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/verveguy/liminis-context-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.
+
+<!-- scratch: docs-only CI fast-path skip demonstration for issue #322, see PR #323 -->
