@@ -208,15 +208,27 @@ pub async fn add_episode(
         e.original_entity_type = None;
     }
 
+    // Drop entities with empty or whitespace-only names before any strict-mode filtering that
+    // tallies counts (also before edge validation, so any edges referencing them are dropped as
+    // unresolvable — spec edge case: treat empty-name extraction as a failure and do not create
+    // a node for it). Doing this before the reclassify loop below, rather than after, matters:
+    // an empty-named entity must never be counted toward `entities_reclassified_unclassified`
+    // since it never reaches storage — counting it first and dropping it after would desync the
+    // tally from what's actually persisted (review finding on issue #312).
+    extraction.entities.retain(|e| !e.name.trim().is_empty());
+
     // Strict-mode entity filtering (issue #312): an entity is never dropped for its entity_type
     // alone. An entity whose normalized type is empty or the literal "Entity" means "no specific
-    // type" — as it does everywhere else in this function — and passes through unchanged (FR-007).
-    // A non-empty, non-matching type is reclassified to `Unclassified`, with the original label
-    // preserved on `original_entity_type` for later storage in `attributes` (FR-002/FR-003) —
-    // never deleted, consistent with ADR-0033/ADR-0037/ADR-0310/ADR-0312. Unlike the edge-side
-    // reclassify tally (deferred to Phase C per ADR-0051, since an edge can still be dropped
-    // afterward), the entity tally is counted directly here: a reclassified entity is never
-    // subsequently dropped by anything downstream in this pipeline, so there's no desync risk.
+    // type" — as it does everywhere else in this function — and passes through unchanged (FR-007),
+    // with `entity_type` rewritten to its normalized form (empty or "Entity") so a raw case/
+    // separator variant (e.g. "entity", "ENTITY") can never leak into `EntityRow.labels` via
+    // `make_insert_row`'s raw-string check (review finding on issue #312). A non-empty,
+    // non-matching type is reclassified to `Unclassified`, with the original label preserved on
+    // `original_entity_type` for later storage in `attributes` (FR-002/FR-003) — never deleted,
+    // consistent with ADR-0033/ADR-0037/ADR-0310/ADR-0312. Unlike the edge-side reclassify tally
+    // (deferred to Phase C per ADR-0051, since an edge can still be dropped afterward), the
+    // entity tally is counted directly here: because the empty-name retain above already ran,
+    // every entity reaching this loop is guaranteed to be persisted, so there's no desync risk.
     let mut entities_reclassified_unclassified = 0usize;
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
@@ -226,6 +238,7 @@ pub async fn add_episode(
                 if normalized.is_empty() || normalized == "Entity" {
                     // No specific type extracted — resolves as a plain untyped Entity, same as
                     // every other ontology mode. Not a reclassification.
+                    e.entity_type = normalized;
                     continue;
                 }
                 if vocab.contains(&normalized) {
@@ -287,11 +300,6 @@ pub async fn add_episode(
             }
         }
     }
-
-    // Drop entities with empty or whitespace-only names before edge validation so that
-    // any edges referencing them are also dropped as unresolvable (spec edge case: treat
-    // empty-name extraction as a failure and do not create a node for it).
-    extraction.entities.retain(|e| !e.name.trim().is_empty());
 
     // Load the DB handle here (rather than at Phase B, below) — Phase B's entity-count check
     // and dedup resolution reuse this same Arc. Phase C, below, reloads its own handle

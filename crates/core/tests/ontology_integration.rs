@@ -1419,6 +1419,131 @@ async fn strict_mode_reclassified_entity_dedups_against_declared_type() {
     );
 }
 
+// Review finding (issue #312): an out-of-vocabulary entity with an empty/whitespace-only name
+// is dropped by the empty-name filter and must never be counted toward
+// entities_reclassified_unclassified — counting it and then dropping it later would desync the
+// tally from what's actually persisted.
+#[tokio::test]
+async fn strict_mode_empty_name_out_of_vocab_entity_not_counted_in_tally() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "   ".to_string(),
+            entity_type: "Spacecraft".to_string(),
+            summary: "an unnamed rocket".to_string(),
+            original_entity_type: None,
+        },
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+            original_entity_type: None,
+        },
+    ];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges: vec![],
+        }]));
+    let state = make_state_with_extractor(db, Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-empty-name-oov",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.nodes_extracted, 1,
+        "only Alice must be persisted; the empty-named entity is dropped"
+    );
+    assert_eq!(
+        result.entities_reclassified_unclassified, 0,
+        "the empty-named out-of-vocabulary entity must never be counted — it never reaches storage"
+    );
+}
+
+// Review finding (issue #312): a case/separator variant of "Entity" (e.g. lowercase "entity")
+// normalizes to "Entity" and must not be reclassified — but `entity_type` must also be rewritten
+// to its normalized form on this passthrough path, otherwise the raw out-of-vocabulary-looking
+// string leaks into `EntityRow.labels` via `make_insert_row`'s raw-string (non-normalized) check.
+#[tokio::test]
+async fn strict_mode_entity_type_case_variant_of_entity_not_leaked_into_labels() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![ExtractedEntity {
+        name: "Mystery".to_string(),
+        entity_type: "entity".to_string(),
+        summary: "lowercase entity type variant".to_string(),
+        original_entity_type: None,
+    }];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges: vec![],
+        }]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-entity-case-variant",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.nodes_extracted, 1);
+    assert_eq!(
+        result.entities_reclassified_unclassified, 0,
+        "a case variant of 'Entity' is not a reclassification"
+    );
+
+    let conn = db.connect().unwrap();
+    let mystery = conn
+        .get_entity_by_name_ci("Mystery", "grp")
+        .unwrap()
+        .expect("Mystery must be persisted");
+    assert_eq!(
+        mystery.labels,
+        vec!["Entity".to_string()],
+        "the raw 'entity' string must not leak into labels: {:?}",
+        mystery.labels
+    );
+}
+
 // SC-003(b): Open-mode ontology with {AUTHORED} declared — edges with WORKS_AT survive.
 // MockExtractor returns Alice --WORKS_AT--> Acme Corp; open mode keeps LLM-derived relation_type.
 #[tokio::test]
