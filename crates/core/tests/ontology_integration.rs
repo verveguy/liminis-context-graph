@@ -973,6 +973,26 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
         "open mode never runs the strict-mode reclassify filter, so this must stay zero even \
          though the edge's relation_type happens to be the literal string UNCLASSIFIED"
     );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Alice → Bob' \
+             RETURN n.relation_type, n.attributes",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one edge must be stored");
+    assert_eq!(
+        rows[0][0], "UNCLASSIFIED",
+        "persisted relation_type must reflect the extractor's literal output, not a rewrite \
+         by the (never-run, in open mode) strict-mode filter"
+    );
+    let attrs = rows[0][1].as_str();
+    assert_eq!(
+        attrs, "{}",
+        "no strict-mode reclassification occurred, so attributes must remain the empty-object \
+         default, not carry a spurious original_relation_type"
+    );
 }
 
 // FR-006 regression: the entity-side strict-mode filter still hard-drops out-of-vocabulary

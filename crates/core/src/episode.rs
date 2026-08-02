@@ -178,6 +178,16 @@ pub async fn add_episode(
         }
     };
 
+    // `original_relation_type` is deserialized directly from raw, untrusted extractor/LLM JSON
+    // (`#[serde(default)]`, no `deny_unknown_fields`) — a hallucinated or prompt-injected key of
+    // that name in the model's edge output must never survive to storage. Clear it here,
+    // unconditionally and regardless of ontology mode/config, before any mode-specific filtering
+    // runs below. It is set again, only by this function's own logic, in the strict-mode
+    // out-of-vocabulary branch further down.
+    for e in extraction.edges.iter_mut() {
+        e.original_relation_type = None;
+    }
+
     // Strict-mode entity filtering: drop entities not in the declared vocabulary.
     //
     // FR-006 audit (issue #310): this filter still drops rather than reclassifies, unlike the
@@ -243,12 +253,6 @@ pub async fn add_episode(
                 match alias_map.get(&normalized) {
                     Some(canonical) => {
                         e.relation_type = Some(canonical.clone());
-                        // `original_relation_type` is deserialized directly from raw extractor
-                        // JSON with `#[serde(default)]` and no `deny_unknown_fields` — a
-                        // hallucinated or injected key of that name in the model's output would
-                        // otherwise survive an alias match untouched. Clear it so the field can
-                        // only ever be set by this filter's own out-of-vocabulary branch below.
-                        e.original_relation_type = None;
                     }
                     None => {
                         eprintln!(
