@@ -2780,7 +2780,7 @@ async fn recover_drop_lbug_wal(
         // never calls build_indices_and_constraints(). handle_knowledge_recover's shared success
         // arm would then report indices_built: true for a DB with no indices at all. Fail fast
         // instead: no checkpoint to reopen means this strategy doesn't apply.
-        if !std::path::Path::new(&db_path).exists() {
+        if !std::path::Path::new(&db_path).is_file() {
             return Err(Error::Ipc(format!(
                 "drop_lbug_wal requires an existing checkpoint file; none found at {db_path}"
             )));
