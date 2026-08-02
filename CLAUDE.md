@@ -76,19 +76,25 @@ The `ideas/` directory (created on demand) holds pre-spec sketches and design no
 
 ## Rust pre-commit checks (MUST run before every commit)
 
-CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget. Full release verification is CI's job, not yours.
+CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget on a warm cache (see below for the cold-worktree case). Full release verification is CI's job, not yours.
 
-> **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite plus the R-003 bench correctness gate — used to measure **15–18 minutes** even on a warm cache, so `cargo test --release` cannot be run in the foreground; CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
+> **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite plus the R-003 bench correctness gate — used to measure **15–18 minutes** even on a warm cache, so the complete release verification path cannot be run in the foreground; CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
 >
 > **The local gate's measured cost is ~8.6 minutes on a worktree with a warm debug-profile
 > cache**: `cargo fmt --all` (< 1s) + `cargo test` (~8.5 min, the dominant cost) + `cargo clippy
 > --all-targets -- -D warnings` (< 10s once `test` has already built the debug artifacts) — see
-> #316. That's comfortably under the 10-minute single-call budget for the sum, but `cargo test`
-> alone can approach a full 10-minute call on its own; if a single step is timing out, that step
-> (not the whole gate) is what to investigate. A genuinely cold worktree (no prior debug build at
-> all) pays additional first-time dependency-compile cost on top of this — not separately
-> re-measured, since #316 found the debug dependency graph is not the bottleneck driving the
-> failure class this budget note exists to prevent (see below).
+> #316. Run each of the three as its own foreground call (as the numbered list below does), not
+> chained into one command — that keeps every individual call comfortably under the 10-minute
+> budget even though their sum approaches it, and `cargo test` is the one to watch since it alone
+> can approach a full 10-minute call on a warm cache.
+>
+> **A genuinely cold worktree (no prior debug build at all) is unmeasured** and pays additional
+> first-time dependency-compile cost on top of the warm-cache figure above — #316 did not capture
+> this number, since it found the debug dependency graph is not the bottleneck driving the failure
+> class this budget note exists to prevent (see below). If `cargo test` alone exceeds a single
+> foreground call on a cold worktree, fall back to the "Long-running commands" section's narrower-scope
+> option: split the run per crate (`cargo test -p lcg-core`, then `-p lcg-service`, then `-p
+> lcg-eval`) rather than chaining a longer combined command.
 
 1. `cargo fmt --all` — auto-format. Never commit without running this. Rust treats whitespace as binary pass/fail; even a single misaligned brace fails `cargo fmt --check` in CI.
 2. `cargo test` — compiles lib + tests and runs them, in **debug**. CI runs `cargo test --release` because the ~50 integration-test binaries (crates/core: 37, crates/service: 11, crates/eval: 2 — not "six", a stale figure corrected by #316) require release-mode linking; that is CI's job, not yours (see the budget note above). Measured: compile+link for all ~50 binaries is ~4 minutes, execution ~1 minute — this was never actually the dominant CI cost (see below). If your change touches release-only behavior, say so in the PR body so a reviewer knows CI is the first place it gets exercised — do not run the release suite locally to pre-empt it. Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
