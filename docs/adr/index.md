@@ -80,6 +80,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |
 | [0310](0310-strict-mode-reclassifies-not-drops.md) | Strict-Mode Relation-Type Filtering Reclassifies, Never Drops | 2026-08-02 |
 | [0314](0314-missing-summary-salvage-and-schema-invalid-classification.md) | Missing-Summary Salvage and `schema_invalid` Classification | 2026-08-02 |
+| [0322](0322-ci-docs-only-fast-path.md) | CI Docs-Only Fast Path via Job-Level Skip | 2026-08-02 |
 
 ## Historical numbering
 
