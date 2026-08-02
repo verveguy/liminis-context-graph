@@ -1,4 +1,19 @@
+---
+layout: default
+title: ADR Index
+---
+
 # Architecture Decision Records
+
+**These are historical decision records, not current-state documentation.** Each ADR captures
+the reasoning behind a decision at the time it was made and is never edited to reflect later
+changes — some entries below are explicitly marked `_(superseded)_`, and others (e.g. ADR-0025's
+lazy index build, later revisited by ADR-0034/ADR-0036's eager build) describe behavior the
+codebase has since moved past without the ADR text itself being marked. For what the system
+does *today*, use the reference pages linked from the [documentation home](../) —
+[Operations](../operations.md), [Configuration](../configuration.md), and
+[IPC & MCP Reference](../ipc-mcp-reference.md) — and treat an ADR as the record of *why*, not a
+live description of *what*.
 
 Numbers are project-local and immutable once assigned. See [ADR-0001](0001-record-architecture-decisions.md) for the format.
 

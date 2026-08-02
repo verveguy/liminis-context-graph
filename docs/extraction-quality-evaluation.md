@@ -1,3 +1,8 @@
+---
+layout: default
+title: Extraction-Quality Evaluation
+---
+
 # Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
 
 This document answers the question `liminis-context-graph` has otherwise left unanswered: **can

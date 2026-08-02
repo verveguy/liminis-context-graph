@@ -1,3 +1,8 @@
+---
+layout: default
+title: Telemetry
+---
+
 # Telemetry
 
 The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
@@ -186,6 +191,37 @@ Example:
 {"type":"structured_output_parse","ts_ms":1716100000060,"model":"qwen3.6-27b","call_type":"edges","outcome":"recovered"}
 ```
 
+### `extraction_failure`
+
+Emitted at all three extraction-call failure sites (HTTP error, budget exhaustion that persists
+after one retry, or a malformed/unparseable response) from inside `AnthropicExtractor` /
+`OaiExtractor`. This is the heavier, complete-body sibling of `extraction_truncated` and
+`structured_output_parse` — it carries the full raw response body for forensics, where those two
+stay lightweight counting-only events. It is consumed only by the sidecar-writing
+`ExtractionFailureSink` (see the [failure-record sidecar](testing-and-evaluation.md#failure-record-sidecar)),
+not by the counting sink `ipc_call`/`token_usage` use.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | The model name in force for the failing call |
+| `call_type` | string | `"entities"` or `"edges"` |
+| `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `classification` | string | `"http_error"`, `"truncation"`, or `"malformed"` |
+| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. |
+| `finish_reason` | string or null | The provider's stop/finish reason, or `null` for an HTTP-level failure |
+| `completion_tokens` | u64 or null | Output token count, or `null` if unavailable |
+| `max_tokens` | u32 | The `max_tokens` value in force for the failing call |
+| `entities_extracted` | usize or null | Entities already extracted for this chunk before an edge-call failure discarded them from the caller's return value. `Some(count)` only at `call_type: "edges"` failure sites; `None` at `call_type: "entities"` sites, where there is nothing to report yet. |
+
+Example:
+```json
+{"type":"extraction_failure","ts_ms":1716100000055,"model":"qwen3.6-27b","call_type":"edges","chunk_key":"notes-0001","classification":"truncation","raw_body":"{\"choices\":[{\"message\":{\"content\":\"[{\\\"predicate\\\"...\"}}]}","finish_reason":"length","completion_tokens":8192,"max_tokens":8192,"entities_extracted":4}
+```
+
+See [ADR-0306](adr/0306-extraction-failure-sidecar-and-truncation-visibility.md) for the design
+rationale, and [Testing & Evaluation](testing-and-evaluation.md#failure-record-sidecar) for the
+on-disk sidecar file this event's consumer writes.
+
 ### `wal_rotated`
 
 Emitted when the WAL rolls over to a new file.
@@ -219,8 +255,8 @@ Example:
 ### `wal_auto_recovery`
 
 Emitted at each phase of autonomous WAL-corruption self-recovery — the observability for the
-self-healing path described in the README. Every field except `phase` is optional and present only
-where the phase produces it.
+self-healing path described in [Operations](operations.md). Every field except `phase` is optional
+and present only where the phase produces it.
 
 | Field | Type | Description |
 |-------|------|-------------|

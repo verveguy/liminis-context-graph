@@ -1,0 +1,14 @@
+source "https://rubygems.org"
+
+gem "github-pages", group: :jekyll_plugins
+
+group :jekyll_plugins do
+  gem "jekyll-seo-tag"
+  gem "jekyll-relative-links"
+end
+
+# CI-only: internal link checking (see .github/workflows/docs-drift.yml). Never
+# reaches the GitHub Pages build itself, which ignores this group.
+group :ci do
+  gem "html-proofer"
+end
