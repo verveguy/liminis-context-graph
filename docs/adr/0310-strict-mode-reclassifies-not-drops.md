@@ -82,9 +82,19 @@ The strict-mode edge filter in `episode.rs` never drops an edge for its `relatio
    `open`, an out-of-vocabulary edge keeps both the edge and its label. Reclassify-and-lose-the-
    label keeps the edge but destroys the label — paying information to buy closure, when the
    trade is avoidable. Preserving the label in `attributes` gives a closed, queryable
-   `relation_type` *and* full recoverability: a future `knowledge_canonicalize_relations` pass
-   can map preserved labels into the vocabulary as it grows, which it cannot do if the label was
-   overwritten.
+   `relation_type` *and* full recoverability: the raw label is never destroyed, so a *future*
+   tool can still map it into the vocabulary as it grows.
+
+   **This is a data-preservation guarantee, not a claim that today's
+   `knowledge_canonicalize_relations` already performs that recovery.** That pass classifies
+   lexically over the edge's current `relation_type`/predicate (README, "Relation typing"), never
+   reads `attributes`, and on a re-run skips any edge already at `UNCLASSIFIED`. An edge
+   reclassified by this feature is exactly such an edge, so `canonicalize_relations` as it exists
+   today will not recover it — teaching that pass to read `attributes.original_relation_type` for
+   residual `UNCLASSIFIED` edges is future work, out of scope for issue #310 (see Out of Scope:
+   "Any change to `knowledge_canonicalize_relations`'s own behavior"). What this decision buys
+   *now* is that the information survives for that future work to consume — not automatic
+   reclassification today.
 
 3. **The reclassified count is a per-run tally**, not just per-edge log lines: threaded through
    `AddEpisodeResult` as `edges_reclassified_unclassified` and surfaced in
@@ -123,6 +133,14 @@ The strict-mode edge filter in `episode.rs` never drops an edge for its `relatio
 4. **The edge-extraction prompt grows under `strict`** for ontologies with many aliases/keywords
    declared. Nothing in the spec suggested this is a blocking concern at realistic ontology
    sizes, but it is a real, measurable cost of making the constraint visible to the model.
+
+5. **`knowledge_canonicalize_relations` does not yet consume the preserved label.** It classifies
+   lexically over `relation_type`/predicate, never reads `attributes`, and skips edges already at
+   `UNCLASSIFIED` on a re-run — so an edge reclassified by this feature is not, today, mapped
+   back into the vocabulary by that pass. This decision preserves the information so that future
+   work can teach `canonicalize_relations` (or a new tool) to consume
+   `attributes.original_relation_type`; it does not itself deliver that recovery, and doing so is
+   explicitly out of scope for issue #310.
 
 ## Alternatives Considered
 

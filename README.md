@@ -291,7 +291,11 @@ relation_types:
     target_type: Organization
 ```
 
-`aliases` and `keywords` on a relation type serve two consumers: under `strict` mode they're rendered directly into the edge-extraction system prompt so the model can emit a declared alias's canonical name itself (see below), and they also drive the offline `knowledge_canonicalize_relations` maintenance pass. `aliases` are exact SCREAMING_SNAKE_CASE match candidates; `keywords` are lowercase substrings used only by the offline pass's fuzzy matching, not by ingest-time filtering.
+`aliases` and `keywords` on a relation type have three consumers, each with different matching rules:
+
+- **The `strict`-mode edge prompt** (`build_fact_types_section`) renders both `aliases` and `keywords` for every declared relation type, so the model can see the full set of accepted spellings and is more likely to emit the canonical name directly.
+- **Ingest-time `strict`-mode filtering** (`episode.rs`) consults only `aliases`, as an exact match after the same case/separator normalization applied to every relation type name (`normalize_relation_type`) — e.g. `wrote` normalizes to `WROTE` and resolves via the alias map to `AUTHORED`. `keywords` play no role in ingest-time filtering.
+- **The offline `knowledge_canonicalize_relations` maintenance pass** consults both: `aliases` via the same exact map, and `keywords` as lowercase substrings for its fuzzy-matching fallback.
 
 #### Entity type hierarchy
 
