@@ -46,7 +46,7 @@ A Fabrik stage worker (in any stage — Implement, Review, or Validate) hits a p
 
 ### Edge Cases
 
-- A worker in the Implement stage (which has no CI-gating relationship yet, unlike Review/Validate) still needs the local-command guidance (don't run `cargo test --release`, use the debug-mode gate instead) — the revised guidance must not read as exclusively a Review/Validate concern.
+- A worker in the Implement stage (which has no CI-gating relationship, same as Review — only Validate is configured with `wait_for_ci: true`) still needs the local-command guidance (don't run `cargo test --release`, use the debug-mode gate instead) — the revised guidance must not read as exclusively a Review/Validate concern.
 - A worker that has already started a long-running command in the background (correct) but is tempted to end its turn to "wait for the notification" (incorrect) needs the distinction between the two to be unambiguous, not just implied by adjacent wording.
 - The casualty list is illustrative context, not a target for exhaustive maintenance — the requirement (FR-005) is that the list named at time of writing is accurate, not that every future recurrence gets appended.
 
