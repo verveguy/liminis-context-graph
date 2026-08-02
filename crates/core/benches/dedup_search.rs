@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 
-#[path = "bench_common.rs"]
+#[path = "common/mod.rs"]
 mod bench_common;
 use bench_common::setup_bench_db_n;
 
