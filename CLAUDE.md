@@ -99,7 +99,7 @@ So the 15–18 minutes CI spends is **Rust compilation and the test suite**, not
 
 If any step fails, fix and re-run from step 1 (fmt may have shifted line numbers).
 
-**Docs-only PRs skip the Rust job.** `ci.yml`'s `changes` job classifies the PR diff; if it touches no `.rs`, `Cargo.toml`/`Cargo.lock`, `.cargo/**`, `build.rs`, or `.github/workflows/**` file, `build-lbug` and `test` both show conclusion "Skipped" instead of running — that's expected, not a misconfiguration. It's a job-level `if:` skip, not a `paths-ignore` on the workflow trigger, so the required `test (ubuntu-latest)` status check still reports (as passing) rather than never posting. Any PR touching a code-relevant path, or any classification error, runs the full suite unchanged. See [ADR-0322](docs/adr/0322-ci-docs-only-fast-path.md).
+**Docs-only PRs skip the Rust job.** `ci.yml`'s `changes` job classifies the PR diff; if it touches no `.rs`, `Cargo.toml`/`Cargo.lock`, `.cargo/**`, `build.rs`, `.github/workflows/**`, or `crates/eval/scripts/**` file, `build-lbug` and `test` both show conclusion "Skipped" instead of running — that's expected, not a misconfiguration. It's a job-level `if:` skip, not a `paths-ignore` on the workflow trigger, so the required `test (ubuntu-latest)` status check still reports (as passing) rather than never posting. Any PR touching a code-relevant path, or any classification error, runs the full suite unchanged. See [ADR-0322](docs/adr/0322-ci-docs-only-fast-path.md).
 
 ## Running performance benchmarks
 
