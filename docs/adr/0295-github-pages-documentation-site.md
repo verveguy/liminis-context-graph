@@ -143,9 +143,9 @@ once that one-time step is taken.
 - The maintainer-only release runbook moved from `README.md` into `CONTRIBUTING.md`, gaining a
   step to keep `docs/_config.yml`'s version and `docs/llms-full.txt` in sync with the
   `Cargo.toml` bump.
-- `docs/telemetry.md` gained the previously-missing `extraction_failure` section (12th
-  `TelemetryEvent` variant, SC-003) — closing the same class of drift PR #294 fixed once
-  already, found again independently during this issue's own research pass.
+- `docs/telemetry.md` gained the previously-missing `extraction_failure` section — the variant
+  that brought `TelemetryEvent` to 12 total (SC-003) — closing the same class of drift PR #294
+  fixed once already, found again independently during this issue's own research pass.
 - Every future doc change that touches a published page must run
   `scripts/generate-docs-llms-full.sh` before committing, or `docs-drift.yml` fails the PR. This
   is intentional friction in exchange for the property the original README never had: a stale

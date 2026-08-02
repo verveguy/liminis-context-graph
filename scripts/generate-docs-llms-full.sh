@@ -54,11 +54,17 @@ trap 'rm -f "${TMPFILE}"' EXIT
 # Strip YAML front matter (---...---) from a file into TMPFILE, then substitute the small set
 # of Liquid variables used in page bodies (site.version/site.repository) with their resolved
 # values — this script emits plain text, not Jekyll-rendered HTML, so unresolved `{{ ... }}`
-# tags would otherwise leak into llms-full.txt verbatim. Pass through unchanged if no front
-# matter. The done flag prevents --- horizontal rules in the body from being misidentified as
-# the front matter closing delimiter.
+# tags would otherwise leak into llms-full.txt verbatim. Front matter is only recognized when
+# the very first line is `---`, matching Jekyll's own detection rule — this way a body's own
+# `---` horizontal rules (at any position, in a page with or without front matter) are never
+# misidentified as a front-matter delimiter.
 strip_front_matter_to_tmp() {
-  awk 'BEGIN{fm=0; done=0} /^---$/ && !done { fm++; if(fm==2){done=1}; next } done || fm==0 {print}' "$1" \
+  awk '
+    NR==1 && /^---$/ { infm=1; next }
+    infm && /^---$/  { infm=0; next }
+    infm             { next }
+    { print }
+  ' "$1" \
     | sed -e "s|{{ *site\.version *}}|${docs_version}|g" -e "s|{{ *site\.repository *}}|${site_repository}|g" \
     > "${TMPFILE}"
 }

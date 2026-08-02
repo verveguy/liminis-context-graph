@@ -82,8 +82,8 @@ An agent pointed at the repo or the site gets accurate, current answers.
 ### Measurable Outcomes
 
 - **SC-001**: `https://verveguy.github.io/liminis-context-graph` serves the site from `main`.
-- **SC-002**: Every environment variable read via `env::var`/`lcg_env_var` under `crates/*/src` appears in the configuration reference. At time of writing that is 26.
-- **SC-003**: Every `TelemetryEvent` variant has a documented section whose field list matches the struct. At time of writing that is 11.
+- **SC-002**: Every environment variable read via `env::var`/`lcg_env_var` under `crates/*/src` appears in the configuration reference. At time of writing that is 26 (by Implement, the actual count had grown to 27 — see `docs/configuration.md`, which documents whatever `crates/*/src` currently reads, not this fixed baseline).
+- **SC-003**: Every `TelemetryEvent` variant has a documented section whose field list matches the struct. At time of writing that is 11 (by Implement, the actual count had grown to 12, including `ExtractionFailure` — see `docs/telemetry.md`).
 - **SC-004**: `README.md` is under 250 lines, down from ~950, and still contains a quickstart that works standalone.
 - **SC-005**: A PR touching published docs without regenerating `llms-full.txt` fails CI.
 - **SC-006**: No internal link on the published site 404s.

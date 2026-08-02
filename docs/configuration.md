@@ -146,8 +146,8 @@ before it will use a local endpoint at all.
 > **The bundled sidecar's model is not recommended for extraction quality.** Prior evaluation
 > found Apple Foundation Models' context window and capability insufficient for reliable
 > entity/relationship extraction (see
-> [Testing & Evaluation](testing-and-evaluation.md) for the full evaluation, methodology, and
-> model rankings). All figures there describe **freeform extraction only** — the same
+> [Extraction-Quality Evaluation](extraction-quality-evaluation.md) for the full evaluation,
+> methodology, and model rankings). All figures there describe **freeform extraction only** — the same
 > corpus/backends run under an ontology (`Open`/`Strict`) are not measured there; see
 > [Testing & Evaluation](testing-and-evaluation.md#running-under-an-ontology-openstrict) if you
 > want to produce those figures yourself. For local extraction that meets a reasonable quality
