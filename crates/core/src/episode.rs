@@ -5,12 +5,14 @@ use chrono::DateTime;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
+    canonicalize::build_alias_map,
     db::Db,
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
-    ontology::{normalize_entity_type, OntologyMode},
+    ontology::{normalize_entity_type, normalize_relation_type, OntologyMode},
     ontology_sidecar,
     prompts::normalize_name,
+    reprocess_relations::UNCLASSIFIED,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
@@ -23,6 +25,11 @@ pub struct AddEpisodeResult {
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
     /// the persisted graph, and were dropped at Phase C commit time (FR-004, FR-005).
     pub edges_dropped_unresolvable: usize,
+    /// Strict-mode edges whose relation type was outside the ontology's vocabulary even after
+    /// alias normalisation, reclassified to `UNCLASSIFIED` rather than dropped (issue #310
+    /// FR-004/FR-005). The original relation type is preserved in the stored edge's
+    /// `attributes` field, not lost.
+    pub edges_reclassified_unclassified: usize,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -171,6 +178,14 @@ pub async fn add_episode(
     };
 
     // Strict-mode entity filtering: drop entities not in the declared vocabulary.
+    //
+    // FR-006 audit (issue #310): this filter still drops rather than reclassifies, unlike the
+    // edge-side filter below. That's not an oversight — `EntityTypeDef` (ontology.rs) has no
+    // `aliases`/`keywords` fields at all, so the alias-blindness defect this issue fixes on the
+    // edge side cannot exist here: there is no alias map to consult, and adding one is out of
+    // scope for #310 (see ADR-0310). This behavior is locked in by
+    // `strict_mode_entity_type_still_drops_not_reclassifies` in
+    // `crates/core/tests/ontology_integration.rs`.
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
             let vocab = onto.entity_type_names();
@@ -200,29 +215,43 @@ pub async fn add_episode(
         }
     }
 
-    // Strict-mode relation_type filtering: drop edges whose relation_type is not in the vocabulary.
+    // Strict-mode relation_type filtering (issue #310): an edge is never dropped for its
+    // relation_type alone. First alias-normalise against the ontology's declared alias map
+    // (FR-001, reusing `canonicalize::build_alias_map` rather than a second parallel map) so a
+    // declared alias like `LAUNCHED_BY` is rewritten to its canonical `LAUNCHED` instead of
+    // being destroyed. An edge whose relation_type is outside the vocabulary even after
+    // normalisation is reclassified to `UNCLASSIFIED`, with the original label preserved on
+    // `original_relation_type` for later storage in `attributes` (FR-004) — never deleted,
+    // consistent with ADR-0033/ADR-0037/ADR-0310.
+    let mut edges_reclassified_unclassified = 0usize;
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
-            let vocab = onto.relation_type_names();
-            extraction.edges.retain(|e| {
-                match &e.relation_type {
-                    Some(rt) if vocab.contains(rt.as_str()) => true,
-                    Some(rt) => {
-                        eprintln!(
-                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (relation_type '{}' not in vocabulary)",
-                            e.source_name, e.target_name, rt
-                        );
-                        false
+            let alias_map = build_alias_map(onto);
+            for e in extraction.edges.iter_mut() {
+                let original = e.relation_type.clone();
+                let normalized = original
+                    .as_deref()
+                    .map(normalize_relation_type)
+                    .unwrap_or_default();
+                match alias_map.get(&normalized) {
+                    Some(canonical) => {
+                        e.relation_type = Some(canonical.clone());
                     }
                     None => {
                         eprintln!(
-                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (no relation_type)",
-                            e.source_name, e.target_name
+                            "liminis-context-graph: ontology strict: reclassifying edge '{}' → '{}' to UNCLASSIFIED (relation_type '{}' not in vocabulary)",
+                            e.source_name, e.target_name, original.as_deref().unwrap_or("")
                         );
-                        false
+                        e.relation_type = Some(UNCLASSIFIED.to_string());
+                        e.original_relation_type = if normalized.is_empty() {
+                            None
+                        } else {
+                            original
+                        };
+                        edges_reclassified_unclassified += 1;
                     }
                 }
-            });
+            }
         }
     }
 
@@ -668,7 +697,12 @@ pub async fn add_episode(
                 valid_at: validate_llm_timestamp(edge.valid_at.clone())
                     .or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
-                attributes: "{}".to_string(),
+                attributes: match &edge.original_relation_type {
+                    Some(orig) => {
+                        serde_json::json!({ "original_relation_type": orig }).to_string()
+                    }
+                    None => "{}".to_string(),
+                },
                 relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
@@ -726,6 +760,7 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
+        edges_reclassified_unclassified,
     })
 }
 

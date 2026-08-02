@@ -16,13 +16,13 @@ use lcg_core::{
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
     episode,
-    extractor::MockExtractor,
+    extractor::{ConfigurableExtractor, Extractor, MockExtractor},
     handlers,
     ipc::IpcRequest,
     ontology::{content_hash, load_ontology, EntityTypeDef, Ontology, OntologyMode},
     ontology_sidecar,
     telemetry::{NoopSink, TelemetrySink},
-    types::SourceType,
+    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -48,6 +48,37 @@ fn make_state(db: Arc<Db>, ontology: Option<Ontology>) -> Arc<AppState> {
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(EMB_DIM)),
         extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: ontology.map(Arc::new),
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+fn make_state_with_extractor(
+    db: Arc<Db>,
+    ontology: Option<Ontology>,
+    extractor: Arc<dyn Extractor>,
+) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(EMB_DIM)),
+        extractor,
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
@@ -281,10 +312,12 @@ fn load_ontology_empty_returns_none() {
 
 use lcg_core::ontology::RelationTypeDef;
 
-// SC-003(a): Strict-mode ontology with {AUTHORED} declared — edges with WORKS_AT are dropped.
-// MockExtractor returns Alice --WORKS_AT--> Acme Corp; the relation_type is not in vocabulary.
+// SC-003(a)/FR-004/SC-005: Strict-mode ontology with {AUTHORED} declared — an edge with
+// WORKS_AT (outside the vocabulary and not a declared alias) is retained and reclassified to
+// UNCLASSIFIED rather than dropped; the original relation_type is preserved in `attributes`.
+// MockExtractor returns Alice --WORKS_AT--> Acme Corp.
 #[tokio::test]
-async fn strict_mode_relation_type_drops_non_matching_edges() {
+async fn strict_mode_relation_type_reclassifies_non_matching_edges_to_unclassified() {
     let (db, _dir) = make_db();
     let ontology = Ontology {
         mode: OntologyMode::Strict,
@@ -310,7 +343,7 @@ async fn strict_mode_relation_type_drops_non_matching_edges() {
         }],
         ancestor_map: HashMap::new(),
     };
-    let state = make_state(db, Some(ontology));
+    let state = make_state(db.clone(), Some(ontology));
 
     let result = episode::add_episode(
         Arc::clone(&state),
@@ -331,9 +364,413 @@ async fn strict_mode_relation_type_drops_non_matching_edges() {
         "both entities (Alice + Acme Corp) should pass through entity filtering"
     );
     assert_eq!(
-        result.edges_extracted, 0,
-        "strict mode: WORKS_AT edge must be dropped when ontology only declares AUTHORED; got {} edges",
+        result.edges_extracted, 1,
+        "strict mode: WORKS_AT edge must be retained (reclassified), not dropped, when ontology only declares AUTHORED; got {} edges",
         result.edges_extracted
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 1,
+        "the out-of-vocabulary edge must be counted in the per-run tally (FR-005)"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Alice → Acme Corp' \
+             RETURN n.relation_type, n.attributes",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one edge must be stored");
+    assert_eq!(
+        rows[0][0], "UNCLASSIFIED",
+        "relation_type must be closed to UNCLASSIFIED, not the raw out-of-vocab label"
+    );
+    let attrs = rows[0][1].as_str();
+    assert!(
+        attrs.contains("WORKS_AT"),
+        "original relation type must be recoverable from attributes (SC-005): {attrs}"
+    );
+}
+
+// User Story 1/SC-001: an edge whose relation_type is a declared alias (LAUNCHED_BY → LAUNCHED)
+// is retained under the canonical name, not dropped.
+#[tokio::test]
+async fn strict_mode_alias_edge_retained_under_canonical_name() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![
+            EntityTypeDef {
+                name: "Person".to_string(),
+                description: None,
+                parent: None,
+            },
+            EntityTypeDef {
+                name: "Vehicle".to_string(),
+                description: None,
+                parent: None,
+            },
+        ],
+        relation_types: vec![RelationTypeDef {
+            name: "LAUNCHED".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec!["LAUNCHED_BY".to_string()],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![
+                ExtractedEntity {
+                    name: "Rocket".to_string(),
+                    entity_type: "Vehicle".to_string(),
+                    summary: "A rocket".to_string(),
+                },
+                ExtractedEntity {
+                    name: "Alice".to_string(),
+                    entity_type: "Person".to_string(),
+                    summary: "A person".to_string(),
+                },
+            ],
+            edges: vec![ExtractedEdge {
+                source_name: "Rocket".to_string(),
+                target_name: "Alice".to_string(),
+                fact: "Rocket launched by Alice".to_string(),
+                relation_type: Some("LAUNCHED_BY".to_string()),
+                valid_at: None,
+                invalid_at: None,
+                original_relation_type: None,
+            }],
+        },
+    ]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-alias",
+        "Rocket launched by Alice",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "declared-alias edge must be retained, not dropped"
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 0,
+        "a declared alias must not count as an out-of-vocabulary reclassification"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Rocket → Alice' RETURN n.relation_type",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "LAUNCHED",
+        "LAUNCHED_BY must be normalised to its canonical relation type LAUNCHED"
+    );
+}
+
+// Edge Case: a case/separator variant of a declared alias (`launched_by`) is still recognized,
+// because `normalize_relation_type` is the single normalisation point consulted before the
+// alias-map lookup (defense-in-depth — the real extractor already normalizes upstream, but the
+// filter must not assume that).
+#[tokio::test]
+async fn strict_mode_alias_case_variant_recognized() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![
+            EntityTypeDef {
+                name: "Person".to_string(),
+                description: None,
+                parent: None,
+            },
+            EntityTypeDef {
+                name: "Vehicle".to_string(),
+                description: None,
+                parent: None,
+            },
+        ],
+        relation_types: vec![RelationTypeDef {
+            name: "LAUNCHED".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec!["LAUNCHED_BY".to_string()],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult {
+            entities: vec![
+                ExtractedEntity {
+                    name: "Rocket".to_string(),
+                    entity_type: "Vehicle".to_string(),
+                    summary: "A rocket".to_string(),
+                },
+                ExtractedEntity {
+                    name: "Alice".to_string(),
+                    entity_type: "Person".to_string(),
+                    summary: "A person".to_string(),
+                },
+            ],
+            edges: vec![ExtractedEdge {
+                source_name: "Rocket".to_string(),
+                target_name: "Alice".to_string(),
+                fact: "Rocket launched by Alice".to_string(),
+                relation_type: Some("launched by".to_string()),
+                valid_at: None,
+                invalid_at: None,
+                original_relation_type: None,
+            }],
+        },
+    ]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-alias-case",
+        "Rocket launched by Alice",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "a case/separator variant of a declared alias must still be retained"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Rocket → Alice' RETURN n.relation_type",
+        )
+        .unwrap();
+    assert_eq!(
+        rows[0][0], "LAUNCHED",
+        "'launched by' must normalise to LAUNCHED_BY and resolve via the alias map to LAUNCHED"
+    );
+}
+
+// Edge Case: an ontology with relation types but no declared aliases behaves unchanged for
+// edges whose relation_type already matches a canonical name exactly.
+#[tokio::test]
+async fn strict_mode_no_aliases_declared_canonical_edge_unchanged() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![
+            EntityTypeDef {
+                name: "Person".to_string(),
+                description: None,
+                parent: None,
+            },
+            EntityTypeDef {
+                name: "Organization".to_string(),
+                description: None,
+                parent: None,
+            },
+        ],
+        relation_types: vec![RelationTypeDef {
+            name: "WORKS_AT".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let state = make_state(db.clone(), Some(ontology));
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-no-alias",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.edges_extracted, 1);
+    assert_eq!(
+        result.edges_reclassified_unclassified, 0,
+        "a canonical-name match with no aliases declared must behave exactly as before"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Alice → Acme Corp' RETURN n.relation_type",
+        )
+        .unwrap();
+    assert_eq!(rows[0][0], "WORKS_AT");
+}
+
+// SC-003/FR-005: a run with N out-of-vocabulary edges surfaces edges_reclassified_unclassified
+// == N via AddEpisodeResult, not merely per-edge log lines.
+#[tokio::test]
+async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "KNOWS".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+        ExtractedEntity {
+            name: "Bob".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+        ExtractedEntity {
+            name: "Carol".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+        ExtractedEntity {
+            name: "Dave".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+    ];
+    let edges = vec![
+        ExtractedEdge {
+            source_name: "Alice".to_string(),
+            target_name: "Bob".to_string(),
+            fact: "Alice also known as Bob".to_string(),
+            relation_type: Some("ALSO_KNOWN_AS".to_string()),
+            valid_at: None,
+            invalid_at: None,
+            original_relation_type: None,
+        },
+        ExtractedEdge {
+            source_name: "Bob".to_string(),
+            target_name: "Carol".to_string(),
+            fact: "Bob mentored Carol".to_string(),
+            relation_type: Some("MENTORED".to_string()),
+            valid_at: None,
+            invalid_at: None,
+            original_relation_type: None,
+        },
+        ExtractedEdge {
+            source_name: "Carol".to_string(),
+            target_name: "Dave".to_string(),
+            fact: "Carol knows Dave".to_string(),
+            relation_type: Some("KNOWS".to_string()),
+            valid_at: None,
+            invalid_at: None,
+            original_relation_type: None,
+        },
+    ];
+    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
+        ExtractionResult { entities, edges },
+    ]));
+    let state = make_state_with_extractor(db, Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-count",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 3,
+        "all 3 edges must be retained (reclassify-not-drop)"
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 2,
+        "exactly the 2 out-of-vocabulary edges (ALSO_KNOWN_AS, MENTORED) must be counted; KNOWS is in-vocabulary"
+    );
+}
+
+// FR-006 regression: the entity-side strict-mode filter still hard-drops out-of-vocabulary
+// entities rather than reclassifying them — unlike the edge-side filter, this is unchanged by
+// issue #310 because EntityTypeDef has no aliases/keywords concept to be alias-blind about (see
+// the doc comment at the entity filter in episode.rs).
+#[tokio::test]
+async fn strict_mode_entity_type_still_drops_not_reclassifies() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    let state = make_state(db, Some(ontology));
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-entity-drop",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.nodes_extracted, 1,
+        "Acme Corp (Organization, out of vocabulary) must still be dropped outright, not reclassified"
     );
 }
 

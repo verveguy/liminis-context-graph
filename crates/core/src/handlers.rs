@@ -436,6 +436,7 @@ async fn handle_knowledge_process_chunk(
         "nodes_extracted": result.nodes_extracted,
         "edges_extracted": result.edges_extracted,
         "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
+        "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "duration_seconds": start.elapsed().as_secs_f64(),
     }))
 }
