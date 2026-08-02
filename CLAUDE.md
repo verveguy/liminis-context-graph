@@ -56,6 +56,20 @@ Worktrees live as siblings to the main checkout under `../liminis-context-graph-
 
 The Spec Kit threshold and the worktree threshold are the same: features go through Spec Kit + Fabrik; everything else still gets a worktree + PR.
 
+## Long-running commands (NON-NEGOTIABLE)
+
+This applies in every stage — Implement, Review, Validate, and direct collaboration — not only around pre-commit checks. It applies any time you need a signal from something that won't finish inside a single foreground call, whether that's a local test suite, a GitHub Actions run, or a benchmark workflow.
+
+An agent's foreground shell call is capped at **10 minutes**. When a check you'd otherwise run will exceed that, work through these options **in order**:
+
+1. **Don't run it.** If something else already runs the exact check, let it. CI runs `cargo test --release` and `cargo clippy --release -- -D warnings` on every PR (see the Rust pre-commit checks section below) — a local rerun duplicates that work and gains nothing.
+2. **Run the in-budget subset instead.** A debug-mode build/test pass, or a narrower command scoped to what changed, often gives a fast local signal without hitting the cap. See the pre-commit gate below for the Rust-specific version of this.
+3. **If a long-running result is genuinely required and nothing else provides it, background it and poll within the same turn.** Start the command in the background, then check on it with a small number of short, bounded foreground checks with brief pauses between them — staying well under the 10-minute cap for each check — and report whatever state was reached (done, still running, failed) before ending the turn. For example: launch `cargo test --release` in the background, then run two or three foreground checks a few minutes apart (e.g. `jobs`, or tailing the command's output file) to see whether it has finished, and report the result either way once you stop polling.
+
+**Backgrounding a command is fine. Ending your turn while it's running, hoping to be woken by a completion notification, is the fatal step** — in a headless run that notification never arrives, the stage closes incomplete, and after enough retries the issue auto-pauses. This has happened repeatedly: #208, #190, #219, #212, #236, #283, #297.
+
+**Never wait on CI or a benchmark run.** A stage completes its work and emits `FABRIK_STAGE_COMPLETE` (or the equivalent for the stage you're in) without checking whether CI has finished — the Fabrik engine gates on CI itself, re-polling and applying the `fabrik:awaiting-ci` label after the stage completes, and only re-invokes the stage if CI fails. Do not poll `gh run watch`, `gh pr checks`, or schedule a wakeup to check on a GitHub Actions or `bench.yml` run's status — that polling is the engine's job, not the stage's.
+
 ## Pre-spec ideas (`ideas/`)
 
 The `ideas/` directory (created on demand) holds pre-spec sketches and design notes that have not crossed the Spec Kit threshold. **Do not implement directly from files there** — they are exploratory by definition and may be wrong, incomplete, or contradicted by later thinking. When an idea matures, file a Fabrik issue (with a Spec Kit–formatted body for features, or a focused bug body for fixes) and the resulting spec lives in `specs/<issue-number>-<short-name>/spec.md` per the convention above.
@@ -64,11 +78,7 @@ The `ideas/` directory (created on demand) holds pre-spec sketches and design no
 
 CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget. Full release verification is CI's job, not yours.
 
-> **Local verification has a 10-minute budget. Read this before running anything.**
->
-> An agent's foreground shell call is capped at **10 minutes**. CI's `test` job — a release build plus the suite — measures **15–18 minutes** even on a warm cache. So `cargo test --release` **cannot be run in the foreground**, and reaching for a background run instead is how this repo's agent sessions stall: the worker backgrounds the command, ends its turn to wait for a completion notification, and in a headless run that notification never arrives. The stage closes incomplete, three times, and the issue auto-pauses. This has happened on #208, #190, #219, #212, and #236.
->
-> **So: do not run `cargo test --release` locally, and never end a turn waiting on a backgrounded command.** Use the local gate below, which fits inside the budget, and let CI own full release verification. That is what CI is for — a local `--release` run duplicates work CI already does, and blocks the agent for longer than a foreground call is allowed to last.
+> **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite — measures **15–18 minutes** even on a warm cache, so `cargo test --release` cannot be run in the foreground, and CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
 
 1. `cargo fmt --all` — auto-format. Never commit without running this. Rust treats whitespace as binary pass/fail; even a single misaligned brace fails `cargo fmt --check` in CI.
 2. `cargo test` — compiles lib + tests and runs them, in **debug**. CI runs `cargo test --release` because the 6 integration tests require release-mode linking; that is CI's job, not yours (see the budget note above). If your change touches release-only behavior, say so in the PR body so a reviewer knows CI is the first place it gets exercised — do not run the release suite locally to pre-empt it. Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
@@ -96,6 +106,8 @@ Performance benchmarks are **not** run on every PR — they run on explicit invo
 ```bash
 gh workflow run bench.yml
 ```
+
+Triggering the run is all a stage does — do not wait for it to finish; see "Long-running commands" above for why stages never wait on CI or benchmark runs.
 
 Results appear in the Actions tab under the "Perf Benchmarks" workflow. Each run uploads two artifacts (30-day retention):
 - **`bench-results-<sha>`** — plain-text criterion output for `1k`, `10k`, and `50k` dedup runs; download the zip from the Actions UI to inspect.
