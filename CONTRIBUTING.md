@@ -69,6 +69,10 @@ Substantial features (anything with user-facing scenarios and acceptance criteri
 
 The maintainer works in git worktrees and never commits directly to `main`. See [`CLAUDE.md`](CLAUDE.md) for the full convention. External contributors working in forks are not subject to this constraint.
 
+### CI failure issues
+
+If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md).
+
 ## Questions
 
 Open an issue or start a GitHub Discussion. The maintainer will respond on a best-effort basis.

@@ -180,6 +180,13 @@ release from it and **requires the pushed tag to match that version**, so the bu
 must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
 never commit release prep directly to `main` — then tag the merge commit.
 
+0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, and `eval` run outside the
+   required PR gate (deliberately, for cost reasons) and can go silently red for days — see
+   [ADR-0298](docs/adr/0298-ci-failure-notification.md). Run
+   `gh issue list --label ci-failure --state open` before proceeding. If it's empty, continue. If
+   it isn't, either fix the underlying failure first or record in the release PR why the release
+   is proceeding anyway — don't ship over a known-broken post-merge check silently the way
+   `v0.11.0` did (#298).
 1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
    `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
    `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
