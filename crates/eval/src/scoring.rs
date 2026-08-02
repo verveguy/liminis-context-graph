@@ -378,6 +378,7 @@ mod tests {
             structured_output: Default::default(),
             vocabulary_compliance: None,
             truncated: Default::default(),
+            missing_summary: Default::default(),
         }
     }
 

@@ -403,6 +403,7 @@ mod tests {
             structured_output: StructuredOutputCounts::default(),
             vocabulary_compliance: None,
             truncated: Default::default(),
+            missing_summary: Default::default(),
         }
     }
 

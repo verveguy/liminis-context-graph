@@ -915,9 +915,7 @@ enum EdgeOutcome {
 /// `ExtractionFailure.classification` agree.
 fn classify_parse_failure(e: &Error) -> &'static str {
     match e {
-        Error::Json(err) if err.classify() == serde_json::error::Category::Data => {
-            "schema_invalid"
-        }
+        Error::Json(err) if err.classify() == serde_json::error::Category::Data => "schema_invalid",
         _ => "malformed",
     }
 }
