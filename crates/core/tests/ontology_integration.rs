@@ -896,6 +896,85 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
     );
 }
 
+// PR #311 review finding: edges_reclassified_unclassified must only ever be incremented for
+// edges that actually passed through the strict-mode reclassify filter. Under `open` mode that
+// filter never runs at all, so even if the extractor happens to emit the literal string
+// "UNCLASSIFIED" as relation_type (an LLM output collision, not an ontology decision), the tally
+// must stay at zero — otherwise the count would falsely suggest strict-mode reclassification
+// occurred for a workspace where strict mode isn't even active.
+#[tokio::test]
+async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassified() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "KNOWS".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+        ExtractedEntity {
+            name: "Bob".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+    ];
+    let edges = vec![ExtractedEdge {
+        source_name: "Alice".to_string(),
+        target_name: "Bob".to_string(),
+        fact: "Alice and Bob are connected somehow".to_string(),
+        relation_type: Some("UNCLASSIFIED".to_string()),
+        valid_at: None,
+        invalid_at: None,
+        original_relation_type: None,
+    }];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges,
+        }]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-open-literal-unclassified",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "open mode: the edge must be retained regardless of its relation_type"
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 0,
+        "open mode never runs the strict-mode reclassify filter, so this must stay zero even \
+         though the edge's relation_type happens to be the literal string UNCLASSIFIED"
+    );
+}
+
 // FR-006 regression: the entity-side strict-mode filter still hard-drops out-of-vocabulary
 // entities rather than reclassifying them — unlike the edge-side filter, this is unchanged by
 // issue #310 because EntityTypeDef has no aliases/keywords concept to be alias-blind about (see

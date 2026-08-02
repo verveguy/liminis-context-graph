@@ -560,6 +560,12 @@ pub async fn add_episode(
     // no longer precomputed here — it's now the actual insert count Phase C returns, since
     // Phase C is the sole point that finally resolves or drops an edge (FR-004, FR-005).
     let nodes_extracted = extraction.entities.len();
+    // Gates the `edges_reclassified_unclassified` tally below: without this, an edge whose
+    // relation_type happens to already be the literal string "UNCLASSIFIED" (e.g. under `open`
+    // mode, where the strict-mode reclassify filter never runs) would be miscounted as a
+    // strict-mode reclassification. Captured now since `ontology_ref` isn't 'static and can't
+    // move into the spawn_blocking closure.
+    let is_strict_mode = ontology_ref.is_some_and(|o| o.mode == OntologyMode::Strict);
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
@@ -724,7 +730,7 @@ pub async fn add_episode(
                 source_descriptions: vec![],
             })?;
             edges_inserted += 1;
-            if edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
+            if is_strict_mode && edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
                 edges_reclassified_unclassified += 1;
             }
         }
