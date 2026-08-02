@@ -1,6 +1,6 @@
 # liminis-context-graph
 
-Source: https://verveguy.github.io/liminis-context-graph/
+Source: https://v3rv.com/liminis-context-graph/
 
 
 A local-first context graph engine. One Rust binary that turns a stream of text into a
@@ -41,7 +41,7 @@ repository) is referenced from `llms.txt` but is not itself published here.
 
 # Getting Started
 
-Source: https://verveguy.github.io/liminis-context-graph/getting-started
+Source: https://v3rv.com/liminis-context-graph/getting-started
 
 
 ## Install prebuilt binary
@@ -163,7 +163,7 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 
 # Configuration
 
-Source: https://verveguy.github.io/liminis-context-graph/configuration
+Source: https://v3rv.com/liminis-context-graph/configuration
 
 
 ## CLI flags
@@ -331,7 +331,7 @@ function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
 
 # IPC & MCP Reference
 
-Source: https://verveguy.github.io/liminis-context-graph/ipc-mcp-reference
+Source: https://v3rv.com/liminis-context-graph/ipc-mcp-reference
 
 
 `liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
@@ -576,7 +576,7 @@ See [ADR 0035](adr/0035-mcp-stdio-transport.md) for the transport's internal arc
 
 # Telemetry
 
-Source: https://verveguy.github.io/liminis-context-graph/telemetry
+Source: https://v3rv.com/liminis-context-graph/telemetry
 
 
 The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
@@ -923,7 +923,7 @@ Rates are in USD per million tokens. Models not present in the table produce `"e
 
 # Ontology
 
-Source: https://verveguy.github.io/liminis-context-graph/ontology
+Source: https://v3rv.com/liminis-context-graph/ontology
 
 
 `liminis-context-graph` supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
@@ -1019,7 +1019,7 @@ than ontology state. See [Operations](operations.md) for those fields.
 
 # Operations
 
-Source: https://verveguy.github.io/liminis-context-graph/operations
+Source: https://v3rv.com/liminis-context-graph/operations
 
 
 ## On-disk layout
@@ -1142,7 +1142,7 @@ bridge and the list of operations that support it.
 
 # Testing & Evaluation
 
-Source: https://verveguy.github.io/liminis-context-graph/testing-and-evaluation
+Source: https://v3rv.com/liminis-context-graph/testing-and-evaluation
 
 
 ## Record/replay cassettes
@@ -1479,7 +1479,7 @@ nothing.
 
 # Full-corpus extraction benchmark runbook (#248)
 
-Source: https://verveguy.github.io/liminis-context-graph/eval-full-corpus-runbook
+Source: https://v3rv.com/liminis-context-graph/eval-full-corpus-runbook
 
 
 This is the maintainer-run procedure for producing #248's benchmark data: a full-228-article
@@ -1901,7 +1901,7 @@ whether or not it actually does.
 
 # Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
 
-Source: https://verveguy.github.io/liminis-context-graph/extraction-quality-evaluation
+Source: https://v3rv.com/liminis-context-graph/extraction-quality-evaluation
 
 
 This document answers the question `liminis-context-graph` has otherwise left unanswered: **can
@@ -2134,7 +2134,7 @@ flags and selection precedence.
 
 # Architecture Decision Records
 
-Source: https://verveguy.github.io/liminis-context-graph/adr/index
+Source: https://v3rv.com/liminis-context-graph/adr/index
 
 
 **These are historical decision records, not current-state documentation.** Each ADR captures

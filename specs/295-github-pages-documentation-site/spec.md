@@ -81,7 +81,7 @@ An agent pointed at the repo or the site gets accurate, current answers.
 
 ### Measurable Outcomes
 
-- **SC-001**: `https://verveguy.github.io/liminis-context-graph` serves the site from `main`.
+- **SC-001**: `https://v3rv.com/liminis-context-graph/` serves the site from `main`. (Originally written as `https://verveguy.github.io/liminis-context-graph` when the default Pages URL was picked. That address can never serve: the account carries a Pages custom domain, so every `verveguy.github.io` request 301-redirects to `v3rv.com`, and `gh api repos/verveguy/liminis-context-graph/pages` reports `html_url` as `http://v3rv.com/liminis-context-graph/` while this repo's own `cname` is null — nothing in this repo can change that. Corrected to the address that actually serves. A dedicated subdomain is a later change and does not block this issue.)
 - **SC-002**: Every environment variable read via `env::var`/`lcg_env_var` under `crates/*/src` appears in the configuration reference. At time of writing that is 26 (by Implement, the actual count had grown to 27 — see `docs/configuration.md`, which documents whatever `crates/*/src` currently reads, not this fixed baseline).
 - **SC-003**: Every `TelemetryEvent` variant has a documented section whose field list matches the struct. At time of writing that is 11 (by Implement, the actual count had grown to 12, including `ExtractionFailure` — see `docs/telemetry.md`).
 - **SC-004**: `README.md` is under 250 lines, down from ~950, and still contains a quickstart that works standalone.

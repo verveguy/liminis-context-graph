@@ -2,7 +2,13 @@ title: liminis-context-graph
 description: >-
   A local-first context graph engine. One Rust binary that turns a stream of
   text into a queryable graph of entities, relationships, and episodes.
-url: "https://verveguy.github.io"
+# The account carries a Pages custom domain (v3rv.com), so every verveguy.github.io
+# URL 301-redirects to it — `gh api repos/verveguy/liminis-context-graph/pages`
+# reports html_url as http://v3rv.com/liminis-context-graph/ even though this repo's
+# own `cname` is null. Point `url` at the domain that actually serves, so generated
+# absolute links and the sitemap don't send readers through a redirect.
+# A dedicated subdomain for this project is a later change.
+url: "https://v3rv.com"
 baseurl: "/liminis-context-graph"
 github_username: verveguy
 github_repo: liminis-context-graph

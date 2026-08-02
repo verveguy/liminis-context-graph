@@ -70,7 +70,10 @@ strip_front_matter_to_tmp() {
     > "${TMPFILE}"
 }
 
-SITE_URL="https://verveguy.github.io/liminis-context-graph"
+# Must match `url` + `baseurl` in docs/_config.yml. Not verveguy.github.io: the account
+# carries a Pages custom domain, so those URLs 301-redirect to v3rv.com (GitHub reports
+# html_url as http://v3rv.com/liminis-context-graph/ while this repo's cname is null).
+SITE_URL="https://v3rv.com/liminis-context-graph"
 
 # Pages in fixed order — do not reorder; CI drift checks require bitwise-identical output.
 # Format: "relative-path-from-docs:canonical-url"

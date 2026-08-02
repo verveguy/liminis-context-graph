@@ -42,9 +42,16 @@ marketing layout from a docs layout because it has a marketing home page; this s
 marketing tone anywhere, so there is nothing for a second layout to differentiate.
 
 `baseurl` is `/liminis-context-graph`, not `""`. Fabrik's `baseurl: ""` matches its custom
-domain; this repo's URL (`verveguy.github.io/liminis-context-graph`, decided in the issue) is a
-GitHub Pages *project* page, not a user/org page, and every `relative_url`-generated link
-depends on getting this right from the first commit.
+domain; this site is a GitHub Pages *project* page, not a user/org page, and every
+`relative_url`-generated link depends on getting this right from the first commit.
+
+`url` is `https://v3rv.com`, not the `https://verveguy.github.io` originally decided in the
+issue. The account carries a Pages custom domain, so every `verveguy.github.io` request
+301-redirects to `v3rv.com` — `gh api repos/verveguy/liminis-context-graph/pages` reports
+`html_url` as `http://v3rv.com/liminis-context-graph/` even though this repo's own `cname` is
+null. Nothing in this repo can change that; it is an account-level Pages setting. Pointing `url`
+at the domain that actually serves keeps generated absolute links and the sitemap off a
+redirect. A dedicated subdomain for this project is a later change.
 
 ### `exclude:` replaces Jekyll's own default list — restated it explicitly, plus `vendor`/`.bundle`
 

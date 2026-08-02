@@ -34,11 +34,11 @@ The result is a context graph you can treat like the rest of your local tooling:
                       └─────────────────────┴────────────┴──────────────┘
 ```
 
-**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](https://verveguy.github.io/liminis-context-graph/ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced.
+**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](https://v3rv.com/liminis-context-graph/ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced.
 
 **Search** is hybrid by default: `knowledge_find_entities` and `knowledge_find_relationships` combine full-text and vector similarity; `knowledge_search_passages` does semantic passage retrieval; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly.
 
-**Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client straight at the graph with no app or custom client in between. See the [IPC & MCP Reference](https://verveguy.github.io/liminis-context-graph/ipc-mcp-reference).
+**Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client straight at the graph with no app or custom client in between. See the [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference).
 
 ## Quickstart
 
@@ -52,7 +52,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-contex
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release. If macOS blocks the binary, clear the quarantine attribute: `xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph`.
 
-> **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://verveguy.github.io/liminis-context-graph/configuration#embedder-sidecar).
+> **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://v3rv.com/liminis-context-graph/configuration#embedder-sidecar).
 
 ### Run it
 
@@ -116,7 +116,7 @@ cargo run --example basic_ingest -p lcg-core  # example: ingest 3 docs, search, 
 cargo run -p lcg-service                      # run the service binary
 ```
 
-See [Getting Started](https://verveguy.github.io/liminis-context-graph/getting-started) for downstream-app bundling and pinned-release tarball URLs.
+See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) for downstream-app bundling and pinned-release tarball URLs.
 
 ## Scope
 
@@ -130,16 +130,16 @@ See [Getting Started](https://verveguy.github.io/liminis-context-graph/getting-s
 
 ## Documentation
 
-Full reference documentation is published at **[verveguy.github.io/liminis-context-graph](https://verveguy.github.io/liminis-context-graph)**:
+Full reference documentation is published at **[v3rv.com/liminis-context-graph](https://v3rv.com/liminis-context-graph)**:
 
-- [Getting Started](https://verveguy.github.io/liminis-context-graph/getting-started) — install, run, build from source, bundle in downstream apps.
-- [Configuration](https://verveguy.github.io/liminis-context-graph/configuration) — every environment variable and CLI flag.
-- [IPC & MCP Reference](https://verveguy.github.io/liminis-context-graph/ipc-mcp-reference) — the JSON-RPC and Model Context Protocol method surface.
-- [Telemetry](https://verveguy.github.io/liminis-context-graph/telemetry) — structured JSONL events emitted on stderr.
-- [Ontology](https://verveguy.github.io/liminis-context-graph/ontology) — the optional entity/relation type vocabulary.
-- [Operations](https://verveguy.github.io/liminis-context-graph/operations) — WAL administration, degraded mode, and self-healing recovery.
-- [Testing & Evaluation](https://verveguy.github.io/liminis-context-graph/testing-and-evaluation) — LLM cassettes and the extraction-quality eval harness.
-- [ADR Index](https://verveguy.github.io/liminis-context-graph/adr/index) — architecture decision records (historical, not current-state, documentation).
+- [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) — install, run, build from source, bundle in downstream apps.
+- [Configuration](https://v3rv.com/liminis-context-graph/configuration) — every environment variable and CLI flag.
+- [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference) — the JSON-RPC and Model Context Protocol method surface.
+- [Telemetry](https://v3rv.com/liminis-context-graph/telemetry) — structured JSONL events emitted on stderr.
+- [Ontology](https://v3rv.com/liminis-context-graph/ontology) — the optional entity/relation type vocabulary.
+- [Operations](https://v3rv.com/liminis-context-graph/operations) — WAL administration, degraded mode, and self-healing recovery.
+- [Testing & Evaluation](https://v3rv.com/liminis-context-graph/testing-and-evaluation) — LLM cassettes and the extraction-quality eval harness.
+- [ADR Index](https://v3rv.com/liminis-context-graph/adr/index) — architecture decision records (historical, not current-state, documentation).
 
 The site documents the version stated on its home page and may lag `main` between releases; this README's quickstart always works against `main`.
 
@@ -152,7 +152,7 @@ crates/core/examples/    # standalone consumers demonstrating the library API
 crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
 crates/eval/             # lcg-eval: binary crate — extraction-quality eval harness
 native/local-inference/  # Swift CoreML embedding/LLM sidecar for macOS
-docs/                    # documentation site source (published at verveguy.github.io/liminis-context-graph)
+docs/                    # documentation site source (published at v3rv.com/liminis-context-graph)
 docs/adr/                # architecture decision records (index at docs/adr/index.md)
 specs/                   # feature specifications
 ```
