@@ -249,23 +249,32 @@ async fn delete_chunk_episode_basic() {
     assert_eq!(ep_after, 0, "episode should be gone");
 }
 
+// Behavior change (issue #284, FR-006/FR-009/SC-005): resubmitting the same chunk_id used to
+// "append a revision" — a second, unrelated episode with no relationship to the first. It is
+// now a documented idempotency check: identical chunk_text on resubmission no-ops (this test),
+// while different chunk_text replaces the prior episode(s) rather than accumulating them. A
+// chunk_id can still map to multiple episodes — see
+// ipc_parity.rs::test_knowledge_process_chunk_splits_oversized_text for that case, which arises
+// from splitting a single oversized chunk_text, not from repeated submission.
 #[tokio::test]
-async fn delete_chunk_episode_all_revisions() {
+async fn delete_chunk_episode_after_idempotent_resubmission() {
     let (db, _dir) = make_db(4);
     let state = make_state(db, "test.db");
 
-    // Process the same chunk_id twice — append-on-revision creates 2 episodes
+    // Process the same chunk_id + identical chunk_text twice — the second call is a no-op.
     assert_ok(
         &process_chunk(1, "rev-chunk", "file.txt", Arc::clone(&state)).await,
         1,
     );
-    assert_ok(
-        &process_chunk(2, "rev-chunk", "file.txt", Arc::clone(&state)).await,
-        2,
+    let v2 = process_chunk(2, "rev-chunk", "file.txt", Arc::clone(&state)).await;
+    assert_ok(&v2, 2);
+    assert_eq!(
+        v2["result"]["idempotent"], true,
+        "resubmitting identical chunk_text must no-op: {v2}"
     );
 
     let (_, ep_before, _) = status_counts(3, Arc::clone(&state)).await;
-    assert_eq!(ep_before, 2, "expected 2 episodes (2 revisions)");
+    assert_eq!(ep_before, 1, "expected 1 episode (idempotent resubmission)");
 
     let v = dispatch_val(
         4,
@@ -275,13 +284,10 @@ async fn delete_chunk_episode_all_revisions() {
     )
     .await;
     assert_ok(&v, 4);
-    assert_eq!(
-        v["result"]["deleted_count"], 2,
-        "both revisions must be deleted: {v}"
-    );
+    assert_eq!(v["result"]["deleted_count"], 1, "{v}");
 
     let (_, ep_after, _) = status_counts(5, Arc::clone(&state)).await;
-    assert_eq!(ep_after, 0, "all revisions should be gone");
+    assert_eq!(ep_after, 0, "episode should be gone");
 }
 
 #[tokio::test]

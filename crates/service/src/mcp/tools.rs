@@ -281,7 +281,27 @@ pub fn registry() -> Vec<ToolSpec> {
                            and adds them to the graph. The result reports \
                            `edges_dropped_unresolvable`: extracted edges discarded because an \
                            endpoint matched no entity in this chunk or in the graph. A nonzero \
-                           count means facts stated in this chunk were not written.",
+                           count means facts stated in this chunk were not written. \
+                           `chunk_text` above the advisory threshold \
+                           (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 chars) \
+                           is split internally into threshold-sized units that all share the \
+                           caller's `chunk_id`; when a split runs, the response carries \
+                           `episode_uuids` and `unit_count` instead of a single `episode_uuid`, \
+                           plus a `warning` describing the split. Resubmitting a `chunk_id` is \
+                           idempotent: identical `chunk_text` no-ops (`idempotent: true`, no new \
+                           episodes, no re-splitting — the response reuses whichever shape the \
+                           existing episode(s) already have), \
+                           different `chunk_text` replaces the prior episode(s) for that \
+                           `chunk_id` (`replaced_uuids` names what was deleted) — a `chunk_id` \
+                           never accumulates unrelated episodes across calls. This guarantee \
+                           holds for serialized calls only: concurrent calls for the same \
+                           `chunk_id` — including two first-time submissions racing each \
+                           other, not just retries — are not mutually exclusive and can both \
+                           insert; callers wanting exactly-once semantics must serialize calls \
+                           per `chunk_id` themselves. Matching is scoped by `chunk_id` and \
+                           `group_id` only, independent of `source_file`, so `chunk_id` must be \
+                           unique per logical document within a `group_id`, not merely unique \
+                           per `source_file`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -356,8 +376,9 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_delete_chunk_episode",
-            description: "Delete all episodes for a given chunk ID. Orphaned entities remain \
-                           in the graph.",
+            description: "Delete all episodes for a given chunk ID — including every unit of \
+                           a chunk that `knowledge_process_chunk` split for exceeding the \
+                           advisory size threshold. Orphaned entities remain in the graph.",
             scope: Scope::Write,
             input_schema: || {
                 json!({

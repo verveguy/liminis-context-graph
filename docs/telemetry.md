@@ -79,6 +79,23 @@ Example:
 {"type":"extraction_truncated","ts_ms":1716100000050,"model":"claude-sonnet-4-6","chunk_len_bytes":12480,"initial_max_tokens":8192,"retry_succeeded":true}
 ```
 
+### `chunk_text_oversized`
+
+Emitted by `handle_knowledge_process_chunk` whenever `chunk_text` exceeds `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` (default 8,000 chars, measured via `chars().count()`, not bytes). Fires regardless of outcome — a fresh split ingest, a replace of a prior oversized chunk, or an idempotent no-op resubmission all emit this event once.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `chunk_id` | string | Caller-supplied chunk identifier |
+| `source_file` | string | Source file path or identifier from the request |
+| `chunk_text_chars` | integer | Character count of the incoming `chunk_text` |
+| `threshold_chars` | integer | The advisory threshold in effect for this call |
+| `unit_count` | integer | For a no-op, the actual number of episodes currently backing `chunk_id`. For a fresh/replaced ingest, the *intended* split unit count — the event fires before extraction begins (so a mid-split failure is still observable), not after the call completes, so a partial failure can leave fewer episodes committed than this value states. Treat this as "units the split attempted", not "episodes that exist right now", for the fresh/replaced case. |
+
+Example:
+```json
+{"type":"chunk_text_oversized","ts_ms":1716100000045,"chunk_id":"doc-42-page-3","source_file":"report.txt","chunk_text_chars":263000,"threshold_chars":8000,"unit_count":33}
+```
+
 ### `llm_fallback`
 
 Emitted when the primary LLM is unavailable and extraction falls back to the secondary model

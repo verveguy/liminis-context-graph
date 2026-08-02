@@ -607,6 +607,54 @@ impl<'db> Conn<'db> {
         Ok(uuids)
     }
 
+    /// Deletes exactly the Episodic nodes named in `uuids`, no lookup by `name`/`chunk_id`
+    /// involved.
+    ///
+    /// Used by `handle_knowledge_process_chunk`'s replace path (issue #284): unlike
+    /// `remove_episodes_by_chunk_id`, which deletes every Episodic node sharing a `name` (chunk
+    /// identifier is not exclusive to this handler — `knowledge_add_episode` can set an
+    /// unrelated `name`), this only touches the specific episode(s) already determined to
+    /// belong to the chunk_id's own ingest lineage.
+    ///
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
+    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
+    pub fn remove_episodes_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// Returns `(uuid, source_description, content)` for every Episodic node whose name
+    /// (chunk identifier) matches `chunk_id` within `group_id`. Read-only counterpart to
+    /// `remove_episodes_by_chunk_id`, used by `handle_knowledge_process_chunk` (issue #284) to
+    /// reconstruct a prior chunk_text before deciding whether a resubmission is a no-op,
+    /// a replace, or a fresh ingest.
+    pub fn get_episodes_by_chunk_id(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        let result = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.source_description, ep.content",
+            serde_json::json!({ "name": chunk_id, "gid": group_id }),
+        )?;
+        Ok(result
+            .into_iter()
+            .map(|row| {
+                (
+                    value_as_string(&row[0]),
+                    value_as_string(&row[1]),
+                    value_as_string(&row[2]),
+                )
+            })
+            .collect())
+    }
+
     /// Returns all Entity nodes in the given group_ids.
     pub fn get_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<Vec<EntityRow>, Error> {
         let result = self.query_params(
