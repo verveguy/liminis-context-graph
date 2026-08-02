@@ -85,6 +85,7 @@ mod tests {
             relation_type: Some(relation_type.to_string()),
             valid_at: None,
             invalid_at: None,
+            original_relation_type: None,
         }
     }
 
@@ -170,6 +171,7 @@ mod tests {
             relation_type: None,
             valid_at: None,
             invalid_at: None,
+            original_relation_type: None,
         }];
         let cands = refs.clone();
         let prf1 = edge_strict_prf1(&refs, &cands);

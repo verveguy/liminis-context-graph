@@ -40,7 +40,7 @@ The result is a context graph you can treat like the rest of your local tooling:
                       └─────────────────────┴────────────┴──────────────┘
 ```
 
-**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](#ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced, so provenance is queryable. Any relationship whose endpoint can't be resolved — even after a name-embedding similarity salvage attempt against the chunk's own entities — is dropped rather than written, and the count of such drops is returned as `edges_dropped_unresolvable` in the result.
+**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](#ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced, so provenance is queryable. Any relationship whose endpoint can't be resolved — even after a name-embedding similarity salvage attempt against the chunk's own entities — is dropped rather than written, and the count of such drops is returned as `edges_dropped_unresolvable` in the result. Under a `strict` ontology, a relationship whose type is outside the declared vocabulary (after alias normalization) is never dropped for that reason — it's retained with `relation_type: UNCLASSIFIED` and the count is returned as `edges_reclassified_unclassified` (see [Modes](#modes)).
 
 **Search** is hybrid by default: `knowledge_find_entities` and `knowledge_find_relationships` combine full-text and vector similarity over the same embedded store; `knowledge_search_passages` does semantic passage retrieval over episode content; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly.
 
@@ -261,7 +261,10 @@ Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 ```yaml
 # mode: open | strict
 # open (default): declared types are preferred; free-form fallback allowed
-# strict: entities and edges outside the vocabulary are dropped post-extraction
+# strict: out-of-vocabulary entities are dropped post-extraction; out-of-vocabulary
+#   edges are never dropped — a declared alias is normalized to its canonical relation
+#   type, and anything else is reclassified to relation_type: UNCLASSIFIED with the
+#   original label preserved in the edge's attributes (see ADR-0310)
 mode: strict
 
 entity_types:
@@ -280,10 +283,19 @@ relation_types:
     description: A person wrote a paper.
     source_type: Person    # optional signature constraint (informational in v1)
     target_type: Paper
+    aliases: [WROTE, PENNED]   # optional: alternate spellings normalized to AUTHORED
+    keywords: [author]         # optional: lowercase substrings used by the offline
+                                # knowledge_canonicalize_relations pass (fuzzy match)
   - name: AFFILIATED_WITH
     source_type: Person
     target_type: Organization
 ```
+
+`aliases` and `keywords` on a relation type have three consumers, each with different matching rules:
+
+- **The `strict`-mode edge prompt** (`build_fact_types_section`) renders both `aliases` and `keywords` for every declared relation type, so the model can see the full set of accepted spellings and is more likely to emit the canonical name directly.
+- **Ingest-time `strict`-mode filtering** (`episode.rs`) consults only `aliases`, as an exact match after the same case/separator normalization applied to every relation type name (`normalize_relation_type`) — e.g. `wrote` normalizes to `WROTE` and resolves via the alias map to `AUTHORED`. `keywords` play no role in ingest-time filtering.
+- **The offline `knowledge_canonicalize_relations` maintenance pass** consults both: `aliases` via the same exact map, and `keywords` as lowercase substrings for its fuzzy-matching fallback.
 
 #### Entity type hierarchy
 
@@ -302,7 +314,7 @@ See [`docs/examples/ontology.example.yaml`](docs/examples/ontology.example.yaml)
 | Mode | Entity types | Relation types |
 |------|-------------|----------------|
 | `open` (default) | Preferred by the LLM; free-form fallback allowed | Same |
-| `strict` | Out-of-vocabulary entities dropped post-extraction | Out-of-vocabulary edges dropped |
+| `strict` | Out-of-vocabulary entities dropped post-extraction | The edge-extraction prompt tells the model to use only the declared vocabulary (including aliases). A declared alias is normalized to its canonical name; anything still out-of-vocabulary after normalization is retained with `relation_type: UNCLASSIFIED` and its original label preserved in `attributes` — never dropped (ADR-0310) |
 
 ### `knowledge_status` summary
 

@@ -2030,6 +2030,7 @@ impl Extractor for MockExtractor {
                     relation_type: Some("WORKS_AT".to_string()),
                     valid_at: None,
                     invalid_at: None,
+                    original_relation_type: None,
                 }],
             })
         })

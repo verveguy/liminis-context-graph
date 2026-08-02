@@ -109,6 +109,13 @@ pub struct ExtractedEdge {
     pub valid_at: Option<String>,
     #[serde(default)]
     pub invalid_at: Option<String>,
+    /// The relation type as originally extracted, set only when the strict-mode filter
+    /// reclassifies an out-of-vocabulary `relation_type` to `UNCLASSIFIED` (FR-004). `None` in
+    /// every other case — including when alias normalisation (FR-001) rewrites `relation_type`
+    /// to a declared alias's canonical name, which does not touch this field, since the
+    /// canonical name is not "lost" information the way an out-of-vocabulary label is.
+    #[serde(default)]
+    pub original_relation_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

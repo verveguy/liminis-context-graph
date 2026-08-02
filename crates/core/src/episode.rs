@@ -5,12 +5,14 @@ use chrono::DateTime;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
+    canonicalize::build_alias_map,
     db::Db,
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
-    ontology::{normalize_entity_type, OntologyMode},
+    ontology::{normalize_entity_type, normalize_relation_type, OntologyMode},
     ontology_sidecar,
     prompts::normalize_name,
+    reprocess_relations::UNCLASSIFIED,
     types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
@@ -21,8 +23,14 @@ pub struct AddEpisodeResult {
     pub nodes_extracted: usize,
     pub edges_extracted: usize,
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
-    /// the persisted graph, and were dropped at Phase C commit time (FR-004, FR-005).
+    /// the persisted graph, and were dropped at Phase C commit time (issue #281 FR-004/FR-005).
     pub edges_dropped_unresolvable: usize,
+    /// Strict-mode edges whose relation type was outside the ontology's vocabulary even after
+    /// alias normalisation, reclassified to `UNCLASSIFIED` rather than dropped (issue #310
+    /// FR-004/FR-005 — distinct from `edges_dropped_unresolvable`'s issue #281 FR-004/FR-005
+    /// above). The original relation type is preserved in the stored edge's `attributes` field,
+    /// not lost.
+    pub edges_reclassified_unclassified: usize,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -170,7 +178,25 @@ pub async fn add_episode(
         }
     };
 
+    // `original_relation_type` is deserialized directly from raw, untrusted extractor/LLM JSON
+    // (`#[serde(default)]`, no `deny_unknown_fields`) — a hallucinated or prompt-injected key of
+    // that name in the model's edge output must never survive to storage. Clear it here,
+    // unconditionally and regardless of ontology mode/config, before any mode-specific filtering
+    // runs below. It is set again, only by this function's own logic, in the strict-mode
+    // out-of-vocabulary branch further down.
+    for e in extraction.edges.iter_mut() {
+        e.original_relation_type = None;
+    }
+
     // Strict-mode entity filtering: drop entities not in the declared vocabulary.
+    //
+    // FR-006 audit (issue #310): this filter still drops rather than reclassifies, unlike the
+    // edge-side filter below. That's not an oversight — `EntityTypeDef` (ontology.rs) has no
+    // `aliases`/`keywords` fields at all, so the alias-blindness defect this issue fixes on the
+    // edge side cannot exist here: there is no alias map to consult, and adding one is out of
+    // scope for #310 (see ADR-0310). This behavior is locked in by
+    // `strict_mode_entity_type_still_drops_not_reclassifies` in
+    // `crates/core/tests/ontology_integration.rs`.
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
             let vocab = onto.entity_type_names();
@@ -200,29 +226,48 @@ pub async fn add_episode(
         }
     }
 
-    // Strict-mode relation_type filtering: drop edges whose relation_type is not in the vocabulary.
+    // Strict-mode relation_type filtering (issue #310): an edge is never dropped for its
+    // relation_type alone. First alias-normalise against the ontology's declared alias map
+    // (FR-001, reusing `canonicalize::build_alias_map` rather than a second parallel map) so a
+    // declared alias like `LAUNCHED_BY` is rewritten to its canonical `LAUNCHED` instead of
+    // being destroyed. An edge whose relation_type is outside the vocabulary even after
+    // normalisation is reclassified to `UNCLASSIFIED`, with the original label preserved on
+    // `original_relation_type` for later storage in `attributes` (FR-004) — never deleted,
+    // consistent with ADR-0033/ADR-0037/ADR-0310.
+    //
+    // This pass only rewrites `relation_type`/`original_relation_type`; it deliberately does not
+    // tally `edges_reclassified_unclassified` here. An edge marked here can still be dropped
+    // afterward as self-referential or (in Phase C) for an unresolvable endpoint, and counting
+    // here would desync the tally from what's actually persisted — the same failure mode
+    // ADR-0051 fixed for `edges_dropped_unresolvable` by making Phase C the sole authoritative
+    // counting point. The tally is instead taken in Phase C, alongside `edges_inserted`.
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
-            let vocab = onto.relation_type_names();
-            extraction.edges.retain(|e| {
-                match &e.relation_type {
-                    Some(rt) if vocab.contains(rt.as_str()) => true,
-                    Some(rt) => {
-                        eprintln!(
-                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (relation_type '{}' not in vocabulary)",
-                            e.source_name, e.target_name, rt
-                        );
-                        false
+            let alias_map = build_alias_map(onto);
+            for e in extraction.edges.iter_mut() {
+                let original = e.relation_type.clone();
+                let normalized = original
+                    .as_deref()
+                    .map(normalize_relation_type)
+                    .unwrap_or_default();
+                match alias_map.get(&normalized) {
+                    Some(canonical) => {
+                        e.relation_type = Some(canonical.clone());
                     }
                     None => {
                         eprintln!(
-                            "liminis-context-graph: ontology strict: dropping edge '{}' → '{}' (no relation_type)",
-                            e.source_name, e.target_name
+                            "liminis-context-graph: ontology strict: reclassifying edge '{}' → '{}' to UNCLASSIFIED (relation_type '{}' not in vocabulary)",
+                            e.source_name, e.target_name, original.as_deref().unwrap_or("")
                         );
-                        false
+                        e.relation_type = Some(UNCLASSIFIED.to_string());
+                        e.original_relation_type = if normalized.is_empty() {
+                            None
+                        } else {
+                            original
+                        };
                     }
                 }
-            });
+            }
         }
     }
 
@@ -519,6 +564,12 @@ pub async fn add_episode(
     // no longer precomputed here — it's now the actual insert count Phase C returns, since
     // Phase C is the sole point that finally resolves or drops an edge (FR-004, FR-005).
     let nodes_extracted = extraction.entities.len();
+    // Gates the `edges_reclassified_unclassified` tally below: without this, an edge whose
+    // relation_type happens to already be the literal string "UNCLASSIFIED" (e.g. under `open`
+    // mode, where the strict-mode reclassify filter never runs) would be miscounted as a
+    // strict-mode reclassification. Captured now since `ontology_ref` isn't 'static and can't
+    // move into the spawn_blocking closure.
+    let is_strict_mode = ontology_ref.is_some_and(|o| o.mode == OntologyMode::Strict);
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
@@ -552,11 +603,15 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
-    let (edges_inserted, edges_dropped_unresolvable) = tokio::task::spawn_blocking(
-        move || -> Result<(usize, usize), Error> {
+    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
+        // Authoritative count of edges persisted with `relation_type = UNCLASSIFIED` (FR-005) —
+        // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
+        // reclassified but then dropped as self-referential or unresolvable is never counted.
+        let mut edges_reclassified_unclassified = 0usize;
 
         // Apply dedup decisions → collect entity UUIDs
         let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
@@ -668,12 +723,20 @@ pub async fn add_episode(
                 valid_at: validate_llm_timestamp(edge.valid_at.clone())
                     .or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
-                attributes: "{}".to_string(),
+                attributes: match &edge.original_relation_type {
+                    Some(orig) => {
+                        serde_json::json!({ "original_relation_type": orig }).to_string()
+                    }
+                    None => "{}".to_string(),
+                },
                 relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             })?;
             edges_inserted += 1;
+            if is_strict_mode && edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
+                edges_reclassified_unclassified += 1;
+            }
         }
 
         // Insert episodic node
@@ -701,7 +764,11 @@ pub async fn add_episode(
 
         wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
 
-        Ok((edges_inserted, edges_dropped_unresolvable))
+        Ok((
+            edges_inserted,
+            edges_dropped_unresolvable,
+            edges_reclassified_unclassified,
+        ))
     })
     .await??;
     drop(_write_guard);
@@ -726,6 +793,7 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
+        edges_reclassified_unclassified,
     })
 }
 
