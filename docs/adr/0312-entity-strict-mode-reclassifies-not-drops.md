@@ -91,8 +91,8 @@ Two arguments, not one, support reclassify-not-drop for entities — and neither
 
 Both arguments independently rule out the same two rejected alternatives ADR-0310 weighed for
 edges (see below) — the alias-blindness reasoning ADR-0310 gives for *not* touching entities in
-#310 is a separate question (no alias map exists) from the drop-vs-reclassify question this ADR
-resolves.
+issue #310 is a separate question (no alias map exists) from the drop-vs-reclassify question
+this ADR resolves.
 
 ## Consequences
 
