@@ -1,0 +1,65 @@
+title: liminis-context-graph
+description: >-
+  A local-first context graph engine. One Rust binary that turns a stream of
+  text into a queryable graph of entities, relationships, and episodes.
+# The account carries a Pages custom domain (v3rv.com), so every verveguy.github.io
+# URL 301-redirects to it — `gh api repos/verveguy/liminis-context-graph/pages`
+# reports html_url as http://v3rv.com/liminis-context-graph/ even though this repo's
+# own `cname` is null. Point `url` at the domain that actually serves, so generated
+# absolute links and the sitemap don't send readers through a redirect.
+# A dedicated subdomain for this project is a later change.
+url: "https://v3rv.com"
+baseurl: "/liminis-context-graph"
+github_username: verveguy
+github_repo: liminis-context-graph
+repository: verveguy/liminis-context-graph
+
+# The release this site documents (FR-010). Kept in sync with Cargo.toml's
+# [workspace.package] version by scripts/generate-docs-llms-full.sh, which fails
+# the build if they diverge.
+version: "0.11.0"
+
+# Plugins
+# jekyll-relative-links rewrites relative .md links (e.g. the ADRs' own cross-links,
+# `0025-auto-heal-index-build.md`) to the rendered page URL, so the same links that resolve
+# on GitHub's native file view also resolve on the published site (FR-005/FR-009). GitHub
+# Pages enables it automatically regardless of this list; it's listed explicitly so a local
+# `bundle exec jekyll build` (and the CI htmlproofer job) match Pages' actual behavior.
+plugins:
+  - jekyll-seo-tag
+  - jekyll-relative-links
+
+# Build settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
+
+# ADRs are immutable decision records with no Jekyll front matter of their own —
+# apply the default layout here instead of editing 57 files individually.
+defaults:
+  - scope:
+      path: "adr"
+    values:
+      layout: default
+
+# Exclude from the published site.
+# specs/ already lives outside this Jekyll source root (docs/) under GitHub Pages'
+# "deploy from branch: main /docs" mode, so listing it here is a no-op today — kept
+# as defensive documentation of FR-004's intent in case the Pages source root ever
+# changes. history/ and spikes/ are the entries that actually matter: internal
+# engineering write-ups that live inside docs/ and must stay out of the build.
+# Setting `exclude:` replaces Jekyll's built-in default list rather than adding to it, so
+# the paths Jekyll normally excludes automatically (Gemfile, Gemfile.lock, vendor/bundle,
+# vendor/cache, vendor/gems, vendor/ruby, node_modules, .bundle) must be listed explicitly
+# here too, or a local `bundle install --path vendor/bundle` (or an npm-based tool under
+# docs/) gets scanned as site content.
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+  - .bundle
+  - node_modules
+  - specs
+  - history
+  - spikes

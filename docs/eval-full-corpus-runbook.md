@@ -1,3 +1,8 @@
+---
+layout: default
+title: Full-Corpus Extraction Benchmark Runbook
+---
+
 # Full-corpus extraction benchmark runbook (#248)
 
 This is the maintainer-run procedure for producing #248's benchmark data: a full-228-article

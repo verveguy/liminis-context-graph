@@ -1,3 +1,8 @@
+---
+layout: default
+title: Extraction-Quality Evaluation
+---
+
 # Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
 
 This document answers the question `liminis-context-graph` has otherwise left unanswered: **can
@@ -223,5 +228,5 @@ evidence that its default model is a good extraction choice.
 
 Both local recommendations are reachable today via `--extractor-uds`/`--extractor-http` pointed at
 an OpenAI-compatible server running the chosen model (e.g. `mlx_lm.server`) — see
-[README: Extractor: local or hosted](../README.md#extractor-local-or-hosted) for the flags and
-selection precedence.
+[Configuration: Extractor: local or hosted](configuration.md#extractor-local-or-hosted) for the
+flags and selection precedence.

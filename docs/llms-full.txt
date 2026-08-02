@@ -1,0 +1,2247 @@
+# liminis-context-graph
+
+Source: https://v3rv.com/liminis-context-graph/
+
+
+A local-first context graph engine. One Rust binary that turns a stream of text into a
+queryable graph of entities, relationships, and episodes — combining property-graph storage,
+HNSW vector search, and full-text search in a single embedded service, built on
+[LadybugDB](https://github.com/lbugdb/lbug). No database server, no separate vector store, no
+search cluster: everything runs in one process, on your machine, against files in your
+workspace.
+
+This site documents **v0.11.0** (see [`Cargo.toml`](https://github.com/verveguy/liminis-context-graph/blob/main/Cargo.toml)).
+It describes the `main` branch as of that release; unreleased changes on `main` since the
+last tag may not yet be reflected here.
+
+Source: [github.com/verveguy/liminis-context-graph](https://github.com/verveguy/liminis-context-graph). The
+[`README`](https://github.com/verveguy/liminis-context-graph/blob/main/README.md) has a short overview
+and a standalone quickstart; this site is the full reference.
+
+## Reference pages
+
+- **[Getting Started](getting-started.md)** — install, run, build from source, bundle in downstream apps.
+- **[Configuration](configuration.md)** — every environment variable and CLI flag.
+- **[IPC & MCP Reference](ipc-mcp-reference.md)** — the JSON-RPC and Model Context Protocol method surface.
+- **[Telemetry](telemetry.md)** — structured JSONL events emitted on stderr.
+- **[Ontology](ontology.md)** — the optional entity/relation type vocabulary.
+- **[Operations](operations.md)** — WAL administration, degraded mode, and self-healing recovery.
+- **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
+- **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
+- **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
+- **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).
+
+## llms.txt
+
+[`llms.txt`](llms.txt) and [`llms-full.txt`](llms-full.txt) provide this site's content in a
+form suited to LLM ingestion. `CLAUDE.md` (agent guidance for contributors working in this
+repository) is referenced from `llms.txt` but is not itself published here.
+
+---
+
+# Getting Started
+
+Source: https://v3rv.com/liminis-context-graph/getting-started
+
+
+## Install prebuilt binary
+
+No Rust toolchain required:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
+```
+
+Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
+
+> **macOS Gatekeeper note**: If macOS blocks the downloaded binary, clear the quarantine attribute before running:
+> ```sh
+> xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph
+> ```
+> Code signing will be added in a future release.
+
+<!-- -->
+
+> **Embedder required at runtime**: the binary connects to an out-of-process embedding service on startup. See [Embedder sidecar](configuration.md#embedder-sidecar) in the Configuration reference.
+
+## Run it
+
+```sh
+# start your embedding service first — see "Embedder sidecar" in the Configuration reference
+cd your-workspace/            # the directory whose content you're indexing
+liminis-context-graph         # creates .lcg/, binds .lcg/service.sock
+```
+
+## Talk to it
+
+The service speaks newline-delimited JSON-RPC 2.0 over the socket — from any language:
+
+```python
+import socket, json
+
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(".lcg/service.sock")
+f = s.makefile("r", encoding="utf-8")
+
+def call(method, params, id=1):
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}) + "\n").encode())
+    return json.loads(f.readline())["result"]
+
+# ingest a chunk of text
+call("knowledge_process_chunk", {
+    "chunk_text": "Ada Lovelace wrote the first program for Babbage's Analytical Engine.",
+    "chunk_id": "notes-0001",
+    "source_file": "notes.md",
+})
+
+# hybrid (full-text + vector) entity search
+print(call("knowledge_find_entities", {"query": "early computing pioneers", "num_results": 5}, id=2))
+
+# graph + WAL health at a glance
+print(call("knowledge_status", {}, id=3))
+```
+
+See the [IPC & MCP Reference](ipc-mcp-reference.md) for the full method list.
+
+## Talk to it over MCP
+
+Or skip the socket entirely and run the graph as a native [MCP](https://modelcontextprotocol.io) server for Claude Code, Claude Desktop, or any MCP client — add it to your client's MCP config:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your-workspace"
+    }
+  }
+}
+```
+
+The client then sees the `knowledge_*` tools directly — no socket client to write. See
+[MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport) for scopes, attached
+mode, and the full flag reference.
+
+## Build from source
+
+Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
+
+```bash
+cargo build --release                         # build both crates
+cargo test -p lcg-core                        # integration tests (LadybugDB round-trip)
+cargo run --example basic_ingest -p lcg-core  # example: ingest 3 docs, search, print
+cargo run -p lcg-service                      # run the service binary
+```
+
+## Bundling in downstream apps
+
+For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
+
+```sh
+curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
+  -o lcg-service-aarch64-apple-darwin.tar.xz
+tar -xJf lcg-service-aarch64-apple-darwin.tar.xz
+# binary is at: lcg-service-aarch64-apple-darwin/liminis-context-graph
+```
+
+Release artifacts are named after the `lcg-service` package (`lcg-service-<target>.tar.xz`); the binary *inside* is `liminis-context-graph`. Targets: `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`. The archive layout is set by cargo-dist 0.32.0; if cargo-dist is upgraded, verify the layout before updating consumer scripts. Each release includes a `.sha256` companion file for verification (`shasum -a 256 -c <file>.sha256`). The macOS Gatekeeper note above applies to script-downloaded binaries too.
+
+Discover the latest release tag programmatically:
+
+```sh
+curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
+```
+
+## Next steps
+
+- [Configuration](configuration.md) — environment variables and CLI flags.
+- [Ontology](ontology.md) — declare an entity/relation type vocabulary.
+- [Operations](operations.md) — WAL administration, recovery, and degraded mode.
+
+---
+
+# Configuration
+
+Source: https://v3rv.com/liminis-context-graph/configuration
+
+
+## CLI flags
+
+| Flag | Description |
+|------|-------------|
+| `--embedder-uds <path>` | Unix domain socket for the embedder sidecar (default on macOS: `/tmp/liminis-inference.sock`, auto-detected). |
+| `--embedder-http <url>` | HTTP URL for an OpenAI-compatible embedding endpoint. Mutually exclusive with `--embedder-uds`. |
+| `--extractor-uds <path>` | Unix domain socket for a local OpenAI-compatible extraction endpoint. |
+| `--extractor-http <url>` | HTTP URL for a local OpenAI-compatible extraction endpoint. Mutually exclusive with `--extractor-uds`. |
+| `--mcp-stdio` | Starts a native [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout instead of binding the Unix socket. See [MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport). |
+| `--scope=<list>` | MCP-stdio only. Comma-separated list of scopes to advertise in `tools/list` (default `all`): `read`, `write`, `cypher`, `admin`. |
+| `--connect <path>` | MCP-stdio only. Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--allow-remote-close` | MCP-stdio attached mode only. Advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode. |
+| `--help` | Print usage and exit. |
+| `--version` | Print the binary's version and exit. |
+
+`--embedder-uds`/`--embedder-http` are for the embedding sidecar; `--extractor-uds`/`--extractor-http` are for the extraction LLM. See [Embedder sidecar](#embedder-sidecar) and [Extractor: local or hosted](#extractor-local-or-hosted) below.
+
+## Environment variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
+| `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
+| `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
+| `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
+| `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe) |
+| `LCG_EXTRACTION_LLM` | No | Anthropic model for entity extraction, optional `primary:fallback` format. Only consulted on the Anthropic path (see `ANTHROPIC_API_KEY` below); ignored when a local extraction endpoint is selected. |
+| `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed and `ANTHROPIC_API_KEY` is unset. If this var is also unset in that situation, the binary exits with an error identifying the missing extraction configuration — extraction has no default-socket auto-detection (unlike the embedder), so a running sidecar alone is not enough. |
+| `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
+| `LCG_EXTRACTION_MAX_TOKENS_CEILING` | No | Uniform ceiling (in tokens) on the per-call `max_tokens` budget for entity/edge extraction, across both the hosted Anthropic path and self-hosted/OAI-compatible models (default `32768`). The per-call initial budget scales with input chunk size up to this ceiling; it exists to stop genuine non-termination (a model that never stops generating), not to optimize spend, so it is intentionally generous. An invalid value (non-numeric, or below the compiled-in 4096-token floor) logs a warning to stderr and falls back to the default. Setting it near the floor is valid but self-defeating: since the per-call budget is `clamp(chunk_len_bytes * ratio, 4096, ceiling)`, a ceiling close to 4096 collapses that range and every call effectively gets the same floor-sized budget regardless of chunk size — silently disabling proportional scaling, not just narrowing the runaway guard. |
+| `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
+| `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
+| `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
+| `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
+| `LCG_WAL_DIR` | No | Directory for write-ahead log JSONL files (default `.lcg/wal`) |
+| `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
+| `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
+| `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
+| `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the hosted Anthropic API for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). When unset, extraction requires an explicit `--extractor-uds`/`--extractor-http` flag or `LCG_EXTRACTION_URL` pointing at a local OpenAI-compatible endpoint — it is not auto-detected — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
+| `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
+| `LCG_REPLAY_BATCH_SIZE` | No | Rows per batch during WAL replay (default `64`, valid range `1`–`256`). Lower values reduce peak memory on a large rebuild; higher values replay faster. |
+| `LCG_REPLAY_FAILURE_SAMPLES` | No | How many distinct failing lines to retain and report per WAL replay (default `10`). Samples are deduplicated by failure shape, so one bad template cannot crowd out the rest. |
+| `LCG_REPLAY_FIDELITY_THRESHOLD` | No | Float `0.0`–`1.0`. Replay warns when the fraction of successfully applied mutations falls below this, i.e. the rebuilt graph is not a faithful reconstruction of the WAL. |
+| `LCG_MIGRATION_KEEP_BACKUP` | No | When set, a workspace-layout migration retains its pre-migration backup instead of removing it after a successful migration. |
+| `LCG_SHUTDOWN_TIMEOUT_MS` | No | Grace period in milliseconds for in-flight requests to finish on `SIGTERM` before the service exits. |
+| `LCG_ATTACHED_CALL_TIMEOUT_MS` | No | Idle-read timeout in milliseconds for MCP attached mode (`--connect`, default `30000`). See [MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport). |
+| `LIMINIS_DEDUP_HYBRID_THRESHOLD` | No | Entity count per `group_id` above which dedup switches from brute-force cosine to the hybrid FTS + vector path. |
+| `LIMINIS_LLM_COST_TABLE_PATH` | No | Path to a JSON model-pricing table used to populate `estimated_cost_usd` in `token_usage` telemetry. See [Telemetry](telemetry.md). |
+
+That's 27 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
+
+**Deprecated `GRAPHITI_*` aliases.** Every `LCG_*` variable above that predates the rename also
+accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
+`GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
+`GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, `GRAPHITI_DEDUP_ADAPTER_URL`, and
+`GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is deprecated; rename to <new>` at
+startup. They are honoured for now; prefer the `LCG_*` names.
+
+## Embedder sidecar
+
+`OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
+`POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
+
+```sh
+liminis-context-graph --embedder-uds /tmp/liminis-inference.sock            # Unix domain socket (default on macOS)
+liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings   # HTTP
+```
+
+**Default behaviour** (no flags): the binary looks for the Swift CoreML sidecar socket at
+`/tmp/liminis-inference.sock`. If absent, it falls back to `LCG_EMBEDDING_URL` (HTTP). If
+neither exists, it exits with a clear error.
+
+The binary probes the embedder at startup to confirm it is reachable and auto-detect the
+embedding dimension. If the probe fails and `LCG_EMBEDDING_DIM` is not set, the process
+exits with an error rather than failing silently on the first embed request.
+
+Start the embedder sidecar **before** starting the `liminis-context-graph` binary.
+Without it, the embedding-dependent IPC methods fail immediately with an embedding error:
+`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`,
+`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`, and
+`knowledge_canonicalize_relations` (its ontology-description fallback embeds each residual edge's
+`fact`). Read-only methods that do not call the embedder (`health_check`, `knowledge_status`,
+`knowledge_list_entities`, `knowledge_get_episodes`) work without the sidecar.
+
+### macOS: Swift CoreML sidecar (default)
+
+The repository ships a Swift CoreML sidecar at
+[`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference)
+that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
+(Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
+embedding, and a fully local option for extraction: no API key, no network. macOS 26+ and Xcode
+command-line tools are required. See
+[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md)
+for build and run instructions.
+
+`liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
+start the sidecar first, then start the binary. Extraction does **not** auto-detect this socket
+(see [Extractor: local or hosted](#extractor-local-or-hosted)): the sidecar's Foundation Models
+backend is not recommended for extraction quality, so using it there requires the explicit
+`--extractor-uds /tmp/liminis-inference.sock` flag rather than happening by default.
+
+### HTTP transport (CI / Linux / custom embedders)
+
+For environments without the Swift sidecar, pass `--embedder-http` pointing at any
+OpenAI-compatible embedding endpoint (local or remote):
+
+```bash
+liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings
+```
+
+See [ADR 0006](adr/0006-embedder-http-contract.md) and
+[ADR 0016](adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
+specification and transport decision record.
+
+## Extractor: local or hosted
+
+Entity/relationship extraction runs against one of two providers, selected with the following
+precedence (highest first):
+
+1. **Explicit CLI flag** — `--extractor-uds <path>` or `--extractor-http <url>` always selects the
+   local OpenAI-compatible adapter, regardless of whether `ANTHROPIC_API_KEY` is set:
+
+   ```bash
+   liminis-context-graph --extractor-uds /tmp/liminis-inference.sock              # Unix domain socket
+   liminis-context-graph --extractor-http http://127.0.0.1:8765/v1/chat/completions  # HTTP
+   ```
+
+   (`--extractor-uds` and `--extractor-http` are mutually exclusive.)
+2. **`ANTHROPIC_API_KEY` set, no explicit flag** — extraction uses the hosted Anthropic API,
+   unchanged from prior versions. A reachable local sidecar never silently redirects this traffic.
+3. **Neither of the above** — `LCG_EXTRACTION_URL` (HTTP), if set, else the binary exits with a
+   clear error identifying the missing configuration.
+
+Unlike the embedder, extraction has **no default-socket auto-detection tier**: a running sidecar
+alone never selects it for extraction, even with no `ANTHROPIC_API_KEY` set. This is deliberate,
+not an oversight. Extraction requires an explicit signal — a CLI flag or `LCG_EXTRACTION_URL` —
+before it will use a local endpoint at all.
+
+> **The bundled sidecar's model is not recommended for extraction quality.** Prior evaluation
+> found Apple Foundation Models' context window and capability insufficient for reliable
+> entity/relationship extraction (see
+> [Extraction-Quality Evaluation](extraction-quality-evaluation.md) for the full evaluation,
+> methodology, and model rankings). All figures there describe **freeform extraction only** — the same
+> corpus/backends run under an ontology (`Open`/`Strict`) are not measured there; see
+> [Testing & Evaluation](testing-and-evaluation.md#running-under-an-ontology-openstrict) if you
+> want to produce those figures yourself. For local extraction that meets a reasonable quality
+> bar, run a model such as `qwen3.6-27b` behind an OpenAI-compatible server (e.g. `mlx_lm.server`)
+> and point `--extractor-http`/`--extractor-uds` at it, or set `ANTHROPIC_API_KEY` to use the
+> hosted baseline. The bundled sidecar's `/v1/chat/completions` route is still reachable for
+> extraction if you want it anyway — pass `--extractor-uds /tmp/liminis-inference.sock`
+> explicitly — the engine just never picks it for you.
+
+The resolved choice is reported in a startup log line: `extractor: provider=...,
+transport=..., endpoint=...` — `provider` is `anthropic` or `local` depending on which path was
+selected. Unlike the embedder, extraction performs no live reachability probe at startup —
+Foundation Models' on-device warm-up can be slow, and there is no response shape to auto-detect —
+so an unreachable local endpoint surfaces as an error on the first extraction call rather than at
+startup. See [ADR 0041](adr/0041-local-openai-compatible-extraction-adapter.md) for the full
+design, including why the local adapter uses `response_format: json_object` rather than
+function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
+
+---
+
+# IPC & MCP Reference
+
+Source: https://v3rv.com/liminis-context-graph/ipc-mcp-reference
+
+
+`liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
+through the same core dispatch in
+[`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
+no graph logic is duplicated between them:
+
+- **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
+- **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
+
+## IPC methods (35)
+
+The socket dispatch handles **35 methods**: 34 `knowledge_*` methods plus `health_check`.
+`health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
+surface (35) and the MCP tool registry (34, below) differ by exactly one — `health_check` is
+not exposed as an MCP tool.
+
+| Category | Methods |
+|----------|---------|
+| Health | `health_check` |
+| Status | `knowledge_status`, `knowledge_rebuild_status` |
+| Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
+| Search | `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
+| Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all` |
+| Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
+| Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
+| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
+| Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
+
+For request/response shapes and parameter details, the dispatch `match` arms in
+[`handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
+and their handler functions are the source of truth — this page is the method index, not a
+copy of each handler's parameter parsing.
+
+Every long-running method above (the five WAL/recovery/reclassification operations most likely
+to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
+before the terminal result — see [Progress notifications](#progress-notifications) below.
+
+## MCP-over-stdio transport
+
+`liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdin/stdout, using the official Rust SDK (`rmcp`). Any MCP client (Claude Code,
+Claude Desktop, other agents) can query and mutate the knowledge graph directly — no Electron
+app, no Node, no custom JSON-RPC client required. This is an *additional* external-facing
+surface; the Unix-socket JSON-RPC protocol above is unchanged.
+
+Every MCP tool is derived from the `knowledge_*` dispatch methods above — tool names match the
+IPC method names verbatim, and each `tools/call` is translated into an `IpcRequest` and routed
+straight through the same core dispatch the socket service uses. Tool descriptions and JSON
+schemas are maintained in the
+[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
+that file is the canonical source for per-tool descriptions; they are not duplicated here.
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--mcp-stdio` | Starts the MCP server over stdin/stdout instead of binding the Unix socket. |
+| `--scope=<list>` | Comma-separated list of scopes to advertise in `tools/list` (default `all`). See [Scopes](#scopes) below. |
+| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--allow-remote-close` | Attached mode only: advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode (no `--connect`). |
+
+### DB-access modes
+
+- **Standalone (default, no `--connect`)**: the MCP process opens the `.lcg` database directly,
+  reusing the same startup and self-recovery path as the socket service ([ADR 0009](adr/0009-degraded-mode-startup-recovery.md)).
+  Zero-dependency — works with no other process running.
+- **Attached (`--connect <socket-path>`)**: the MCP process never opens the database; it
+  forwards each call over the given socket to a service that already has it open. Use this to
+  add MCP access to a workspace where another socket-service instance is already running,
+  without contending for lbug's single-writer lock.
+  - **Idle timeout.** `LCG_ATTACHED_CALL_TIMEOUT_MS` (default 30s) is a **per-read-line** idle
+    timeout, not a whole-call timeout: it resets on every line read off the socket, including
+    `{"type":"progress"}` lines. A call that keeps emitting progress is never bounded by it, no
+    matter how long the call runs in total — only genuine silence (no output at all for the full
+    timeout window) trips it. If the remote stops responding mid-call (e.g. it crashes), the
+    attached client fails that call with a clean timeout error rather than blocking forever.
+  - **Reconnect and retry.** If the connection to the remote breaks, the client transparently
+    re-dials the same socket path rather than staying wedged. If the break is detected while
+    writing the outgoing request — treated as safe to retry, since the write failing is the
+    client's best available signal that the request didn't get through — the client
+    automatically retries that request exactly once over the freshly-dialed connection. If the
+    break is detected only after the request was fully written — while waiting for or reading
+    the response — the call is **not** retried automatically, since the remote's execution
+    status is unknown and blind retry could double-apply a non-idempotent write (e.g.
+    `knowledge_add_episode`); that call fails with a clear "connection lost mid-call" error, but
+    the connection is marked dead so the *next* call reconnects fresh. If a reconnect attempt
+    itself fails (no listener at that path), the call fails with a clear, descriptive error —
+    never a hang — and a later call will try reconnecting again. See
+    [ADR-0040](adr/0040-attached-mode-reconnect-retry-boundary.md) for the full rationale.
+
+### Scopes
+
+Scopes are additive and composable (e.g. `--scope=read,admin`). `tools/list` advertises the
+union of all active scopes.
+
+| Scope | Methods |
+|-------|---------|
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types` |
+| `cypher` | `knowledge_query_cypher` |
+| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
+| `all` | every scope above (default) |
+
+**`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
+raw Cypher with no param interpolation or value coercion — despite being a "query" method, it can
+perform arbitrary mutations, and it bypasses the WAL-ordering and embedding invariants that the
+structured write tools maintain. It is never implicitly included in `read`, `write`, or `admin`;
+operators must opt in explicitly (or via `all`).
+
+**`knowledge_close` in attached mode is a footgun without `--allow-remote-close`.** In
+**standalone** mode, `knowledge_close` is always advertised under `admin` scope and shuts down
+only this MCP process's own DB connection. In **attached** mode, calling it would shut down the
+*running remote service*. Without `--allow-remote-close`, `knowledge_close` is omitted from
+`tools/list` entirely in attached mode (not merely rejected when called). Pass
+`--allow-remote-close` only when you specifically intend this MCP connection to be able to stop
+the remote service.
+
+**Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild the graph from
+the WAL), `knowledge_dump_wal` (snapshot/export the graph into a fresh compacted WAL directory),
+and `knowledge_recover` / `knowledge_recover_full` are all `admin`-scope tools — an attached client
+only sees them when launched with `--scope=admin` (or `all`). If a mutation goes wrong, this is the
+recovery path. See [Operations](operations.md) for the recovery model in full. Note the WAL replays
+**forward-only**, so take periodic `knowledge_dump_wal` snapshots if you want restore points
+before large or destructive operations.
+
+**`knowledge_rebuild_from_wal` refuses to run against a non-empty database, unless you ask it
+not to.** A `from_seq: 0` (default) full rebuild against a database that already contains data
+fails fast with an explicit error rather than silently emitting a duplicate-primary-key failure
+for every existing `Entity`/`Episodic`/`RelatesToNode_` row — the native write path uses `CREATE`,
+not `MERGE`, for those labels. Pass `force_clear: true` to have the call clear the database itself
+before replaying (the same DB-file-delete-and-reopen behavior `knowledge_recover`'s
+`rebuild_from_workspace_wal` strategy uses), or clear it yourself first with `knowledge_clear_all`.
+`dry_run: true` always fails fast on a non-empty database regardless of `force_clear`, since a dry
+run must never mutate the database — this lets a preview surface the problem before you commit to
+a real rebuild. None of this applies to an incremental `from_seq > 0` resume, which intentionally
+targets a database that already has state.
+
+### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
+
+Three tools populate an edge's `relation_type`, with different tradeoffs:
+
+**`knowledge_canonicalize_relations`** maps each edge's **existing raw predicate** onto your
+ontology's declared `relation_types`. Its behavior has three caveats worth knowing before you
+rely on it:
+
+- **The primary pass is lexical, over the predicate — not the `fact`.** It matches the edge's
+  predicate / current `relation_type` against ontology type names, aliases, and keywords. It does
+  **not** read the edge's `fact` sentence, so an edge whose `relation_type` was cleared cannot be
+  re-mapped from its fact by this pass.
+- **`embedding_threshold` tunes only the fallback promoter** (default `0.7`). The fallback embeds
+  each residual edge's `fact` against the ontology types' *descriptions* and force-assigns the single
+  nearest type at or above the threshold. Lowering it types more edges, but by nearest-neighbor
+  force-fit with **no abstention** — an idiosyncratic fact (e.g. "*X is affiliated with Y*") can land
+  on a wrong type (e.g. `HOLDS`).
+- **Re-runs are only partly idempotent, and clearing `relation_type` can't be undone by
+  canonicalize.** A re-run skips an edge only when it's already at its target — a `Mapped` edge
+  already equal to the canonical type, or a residual edge already `UNCLASSIFIED`; an edge whose
+  classification *changes* is overwritten (including a previously-assigned type), while
+  arrow-named "noise" edges keep any existing predicate. Critically, canonicalize's only input is
+  the edge's existing predicate / `relation_type` — if you **null that field to "start clean,"
+  canonicalize has nothing to map from and cannot rebuild it.** Snapshot with `knowledge_dump_wal`
+  before such an operation.
+
+**`knowledge_backfill_relation_types`** (DEPRECATED) does not classify at all — it mints
+uppercased fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
+`relation_type`, rather than matching against the ontology. Avoid it for building a typed
+taxonomy; prefer `knowledge_reprocess_relation_types` below, which supersedes it for that purpose.
+
+**`knowledge_reprocess_relation_types`** is the relation-side twin of
+`knowledge_reprocess_entity_types`: for each in-scope edge, it sends the edge's `fact` and the
+ontology's declared relation types (name + description) to the configured extraction LLM and asks
+it to pick exactly one type, or honestly abstain. This is the tool to reach for when you want
+genuine fact-based classification instead of lexical matching or pseudo-typing:
+
+- **Always reads the `fact`, never the predicate.** Unlike `canonicalize_relations`, classification
+  is grounded in the edge's natural-language fact sentence against the ontology's declared menu —
+  not lexical/alias/keyword matching on the existing predicate string.
+- **A declared ontology relation-type menu is always required.** Unlike
+  `knowledge_reprocess_entity_types` (whose `untyped` scope works with no ontology via open-ended
+  classification), every scope value (`untyped`, `off_ontology`, `all`) fails with a structured
+  `{success: false, error: ...}` if the ontology declares no relation types — there is no
+  open-ended fallback (see [ADR-0037](adr/0037-relation-classification-abstention-writes-unclassified.md)).
+- **Abstention is an honest, real write of `UNCLASSIFIED`.** If the LLM cannot map a fact to any
+  declared type, the edge's `relation_type` is set to the literal string `UNCLASSIFIED` — never a
+  force-assigned nearest match. This differs from `knowledge_reprocess_entity_types`, where an
+  unclassifiable entity is simply left unchanged (see ADR-0037).
+- **`scope`** controls candidates: `"untyped"` (default) — `relation_type` NULL/empty, the same
+  predicate `backfill_relation_types` uses; `"off_ontology"` — untyped edges plus edges whose
+  `relation_type` isn't a declared type (this naturally covers prior `UNCLASSIFIED` sentinels and
+  `backfill_relation_types`'s fact-prefix pseudo-types with no special-casing); `"all"` — every
+  edge in the group.
+- **Idempotent.** An edge whose computed verdict already matches its current `relation_type`
+  (including an edge already correctly `UNCLASSIFIED`) is left unchanged — no write, no WAL entry.
+- **`dry_run: true`** returns `would_reclassify_count`, a `plan` array of per-edge
+  `{edge_id, fact, old_type, new_type}` entries, and a `breakdown` object counting edges per
+  assigned `new_type` (including an `UNCLASSIFIED` count) — without mutating the graph.
+
+### Progress notifications
+
+The five long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+`knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, and
+`knowledge_reprocess_entity_types` — bridge to MCP progress notifications when the client
+attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both
+standalone and attached mode. Without a progress token, these calls simply block until they
+complete, same as over the socket protocol. In attached mode, each progress notification also
+re-arms `LCG_ATTACHED_CALL_TIMEOUT_MS`'s per-read-line idle timer (see
+[DB-access modes](#db-access-modes) above), so a progress-tracked call isn't falsely reported as
+timed out just because it runs longer than that timeout in total.
+
+### Example MCP client config
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your/workspace"
+    }
+  }
+}
+```
+
+To attach to an already-running socket service instead of opening the DB directly:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--connect", "/path/to/your/workspace/.lcg/service.sock", "--scope=read"]
+    }
+  }
+}
+```
+
+See [ADR 0035](adr/0035-mcp-stdio-transport.md) for the transport's internal architecture.
+
+---
+
+# Telemetry
+
+Source: https://v3rv.com/liminis-context-graph/telemetry
+
+
+The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
+
+## Transport
+
+**Default**: Events are written to **stderr**, one JSON object per line.
+
+```
+{"type":"ipc_call","ts_ms":1716100000000,"method":"knowledge_find_entities","request_id":1,"duration_ms":42,"success":true}
+```
+
+**Future**: Set `LIMINIS_TELEMETRY_SOCKET` to a UNIX socket path to stream events there instead of (or in addition to) stderr. This transport is not yet implemented.
+
+To capture events from the default transport:
+
+```sh
+./liminis-context-graph 2> telemetry.jsonl
+```
+
+## Event Types
+
+All events share two common fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | Discriminant identifying the event kind (see table below) |
+| `ts_ms` | u64 | Unix epoch timestamp in milliseconds when the event was emitted |
+
+### `ipc_call`
+
+Emitted after every IPC request completes, from `handlers::dispatch()`. This is a **hot-path event** — it fires on every request.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | string | JSON-RPC method name (e.g. `knowledge_add_episode`) |
+| `request_id` | any | JSON-RPC request `id` value as-is |
+| `duration_ms` | u64 | Wall-clock time from request receipt to response, in milliseconds |
+| `success` | bool | `true` if the handler returned `Ok`, `false` for any error |
+
+Example:
+```json
+{"type":"ipc_call","ts_ms":1716100000000,"method":"knowledge_add_episode","request_id":1,"duration_ms":42,"success":true}
+```
+
+### `token_usage`
+
+Emitted after every successful Anthropic API call from `extractor.rs`. This is a **hot-path event** for `knowledge_add_episode` calls.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, future: `"dedup"`) |
+| `model` | string | Anthropic model identifier (e.g. `claude-haiku-4-5-20251001`) |
+| `input_tokens` | u64 | Input tokens billed by the API |
+| `output_tokens` | u64 | Output tokens billed by the API |
+| `cache_read_tokens` | u64 | Tokens served from the prompt cache (cheaper rate) |
+| `cache_creation_tokens` | u64 | Tokens written into the prompt cache |
+| `estimated_cost_usd` | f64 or null | Estimated cost in USD, or `null` if the model is not in the pricing table |
+
+Example:
+```json
+{"type":"token_usage","ts_ms":1716100000001,"role":"extraction","model":"claude-haiku-4-5-20251001","input_tokens":512,"output_tokens":128,"cache_read_tokens":384,"cache_creation_tokens":0,"estimated_cost_usd":0.000512}
+```
+
+### `extraction_truncated`
+
+Emitted when `do_extract` detects a `stop_reason: "max_tokens"` response and triggers a budget-doubling retry. Emitted once per chunk, after the retry resolves (either with success or with a second budget overflow). If `retry_succeeded` is `false`, the chunk was lost and an error was returned to the caller.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts_ms` | integer | Unix timestamp in milliseconds |
+| `model` | string | Anthropic model identifier that triggered the overflow |
+| `chunk_len_bytes` | integer | Length of the episode body chunk in bytes |
+| `initial_max_tokens` | integer | The `max_tokens` value used for the first (overflowing) attempt |
+| `retry_succeeded` | bool | `true` if the doubled-budget retry produced a valid result; `false` if the retry also overflowed |
+
+Example:
+```json
+{"type":"extraction_truncated","ts_ms":1716100000050,"model":"claude-sonnet-4-6","chunk_len_bytes":12480,"initial_max_tokens":8192,"retry_succeeded":true}
+```
+
+### `llm_fallback`
+
+Emitted when the primary LLM is unavailable and extraction falls back to the secondary model
+configured via `LCG_EXTRACTION_LLM`'s `primary:fallback` form.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `role` | string | Which LLM use-case triggered the fallback |
+| `primary_model` | string | Model that failed |
+| `fallback_model` | string | Model being used instead |
+| `error_reason` | string | Reason the primary model was unavailable (e.g. `"rate_limit_exceeded"`) |
+
+Example:
+```json
+{"type":"llm_fallback","ts_ms":1716100000002,"role":"extraction","primary_model":"claude-sonnet-4-6","fallback_model":"claude-haiku-4-5-20251001","error_reason":"rate_limit_exceeded"}
+```
+
+### `wal_append`
+
+Emitted after each WAL entry is written. **Not yet emitted** — pending issue #3 (WAL implementation).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `duration_us` | u64 | Time to append the WAL entry, in microseconds |
+| `bytes` | integer | Size of the appended WAL entry in bytes |
+
+Example:
+```json
+{"type":"wal_append","ts_ms":1716100000003,"duration_us":180,"bytes":1024}
+```
+
+### `service_state`
+
+Emitted when the daemon changes operational state: on degraded startup, after successful recovery, and during graceful shutdown.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `state` | string | One of `"degraded"`, `"healthy"`, `"shutting_down"`, or `"stopped"` |
+| `reason` | string or absent | Machine-readable reason code (e.g. `"lbug_wal_corrupt"`). Present when `state = "degraded"`. |
+| `detail` | JSON value or absent | Structured detail, typically a string carrying the lbug error. Present when `state = "degraded"` |
+
+Degraded example (emitted at startup when lbug WAL is corrupt):
+```json
+{"type":"service_state","ts_ms":1716523200000,"state":"degraded","reason":"lbug_wal_corrupt","detail":"database error: Lbug(Runtime exception: Corrupted wal file. Read out invalid WAL record type.)"}
+```
+
+Healthy example (emitted after successful `knowledge_recover`):
+```json
+{"type":"service_state","ts_ms":1716523260000,"state":"healthy"}
+```
+
+Shutting-down example (emitted at the start of graceful shutdown, before in-flight tasks are drained):
+```json
+{"type":"service_state","ts_ms":1716523270000,"state":"shutting_down"}
+```
+
+Stopped example (emitted immediately before `exit(0)`, after initiating the WAL checkpoint; if the inner shutdown timeout was exceeded, in-flight tasks may still be winding down and the checkpoint is best-effort):
+```json
+{"type":"service_state","ts_ms":1716523271000,"state":"stopped"}
+```
+
+The renderer uses this event to update the recovery UI state without polling `knowledge_status`. On every clean exit, the telemetry stream ends with `"shutting_down"` → `"stopped"`.
+
+### `wal_replay_complete`
+
+Emitted once when WAL replay finishes — at startup, after `knowledge_rebuild_from_wal`, and at the end
+of autonomous recovery.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mutations_replayed` | u64 | WAL mutations successfully applied |
+| `unrecognised_lines` | u64 | Lines whose shape matched no known mutation template |
+| `failed_lines` | u64 | Lines that parsed but whose statement failed to execute |
+| `unparseable_lines` | u64 | Lines that were not valid JSON |
+| `legacy_skipped_lines` | u64 | Lines skipped as a superseded legacy format |
+| `duration_ms` | u64 | Total replay wall-clock time in milliseconds |
+
+A nonzero `failed_lines`, `unrecognised_lines`, or `unparseable_lines` means the rebuilt graph is
+not a faithful reconstruction of the WAL — each counts a line whose content did not make it into
+the graph, whether it failed to execute, matched no known template, or was not valid JSON. Use
+`LCG_REPLAY_FAILURE_SAMPLES` to surface examples. `legacy_skipped_lines` is the one counter that
+does not indicate loss: those lines are a superseded format that is intentionally not replayed.
+
+Example:
+```json
+{"type":"wal_replay_complete","ts_ms":1716100000004,"mutations_replayed":1284,"unrecognised_lines":0,"failed_lines":0,"unparseable_lines":0,"legacy_skipped_lines":0,"duration_ms":380}
+```
+
+### `structured_output_parse`
+
+Emitted by `OaiExtractor` for every entity/edge extraction response on the local /
+OpenAI-compatible path, recording whether the model's structured output was usable as-is.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Model that produced the response |
+| `call_type` | string | `"entities"` or `"edges"` |
+| `outcome` | string | `"clean"` (valid JSON as returned), `"recovered"` (needed fence/prefix stripping), `"malformed"` (not valid JSON at all), or `"schema_invalid"` (valid JSON that failed schema/field validation on a genuinely required field, [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md)) |
+
+A high `"recovered"` or `"malformed"` rate is the main signal that a local model is a poor fit for
+extraction. The Anthropic path uses tool-use and does not emit this event.
+
+Example:
+```json
+{"type":"structured_output_parse","ts_ms":1716100000060,"model":"qwen3.6-27b","call_type":"edges","outcome":"recovered"}
+```
+
+### `entities_missing_summary`
+
+Emitted by `OaiExtractor::do_extract_entities` on every successful entity-extraction parse that
+produced at least one entity — OAI-only; the Anthropic path's tool-use schema doesn't need this
+signal and never emits it. Its `tool_use` schema requires the `summary` key to be present but not
+non-empty, so a model can satisfy the schema while still returning entities with no summary text.
+This event surfaces that missing-summary rate as its own signal, separate from the pass/fail
+classification in `structured_output_parse`/`extraction_failure`: an empty summary is a degraded
+entity, not a failed extraction. See [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Model that produced the response |
+| `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `entities_extracted` | usize | Total entities parsed from this chunk |
+| `missing_summary` | usize | Count of those entities whose `summary` is empty — absent, explicit `null`, and explicit `""` in the source JSON are all indistinguishable after parsing and all count here |
+
+Example:
+```json
+{"type":"entities_missing_summary","ts_ms":1716100000058,"model":"qwen3.6-27b","chunk_key":"notes-0001","entities_extracted":6,"missing_summary":1}
+```
+
+### `extraction_failure`
+
+Emitted at all three extraction-call failure sites (HTTP error, budget exhaustion that persists
+after one retry, or a malformed/unparseable response) from inside `AnthropicExtractor` /
+`OaiExtractor`. This is the heavier, complete-body sibling of `extraction_truncated` and
+`structured_output_parse` — it carries the full raw response body for forensics, where those two
+stay lightweight counting-only events. It is consumed only by the sidecar-writing
+`ExtractionFailureSink` (see the [failure-record sidecar](testing-and-evaluation.md#failure-record-sidecar)),
+not by the counting sink `ipc_call`/`token_usage` use.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | The model name in force for the failing call |
+| `call_type` | string | `"entities"` or `"edges"` |
+| `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `classification` | string | `"http_error"`, `"truncation"`, `"malformed"` (content that never parsed as JSON at all), or `"schema_invalid"` (valid JSON that failed schema/field validation, [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md)) |
+| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. May echo back source-text content from the failing call; apply the same review-before-sharing care as [LLM cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
+| `finish_reason` | string or null | The provider's stop/finish reason, or `null` for an HTTP-level failure |
+| `completion_tokens` | u64 or null | Output token count, or `null` if unavailable |
+| `max_tokens` | u32 | The `max_tokens` value in force for the failing call |
+| `entities_extracted` | usize or null | Entities already extracted for this chunk before an edge-call failure discarded them from the caller's return value. `Some(count)` only at `call_type: "edges"` failure sites; `None` at `call_type: "entities"` sites, where there is nothing to report yet. |
+
+Example:
+```json
+{"type":"extraction_failure","ts_ms":1716100000055,"model":"qwen3.6-27b","call_type":"edges","chunk_key":"notes-0001","classification":"truncation","raw_body":"{\"choices\":[{\"message\":{\"content\":\"[{\\\"predicate\\\"...\"}}]}","finish_reason":"length","completion_tokens":8192,"max_tokens":8192,"entities_extracted":4}
+```
+
+See [ADR-0306](adr/0306-extraction-failure-sidecar-and-truncation-visibility.md) for the design
+rationale, and [Testing & Evaluation](testing-and-evaluation.md#failure-record-sidecar) for the
+on-disk sidecar file this event's consumer writes.
+
+### `wal_rotated`
+
+Emitted when the WAL rolls over to a new file.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `from_file_seq` | u32 | Sequence number of the file just closed |
+| `to_file_seq` | u32 | Sequence number of the file now being written |
+| `closed_bytes` | u64 | Size of the closed file in bytes |
+| `closed_events` | u64 | Number of events in the closed file |
+
+Example:
+```json
+{"type":"wal_rotated","ts_ms":1716100000070,"from_file_seq":3,"to_file_seq":4,"closed_bytes":8388608,"closed_events":15220}
+```
+
+### `workspace_migration`
+
+Emitted at each phase of a workspace layout migration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | Migration phase reached |
+| `detail` | JSON value or absent | Structured phase detail |
+
+Example:
+```json
+{"type":"workspace_migration","ts_ms":1716100000080,"phase":"complete"}
+```
+
+### `wal_auto_recovery`
+
+Emitted at each phase of autonomous WAL-corruption self-recovery — the observability for the
+self-healing path described in [Operations](operations.md). Every field except `phase` is optional
+and present only where the phase produces it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `phase` | string | One of `"corruption_detected"`, `"checkpoint_drop_complete"`, `"cursor_derived"`, `"replay_complete"`, `"index_build_complete"`, `"recovery_complete"`, `"fallback_triggered"` |
+| `from_seq` | u64 or absent | WAL sequence the replay resumed from |
+| `cursor_reason` | string or absent | How the resume cursor was derived |
+| `mutations_replayed` | u64 or absent | Mutations applied during recovery replay |
+| `elapsed_ms` | u64 or absent | Wall-clock time for the phase |
+| `fallback_reason` | string or absent | Why automatic recovery gave up, on `"fallback_triggered"` |
+
+A stream ending in `"recovery_complete"` means the service healed itself; one ending in
+`"fallback_triggered"` means it needs manual intervention.
+
+Example:
+```json
+{"type":"wal_auto_recovery","ts_ms":1716100000090,"phase":"replay_complete","from_seq":7,"mutations_replayed":412,"elapsed_ms":1830}
+```
+
+---
+
+## Sample Output
+
+A complete session ingesting one episode and running one search:
+
+```jsonl
+{"type":"ipc_call","ts_ms":1716100000000,"method":"knowledge_build_indices","request_id":1,"duration_ms":12,"success":true}
+{"type":"token_usage","ts_ms":1716100000100,"role":"extraction","model":"claude-haiku-4-5-20251001","input_tokens":512,"output_tokens":128,"cache_read_tokens":384,"cache_creation_tokens":0,"estimated_cost_usd":0.000512}
+{"type":"ipc_call","ts_ms":1716100000150,"method":"knowledge_add_episode","request_id":2,"duration_ms":320,"success":true}
+{"type":"ipc_call","ts_ms":1716100000500,"method":"knowledge_find_entities","request_id":3,"duration_ms":18,"success":true}
+```
+
+---
+
+## Pricing Table
+
+Token cost estimates use the compiled-in pricing table at `assets/llm_pricing.json`. To override at runtime without recompiling:
+
+```sh
+LIMINIS_LLM_COST_TABLE_PATH=/path/to/my_pricing.json ./liminis-context-graph
+```
+
+The JSON schema matches the built-in table:
+
+```json
+{
+  "claude-haiku-4-5-20251001": {
+    "input_per_mtok": 0.80,
+    "output_per_mtok": 4.00,
+    "cache_read_per_mtok": 0.08,
+    "cache_creation_per_mtok": 1.00
+  }
+}
+```
+
+Rates are in USD per million tokens. Models not present in the table produce `"estimated_cost_usd": null`.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIMINIS_LLM_COST_TABLE_PATH` | *(built-in)* | Path to a JSON pricing table; overrides the compiled-in defaults |
+| `LIMINIS_TELEMETRY_SOCKET` | *(unset)* | UNIX socket path for telemetry output (**not yet implemented**) |
+| `LCG_SHUTDOWN_TIMEOUT_MS` | `30000` | Inner shutdown timeout in milliseconds; process aborts in-flight tasks after this and exits (best-effort WAL checkpoint). Sized to leave headroom under the liminis-app outer budget of 60 s. |
+
+---
+
+# Ontology
+
+Source: https://v3rv.com/liminis-context-graph/ontology
+
+
+`liminis-context-graph` supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
+
+## File location
+
+Place the ontology at `{workspace}/.lcg/ontology.yaml`.
+
+**Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
+
+## Format
+
+```yaml
+# mode: open | strict
+# open (default): declared types are preferred; free-form fallback allowed
+# strict: out-of-vocabulary entities are dropped post-extraction; out-of-vocabulary
+#   edges are never dropped — a declared alias is normalized to its canonical relation
+#   type, and anything else is reclassified to relation_type: UNCLASSIFIED with the
+#   original label preserved in the edge's attributes (see ADR-0310)
+mode: strict
+
+entity_types:
+  - name: Person           # normalized to PascalCase
+    description: A human individual, not a role or title.
+  - name: Organization
+  - name: Document
+  - name: Rfc
+    parent: Document       # optional: Rfc is a subtype of Document
+  - name: Adr
+    parent: Document       # optional: Adr is also a subtype of Document
+  - name: Paper
+
+relation_types:
+  - name: AUTHORED         # normalized to SCREAMING_SNAKE_CASE
+    description: A person wrote a paper.
+    source_type: Person    # optional signature constraint (informational in v1)
+    target_type: Paper
+    aliases: [WROTE, PENNED]   # optional: alternate spellings normalized to AUTHORED
+    keywords: [author]         # optional: lowercase substrings used by the offline
+                                # knowledge_canonicalize_relations pass (fuzzy match)
+  - name: AFFILIATED_WITH
+    source_type: Person
+    target_type: Organization
+```
+
+`aliases` and `keywords` on a relation type have three consumers, each with different matching rules:
+
+- **The `strict`-mode edge prompt** (`build_fact_types_section`) renders both `aliases` and `keywords` for every declared relation type, so the model can see the full set of accepted spellings and is more likely to emit the canonical name directly.
+- **Ingest-time `strict`-mode filtering** (`episode.rs`) consults only `aliases`, as an exact match after the same case/separator normalization applied to every relation type name (`normalize_relation_type`) — e.g. `wrote` normalizes to `WROTE` and resolves via the alias map to `AUTHORED`. `keywords` play no role in ingest-time filtering.
+- **The offline `knowledge_canonicalize_relations` maintenance pass** (see [IPC & MCP Reference](ipc-mcp-reference.md#relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types)) consults both: `aliases` via the same exact map, and `keywords` as lowercase substrings for its fuzzy-matching fallback.
+
+### Entity type hierarchy
+
+The optional `parent: <TypeName>` field on an entity type declares a single-parent (tree) subtype relationship. A node typed `Rfc` will carry labels `["Entity", "Document", "Rfc"]` — enabling both specific queries (`WHERE 'Rfc' IN e.labels`) and rollup queries (`WHERE 'Document' IN e.labels`).
+
+- **Additive**: the specific type is never replaced by its parent; ancestor labels are added alongside it.
+- **Transitive**: a 3-level chain `SubDoc → Rfc → Document` stamps all four labels.
+- **Safe degrades**: an undeclared parent is cleared with a warning; cycles are detected and broken at startup (no crash).
+- **Flat ontologies unaffected**: types without `parent` fields behave exactly as before — `["Entity", <SpecificType>]`.
+- **Drift detection**: adding, removing, or changing a `parent` changes the ontology content hash, which triggers a `drifted: true` status in `knowledge_status`. Run `knowledge_reprocess_entity_types` to propagate new hierarchy to existing nodes.
+
+See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
+
+## Modes
+
+| Mode | Entity types | Relation types |
+|------|-------------|----------------|
+| `open` (default) | Preferred by the LLM; free-form fallback allowed | Same |
+| `strict` | Out-of-vocabulary entities dropped post-extraction | The edge-extraction prompt tells the model to use only the declared vocabulary (including aliases). A declared alias is normalized to its canonical name; anything still out-of-vocabulary after normalization is retained with `relation_type: UNCLASSIFIED` and its original label preserved in `attributes` — never dropped (ADR-0310) |
+
+## `knowledge_status` summary
+
+The `knowledge_status` IPC response always includes an `ontology` field:
+
+```json
+{
+  "ontology": {
+    "present": true,
+    "mode": "strict",
+    "entity_type_count": 4,
+    "relation_type_count": 4
+  }
+}
+```
+
+When no ontology is loaded, `present` is `false` and counts are `0`.
+
+The response also includes an `indices_built` boolean, a `name_index_trusted` boolean, and a
+`name_index_fallback_scans` integer — these describe search-index and name-lookup health rather
+than ontology state. See [Operations](operations.md) for those fields.
+
+---
+
+# Operations
+
+Source: https://v3rv.com/liminis-context-graph/operations
+
+
+## On-disk layout
+
+Everything the service manages lives under `.lcg/` in the workspace:
+
+```text
+.lcg/
+├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
+├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL
+├── ontology.yaml      # optional extraction vocabulary (yours to edit)
+└── service.sock       # JSON-RPC 2.0 endpoint while the service runs
+```
+
+**The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended
+to plain JSONL files in `.lcg/wal/` before it touches the database. The WAL is human-readable,
+append-only, and git-friendly: check it into the same repository as your notes or documents,
+diff it, and carry it across machines. The database is a derived index — delete it and
+`knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
+
+## WAL administration
+
+- **Rebuild** the database from the log with `knowledge_rebuild_from_wal`. A `from_seq: 0`
+  (default) rebuild against a database that already has data in it fails fast with an explicit
+  error instead of silently producing a duplicate-key failure per node — pass
+  `force_clear: true` to clear it automatically first, or delete it yourself before calling
+  rebuild. A successful non-dry-run rebuild automatically rebuilds the entity/relationship
+  search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately
+  queryable afterward — `knowledge_build_indices` is not normally required.
+- **Dump** the database back to a compacted log with `knowledge_dump_wal` — this is also the
+  way to take a restore-point snapshot before a large or destructive operation, since WAL replay
+  is forward-only.
+- **Checkpoint** before backups with `knowledge_prepare_checkpoint`.
+- **Rotation.** `LCG_WAL_MAX_BYTES_PER_FILE` (default 5 MB) and `LCG_WAL_MAX_EVENTS_PER_FILE`
+  (default 10000) bound each WAL file's size; rotation fires when either threshold is reached
+  and emits a `wal_rotated` [telemetry event](telemetry.md#wal_rotated).
+- **Failure reporting.** Failure reports from replay dedupe by `(template, error)`, so a schema
+  gap on one mutation type can no longer hide an unrelated failure category behind a wall of
+  identical samples. Use `LCG_REPLAY_FAILURE_SAMPLES` to control how many distinct failing
+  lines are retained per replay.
+
+See [Configuration](configuration.md) for the full set of `LCG_WAL_*`/`LCG_REPLAY_*` environment
+variables, and [IPC & MCP Reference](ipc-mcp-reference.md#mcp-over-stdio-transport) for the
+`knowledge_rebuild_from_wal` non-empty-database refusal behavior in detail.
+
+## Self-healing and degraded mode
+
+The service binds its socket **before** opening the database, so a corrupted store leaves it
+reachable in degraded mode rather than dead ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md)).
+Autonomous startup recovery ([ADR-0027](adr/0027-autonomous-wal-startup-recovery.md)) then reopens
+at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
+Recovery progress is observable via the [`wal_auto_recovery` telemetry event](telemetry.md#wal_auto_recovery),
+whose `phase` field steps through `corruption_detected` → `checkpoint_drop_complete` →
+`cursor_derived` → `replay_complete` → `index_build_complete` → `recovery_complete` (or
+`fallback_triggered`, if automatic recovery gives up and manual intervention via
+`knowledge_recover`/`knowledge_recover_full` is needed).
+
+## `knowledge_status` health fields
+
+Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
+
+**`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
+currently built and reflect the graph's current contents. The service builds these indices
+**eagerly at startup** — immediately after schema init on a fresh DB, or as part of
+self-recovery after a WAL-corruption auto-heal — before the socket accepts any request, so
+`indices_built` is normally `true` from the very first `knowledge_status` call onward (see
+[ADR-0036](adr/0036-eager-index-build-at-startup.md)). A genuine build failure during that eager
+startup build fails startup outright rather than silently leaving indices unbuilt.
+
+A runtime recovery — any `knowledge_recover` strategy (`drop_lbug_wal`,
+`rebuild_from_workspace_wal`, `restore_from_backup`) or `knowledge_recover_full` — also leaves
+`indices_built` correctly `true` on success: `drop_lbug_wal`/`restore_from_backup` reopen an
+already-indexed checkpoint or backup, while `rebuild_from_workspace_wal`/`knowledge_recover_full`
+explicitly rebuild the indices before reporting success. Failure handling differs by strategy:
+`rebuild_from_workspace_wal` and `knowledge_recover_full` invalidate indices as part of the
+attempt, so a failure that aborts before the rebuild completes leaves the flag `false` rather than
+reporting stale readiness; `drop_lbug_wal` and `restore_from_backup` never touch indices, so a
+failed call leaves the flag at whatever it was before the attempt.
+
+`indices_built` still goes back to `false` in narrower, later situations: after
+`knowledge_clear_all`, or if a post-rebuild index build genuinely fails (as opposed to the
+common, harmless "already built" case). In those cases `false` does not mean search or ingest
+is broken — `knowledge_find_entities`/`knowledge_find_relationships`, and the ingest
+hybrid-dedup path used once a `group_id` passes the dedup threshold, all auto-heal by
+transparently rebuilding indices and retrying on their first call after a `false` state. The
+field exists so a caller can *observe* readiness proactively instead of discovering it only via
+a search or ingest attempt. The same field appears on `knowledge_rebuild_from_wal`'s result (and
+on `knowledge_rebuild_status`'s `result` for the background-job path) for the specific rebuild
+that produced it; it is omitted from dry-run rebuild results, since a dry run never touches
+indices.
+
+**`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — report the
+health of the in-process `NameIndex` accelerator behind case-insensitive entity name lookups
+([ADR-0038](adr/0038-in-process-name-index.md)). `name_index_trusted` is `true` unless a write path
+is known to have bypassed the index — e.g. a raw-Cypher mutation via `knowledge_query_cypher`
+whose follow-up rebuild failed, or a post-replay `rebuild_name_index()` failure inside
+`knowledge_rebuild_from_wal` — and goes back to `true` once the next rebuild succeeds.
+`name_index_fallback_scans` counts how many times an endpoint-existence lookup (the
+"does this entity exist anywhere in the group" check used during edge-endpoint resolution)
+missed the index and fell back to a bounded database scan; it only increments on a miss; a
+healthy, coherent index keeps this at (or near) `0`. Both fields are `null` while the service is
+degraded (no connected database). A rising `name_index_fallback_scans` count, or a
+`name_index_trusted: false` that doesn't clear on its own, signals index desync worth
+investigating — see [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the
+mechanism.
+
+## Streaming progress
+
+Long operations accept a `_progress_token` and stream progress frames before the terminal
+result — see [Progress notifications](ipc-mcp-reference.md#progress-notifications) for the MCP
+bridge and the list of operations that support it.
+
+## Recovery and export tools
+
+`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`,
+`knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
+[Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.
+
+---
+
+# Testing & Evaluation
+
+Source: https://v3rv.com/liminis-context-graph/testing-and-evaluation
+
+
+## Record/replay cassettes
+
+Every test that exercises the real extraction pipeline used to face a choice: pay for a live
+LLM call, or fall back to `MockExtractor`'s fixed `Alice`/`Acme Corp` output regardless of input.
+Neither lets you regression-test a prompt change, a response-parsing change, or the ingest
+pipeline's real entity/edge yield without spending money on every run. **LLM cassettes** close
+that gap: record one real extraction pass to a file, then replay it deterministically and for
+free — with no network access — for as long as the recorded calls still match.
+
+### Recording
+
+Set `LCG_RECORD_LLM=<path>` and run a real ingest (`ANTHROPIC_API_KEY` or a local extractor must
+still be configured normally — recording wraps whichever provider is resolved). Every extraction
+call — `knowledge_add_episode`'s entity/edge extraction, and the `knowledge_reprocess_*` type
+classification calls — appends one line to `<path>`. Re-running recording against an existing
+path always **appends**, never truncates, matching the WAL's convention.
+
+### Replaying
+
+Set `LCG_REPLAY_LLM=<path>` and run the identical ingest again. Extraction is served entirely
+from the cassette: no provider is resolved, no `ANTHROPIC_API_KEY`/`--extractor-*` flag is
+needed, and no network call is ever made. `LCG_RECORD_LLM` and `LCG_REPLAY_LLM` are mutually
+exclusive — setting both is a startup error.
+
+A replay request that doesn't match any recorded entry — because the episode text differs, or
+because a prompt/parsing change altered what's semantically being asked — fails immediately with
+an identifiable cassette-miss error rather than silently falling through to a live call or
+producing divergent output. **To re-record after a cassette miss**: delete or move aside the
+stale cassette (or point `LCG_RECORD_LLM` at a fresh path), re-run the affected ingest with
+recording enabled against a live provider, then switch back to `LCG_REPLAY_LLM` to confirm the
+new cassette replays cleanly.
+
+### Format
+
+A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record
+carries a `key` (a SHA-256 hex digest used for matching), `call_type` (`extract`,
+`classify_entities`, or `classify_relations`), `provider`, `model`, an RFC 3339 `timestamp`,
+the human-readable `request` content, and the call's `response`. Records are matched by `key`
+alone, independent of file order — a cassette assembled from multiple recording runs (or, for
+`LlmRouter`, from more than one primary/fallback leaf) replays correctly as a single flat file.
+Two calls with identical semantic content are served FIFO, in the order they were recorded.
+
+**What's in the matching key, precisely** (and what isn't): for `extract`, the rendered entity
+and edge system/user prompts plus `episode_body`/`group_id`/`reference_time`/
+`custom_instructions`/`source_type` — rendering the prompts (not just hashing the raw options)
+means editing a prompt template or the injected ontology correctly invalidates stale cassette
+entries. For `classify_entities`/`classify_relations`, the raw call arguments only. Timestamps,
+request nonces, and anything transport-specific (headers, API keys, URLs) are never part of the
+key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
+boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
+to see or need to scrub. See the
+[`crates/core/src/cassette.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
+module doc for the full, authoritative scope (including one documented, narrow gap around the
+edge extraction user prompt).
+
+Cassettes carry no credential material — the record/replay seam sits above HTTP request
+construction, so there's nothing transport-level for it to see. But a cassette's `request` and
+`response` fields are the actual episode text and model output, so **review content before
+committing or sharing a cassette**: source text drawn from a real workspace can carry
+proprietary or personal data that has nothing to do with authentication. See
+[`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
+for this repo's fixture-capture conventions.
+
+### Failure-record sidecar
+
+A failed extraction call — an HTTP error, a malformed/unparseable response, or budget
+exhaustion that persists after one retry — appends one record to a sidecar file,
+`<cassette-path>.failures.jsonl`. A call that ends in an error never produces a cassette
+record (the cassette's success-only invariant is unaffected). Edge-budget exhaustion is the one
+non-fatal class: the call still succeeds with an empty edge list, so it produces both a cassette
+record and a sidecar record — entity-budget exhaustion, by contrast, is fatal to the call and
+produces only the sidecar record. This is created wherever a cassette is being recorded (both
+`LCG_RECORD_LLM` and `lcg-eval --record-cassette`) — never in replay mode, since no live failure
+can occur there. The file is created eagerly (empty, if no failures occur) alongside the
+cassette itself.
+
+Each record is a JSON object with:
+
+| Field | Description |
+|-------|-------------|
+| `ts_ms` | Unix epoch milliseconds |
+| `model` | The model name in force for this call |
+| `call_type` | `"entities"` or `"edges"` |
+| `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
+| `raw_body` | The **complete** raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above. |
+| `finish_reason` | The provider's stop/finish reason, or `null` for an HTTP-level failure |
+| `completion_tokens` | Output token count, or `null` if unavailable |
+| `max_tokens` | The `max_tokens` value in force for the failing call |
+
+A single sidecar file is capped at 20MB; once appending would exceed that, it's rotated to a
+numbered `<cassette-path>.failures.N.jsonl` file (matching the WAL's own byte-size rotation
+convention) so a long-running service's sidecar can't grow without limit. Individual records are
+never truncated to hit this cap — only the aggregate is bounded. See
+[ADR-0306](adr/0306-extraction-failure-sidecar-and-truncation-visibility.md) for the design
+rationale, and [Telemetry](telemetry.md#extraction_failure) for the event that drives this sink.
+
+## Extraction-quality eval harness
+
+The `lcg-eval` binary (`crates/eval`) measures extraction quality directly against this
+engine's own prompts and extractor clients — no captured/copied prompts, so a prompt change
+either updates the eval or breaks its build. It closes the gap noted in
+[ADR 0041](adr/0041-local-openai-compatible-extraction-adapter.md): the local extraction
+adapter's quality claim used to rest on a manual-testing caveat instead of anything
+measurable. See [extraction-quality-evaluation.md](extraction-quality-evaluation.md) for the prior
+research findings this harness re-baselines, and
+[eval-full-corpus-runbook.md](eval-full-corpus-runbook.md) for the maintainer-run full-corpus model
+comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it, with the exact commands.
+
+### Running the harness
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...   # hosted baseline + LLM-as-judge scoring
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \
+  --reference baseline
+```
+
+This runs both backends over the default corpus subset (the first 50 chunks of the public Simple
+English Wikipedia fixture,
+`crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl`) and prints a report with, per
+backend: strict-string and LLM-as-judge F1 for entities/edges/summaries, latency percentiles,
+error rate, and structured-output reliability (clean/recovered/malformed JSON parse counts).
+Pass `--output report.json` to also write the report as JSON. Run `cargo run -p lcg-eval --
+--help` for the full flag reference.
+
+Each candidate also carries a `truncated` count — `retry_succeeded` (a doubled `max_tokens`
+retry recovered) and `exhausted` (it didn't) — surfaced separately from `clean`/`recovered`/
+`malformed`. Edge-budget exhaustion is deliberately non-fatal (it returns an empty edge list
+rather than erroring), which is otherwise indistinguishable in the report from a chunk where the
+model genuinely extracted zero edges; a non-zero `exhausted` count on a chunk means the low
+count is suppressed output, not a quality signal. The human-readable report only prints a
+`truncated:` line when the count is non-zero, so a clean run's output is unchanged. Pair this
+with `--record-cassette` to get the exact raw response for any exhausted call from the
+[failure-record sidecar](#failure-record-sidecar).
+
+To validate the judge itself rather than compare backends, point `--reference` and a second
+`--backend` at the *same* spec (a baseline-vs-itself run): the judged score should land near
+1.0 (pure wording-variance noise floor) while the strict-string score is materially lower —
+this is what the `eval.yml` workflow's on-demand smoke pass checks.
+
+### Previewing a run (`--dry-run`)
+
+Before committing to a multi-hour, real-money run, add `--dry-run` to any invocation:
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=baseline.jsonl \
+  --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \
+  --reference baseline \
+  --all \
+  --dry-run
+```
+
+This resolves every `--backend` spec exactly the way a real run would — the replay-or-live
+decision, a cassette backend's on-disk record count, and the requested scope (`--limit N`
+or the full corpus) — and prints the plan without making a single outbound call. It also
+names any guard that would abort a real run: two backends resolving to the same cassette
+(by path or by byte-identical content), or a cassette that's corrupt or has a duplicate
+key. `--dry-run` itself always exits 0 for a syntactically valid invocation, even when the
+plan shows a guard that would abort a real run — the point is to see the plan, not to run
+the guard as a separate pass-fail check. Combining `--dry-run` with `--record-cassette`
+writes nothing.
+
+These are the same guards a real run enforces unconditionally before touching the network:
+a duplicate-keyed or otherwise corrupt cassette is rejected at load time (distinguishable by
+error type — `Error::CassetteDuplicateKey` vs. `Error::CassetteCorrupt` — not just by exit
+code), and two cassette backends that would make the comparison degenerate (identical path
+or identical content) are rejected before any extraction happens. A cassette covering fewer
+chunks than the requested scope is not an abort condition — it's reported as a coverage
+note, since the shortfall already shows up honestly in `error_rate`. `--dry-run` and a real
+run share this resolution code exactly (see [ADR-0052](adr/0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md)),
+so the preview cannot drift from what actually happens.
+
+A pair of backends `--record-cassette`d fresh in the *same* invocation can't be checked this
+way — there's nothing on disk to hash until the run finishes — so that half of the identity
+guard runs post-run instead, before the report is ever printed or written: if two freshly
+recorded cassettes come out byte-identical, the run still fails loudly, just after capture
+rather than before it.
+
+### Adding a candidate backend
+
+`--backend NAME=SPEC` is repeatable. `SPEC` is one of:
+
+- `anthropic[:model=<MODEL>]` — the hosted baseline, via `AnthropicExtractor`. Reads
+  `ANTHROPIC_API_KEY`.
+- `oai-http:url=<URL>[,model=<MODEL>]` — an OpenAI-compatible local endpoint over HTTP, via
+  `OaiExtractor`.
+- `oai-uds:path=<SOCKET_PATH>[,model=<MODEL>]` — the same, over a Unix domain socket (e.g. a
+  local `mlx_lm.server` instance).
+- `cassette:path=<PATH>` — replay a previously recorded cassette instead of making live LLM
+  calls, via `ReplayingExtractor`. Makes zero outbound requests; a cassette miss fails loudly
+  with `Error::CassetteMiss` rather than falling through to a live call. Cannot be combined
+  with `--record-cassette` for the same backend name (recording a replay is meaningless).
+
+No new backend *kind* should be needed for a new model — point an `oai-http`/`oai-uds` spec
+at any OpenAI-compatible server. Adding a genuinely new provider means extending
+`crates/eval/src/backend.rs`'s `BackendKind`/`build_extractor` the same way `OaiExtractor` was
+added to `crates/core/src/extractor.rs` — reuse an existing `Extractor` implementation rather
+than writing new HTTP/JSON client logic in the harness.
+
+Add `--record-cassette NAME=PATH` to wrap a configured backend in a cassette recorder
+(see [Record/replay cassettes](#recordreplay-cassettes) above) so a single corpus pass yields
+both the eval report and a recorded cassette. To replay a cassette recorded this way on a
+later run without paying for the extraction calls again, use a `cassette:path=<PATH>` backend
+spec instead — see [eval-full-corpus-runbook.md](eval-full-corpus-runbook.md)'s "Resuming a
+partial run" section for a worked example.
+
+### Running under an ontology (`Open`/`Strict`)
+
+By default every run above is **freeform**: the model invents its own entity/relation type
+vocabulary, and `ExtractOptions.ontology` is `None`. Pass `--ontology <PATH>` to load an
+`Ontology` from a bare YAML file (not necessarily inside a `.lcg`-rooted workspace — this is a
+standalone eval fixture) and thread it through every extraction call instead, exercising the
+same `Open`/`Strict` prompt-injection regimes production ingestion uses:
+
+- `--ontology <PATH>` — load the ontology. Omit for the unchanged freeform behavior.
+- `--ontology-mode <open|strict>` — which regime to apply; defaults to `strict` when
+  `--ontology` is given without it, and overrides any `mode:` the file itself declares. Rejected
+  as a usage error if given without `--ontology` (there's nothing to apply the mode to).
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \
+  --reference baseline \
+  --ontology crates/core/tests/fixtures/real_corpus_wal/ontology.yaml \
+  --ontology-mode strict
+```
+
+The report's top-level `ontology_mode` field records which regime produced it
+(`"freeform"`/`"open"`/`"strict"`), and — `Strict` only — each candidate also carries a
+`vocabulary_compliance` metric: how often that backend emitted an entity or relation type
+outside the ontology's declared vocabulary, tracked separately from
+`structured_output.{clean,recovered,malformed}` so a model producing syntactically valid JSON
+that simply ignores the closed type list isn't scored as if its structured-output reliability
+were perfect. See [eval-full-corpus-runbook.md](eval-full-corpus-runbook.md)'s "Running the
+ontology mode matrix" section for the full freeform/`Open`/`Strict` three-command comparison
+procedure and `crates/eval/scripts/run_mode_matrix.sh` for a runnable version of it.
+
+### Blind pairwise judging (`--judge-mode`)
+
+The reference-mode report above measures **similarity to `--reference`**, not quality — the
+reference is one more model's output, not ground truth, so a candidate that extracts something
+the reference missed is scored as a false positive for being right. `--judge-mode pairwise`
+adds a second, reference-agnostic signal: for every pair of configured backends, the
+judge sees the source chunk plus the two extractions *unlabelled* (slot A / slot B, no backend
+name, model id, or provider reachable by the judge) and picks which better captures the
+content, per axis (entities/edges/summary). No backend is privileged.
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=baseline.jsonl \
+  --backend candidate=cassette:path=candidate.jsonl \
+  --backend qwen=cassette:path=qwen.jsonl \
+  --reference baseline \
+  --judge-mode pairwise
+```
+
+- `--judge-mode <reference|pairwise|both>` (default `reference`) — `reference` is the
+  unchanged pre-pairwise behavior (omitting the flag leaves output byte-identical). `pairwise`
+  runs only the blind pairwise pass above — the reference-mode judge calls above are skipped
+  entirely, not run-and-ignored, so a candidate that's only interested in the pairwise signal
+  doesn't pay for reference-mode judge calls it didn't ask for. `both` runs both passes.
+- Every chunk is judged in **both** slot orders (an extraction placed in slot A once, slot B
+  once), with slot assignment derived deterministically from a hash of the chunk key and the
+  two backend names — never wall-clock or RNG, so a re-run reproduces the same result exactly.
+  Agreeing verdicts count as a win for the agreed side; disagreeing verdicts count as a tie and
+  increment an **order-inconsistency** counter — a judge that flips its answer when the
+  operands swap is reporting position bias, not model quality, and that must surface as a
+  number rather than be averaged away.
+- The report's `pairwise` section (present only when `--judge-mode` requested it — absent
+  entirely, not null, under the default `reference` mode) lists, per backend pair and per
+  axis: wins, losses, ties, win rate (excluding ties from the denominator), the
+  order-inconsistency rate, chunks compared, and chunks skipped (present on only one side of
+  the pair — e.g. differing cassette coverage — never silently counted as a loss).
+- **The reference-vs-candidate pair is always included** — pairwise mode covers every
+  unordered pair among the configured `--backend`s, not just candidates against the
+  designated reference.
+- **Judge calibration control**: configure the same model as two independently-recorded
+  cassettes under different backend names (the pairwise analogue of the reference-mode
+  noise-floor pattern above) and judge that pair too. Two independent samples of the same
+  model should split near 50/50 on every axis. A run prints a stderr note for **every** pair
+  whose win rate falls outside **45–55%** (`pairwise::CALIBRATION_BAND_LOW`/`_HIGH`) — which
+  pair is *the* calibration control is operator knowledge the harness can't derive from
+  `--backend` specs alone (two independently-recorded `cassette:path=` files of the same
+  model, the pattern above, share no spec string to detect it by), so the note doesn't assert
+  bias outright: if the flagged pair is your calibration control, the deviation likely means
+  judge position bias and every pairwise result in the run should be treated with suspicion;
+  if it's a genuine candidate-vs-candidate pair, landing outside the band is the expected,
+  desired signal (the whole point of pairwise judging), not evidence of bias. A separate
+  warning fires for every pair whenever its order-inconsistency rate exceeds **20%**
+  (`pairwise::ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`) — above that, the judge is flipping
+  its answer often enough that the win rate isn't distinguishable from noise; this one is not
+  conditional on which pair is the calibration control. Neither warning blocks the run; both
+  are stderr-only, so the report artifact itself stays pure data. See
+  [ADR-0050](adr/0050-blind-pairwise-judging.md) for the rationale behind both numbers.
+- A degenerate pair — two backends whose specs resolve to the *identical* `cassette:path=`
+  — is rejected at CLI parse time, before any judge call, naming the offending backend names.
+  This does **not** reject the same *live* spec (e.g. `anthropic:model=X`) configured twice
+  under different names — that's the calibration pattern above, which produces two
+  independently-sampled, non-degenerate outputs and must keep working.
+- Pairwise mode reuses the same `run_results` reference mode already produced — it makes
+  **zero additional extraction calls**, whether the backends are live or `cassette:path=`
+  replays, and reuses `--judge-cache` under a disjoint `prompt_name` family so pairwise and
+  reference-mode cache entries can never collide.
+
+### Cost implications
+
+Every corpus chunk costs two extraction calls (entities, then edges) per configured backend,
+plus one LLM-as-judge call per scored comparison (entities/edges/summaries) against the
+`--reference` backend. Judge calls are the expensive part — they hit a hosted model
+(`claude-sonnet-4-6` by default, `--judge-model` to override) regardless of which backends are
+under test. The **on-disk judge cache is mandatory, not optional**: pass `--judge-cache
+<path>` (default `judge_cache.jsonl` in the current directory) and re-runs against the same
+corpus and backends make zero new judge calls — always reuse the same cache path across
+repeated runs rather than deleting it. The default corpus subset (50 chunks, override with
+`--limit N` / `--all`) is sized to keep a default run affordable; widening it multiplies cost
+roughly linearly in chunk count. Without `ANTHROPIC_API_KEY` set, the harness still runs and
+reports strict-string F1, but skips judge scoring entirely (no cost, no judged F1 in the
+report).
+
+`--judge-mode pairwise`/`both` multiplies judge-call volume further: every unordered backend
+pair (C(N,2), not N-1) is judged in both slot orders across all three axes — a 3-backend
+`pairwise` run costs 3 pairs × 2 orders × 3 axes = 18 judge calls per chunk, versus reference
+mode's 2 candidates × 1 order × 3 axes = 6. Still **zero extraction calls** either way — the
+judge cache applies identically, so a re-run against the same `--judge-cache` path costs
+nothing.
+
+---
+
+# Full-corpus extraction benchmark runbook (#248)
+
+Source: https://v3rv.com/liminis-context-graph/eval-full-corpus-runbook
+
+
+This is the maintainer-run procedure for producing #248's benchmark data: a full-228-article
+`lcg-eval` run comparing the hosted Anthropic baseline against a local `qwen3.6-27b`, with LLM
+cassettes recorded for both. It exists because this run needs a live, spend-authorized
+`ANTHROPIC_API_KEY` and a reachable local `qwen3.6-27b` server — neither is available inside
+Fabrik's sandbox (see the spec's Background at `specs/248-benchmark-run-full-corpus/spec.md`).
+No new `crates/eval`/`crates/core` mechanism is needed to run this — everything below uses
+flags `lcg-eval` (#228) and `--record-cassette` (#232) already support today.
+
+Once you've run this and hold a completed JSON report plus the two cassette files, see
+[docs/extraction-quality-evaluation.md](extraction-quality-evaluation.md)'s "Measured results
+(this engine)" section for where the figures go, and FR-007/SC-004 in the spec for how the
+README's "quality-verified" wording should change to match whatever the numbers turn out to be
+— including walking that claim back if the local model scores materially worse than the
+inherited figures.
+
+## Scripted path (recommended)
+
+`crates/eval/scripts/` automates everything below and encodes several traps that have
+each cost a run. Prefer it over copy-pasting the commands in this document:
+
+```bash
+crates/eval/scripts/01-start-server.sh          # starts mlx with thinking DISABLED
+crates/eval/scripts/02-timing-check.sh          # projects runtime; do not skip
+crates/eval/scripts/03-capture-qwen.sh 25       # validate on 25 chunks, no hosted spend
+crates/eval/scripts/04-full-run.sh              # the real benchmark
+```
+
+> **Thinking mode must be disabled on the local server.** `qwen3.6` defaults to
+> emitting `<think>` reasoning, which is ~10x slower *and* scores worse on
+> enumeration tasks — `docs/history/extraction-eval-2026-04.md` measured
+> `qwen3.6-27b-thinking-only` at 112.7s p50 versus 10.9s without, and judged it
+> "operationally non-viable". Start the server with
+> `--chat-template-args '{"enable_thinking": false}'`, which `01-start-server.sh`
+> does and then verifies. A full-corpus capture in thinking mode projects to 15+
+> hours and yields a cassette of the known-bad configuration.
+>
+> **Use the model id the server advertises**, i.e.
+> `model=mlx-community/Qwen3.6-27B-4bit`. `mlx_lm.server` treats an unrecognised id as a
+> HuggingFace repo to fetch, so a short-form guess like `model=qwen3.6-27b` fails *every*
+> call with `Repository Not Found` and leaves an empty cassette with no other symptom.
+
+## Prerequisites
+
+1. **A reachable local OpenAI-compatible server hosting `qwen3.6-27b`** — e.g. `mlx_lm.server`
+   serving an HTTP or Unix-domain-socket endpoint. `lcg-eval` talks to it exactly like any other
+   `oai-http`/`oai-uds` backend (see README's "Extraction-quality eval harness" section).
+2. **`ANTHROPIC_API_KEY` set in the environment, unconditionally.** This is stricter than the
+   harness's general graceful-degradation behavior: judge-scoring (LLM-as-judge F1) does degrade
+   gracefully to strict-string-F1-only when the key is unset, but every command below also
+   configures at least one `anthropic` backend for the hosted leg itself, and
+   `build_extractor` (`crates/eval/src/backend.rs`) errors immediately at startup if the key is
+   missing — there is no partial/degraded path for the backend construction itself. Set the key
+   before running, not after a failure partway through.
+3. Run from the repo root (or anywhere — `--corpus` defaults to the #217 fixture at
+   `crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl`, resolved via
+   `CARGO_MANIFEST_DIR` at compile time, not the invoking shell's working directory). **Do not
+   pass `--corpus`** unless you deliberately want a different input — both legs must see the
+   byte-identical committed fixture (FR-004), not a freshly refetched Wikipedia pull.
+
+## The combined run (recommended)
+
+A single `lcg-eval` invocation with three `--backend` entries produces both benchmark legs while
+reducing the separate-run cost from three full-corpus Anthropic passes to two:
+
+- `baseline=anthropic` — the reference. Cassette-recorded; this cassette **is**
+  `anthropic-<model>.jsonl` (FR-002).
+- `candidate=anthropic` — a second, independent hosted run of the same spec. Compared against
+  `baseline` under `--reference baseline`, this pair **is** the hosted-vs-itself noise floor
+  (FR-001) — a judged F1 near the established ceiling while strict-string F1 is materially
+  lower, per the property `.github/workflows/eval.yml`'s small-scale smoke pass already checks.
+- `qwen=oai-http:...,model=mlx-community/Qwen3.6-27B-4bit` — the local candidate. Cassette-recorded to
+  `qwen3.6-27b.jsonl` (FR-002). Compared against `baseline`, this pair **is** the hosted-vs-qwen
+  comparison (FR-002/SC-002).
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --record-cassette baseline=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --record-cassette qwen=qwen3.6-27b.jsonl \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248.json
+```
+
+**The local backend spec must spell out `model=mlx-community/Qwen3.6-27B-4bit` explicitly.** `oai-http`/`oai-uds`
+silently default the model id to the literal string `"local"` when `model=` is omitted
+(`crates/eval/src/backend.rs`) — leaving it off would produce a valid-looking report and
+cassette mislabeled with the wrong model name, undermining SC-002/SC-005's point of attributing
+results to the actual model tested. Swap the URL for wherever your `mlx_lm.server` (or
+equivalent) is actually listening; use `--backend qwen=oai-uds:path=/tmp/qwen.sock,model=mlx-community/Qwen3.6-27B-4bit`
+instead if you're serving over a Unix domain socket.
+
+`--all` runs the full 228-chunk corpus — 2 extraction calls per chunk per backend (6 total
+here), plus one judge call per scored comparison per chunk. This is real, non-trivial spend;
+see README's "Cost implications" subsection under "Extraction-quality eval harness" for the
+full breakdown. The `--judge-cache` path above is mandatory in the sense that omitting it
+defaults to `judge_cache.jsonl` in the current directory — pick an explicit path you'll keep
+around, since a same-corpus, same-backend re-run reuses every cached judge score for free (see
+"Re-running after a partial failure" below).
+
+## Reading the report
+
+Each `candidates[]` entry (`crates/eval/src/report.rs`) is keyed by `backend_name`:
+
+- **`candidate`** (vs. `baseline`) is the noise floor: `judged_entity_f1`/`judged_edge_f1`/
+  `judged_summary_f1` should land near the established ceiling (0.990/0.978/0.900 in the
+  ported historical figures — see `docs/extraction-quality-evaluation.md`) while
+  `strict_entity_f1`/`strict_edge_f1` are materially lower, purely from wording variance.
+- **`qwen`** (vs. `baseline`) is the actual hosted-vs-local comparison: read its judged F1 as
+  "distance from the noise floor established by `candidate`," not "distance from 1.0."
+- **`baseline`**'s own entry (compared against itself as the reference) is a trivial, always-
+  perfect self-comparison — ignore it; it exists because the harness reports one entry per
+  configured backend, not because it's informative on its own.
+
+Every candidate also carries `chunks_run`, `chunks_scored` (can be smaller than `chunks_run` if
+either side errored on some chunks — the two aren't necessarily scored over the same sample
+count), `errors`/`error_rate`, `latency.{p50_ms,p95_ms,p99_ms}`, and
+`structured_output.{clean,recovered,malformed,malformed_rate}` — the structured-output
+reliability figures FR-005/SC-002 need, straight off the harness with no extra flags.
+
+## Re-running after a partial failure
+
+The on-disk judge cache (`--judge-cache`) is keyed on corpus content, backend, and judge model,
+so re-running the exact same command after a partial failure makes **zero new judge calls** for
+any chunk/backend pair already scored — only genuinely new work is paid for again.
+
+If only one leg needs re-running (e.g. the local server dropped mid-run but the hosted leg
+completed), split into two invocations instead of re-running all three backends. If the hosted
+`baseline` leg already completed and its cassette is on disk, replay it instead of re-running it
+live — see "Resuming a partial run" below. Otherwise, re-run it live as shown here.
+
+```bash
+# Noise-floor leg alone (FR-001):
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \
+  --reference baseline \
+  --all \
+  --record-cassette baseline=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_noise_floor.json
+
+# Hosted-vs-qwen leg alone (FR-002):
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --record-cassette baseline=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --record-cassette qwen=qwen3.6-27b.jsonl \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_hosted_vs_qwen.json
+```
+
+Both commands above append to the same `anthropic-claude-haiku-4-5-20251001.jsonl` cassette
+(`CassetteWriter::open` always appends, matching the WAL's own convention) — running them one
+after another, or re-running one after a failure, does not corrupt or truncate it.
+
+## Resuming a partial run
+
+If the `baseline` leg already completed and captured a cassette (e.g. `#248`'s run, where
+`baseline` finished but the `qwen` leg died on an unrelated fault later in the same invocation),
+replay that cassette instead of re-paying for the `baseline` extraction calls. `lcg-eval` accepts
+a `cassette:path=<PATH>` backend spec (#263) that builds `lcg_core::cassette::ReplayingExtractor`
+— it makes zero outbound LLM requests, matching each call by content hash against the recorded
+cassette and failing loudly with `Error::CassetteMiss` on any chunk it can't match.
+
+```bash
+# Resume: replay baseline from its captured cassette, run only qwen live.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --backend qwen=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --record-cassette qwen=qwen3.6-27b.jsonl \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_resumed.json
+```
+
+**Replay applies to `baseline` only — never point `candidate` at a `cassette:` spec.**
+`baseline` and `candidate` are deliberately two *independent* live samples of the same spec; their
+disagreement is the noise-floor measurement itself (FR-001 above). Replaying the same cassette
+into both makes them byte-identical, so judged F1 becomes 1.000 by construction and the noise
+floor stops meaning anything. Only ever run `candidate` live.
+
+Do not add `--record-cassette` for a backend whose spec is `cassette:...` — `lcg-eval` rejects
+this combination at startup (recording a replay is meaningless: there's no live call to capture).
+
+**The #248 capture is 226 records against the 228-chunk fixture.** Two chunks will
+`Error::CassetteMiss` on every replay of that file, permanently. This is not corpus drift or a
+replay bug: `RecordingExtractor::extract` (`crates/core/src/cassette.rs`) propagates any `Err`
+from the wrapped extractor via `?` *before* it appends a cassette record, so a chunk whose live
+extraction call failed during the original recording run (rate limit, transient network error, an
+unrecoverable malformed response) is counted as an error in that run's own report but produces
+zero cassette entry — there is nothing to replay for it, by construction. The specific two
+chunks/cause can't be reconstructed after the fact from the cassette file alone (only the
+original run's own logs would show that); `Error::CassetteMiss` on those two chunks on every
+future replay is the expected, correct outcome, not a bug to chase.
+
+## Committing the cassettes
+
+Once both cassette files exist, commit them as plain, uncompressed JSONL — the same convention
+#232 established (one record per line: `key`, `call_type`, `provider`, `model`, `timestamp`,
+`request`, `response`) and README's "Record/replay cassettes" section documents in full. If
+either file turns out to be large enough to warrant it, follow the size-management precedent in
+`crates/core/tests/fixtures/real_corpus_wal/README.md` (uncompressed JSONL, not gzip — git
+already compresses blobs, and gzip defeats diffability and delta compression across future
+re-captures) rather than introducing a new convention.
+
+## Verifying deterministic replay (SC-005)
+
+Run the cassette directly through `lcg-eval`'s real `--backend NAME=cassette:path=<PATH>` spec
+(#263) — no separate test harness or bespoke code is needed; the ordinary CLI invocation itself is
+the verification, since a `cassette:` backend makes zero outbound requests by construction
+(`ReplayingExtractor` holds no HTTP client) and fails loudly on any unmatched chunk:
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --reference baseline \
+  --all \
+  --output eval_report_248_replay_check.json
+```
+
+A clean run (aside from the two known `Error::CassetteMiss` chunks documented above) with no
+`ANTHROPIC_API_KEY` set and no network access confirms both the zero-live-calls property (FR-002)
+and that the cassette replays deterministically against the full 228-chunk corpus (SC-005). Repeat
+with `qwen3.6-27b.jsonl` to verify the second cassette the same way. This replaces the
+`#[ignore]`d code-sketch approach an earlier draft of this runbook described — the CLI wiring
+that sketch was written to anticipate now exists directly, so no separate integration test file is
+needed here (`crates/eval/tests/harness_integration.rs` already covers the pipeline's correctness
+as an integration test, with a hand-built cassette).
+
+## Pairwise judging pass (#269)
+
+Everything above measures **similarity to `baseline`** via judged precision/recall/F1 — a
+candidate that extracts something `baseline` missed is scored as a false positive for being
+right. `--judge-mode pairwise` adds a second, reference-agnostic pass over the same three
+cassettes: the judge sees the source chunk plus two *unlabelled* extractions and picks which
+better captures the content, per axis, with no backend privileged. It is a pure scoring-layer
+pass — zero extraction calls, re-runnable for free against cassettes already on disk (FR-009,
+SC-003).
+
+**This pass needs a `candidate` cassette that "The combined run" above does not currently
+capture.** The existing noise-floor leg intentionally never replays `candidate` from a cassette
+(see "Resuming a partial run" above — replaying it would make the two samples byte-identical and
+destroy the reference-mode noise-floor measurement), but it also never *records* one. To capture
+all three cassettes needed for the command below, add `--record-cassette
+candidate=anthropic-claude-haiku-4-5-20251001-candidate.jsonl` to "The combined run"'s command —
+recording `candidate`'s live calls doesn't change anything about how `candidate` is scored in
+reference mode, it just additionally captures the cassette this pairwise pass needs.
+
+Once all three cassettes exist (`baseline`, `candidate`, `qwen`), run:
+
+```bash
+cargo run --release -p lcg-eval -- \
+  --backend baseline=cassette:path=anthropic-claude-haiku-4-5-20251001.jsonl \
+  --backend candidate=cassette:path=anthropic-claude-haiku-4-5-20251001-candidate.jsonl \
+  --backend qwen=cassette:path=qwen3.6-27b.jsonl \
+  --reference baseline \
+  --all \
+  --judge-mode pairwise \
+  --judge-cache eval_judge_cache_248.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_248_pairwise.json
+```
+
+No `ANTHROPIC_API_KEY`-gated extraction backend is configured here — all three are `cassette:`
+replays — so the run makes zero outbound extraction requests regardless (FR-009); judge calls
+still require `ANTHROPIC_API_KEY` (the judge is a standalone client, ADR-0048 Decision 3,
+independent of the backends under test).
+
+This produces three backend pairs, each judged on all three axes (entities/edges/summary):
+
+- **`baseline` vs `candidate` is the mandatory calibration control** (User Story 2) — two
+  independent samples of the same model. Each axis's win rate should land within
+  **45–55%** (`CALIBRATION_BAND_LOW`/`_HIGH`, ADR-0050); a loud stderr warning fires naming the
+  observed rate and axis if not. Do not treat the other two pairs' results as trustworthy
+  without checking this one first.
+- **`baseline` vs `qwen`** and **`candidate` vs `qwen`** are the actual hosted-vs-local blind
+  comparisons — read the win rate as "how often the judge picked `qwen`'s extraction over the
+  hosted one when neither was labelled," a different question from reference-F1's "how much
+  would existing graph content shift if we swapped models."
+
+Every pair/axis result also carries an `order_inconsistency_rate` — never trust a win rate
+without checking it alongside (FR-007). Above **20%**
+(`ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD`, ADR-0050), the judge is flipping its answer often
+enough when the slot order reverses that the win rate isn't distinguishable from position-bias
+noise; a loud stderr warning fires for this too. `chunks_skipped` depends on each pair's actual
+cassette coverage — chunks present on only one side are excluded from that pair's tally, never
+counted as a loss (FR-010). The known `baseline`/`qwen` coverage (226/223, a 221 overlap) means
+that pair is expected to report a nonzero skip count; `candidate` is freshly recorded per this
+runbook, so its overlap with the other two isn't known ahead of a run and may be zero.
+
+Re-running the exact command above against the same `--judge-cache` path makes zero new judge
+calls (SC-005) — free to re-run after tweaking the report format or investigating a surprising
+result.
+
+## Running the ontology mode matrix (#266)
+
+Everything above measures **freeform extraction only** — `ExtractOptions.ontology` was always
+`None`. `lcg-eval` also accepts `--ontology <PATH>`/`--ontology-mode <open|strict>` (#266), so the
+same corpus and backends can be re-run under `Open` and `Strict` and compared against the
+freeform baseline above. **No maintainer has executed this matrix yet** — this section documents
+the exact procedure, following #248's own precedent of shipping mechanism-plus-runbook rather
+than the paid run itself (see the spec's Background/User Story 2 at
+`specs/266-extraction-eval-measures-only/spec.md`).
+
+### Prerequisites
+
+Same as the combined run above (a reachable local OpenAI-compatible server,
+`ANTHROPIC_API_KEY` set unconditionally, run from the repo root) plus:
+
+4. **The FR-005 ontology fixture**, committed at
+   `crates/core/tests/fixtures/real_corpus_wal/ontology.yaml` alongside the corpus fixture — its
+   header documents how its entity/relation-type distribution was derived from this exact
+   corpus's freeform extraction output, so `Open`/`Strict` runs are never a degenerate comparison
+   against types that don't actually occur in the text (this issue's own Edge Case). The same
+   file drives both `Open` and `Strict`: `--ontology-mode` on the CLI always overrides the
+   file's own `mode: strict` declaration (FR-002), so there is no separate `ontology-open.yaml`.
+
+### The three commands
+
+`crates/eval/scripts/run_mode_matrix.sh` runs all three below in sequence (see the script's own
+header comment for its env-var overrides: `LOCAL_BACKEND_SPEC` is required, everything else has
+a default matching the commands here). Each mode records `baseline`'s hosted leg to its own
+cassette file — a cassette recorded under one mode's rendered system prompts never matches
+another mode's replay (see Edge Cases in the spec), so `anthropic-freeform-*.jsonl`,
+`anthropic-open-*.jsonl`, and `anthropic-strict-*.jsonl` are three genuinely distinct captures,
+not the same file reused:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+FIXTURE=crates/core/tests/fixtures/real_corpus_wal/ontology.yaml
+
+# 1. Freeform baseline — no --ontology flag, unchanged from every prior run.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --record-cassette baseline=anthropic-freeform-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_freeform.json
+
+# 2. Open — declared types preferred; the model may still invent others.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --ontology "$FIXTURE" --ontology-mode open \
+  --record-cassette baseline=anthropic-open-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_open.json
+
+# 3. Strict — only declared types are ever accepted.
+cargo run --release -p lcg-eval -- \
+  --backend baseline=anthropic:model=claude-haiku-4-5-20251001 \
+  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=mlx-community/Qwen3.6-27B-4bit \
+  --reference baseline \
+  --all \
+  --ontology "$FIXTURE" --ontology-mode strict \
+  --record-cassette baseline=anthropic-strict-claude-haiku-4-5-20251001.jsonl \
+  --judge-cache eval_judge_cache_266.jsonl \
+  --judge-model claude-sonnet-4-6 \
+  --output eval_report_266_strict.json
+```
+
+The three commands triple the cost of the single combined run described above — plan for three
+full-corpus passes' worth of extraction and judge spend, not one, before running this. The
+`--judge-cache` path is shared across all three invocations deliberately: the cache key already
+incorporates the rendered prompt content (which differs by mode), so freeform/`Open`/`Strict`
+judge verdicts for the same underlying comparison never collide in one cache file, and reusing
+it just means a fourth re-run of any single mode makes zero new judge calls, exactly as the
+combined run above does.
+
+### Reading the three reports
+
+Each report's top-level `ontology_mode` field (FR-003) is `"freeform"`, `"open"`, or `"strict"` —
+read that field first, don't infer the mode from the filename alone, since reports are meant to
+be archived and compared side by side. Per FR-004, `structured_output.{clean,recovered,malformed}`
+is reported identically to the freeform run's own figures — this is the metric most likely to
+improve once a closed vocabulary removes open-ended type naming from the model's task, per this
+issue's own hypothesis that a closed vocabulary should narrow the local/hosted structured-output
+gap (ADR-0041).
+
+Only the `Strict` report carries a `vocabulary_compliance` field per candidate (FR-007) —
+`null`/absent on both the freeform *and* the `Open` report, since the metric isn't applicable
+outside `Strict` (an `Open` ontology never rejects a type, so there is nothing to count). It
+counts, separately from JSON-syntax validity, how often a candidate emitted an entity or relation
+type outside the fixture's declared vocabulary — a model can produce perfectly valid JSON that
+simply ignores the closed type list, and that failure mode would otherwise be invisible if folded
+into `structured_output`.
+
+Diff the three reports' per-backend `judged_entity_f1`/`judged_edge_f1`/`strict_entity_f1`/
+`strict_edge_f1` figures directly — any reordering of the model ranking between modes is now
+visible without re-running anything (SC-002). Per FR-005 fixture's own derivation notes: entity
+typing already converged under freeform extraction on this corpus (a closed vocabulary should
+move entity F1 relatively little), while relation naming did not converge at all (heavy synonym
+clustering across hundreds of distinct freeform relation names) — so edge F1 is the figure most
+likely to move materially between freeform and `Strict`, and is worth writing up explicitly
+whether or not it actually does.
+
+---
+
+# Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
+
+Source: https://v3rv.com/liminis-context-graph/extraction-quality-evaluation
+
+
+This document answers the question `liminis-context-graph` has otherwise left unanswered: **can
+extraction run fully local, and what does it cost in quality?** It ports the methodology,
+findings, and resulting guidance from a prior extraction-quality evaluation into this repo, scrubbed
+of private corpus names, internal paths, and sample extraction text.
+
+## Read this first: what these numbers are and aren't
+
+The evaluation below predates this engine. Concretely:
+
+- It was measured **before** a 2026-04-30 prompt restructure (this repo's extraction prompts were
+  ported from graphiti afterward — see `specs/92-port-graphiti-s-extraction/spec.md`).
+- It was measured against a **different, private corpus** than anything in this repo.
+- It was measured against a **Python pipeline**, not this repo's Rust pipeline.
+
+Treat everything below as **historical prior art indicating relative ranking** — which local model
+family leads, roughly how far behind the hosted baseline it falls, which approaches failed — not as
+a current guarantee for this engine. Issue [#228](https://github.com/verveguy/liminis-context-graph/issues/228)
+(an in-repo Rust eval harness) and issue [#248](https://github.com/verveguy/liminis-context-graph/issues/248)
+(a benchmark run comparing the hosted baseline against `qwen3.6-27b`, on this engine and corpus,
+with cassettes captured for both — see the [full-corpus runbook](eval-full-corpus-runbook.md) for
+the exact maintainer-run procedure) are what will re-baseline these numbers against the current
+pipeline. Until then, this is the best evidence available, and it's why
+[ADR-0041](adr/0041-local-openai-compatible-extraction-adapter.md) does not auto-select the bundled
+sidecar's model for extraction.
+
+**Every figure below and in the next section describes freeform extraction only** — the model
+inventing its own entity/relation type vocabulary. Issue
+[#266](https://github.com/verveguy/liminis-context-graph/issues/266) added `--ontology`/
+`--ontology-mode` to `lcg-eval` plus a corpus-derived fixture so the same corpus and backends can
+also be measured under `Open`/`Strict`, but **no maintainer has run that mode matrix yet** — see
+the runbook's ["Running the ontology mode matrix"](eval-full-corpus-runbook.md#running-the-ontology-mode-matrix-266)
+section for the procedure. Do not read the rankings below as applying to an ontology-constrained
+workspace until that matrix has actually been run; #266's own fixture derivation notes observed
+that freeform entity typing already converges to a small set on this corpus (so a closed
+vocabulary may move entity F1 relatively little) while freeform relation naming does not converge
+at all (heavy synonym clustering), making edge F1 the figure most likely to move once a closed
+vocabulary is applied — but that is a hypothesis to verify by running the matrix, not a measured
+result.
+
+## Measured results (this engine) — Status: Pending, not yet measured
+
+This section is reserved for #248's measured figures once a maintainer runs the
+[full-corpus runbook](eval-full-corpus-runbook.md) and supplies its report and cassettes. **No
+run has been executed yet as of this section being added** — the numbers below are deliberately
+absent rather than estimated or copied from the historical section above, per the spec's Edge
+Cases ("must say so explicitly rather than fabricate placeholder numbers"). Whatever #248
+eventually measures here will itself be a **freeform-only** result, per the same caveat above —
+it does not by itself say anything about `Open`/`Strict` extraction, which needs the separate
+mode-matrix run #266 documents.
+
+Once a run completes, this section is replaced (not the historical section below, which stays as
+labeled prior art) with:
+
+- Judged F1 for nodes/edges/summaries for `qwen3.6-27b`, read against this engine's own measured
+  hosted-vs-itself noise floor (not the historical 0.990/0.978/0.900 figures above, which were
+  measured on a different pipeline and corpus).
+- Structured-output reliability (clean/recovered/malformed JSON parse counts) for both the
+  hosted and local backends — a dimension the historical evaluation above did not track at all,
+  since the predecessor pipeline had no equivalent telemetry.
+- A direct statement of whether this engine's local-vs-hosted gap is in line with, narrower
+  than, or wider than the inherited ~7 percentage-point gap — and, per FR-007, whether that
+  changes the README's "quality-verified" framing.
+
+## Ontology-constrained results (`Open`/`Strict`) — Status: Pending, not yet measured
+
+This section is reserved for the freeform/`Open`/`Strict` mode-matrix figures (#266) once a
+maintainer runs `crates/eval/scripts/run_mode_matrix.sh` (or the equivalent hand-typed commands
+in the runbook) and supplies the three resulting reports. **No mode-matrix run has been executed
+yet** — same discipline as the section above: no placeholder or estimated numbers here until a
+real run produces them.
+
+Once a run completes, this section is replaced with:
+
+- Per-backend judged/strict F1 for entities and edges under `Open` and `Strict`, compared
+  directly against the freeform figures in the section above — specifically, whether the
+  freeform model ranking holds or reorders under a closed vocabulary (this issue's central
+  question — see the spec's User Story 2).
+- The `Strict`-mode vocabulary-compliance rate (FR-007) per backend — how often each candidate
+  emitted a type outside the ontology's declared vocabulary, distinct from JSON-syntax
+  structured-output reliability.
+- A direct statement of whether entity F1 moved materially less than edge F1 under `Strict`, per
+  the hypothesis in "Read this first" above, and whether that changes any local-model
+  recommendation stated elsewhere in this document.
+
+## Methodology: replay against frozen inputs, not a fresh pipeline run per candidate
+
+The evaluation used a **record-and-replay** design: a single reference run drove a real indexing
+pipeline once, with every LLM call traced to a message array — full pre-mutation prompt, response,
+timing, and call site. Each candidate model then replayed the *same* captured calls: identical
+prompts, identical inputs, identical dispatch (which calls go to the "extraction" role vs. the
+"dedup" role). The only variable between runs was the model answering the call.
+
+This is deliberately preferred over re-running the full pipeline once per candidate. A fresh
+end-to-end run per candidate would let each model's own extractions feed its own downstream dedup
+decisions, so different candidates would face different inputs by the time you get to comparing
+their outputs — pipeline and pass-order variance would be a confound sitting on top of the actual
+model-quality difference you're trying to measure. Freezing the inputs removes that confound: every
+candidate is graded against exactly the same task.
+
+## Why every F1 number here is a judged score, not a strict-string one
+
+The first pass at scoring used strict-string comparison: entity name-set overlap, and an exact
+tuple match on edges (source, target, relation-label). This produced misleadingly low edge scores
+across every candidate, including a same-model self-comparison — running the reference model
+against itself.
+
+The cause turned out to be wording variance, not quality. A model would extract the same real-world
+relationship on both runs but label it slightly differently — for example `won` on one pass and
+`won_award` on the other. Strict string comparison scores that as a complete miss, even though it's
+the same edge.
+
+The reference model compared against itself scored:
+
+- **Strict-string F1 on edges: 0.771** — roughly a 23% "disagreement" floor from wording variance
+  alone, despite comparing a model against itself.
+- **LLM-as-judge F1 on the same comparison: 0.978** — using a second model to align items by
+  semantic meaning (not exact string) before computing precision/recall, this same self-comparison
+  scores far closer to what it should: near-perfect agreement.
+
+Because strict-string scoring is this misleading even on a same-model self-comparison, **every F1
+figure in the rest of this document is an LLM-as-judge score**, not a strict-string one. Numbers
+from the two metrics are not comparable to each other.
+
+## The noise floor
+
+Before ranking any local candidate, it's necessary to know the practical ceiling: how much
+disagreement exists even between two runs of the intended hosted configuration. That's the noise
+floor, established via self-comparison under the judged metric, pairing the extraction role with
+a hosted model and the dedup role with a small local model (`qwen-9b`):
+
+| | nodes | edges | summaries |
+|---|---:|---:|---:|
+| **Noise floor (judged F1)** | **0.990** | **0.978** | **0.900** |
+
+Read every other candidate's judged F1 in the tables below as "distance from this ceiling," not
+"distance from 1.0."
+
+## The two evaluation corpora
+
+Two corpora were used to check that rankings weren't an artifact of one particular kind of content,
+described here only by shape and character (no titles, paths, or subject-matter detail beyond
+this):
+
+- **Corpus A** (a small, curated corpus): ~40 chunks, ~130 extraction calls. Character: personal
+  reading notes on a fiction series — narrative prose with a dense cast of named characters,
+  places, and factions, and relatively few technical/typed relations.
+- **Corpus B** (a larger, sampled corpus): ~75 chunks sampled from a ~360-chunk personal knowledge
+  base, ~290 extraction calls. Character: a mixed personal/technical knowledge base — design notes,
+  decisions, and reference material, with higher relational density than Corpus A.
+
+**Cross-corpus finding**: quality dropped most on **edges** moving from Corpus A to Corpus B — the
+leading local model (`qwen3.6-27b`) lost roughly **9 percentage points on edges**, a materially
+larger drop than its ~2-point drop on nodes. This is attributed to Corpus B's greater relational
+density: more, and more varied, relationships per chunk gives a model more chances to phrase or
+miss an edge. This finding matters more than either corpus's absolute per-model number in isolation
+— it says local-model extraction quality degrades specifically on higher-relational-density
+content, which is closer to what this engine's own use cases target than the lower-density corpus
+is.
+
+## Rankings
+
+Judged F1 (nodes / edges / summaries), read against the 0.990 / 0.978 / 0.900 noise floor above.
+
+| Candidate | nodes | edges | summaries | Notes |
+|---|---:|---:|---:|---|
+| `qwen3.6-27b` | **0.894** | **0.852** | **0.900** | Local winner. ~7 points off the noise floor on average (nodes and edges individually trail by more; summaries ties). |
+| `qwen3.6-35b-a3b` (MoE) | 0.879 | 0.764 | 0.800 | ~14 points off the noise floor, but roughly **4x faster** than `qwen3.6-27b` — a mixture-of-experts model with a much smaller active-parameter count per token. |
+| `qwen3.6-27b-thinking` (thinking-mode variant of the winner) | *lower than non-thinking, same model* | — | — | Scored **worse on nodes** than the non-thinking baseline above, at roughly **10x the latency**. Included as a "more compute did not help" data point; no precise figure is reproduced here since the original result predates this doc and shouldn't be treated as a re-verified number. |
+
+**Ruled out — graded, but below the quality bar.** These were run through the full evaluation and
+scored, but fell meaningfully short of the leading candidates above: `qwen2.5-72b`, `llama-3.3-70b`,
+`gemma-3-27b`, `deepseek-r1-distill-32b`, `qwen-claude-distill` (a Qwen model distilled from a
+hosted-model teacher — the distillation did not close the gap to the un-distilled winner).
+
+**Ruled out — pipeline failure, not a quality score.** `mistral-small-3` is a distinct failure
+mode from the models above: it produced a **100% error rate**, failing to produce usable
+structured output at all, rather than producing usable output that was simply graded lower. Don't
+read this as "scored worst" — it never produced a comparable score.
+
+### This rankings table is a reconstruction, not a verbatim transcription
+
+The original evaluation covered **13 configurations**, including at least one mode variant of an
+already-listed model (`qwen3.6-27b-thinking`, above) and a hosted routing combination used to
+establish the noise floor itself (the hosted extraction model paired with `qwen-9b` for dedup,
+compared against itself under the judged metric). What's published above is the **attested
+subset** — the candidates and figures that could be confirmed from summarized results — not a
+transcription of the original matrix. Treat the list as representative, not exhaustive, and don't
+assume every label here matches the original evaluation's own naming exactly.
+
+## Dedup finding
+
+Across every evaluated candidate that completed, including the smallest model tested (a 9B-parameter
+model, `qwen-9b`), dedup scored **F1 = 1.000**. Dedup — deciding whether two extracted entities
+refer to the same real-world thing — did not differentiate between models at all in this
+evaluation. The implication: no model upgrade is needed for the dedup role specifically, independent
+of whatever extraction-model choice is made.
+
+## Apple Foundation Models: assessed and not recommended for extraction
+
+Apple Foundation Models were assessed for entity/relationship extraction as part of this evaluation
+and are **not recommended** — the model's context window and general capability were judged
+insufficient for this task's quality bar.
+
+This matters concretely for this repo: Apple Foundation Models are the backend served by the
+bundled CoreML sidecar's `/v1/chat/completions` route — the same route an operator would get if
+that socket were auto-selected for extraction. This finding is why [ADR-0041](adr/0041-local-openai-compatible-extraction-adapter.md)
+deliberately does **not** include a default-socket auto-detection tier for extraction (unlike the
+embedder, which does auto-detect the same sidecar): a live sidecar being present is not, by itself,
+evidence that its default model is a good extraction choice.
+
+## Guidance
+
+- **Quality-first, fully local**: `qwen3.6-27b`. The best-scoring local candidate on both corpora,
+  roughly 7-9 points of judged F1 below the hosted noise floor depending on corpus and metric.
+- **Speed-first, fully local**: `qwen3.6-35b-a3b`. Roughly 4x faster than `qwen3.6-27b` at a
+  further quality cost (~14 points off the noise floor) — a reasonable trade for high-volume
+  indexing where throughput matters more than the last few points of extraction fidelity.
+- **Hosted (Anthropic) remains the quality baseline.** Nothing in this evaluation argues for
+  moving away from the hosted API when quality is the priority; it exists to make the *local*
+  trade-off legible, not to unseat the hosted default.
+
+Both local recommendations are reachable today via `--extractor-uds`/`--extractor-http` pointed at
+an OpenAI-compatible server running the chosen model (e.g. `mlx_lm.server`) — see
+[Configuration: Extractor: local or hosted](configuration.md#extractor-local-or-hosted) for the
+flags and selection precedence.
+
+---
+
+# Architecture Decision Records
+
+Source: https://v3rv.com/liminis-context-graph/adr/index
+
+
+**These are historical decision records, not current-state documentation.** Each ADR captures
+the reasoning behind a decision at the time it was made and is never edited to reflect later
+changes — some entries below are explicitly marked `_(superseded)_`, and others (e.g. ADR-0025's
+lazy index build, later revisited by ADR-0034/ADR-0036's eager build) describe behavior the
+codebase has since moved past without the ADR text itself being marked. For what the system
+does *today*, use the reference pages linked from the [documentation home](../) —
+[Operations](../operations.md), [Configuration](../configuration.md), and
+[IPC & MCP Reference](../ipc-mcp-reference.md) — and treat an ADR as the record of *why*, not a
+live description of *what*.
+
+Numbers are project-local and immutable once assigned. See [ADR-0001](0001-record-architecture-decisions.md) for the format.
+
+**From 2026-07-30, a new ADR takes the number of the GitHub issue that motivated it** — [`0283-name-index-scan-fallback-for-endpoint-authority.md`](0283-name-index-scan-fallback-for-endpoint-authority.md), from issue #283, is the first — matching the `specs/<issue_number>-<slug>/` convention and for the same reason: a shared sequential counter is claimed at branch time, so two issues in flight always claim the same number. `0001`–`0052` predate this and keep their sequential numbers — **the gap between `0052` and the first issue-numbered ADR is expected, not missing history.** See CLAUDE.md for the full rule.
+
+| ADR | Title | Date |
+|-----|-------|------|
+| [0001](0001-record-architecture-decisions.md) | Record Architecture Decisions | 2026-05-19 |
+| [0002](0002-reader-writer-split.md) | Reader/Writer Split via `tokio::sync::RwLock` | 2026-05-19 |
+| [0003](0003-arcswap-db-hot-swap.md) | `ArcSwap<Db>` for Live Database Replacement in `clear_all` | 2026-05-22 |
+| [0004](0004-classify-entities-trait.md) | Add `classify_entities` to the `Extractor` trait |  |
+| [0005](0005-streaming-ipc-progress-framing.md) | Streaming IPC Progress Framing via `_progress_token` | 2026-05-22 |
+| [0006](0006-embedder-http-contract.md) | HTTP Embedding Sidecar Contract | 2026-05-22 |
+| [0007](0007-relates-to-two-hop-traversal.md) | Two-Hop RELATES_TO Traversal as Canonical Read Pattern | 2026-05-22 |
+| [0008](0008-context-graph-multi-connection-pool.md) | Named Multi-Connection Pool for ContextGraphSocketClient | 2026-05-22 |
+| [0009](0009-degraded-mode-startup-recovery.md) | Degraded-Mode Startup and In-Process Recovery | 2026-05-24 |
+| [0010](0010-tool-use-extraction.md) | Migrate do_extract to tool_use structured output | 2026-05-24 |
+| [0011](0011-auto-heal-write-lock-acquisition.md) | Auto-Heal Write-Lock Acquisition from Search Handlers | 2026-05-24 |
+| [0012](0012-edge-episode-via-entity-traversal.md) | Edge-to-Episode Associations via Either-Endpoint Entity Traversal | 2026-05-25 |
+| [0013](0013-cancellation-token-shutdown.md) | CancellationToken as the Single Shutdown Signal on AppState | 2026-05-25 |
+| [0014](0014-ontology-extractor-trait-parameter.md) | Pass `Option<&Ontology>` as a call-time parameter to `Extractor::extract` | 2026-05-25 |
+| [0015](0015-wal-drain-and-flush-pattern.md) | WAL Drain-and-Flush Pattern for Production Write Handlers | 2026-05-25 |
+| [0016](0016-oai-embedding-contract-uds-transport.md) | OpenAI-compatible embedding contract over UDS; hyper for UDS transport | 2026-05-25 |
+| [0017](0017-replace-process-exit-with-normal-return.md) | Replace `std::process::exit(0)` with Normal Return in async main | 2026-05-25 |
+| [0018](0018-ontology-hash-sidecar.md) | Ontology Hash Sidecar for Drift Detection | 2026-05-26 |
+| [0019](0019-workspace-migration-resume-vs-schism.md) | Workspace Migration Partial-Resume vs. Schism Marker | 2026-05-26 |
+| [0020](0020-ipc-collection-envelope-contract.md) | IPC Collection Response Envelope Contract | 2026-05-26 |
+| [0021](0021-cargo-dist-build-setup-env-injection.md) | Inject `LBUG_BUILD_FROM_SOURCE` via cargo-dist `github-build-setup` | 2026-06-01 |
+| [0022](0022-lbug-cypher-escaping-convention.md) | lbug Cypher Escaping Convention — Backslash, Not SQL Doubling _(superseded)_ | 2026-06-12 |
+| [0023](0023-legacy-wal-translation-module.md) | Legacy-WAL Translation Layer — Cypher-text/Param-shape vs. Param-value Module Split | 2026-06-15 |
+| [0024](0024-bound-parameter-db-access.md) | Bound-Parameter DB Access — Retire Cypher String Interpolation | 2026-06-15 |
+| [0025](0025-auto-heal-index-build.md) | Auto-Heal Index Build and Bulk-Load Reload Pattern | 2026-06-17 |
+| [0026](0026-episode-cursor-wal-resume.md) | Episode-Cursor WAL Resume for Checkpoint Recovery | 2026-06-18 |
+| [0027](0027-autonomous-wal-startup-recovery.md) | Autonomous WAL-Corruption Self-Recovery on Startup | 2026-06-18 |
+| [0028](0028-db-wal-dump-compaction.md) | DB→WAL Dump / Compaction Pattern | 2026-06-22 |
+| [0029](0029-name-first-entity-resolution.md) | Name-First Entity Resolution in add_episode Phase B | 2026-06-22 |
+| [0030](0030-batched-write-lock-for-long-running-passes.md) | Batched Write-Lock Acquisition for Long-Running Passes | 2026-06-22 |
+| [0031](0031-orphaned-direct-rels-after-noise-deletion.md) | Orphaned Direct RELATES_TO Rels After Noise Edge Deletion _(superseded)_ | 2026-06-22 |
+| [0032](0032-ontology-parent-edges-conditional-hash-segment.md) | Ontology `parent_edges:` segment conditionally included in content hash | 2026-06-23 |
+| [0033](0033-noise-edges-reclassified-not-deleted.md) | Noise Edges Are Reclassified to UNCLASSIFIED, Not Deleted | 2026-06-23 |
+| [0034](0034-observable-index-build-outcome.md) | Observable Index-Build Outcome — Fixing ADR-0025's Dead-Code Failure Path | 2026-07-16 |
+| [0035](0035-mcp-stdio-transport.md) | MCP-over-stdio Transport Architecture | 2026-07-21 |
+| [0036](0036-eager-index-build-at-startup.md) | Eager HNSW/FTS Index Build at Startup + Dedup-Path Auto-Heal | 2026-07-24 |
+| [0037](0037-relation-classification-abstention-writes-unclassified.md) | Relation Classification Has No Open-Ended Mode and Abstention Writes `UNCLASSIFIED` | 2026-07-25 |
+| [0038](0038-in-process-name-index.md) | In-Process NameIndex Accelerator for Entity Name Lookup | 2026-07-25 |
+| [0039](0039-uds-embedder-connection-pooling.md) | UDS Embedder Connection Pooling | 2026-07-25 |
+| [0040](0040-attached-mode-reconnect-retry-boundary.md) | Attached-Mode Reconnect — Retry Only Write-Time Failures | 2026-07-25 |
+| [0041](0041-local-openai-compatible-extraction-adapter.md) | Local/OpenAI-Compatible Extraction Adapter | 2026-07-25 |
+| [0042](0042-oai-extractor-uds-connection-pooling.md) | OaiExtractor UDS Connection Pooling | 2026-07-25 |
+| [0043](0043-wal-replay-seq-ordering-and-noop-accounting.md) | WAL Replay — Seq-Based File Ordering and MATCH-Write No-Op Accounting | 2026-07-25 |
+| [0044](0044-llm-cassette-record-replay-seam.md) | LLM Cassette Record/Replay Seam | 2026-07-26 |
+| [0045](0045-wal-replay-prepared-statement-cache-scope.md) | WAL Replay Prepared-Statement Cache — LRU-1 Scope and Deferred Connection Recycling | 2026-07-26 |
+| [0046](0046-wal-replay-failure-dedup-and-rebuild-idempotency.md) | WAL Replay — Deduplicated Failure Samples and Fail-Fast Rebuild Idempotency | 2026-07-26 |
+| [0047](0047-wal-replay-transaction-boundaries.md) | WAL Replay Transaction Boundaries — Batch-Aligned, Not Chunk-Aligned | 2026-07-26 |
+| [0048](0048-rust-extraction-quality-eval-harness.md) | Rust Extraction-Quality Eval Harness — Architecture and Judge Design | 2026-07-26 |
+| [0049](0049-bare-path-ontology-loader-and-cli-mode-override.md) | Bare-Path Ontology Loader and CLI Mode-Override Precedence | 2026-07-27 |
+| [0050](0050-blind-pairwise-judging.md) | Blind Pairwise Judging for the Extraction-Quality Eval Harness | 2026-07-27 |
+| [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
+| [0052](0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md) | `lcg-eval --dry-run` Shares the Real Run's Resolution Path | 2026-07-29 |
+| [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
+| [0295](0295-github-pages-documentation-site.md) | GitHub Pages Documentation Site | 2026-08-02 |
+| [0298](0298-ci-failure-notification.md) | CI Failure Notification for Non-Gating Workflows | 2026-07-30 |
+| [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
+| [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |
+| [0310](0310-strict-mode-reclassifies-not-drops.md) | Strict-Mode Relation-Type Filtering Reclassifies, Never Drops | 2026-08-02 |
+| [0314](0314-missing-summary-salvage-and-schema-invalid-classification.md) | Missing-Summary Salvage and `schema_invalid` Classification | 2026-08-02 |
+
+## Historical numbering
+
+Before 2026-07, ADRs lived in two directories (`docs/adr/` numbered `0042`+ and a top-level
+`adrs/` numbered from `0001`) with colliding, sometimes duplicated numbers. They were
+consolidated into this directory under the single sequence above. Historical documents —
+`specs/`, old issues/PRs, commit messages — may cite the old numbers; this table decodes them.
+References to `ADR-035`/`ADR-042` prefixed with "the Liminis app's" refer to the parent
+application's separate ADR index, not this one.
+
+| Old (in `docs/adr/`) | New | | Old (in `adrs/`) | New |
+|---|---|---|---|---|
+| 0001 (meta) | 0001 | | 001 (wal-drain) | 0015 |
+| 0042 | 0002 | | 0001 | 0012 |
+| 0043 (arcswap) | 0003 | | 0002 | 0013 |
+| 0043 (classify-entities) | 0004 | | 0003 | 0014 |
+| 0043 (streaming-progress) | 0005 | | 0004 | 0018 |
+| 0044 (embedder-http) | 0006 | | 0005 | 0019 |
+| 0044 (two-hop) | 0007 | | 0006 | 0021 |
+| 0045 | 0008 | | 0007 | 0022 |
+| 0046 (degraded-mode) | 0009 | | 0008 | 0023 |
+| 0046 (tool-use) | 0010 | | 0009 | 0024 |
+| 0047 | 0011 | | 0047 | 0025 |
+| 0048 | 0016 | | 0048 | 0027 |
+| 0049 | 0017 | | 0049 | 0028 |
+| 0050 | 0020 | | 0050 | 0029 |
+| 0051 | 0026 | | 0051 | 0030 |
+| | | | 0052 | 0031 |
+| | | | 0053 | 0032 |
+| | | | 0054 | 0033 |
+
+---
+

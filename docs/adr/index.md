@@ -1,4 +1,19 @@
+---
+layout: default
+title: ADR Index
+---
+
 # Architecture Decision Records
+
+**These are historical decision records, not current-state documentation.** Each ADR captures
+the reasoning behind a decision at the time it was made and is never edited to reflect later
+changes — some entries below are explicitly marked `_(superseded)_`, and others (e.g. ADR-0025's
+lazy index build, later revisited by ADR-0034/ADR-0036's eager build) describe behavior the
+codebase has since moved past without the ADR text itself being marked. For what the system
+does *today*, use the reference pages linked from the [documentation home](../) —
+[Operations](../operations.md), [Configuration](../configuration.md), and
+[IPC & MCP Reference](../ipc-mcp-reference.md) — and treat an ADR as the record of *why*, not a
+live description of *what*.
 
 Numbers are project-local and immutable once assigned. See [ADR-0001](0001-record-architecture-decisions.md) for the format.
 
@@ -59,6 +74,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
 | [0052](0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md) | `lcg-eval --dry-run` Shares the Real Run's Resolution Path | 2026-07-29 |
 | [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
+| [0295](0295-github-pages-documentation-site.md) | GitHub Pages Documentation Site | 2026-08-02 |
 | [0298](0298-ci-failure-notification.md) | CI Failure Notification for Non-Gating Workflows | 2026-07-30 |
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
 | [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |
