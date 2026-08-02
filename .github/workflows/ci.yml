@@ -92,10 +92,13 @@ jobs:
             target/release/.fingerprint/lbug-*
             target/release/deps/liblbug-*
 
-      # `cargo test` must stay --release: linking the 6 integration-test
-      # binaries against lbug + third-party static archives in debug mode
-      # OOMs the 7GB Ubuntu runner during `ld` (bus error / signal 7).
-      # Release dead-code-eliminates enough to fit.
+      # `cargo test` must stay --release: linking the ~50 integration-test
+      # binaries (crates/core: 37, crates/service: 11, crates/eval: 2) against
+      # lbug + third-party static archives in debug mode OOMs the 7GB Ubuntu
+      # runner during `ld` (bus error / signal 7). Release dead-code-eliminates
+      # enough to fit. Measured cost here is modest (~4m compile+link, ~1m
+      # execution across all 50 binaries) — see ADR-0316 and #316 for why the
+      # dominant CI cost was actually the R-003 bench step below, not this.
       - name: cargo build --release (capture output for cache regression check)
         run: cargo build --release 2>&1 | tee /tmp/build.log
 
@@ -125,8 +128,12 @@ jobs:
 
       # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
       # Runs here (not bench-dedup) so it shares the lbug build artifacts already in ./target/.
+      # `dedup_overlap_check` is its own [[bench]] target (not a group sharing a
+      # criterion_main! with other benches, see ADR-0316) so this invocation pays only its
+      # own ~1k-entity setup, not the other bench groups' — the previous shared-binary
+      # layout made this step ~10-11 minutes; isolated, it's ~1-2.
       - name: dedup decision-overlap check (R-003)
-        run: cargo bench --bench search -- dedup_overlap_check
+        run: cargo bench --bench dedup_overlap_check
 
       - name: check no ML runtime deps
         run: |
