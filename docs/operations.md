@@ -9,7 +9,7 @@ title: Operations
 
 Everything the service manages lives under `.lcg/` in the workspace:
 
-```
+```text
 .lcg/
 ├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
 ├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL

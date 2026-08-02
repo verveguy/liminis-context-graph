@@ -44,13 +44,16 @@ defaults:
 # changes. history/ and spikes/ are the entries that actually matter: internal
 # engineering write-ups that live inside docs/ and must stay out of the build.
 # Setting `exclude:` replaces Jekyll's built-in default list rather than adding to it, so
-# vendor/.bundle (normally excluded by default) must be listed explicitly here too, or a
-# local `bundle install --path vendor/bundle` gets scanned as site content.
+# the paths Jekyll normally excludes automatically (Gemfile, Gemfile.lock, vendor/bundle,
+# vendor/cache, vendor/gems, vendor/ruby, node_modules, .bundle) must be listed explicitly
+# here too, or a local `bundle install --path vendor/bundle` (or an npm-based tool under
+# docs/) gets scanned as site content.
 exclude:
   - Gemfile
   - Gemfile.lock
   - vendor
   - .bundle
+  - node_modules
   - specs
   - history
   - spikes

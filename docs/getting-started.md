@@ -21,6 +21,8 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 > ```
 > Code signing will be added in a future release.
 
+<!-- -->
+
 > **Embedder required at runtime**: the binary connects to an out-of-process embedding service on startup. See [Embedder sidecar](configuration.md#embedder-sidecar) in the Configuration reference.
 
 ## Run it

@@ -60,8 +60,11 @@ to see or need to scrub. See the
 module doc for the full, authoritative scope (including one documented, narrow gap around the
 edge extraction user prompt).
 
-Because cassettes are plain JSONL with no credential material, they're safe to commit as test
-fixtures — see
+Cassettes carry no credential material — the record/replay seam sits above HTTP request
+construction, so there's nothing transport-level for it to see. But a cassette's `request` and
+`response` fields are the actual episode text and model output, so **review content before
+committing or sharing a cassette**: source text drawn from a real workspace can carry
+proprietary or personal data that has nothing to do with authentication. See
 [`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
 
@@ -87,7 +90,7 @@ Each record is a JSON object with:
 | `call_type` | `"entities"` or `"edges"` |
 | `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
-| `raw_body` | The **complete** raw response body — never truncated to a prefix |
+| `raw_body` | The **complete** raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above. |
 | `finish_reason` | The provider's stop/finish reason, or `null` for an HTTP-level failure |
 | `completion_tokens` | Output token count, or `null` if unavailable |
 | `max_tokens` | The `max_tokens` value in force for the failing call |

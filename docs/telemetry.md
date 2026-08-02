@@ -207,7 +207,7 @@ not by the counting sink `ipc_call`/`token_usage` use.
 | `call_type` | string | `"entities"` or `"edges"` |
 | `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | string | `"http_error"`, `"truncation"`, or `"malformed"` |
-| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. |
+| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. May echo back source-text content from the failing call; apply the same review-before-sharing care as [LLM cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
 | `finish_reason` | string or null | The provider's stop/finish reason, or `null` for an HTTP-level failure |
 | `completion_tokens` | u64 or null | Output token count, or `null` if unavailable |
 | `max_tokens` | u32 | The `max_tokens` value in force for the failing call |

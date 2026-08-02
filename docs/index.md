@@ -29,6 +29,8 @@ and a standalone quickstart; this site is the full reference.
 - **[Ontology](ontology.md)** — the optional entity/relation type vocabulary.
 - **[Operations](operations.md)** — WAL administration, degraded mode, and self-healing recovery.
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
+- **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
+- **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).
 
 ## llms.txt

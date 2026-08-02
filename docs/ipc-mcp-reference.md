@@ -38,7 +38,7 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
-Every long-running method above (the four WAL/recovery/reclassification operations most likely
+Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
 

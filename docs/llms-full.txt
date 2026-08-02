@@ -27,6 +27,8 @@ and a standalone quickstart; this site is the full reference.
 - **[Ontology](ontology.md)** — the optional entity/relation type vocabulary.
 - **[Operations](operations.md)** — WAL administration, degraded mode, and self-healing recovery.
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
+- **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
+- **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).
 
 ## llms.txt
@@ -57,6 +59,8 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 > xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph
 > ```
 > Code signing will be added in a future release.
+
+<!-- -->
 
 > **Embedder required at runtime**: the binary connects to an out-of-process embedding service on startup. See [Embedder sidecar](configuration.md#embedder-sidecar) in the Configuration reference.
 
@@ -225,7 +229,7 @@ startup. They are honoured for now; prefer the `LCG_*` names.
 `OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
 `POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
 
-```
+```sh
 liminis-context-graph --embedder-uds /tmp/liminis-inference.sock            # Unix domain socket (default on macOS)
 liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings   # HTTP
 ```
@@ -363,7 +367,7 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
-Every long-running method above (the four WAL/recovery/reclassification operations most likely
+Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
 
@@ -777,7 +781,7 @@ not by the counting sink `ipc_call`/`token_usage` use.
 | `call_type` | string | `"entities"` or `"edges"` |
 | `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | string | `"http_error"`, `"truncation"`, or `"malformed"` |
-| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. |
+| `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. May echo back source-text content from the failing call; apply the same review-before-sharing care as [LLM cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
 | `finish_reason` | string or null | The provider's stop/finish reason, or `null` for an HTTP-level failure |
 | `completion_tokens` | u64 or null | Output token count, or `null` if unavailable |
 | `max_tokens` | u32 | The `max_tokens` value in force for the failing call |
@@ -1000,7 +1004,7 @@ Source: https://verveguy.github.io/liminis-context-graph/operations
 
 Everything the service manages lives under `.lcg/` in the workspace:
 
-```
+```text
 .lcg/
 ├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
 ├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL
@@ -1164,8 +1168,11 @@ to see or need to scrub. See the
 module doc for the full, authoritative scope (including one documented, narrow gap around the
 edge extraction user prompt).
 
-Because cassettes are plain JSONL with no credential material, they're safe to commit as test
-fixtures — see
+Cassettes carry no credential material — the record/replay seam sits above HTTP request
+construction, so there's nothing transport-level for it to see. But a cassette's `request` and
+`response` fields are the actual episode text and model output, so **review content before
+committing or sharing a cassette**: source text drawn from a real workspace can carry
+proprietary or personal data that has nothing to do with authentication. See
 [`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
 
@@ -1191,7 +1198,7 @@ Each record is a JSON object with:
 | `call_type` | `"entities"` or `"edges"` |
 | `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
-| `raw_body` | The **complete** raw response body — never truncated to a prefix |
+| `raw_body` | The **complete** raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above. |
 | `finish_reason` | The provider's stop/finish reason, or `null` for an HTTP-level failure |
 | `completion_tokens` | Output token count, or `null` if unavailable |
 | `max_tokens` | The `max_tokens` value in force for the failing call |

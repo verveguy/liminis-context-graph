@@ -68,7 +68,7 @@ startup. They are honoured for now; prefer the `LCG_*` names.
 `OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
 `POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
 
-```
+```sh
 liminis-context-graph --embedder-uds /tmp/liminis-inference.sock            # Unix domain socket (default on macOS)
 liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings   # HTTP
 ```

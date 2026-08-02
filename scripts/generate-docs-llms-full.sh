@@ -49,7 +49,8 @@ if [[ "${docs_version}" != "${cargo_version}" ]]; then
 fi
 
 TMPFILE="$(mktemp)"
-trap 'rm -f "${TMPFILE}"' EXIT
+OUT_TMP="$(mktemp)"
+trap 'rm -f "${TMPFILE}" "${OUT_TMP}"' EXIT
 
 # Strip YAML front matter (---...---) from a file into TMPFILE, then substitute the small set
 # of Liquid variables used in page bodies (site.version/site.repository) with their resolved
@@ -87,7 +88,7 @@ ORDERED=(
   "adr/index.md:${SITE_URL}/adr/index"
 )
 
-> "$OUT"
+> "$OUT_TMP"
 
 for entry in "${ORDERED[@]}"; do
   file="${DOCS_DIR}/${entry%%:*}"
@@ -102,7 +103,7 @@ for entry in "${ORDERED[@]}"; do
     exit 1
   fi
 
-  printf '# %s\n\nSource: %s\n\n' "$title" "$url" >> "$OUT"
+  printf '# %s\n\nSource: %s\n\n' "$title" "$url" >> "$OUT_TMP"
 
   # Output body content, skipping leading blank lines and the first H1 heading
   # so the H1 appears exactly once (in the section header above).
@@ -111,7 +112,11 @@ for entry in "${ORDERED[@]}"; do
     skipping && /^[[:space:]]*$/ { next }
     skipping && /^# /            { skipping=0; next }
     { skipping=0; print }
-  ' "${TMPFILE}" >> "$OUT"
+  ' "${TMPFILE}" >> "$OUT_TMP"
 
-  printf '\n---\n\n' >> "$OUT"
+  printf '\n---\n\n' >> "$OUT_TMP"
 done
+
+# Only replace the committed file once every page has validated successfully — a mid-loop
+# failure (e.g. a missing H1) must never leave docs/llms-full.txt truncated or partial.
+mv "${OUT_TMP}" "$OUT"

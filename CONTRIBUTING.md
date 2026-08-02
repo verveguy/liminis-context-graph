@@ -103,8 +103,9 @@ never commit release prep directly to `main` — then tag the merge commit.
 5. The release workflow builds all three platforms and publishes the GitHub Release
    automatically (~30–45 min).
 
-If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue on a
-branch, merge it, then re-tag the corrected commit and re-push.
+If a release build fails: delete the local and remote tags (`git tag --delete vX.Y.Z` and
+`git push --delete origin vX.Y.Z`), fix the issue on a branch, merge it, then re-tag the
+corrected commit and re-push.
 
 ## Questions
 
