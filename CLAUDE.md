@@ -102,14 +102,14 @@ CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merg
 **`.cargo/config.toml` pins `LBUG_VERSION = "0.17.0"`, and that pin is load-bearing.** Without it `build.rs` downloads the *floating* `latest` ladybug release, building the 0.17.0 crate's FFI against a newer native bundle. That skew broke the v0.9.0 release: 0.18.1 links httplib against OpenSSL rather than the bundled mbedtls, and the macOS build failed with `ld: symbol(s) not found`. The same file sets `RUST_TEST_THREADS = "4"` because lbug mmaps an 8 TB virtual region per `Db::open()` and default parallelism exhausts the macOS VM ceiling.
 
 **The 15–18 minutes CI used to spend was not, in fact, dominated by `cargo test --release`.**
-#316 measured it: `cargo build --release` (~2–2.5m) + `cargo test --release` (~5m, of which only
+Issue `#316` measured it: `cargo build --release` (~2–2.5m) + `cargo test --release` (~5m, of which only
 ~1m is test *execution* — the rest is compile+link) + the R-003 `dedup_overlap_check` bench step
 (**~10.5–11m — 58–60% of the job**) + clippy/fmt (negligible). The bench step was the dominant
 cost, caused by a Criterion footgun: `crates/core/benches/search.rs` bundled four
 `criterion_group!`s behind one `criterion_main!`, and Criterion's `--` filter only gates the
 measurement loop inside `bench_function`, not each group's setup code — so a single filtered
-invocation still built+indexed ~133,200 rows across every group before reaching the ~1,000-row
-check it was actually asked for. #316 split this into five separate `[[bench]]` targets (one per
+invocation still built+indexed ~143,200 rows across every group before reaching the ~1,000-row
+check it was actually asked for. Issue `#316` split this into five separate `[[bench]]` targets (one per
 former group), making isolation a target-layout property instead of a filter string — see
 **ADR-0316**. The R-003 gate now runs in ~1–2 minutes, and it stays PR-blocking (nothing moved
 post-merge). Do not expect further build-cache work on the test-suite side to move the CI job's

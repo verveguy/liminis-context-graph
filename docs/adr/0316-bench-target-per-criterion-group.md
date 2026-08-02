@@ -24,23 +24,23 @@ the function body, outside the `c.bench_function(...)` closure. Criterion's `-- 
 argument only gates whether the *measurement loop inside* `bench_function` runs; it has no effect
 on ordinary Rust code that runs before that call. So `cargo bench --bench search --
 dedup_overlap_check` unconditionally ran every other group's setup too — 100+100+1,000×3+10,000×2+
-50,000×2+10,000×2 = 133,200 rows, most of it through the HNSW/FTS index build — before ever
+50,000×2+10,000×2 = 143,200 rows, most of it through the HNSW/FTS index build — before ever
 reaching the ~1,000-row overlap check it was actually asked for. This is a well-documented Criterion
 footgun (filters operate on registered bench IDs, not on arbitrary code paths reachable before
 registration), not a bug in this repo's Criterion version.
 
 The same file was also invoked three times by `.github/workflows/bench.yml` (`-- 1k`, `-- 10k`,
-`-- dedup_50k`), each paying the same unconditional 133,200-row setup on top of whatever it was
+`-- dedup_50k`), each paying the same unconditional 143,200-row setup on top of whatever it was
 actually trying to measure.
 
 ## Decision
 
 Split `search.rs` into five separate bench source files, each with its own `[[bench]]` Cargo
-target and its own `criterion_main!`. Four map one-to-one onto a former `criterion_group!`
+target and its own `criterion_main!`. Three of the former groups map one-to-one onto a new file
 (`benches` → `hybrid_search.rs`, `dedup_50k` → `dedup_50k.rs`, `name_lookup` → `name_lookup.rs`);
-the fifth, `dedup_overlap_check.rs`, carves `bench_dedup_overlap_check` out of the former `dedup`
-group into its own target, since it's the one function that's actually PR-gating — the rest of
-that group's functions move to `dedup_search.rs`:
+the fourth, `dedup`, splits into two: `dedup_overlap_check.rs` carves out
+`bench_dedup_overlap_check` alone, since it's the one function that's actually PR-gating, and the
+rest of that group's functions move to `dedup_search.rs`:
 
 - `dedup_overlap_check.rs` — `bench_dedup_overlap_check` only (the R-003 gate)
 - `dedup_search.rs` — the four 1k/10k dedup functions
@@ -83,7 +83,7 @@ auto-registration the same way.
   convention that silently stops working the next time someone adds a function to a shared group
   — this is what FR-004 asked for.
 - `bench.yml`'s three on-demand measurement runs each pay only their own relevant setup instead
-  of all 133,200 rows every time.
+  of all 143,200 rows every time.
 - R-003 (95% decision-overlap) and R-007 (≤30% hybrid/brute-force ratio) assertion logic is
   unchanged — only moved, not rewritten; both were re-run after the split to confirm.
 

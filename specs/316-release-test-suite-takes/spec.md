@@ -60,7 +60,7 @@ A contributor or maintainer opens a PR. Today, the required `test (ubuntu-latest
 
 ---
 
-### Edge Cases
+## Edge Cases
 
 - Worktrees do not share `target/`, so a fresh Fabrik worktree pays a full cold rebuild regardless of how the suite is split — the local gate's duration must be stated for the cold case too, since that is what workers actually experience.
 - `RUST_TEST_THREADS = "4"` and the 8 TB mmap per `Db::open()` bound parallelism; a split that increases concurrent `Db::open()` calls (e.g. by running previously-sequential release binaries in parallel jobs) could regress rather than help.
