@@ -1,0 +1,46 @@
+# liminis-context-graph
+
+> A local-first context graph engine. One Rust binary that turns a stream of text into a
+> queryable graph of entities, relationships, and episodes — combining property-graph
+> storage, HNSW vector search, and full-text search in a single embedded service, built on
+> LadybugDB.
+
+## Getting Started
+
+- [Getting Started](https://verveguy.github.io/liminis-context-graph/getting-started): Install, run, build from source, and bundle in downstream apps.
+
+## Configuration
+
+- [Configuration](https://verveguy.github.io/liminis-context-graph/configuration): Every environment variable and CLI flag, plus the embedder-sidecar and extractor local-vs-hosted selection rules.
+
+## IPC & MCP Reference
+
+- [IPC & MCP Reference](https://verveguy.github.io/liminis-context-graph/ipc-mcp-reference): The JSON-RPC method surface and the Model Context Protocol (`--mcp-stdio`) transport, scopes, and tools.
+
+## Telemetry
+
+- [Telemetry](https://verveguy.github.io/liminis-context-graph/telemetry): Structured JSONL events emitted on stderr, with field-level schemas for each event type.
+
+## Ontology
+
+- [Ontology](https://verveguy.github.io/liminis-context-graph/ontology): The optional workspace-scoped entity/relation type vocabulary, its YAML format, and type-hierarchy rules.
+
+## Operations
+
+- [Operations](https://verveguy.github.io/liminis-context-graph/operations): WAL administration, degraded-mode startup, and autonomous self-healing recovery.
+
+## Testing & Evaluation
+
+- [Testing & Evaluation](https://verveguy.github.io/liminis-context-graph/testing-and-evaluation): LLM record/replay cassettes and the `lcg-eval` extraction-quality harness.
+- [Full-Corpus Extraction Benchmark Runbook](https://verveguy.github.io/liminis-context-graph/eval-full-corpus-runbook): Maintainer-run procedure for the full-corpus model comparison.
+- [Extraction-Quality Evaluation](https://verveguy.github.io/liminis-context-graph/extraction-quality-evaluation): Methodology, model rankings, and local-LLM guidance.
+
+## Architecture Decision Records
+
+- [ADR Index](https://verveguy.github.io/liminis-context-graph/adr/index): Historical decision records — each is immutable and reflects reasoning at the time it was made, not necessarily current behavior.
+
+## Other repository documentation
+
+- [README](https://github.com/verveguy/liminis-context-graph/blob/main/README.md): Short project overview, install, and a standalone quickstart.
+- [CONTRIBUTING](https://github.com/verveguy/liminis-context-graph/blob/main/CONTRIBUTING.md): Filing issues, submitting pull requests, and the maintainer release runbook.
+- [CLAUDE.md](https://github.com/verveguy/liminis-context-graph/blob/main/CLAUDE.md): Agent guidance for contributors working in this repository with Claude Code — not user documentation, and not published on the site.

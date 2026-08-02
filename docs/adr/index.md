@@ -74,6 +74,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0051](0051-edge-endpoint-salvage-and-deferred-drop.md) | Edge Endpoint Salvage and Deferred Drop Decision | 2026-07-29 |
 | [0052](0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md) | `lcg-eval --dry-run` Shares the Real Run's Resolution Path | 2026-07-29 |
 | [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
+| [0295](0295-github-pages-documentation-site.md) | GitHub Pages Documentation Site | 2026-08-02 |
 | [0298](0298-ci-failure-notification.md) | CI Failure Notification for Non-Gating Workflows | 2026-07-30 |
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
 | [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |

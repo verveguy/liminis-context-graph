@@ -1,0 +1,63 @@
+name: Docs drift check
+
+on:
+  pull_request:
+
+concurrency:
+  group: docs-drift-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-llms-full:
+    name: Verify llms-full.txt is up to date
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Regenerate llms-full.txt
+        run: bash scripts/generate-docs-llms-full.sh
+
+      - name: Fail if llms-full.txt (or docs/_config.yml's version) is out of date
+        run: |
+          if ! git diff --exit-code docs/llms-full.txt docs/_config.yml; then
+            echo ""
+            echo "docs/llms-full.txt is out of date, or docs/_config.yml's version doesn't"
+            echo "match Cargo.toml's [workspace.package] version."
+            echo "Run 'scripts/generate-docs-llms-full.sh' and commit the result alongside"
+            echo "your doc changes."
+            exit 1
+          fi
+
+  check-internal-links:
+    name: Build site and check internal links
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          # The `github-pages` gem pins jekyll 3.9.0 / liquid 4.0.3 to mirror GitHub Pages'
+          # actual build environment. liquid 4.0.3 calls the deprecated String#tainted?,
+          # which Ruby removed in 3.2 — on 3.2+ every page render fails with
+          # `NoMethodError: undefined method 'tainted?'`. Pin 3.1 (last version that still
+          # has it) rather than bumping liquid, since overriding a github-pages-pinned
+          # dependency risks drifting from what Pages itself actually builds with.
+          ruby-version: "3.1"
+          bundler-cache: true
+          working-directory: docs
+
+      - name: Build site
+        working-directory: docs
+        run: bundle exec jekyll build
+
+      - name: Check internal links
+        working-directory: docs
+        run: bundle exec htmlproofer ./_site --disable-external --allow-hash-href

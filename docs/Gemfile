@@ -1,5 +1,11 @@
 source "https://rubygems.org"
 
+# Ruby 3.4+ dropped csv from the default gems bundled with the interpreter; the
+# github-pages gem's pinned Jekyll 3.x still expects to `require "csv"` unconditionally.
+# Harmless on older Rubies (including CI's, see docs-drift.yml) where it's already a
+# default gem.
+gem "csv"
+
 gem "github-pages", group: :jekyll_plugins
 
 group :jekyll_plugins do

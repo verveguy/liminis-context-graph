@@ -43,9 +43,14 @@ defaults:
 # as defensive documentation of FR-004's intent in case the Pages source root ever
 # changes. history/ and spikes/ are the entries that actually matter: internal
 # engineering write-ups that live inside docs/ and must stay out of the build.
+# Setting `exclude:` replaces Jekyll's built-in default list rather than adding to it, so
+# vendor/.bundle (normally excluded by default) must be listed explicitly here too, or a
+# local `bundle install --path vendor/bundle` gets scanned as site content.
 exclude:
   - Gemfile
   - Gemfile.lock
+  - vendor
+  - .bundle
   - specs
   - history
   - spikes

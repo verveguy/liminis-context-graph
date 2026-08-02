@@ -73,6 +73,39 @@ The maintainer works in git worktrees and never commits directly to `main`. See 
 
 If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md).
 
+## Release runbook (maintainers)
+
+The release version lives in `[workspace.package]` in `Cargo.toml`; cargo-dist derives the
+release from it and **requires the pushed tag to match that version**, so the bump and the tag
+must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
+never commit release prep directly to `main` — then tag the merge commit.
+
+0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, and `eval` run outside the
+   required PR gate (deliberately, for cost reasons) and can go silently red for days — see
+   [ADR-0298](docs/adr/0298-ci-failure-notification.md). Run
+   `gh issue list --label ci-failure --state open` before proceeding. If it's empty, continue. If
+   it isn't, either fix the underlying failure first or record in the release PR why the release
+   is proceeding anyway — don't ship over a known-broken post-merge check silently the way
+   `v0.11.0` did (#298).
+1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
+   `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
+   `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
+   Add any newly-introduced workspace member to that command — a crate left out keeps a stale version
+   in the lockfile. Also update `docs/_config.yml`'s `version:` field to match, and run
+   `scripts/generate-docs-llms-full.sh` to regenerate `docs/llms-full.txt` — the docs-drift CI
+   check fails the PR if either is left stale (see [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)).
+2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
+   `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
+   tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
+3. **Open a PR and merge it** to `main` once CI is green.
+4. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+   The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
+5. The release workflow builds all three platforms and publishes the GitHub Release
+   automatically (~30–45 min).
+
+If a release build fails: delete the tag (`git push --delete origin vX.Y.Z`), fix the issue on a
+branch, merge it, then re-tag the corrected commit and re-push.
+
 ## Questions
 
 Open an issue or start a GitHub Discussion. The maintainer will respond on a best-effort basis.
