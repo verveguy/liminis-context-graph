@@ -735,6 +735,99 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
     );
 }
 
+// PR #311 review finding: an edge whose incoming relation_type is None/empty has
+// `original_relation_type` deliberately left as None (nothing to preserve) even though
+// `relation_type` is set to UNCLASSIFIED. The tally must not use
+// `original_relation_type.is_some()` as a proxy for "was reclassified" — it must count off
+// `relation_type == UNCLASSIFIED` directly, so an edge with no original label to preserve is
+// still counted (FR-005 must reflect what's actually persisted).
+#[tokio::test]
+async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_type() {
+    let (db, _dir) = make_db();
+    let ontology = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types: vec![EntityTypeDef {
+            name: "Person".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![RelationTypeDef {
+            name: "KNOWS".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+        }],
+        ancestor_map: HashMap::new(),
+    };
+    let entities = vec![
+        ExtractedEntity {
+            name: "Alice".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+        ExtractedEntity {
+            name: "Bob".to_string(),
+            entity_type: "Person".to_string(),
+            summary: "A person".to_string(),
+        },
+    ];
+    let edges = vec![ExtractedEdge {
+        source_name: "Alice".to_string(),
+        target_name: "Bob".to_string(),
+        fact: "Alice and Bob are connected somehow".to_string(),
+        relation_type: None,
+        valid_at: None,
+        invalid_at: None,
+        original_relation_type: None,
+    }];
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges,
+        }]));
+    let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
+
+    let result = episode::add_episode(
+        Arc::clone(&state),
+        "test-ep-empty-rt",
+        "irrelevant body — extraction is mocked",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "grp",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result.edges_extracted, 1,
+        "edge with no relation_type must be retained (reclassified), not dropped"
+    );
+    assert_eq!(
+        result.edges_reclassified_unclassified, 1,
+        "edge reclassified to UNCLASSIFIED must be counted even though it has no \
+         original_relation_type to preserve"
+    );
+
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:RelatesToNode_) WHERE n.name = 'Alice → Bob' \
+             RETURN n.relation_type, n.attributes",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "exactly one edge must be stored");
+    assert_eq!(rows[0][0], "UNCLASSIFIED");
+    assert_eq!(
+        rows[0][1], "{}",
+        "no original relation type to preserve, attributes must remain the empty-object default"
+    );
+}
+
 // PR #311 review finding: an edge reclassified to UNCLASSIFIED by the pre-lock strict-mode pass
 // must NOT be counted in edges_reclassified_unclassified if it's subsequently dropped as
 // self-referential — the tally must reflect what's actually persisted (mirroring how

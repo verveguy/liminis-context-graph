@@ -724,7 +724,7 @@ pub async fn add_episode(
                 source_descriptions: vec![],
             })?;
             edges_inserted += 1;
-            if edge.original_relation_type.is_some() {
+            if edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
                 edges_reclassified_unclassified += 1;
             }
         }
