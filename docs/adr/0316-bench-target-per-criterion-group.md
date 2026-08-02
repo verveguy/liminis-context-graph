@@ -92,7 +92,7 @@ auto-registration the same way.
   binaries for no PR-path benefit.
 - The `cargo test --release` integration-test side (~50 binaries, ~4m compile+link, ~1m
   execution) was measured and found not to be a material bottleneck — no restructuring was applied
-  there. If that changes as the test count grows, `crates/core/tests/real-corpus-e2e.yml`'s
+  there. If that changes as the test count grows, `.github/workflows/real-corpus-e2e.yml`'s
   `#[ignore]` + naming-convention + separate-post-merge-workflow pattern is the established
   precedent to extend.
 - Every `--bench search` call site had to be updated in the same change (`ci.yml`, `bench.yml`);
@@ -126,7 +126,7 @@ binaries would add `ld` invocations against `liblbug.a` without a demonstrated p
   `name_lookup.rs`, `hybrid_search.rs`, `common/mod.rs` — the split implementation.
 - `.github/workflows/ci.yml` — R-003 gate, now `cargo bench --bench dedup_overlap_check`.
 - `.github/workflows/bench.yml` — on-demand perf measurement, retargeted to the split bins.
-- `crates/core/tests/real-corpus-e2e.yml`, `docs/adr` precedent (#217/#234–236) — the
+- `.github/workflows/real-corpus-e2e.yml`, `docs/adr` precedent (#217/#234–236) — the
   `#[ignore]` + naming-convention + separate-workflow pattern for the integration-test side,
   not extended here but the established option if that side ever needs it.
 - #298 — post-merge failure signalling; a soft dependency only for the rejected "post-merge
