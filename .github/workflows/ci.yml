@@ -135,6 +135,17 @@ jobs:
       - name: dedup decision-overlap check (R-003)
         run: cargo bench --bench dedup_overlap_check
 
+      # Before ADR-0316's split, this same `dedup_overlap_check` invocation compiled all
+      # of former search.rs's code in one binary, so a compile break anywhere in it was
+      # caught here even though only one function ran. Now that the four sibling groups
+      # (dedup_search, dedup_50k, name_lookup, hybrid_search) are separate [[bench]]
+      # targets, nothing else in the PR-blocking job compiles them — `cargo build`/`test`
+      # --release don't touch bench targets, and bench.yml (the only thing that would)
+      # is workflow_dispatch-only. `check` (not `bench --no-run`) keeps this cheap: it
+      # type-checks without codegen, ~10-30s reusing this job's already-built release deps.
+      - name: compile-check remaining bench targets
+        run: cargo check --release --benches -p lcg-core
+
       - name: check no ML runtime deps
         run: |
           # Match crate names only — "tch" must not also match "scratch", etc.

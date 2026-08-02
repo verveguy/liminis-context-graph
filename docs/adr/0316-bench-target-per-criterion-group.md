@@ -102,6 +102,13 @@ auto-registration the same way.
 - Every `--bench search` call site had to be updated in the same change (`ci.yml`, `bench.yml`);
   a missed one fails the workflow immediately rather than silently, but this is still a
   multi-file-consistency requirement worth flagging for future changes to bench target names.
+- Splitting into five separate compilation units means a PR that only ran
+  `cargo bench --bench dedup_overlap_check` would no longer catch a compile break in the four
+  sibling targets (`dedup_search`, `dedup_50k`, `name_lookup`, `hybrid_search`) — before the
+  split, they shared one binary with `dedup_overlap_check`, so compiling it compiled all of
+  them too. `ci.yml`'s `test` job now runs a follow-up `cargo check --release --benches -p
+  lcg-core` step (type-check only, no codegen, ~10-30s reusing the job's already-built release
+  deps) specifically to keep that coverage without paying `bench.yml`'s full measurement cost.
 
 ## Alternatives Considered
 
