@@ -67,12 +67,24 @@ jobs:
 
           # Relies on GitHub.com's uploadpack.allowReachableSHA1InWant support for
           # fetching arbitrary commit SHAs by ID; a platform behavior, not repo config.
-          if ! git fetch --depth=1 origin "$BASE_SHA" "$HEAD_SHA"; then
+          # No --depth here (unlike an earlier version of this script): a shallow
+          # single-commit fetch has no shared history to compute a merge-base from,
+          # and diffing BASE_SHA..HEAD_SHA directly (two-dot) would then pick up
+          # unrelated commits landed on the base branch after this PR branched,
+          # over-classifying stale/long-lived PRs as code-touching for reasons
+          # unrelated to their own diff.
+          if ! git fetch origin "$BASE_SHA" "$HEAD_SHA"; then
             emit true "WARNING: git fetch of base/head SHA failed, defaulting to full suite (fail-safe)"
             exit 0
           fi
 
-          CHANGED_FILES=$(git diff --no-renames --name-only "$BASE_SHA" "$HEAD_SHA")
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          if [ $? -ne 0 ]; then
+            emit true "WARNING: git merge-base failed, defaulting to full suite (fail-safe)"
+            exit 0
+          fi
+
+          CHANGED_FILES=$(git diff --no-renames --name-only "$MERGE_BASE" "$HEAD_SHA")
           if [ $? -ne 0 ]; then
             emit true "WARNING: git diff failed, defaulting to full suite (fail-safe)"
             exit 0
