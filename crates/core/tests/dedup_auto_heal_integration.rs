@@ -75,6 +75,7 @@ impl Extractor for UniqueEntityExtractor {
                     name: format!("Entity-{n}"),
                     entity_type: "Person".to_string(),
                     summary: format!("Auto-generated test entity #{n}"),
+                    original_entity_type: None,
                 }],
                 edges: vec![],
             })

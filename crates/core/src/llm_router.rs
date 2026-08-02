@@ -356,6 +356,7 @@ mod tests {
                         name: "Alice".to_string(),
                         entity_type: "Person".to_string(),
                         summary: "a person".to_string(),
+                        original_entity_type: None,
                     }],
                     edges: vec![],
                 })

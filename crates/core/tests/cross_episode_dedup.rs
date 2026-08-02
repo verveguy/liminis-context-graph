@@ -74,6 +74,7 @@ fn one_entity(name: &str) -> ExtractionResult {
             name: name.to_string(),
             entity_type: "Person".to_string(),
             summary: format!("{name} is a person"),
+            original_entity_type: None,
         }],
         edges: vec![],
     }
@@ -229,6 +230,7 @@ async fn test_empty_name_entity_skipped() {
             name: "   ".to_string(), // whitespace-only name
             entity_type: "Person".to_string(),
             summary: "nobody".to_string(),
+            original_entity_type: None,
         }],
         edges: vec![],
     };

@@ -74,6 +74,7 @@ mod tests {
             name: name.to_string(),
             entity_type: "Thing".to_string(),
             summary: String::new(),
+            original_entity_type: None,
         }
     }
 

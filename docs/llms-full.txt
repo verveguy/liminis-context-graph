@@ -939,10 +939,13 @@ Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 ```yaml
 # mode: open | strict
 # open (default): declared types are preferred; free-form fallback allowed
-# strict: out-of-vocabulary entities are dropped post-extraction; out-of-vocabulary
-#   edges are never dropped — a declared alias is normalized to its canonical relation
-#   type, and anything else is reclassified to relation_type: UNCLASSIFIED with the
-#   original label preserved in the edge's attributes (see ADR-0310)
+# strict: out-of-vocabulary entities and edges are never dropped for their type alone — an
+#   entity whose type doesn't match the declared vocabulary is reclassified to Unclassified,
+#   with its original type preserved in the entity's attributes (see ADR-0312); a declared
+#   alias on an edge is normalized to its canonical relation type, and anything else is
+#   reclassified to relation_type: UNCLASSIFIED with the original label preserved in the
+#   edge's attributes (see ADR-0310). Edges can still be dropped for unrelated reasons
+#   (self-referential, unresolvable endpoint) — see edges_dropped_unresolvable.
 mode: strict
 
 entity_types:
@@ -992,7 +995,7 @@ See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-
 | Mode | Entity types | Relation types |
 |------|-------------|----------------|
 | `open` (default) | Preferred by the LLM; free-form fallback allowed | Same |
-| `strict` | Out-of-vocabulary entities dropped post-extraction | The edge-extraction prompt tells the model to use only the declared vocabulary (including aliases). A declared alias is normalized to its canonical name; anything still out-of-vocabulary after normalization is retained with `relation_type: UNCLASSIFIED` and its original label preserved in `attributes` — never dropped (ADR-0310) |
+| `strict` | An entity whose normalized type doesn't match the declared vocabulary is retained with an `Unclassified` label in place of the rejected type, and its original type preserved in `attributes` — never dropped for its type alone (ADR-0312) | The edge-extraction prompt tells the model to use only the declared vocabulary (including aliases). A declared alias is normalized to its canonical name; anything still out-of-vocabulary after normalization is retained with `relation_type: UNCLASSIFIED` and its original label preserved in `attributes` — never dropped for its type alone (ADR-0310) |
 
 ## `knowledge_status` summary
 
@@ -2211,6 +2214,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
 | [0307](0307-token-budget-policy-and-edge-exhaustion-semantics.md) | Token-Budget Policy and Edge Budget-Exhaustion Semantics | 2026-08-01 |
 | [0310](0310-strict-mode-reclassifies-not-drops.md) | Strict-Mode Relation-Type Filtering Reclassifies, Never Drops | 2026-08-02 |
+| [0312](0312-entity-strict-mode-reclassifies-not-drops.md) | Strict-Mode Entity-Type Filtering Reclassifies, Never Drops | 2026-08-02 |
 | [0314](0314-missing-summary-salvage-and-schema-invalid-classification.md) | Missing-Summary Salvage and `schema_invalid` Classification | 2026-08-02 |
 
 ## Historical numbering

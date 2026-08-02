@@ -350,6 +350,7 @@ mod tests {
                     name: format!("Entity{i}"),
                     entity_type: "Thing".to_string(),
                     summary: "a thing".to_string(),
+                    original_entity_type: None,
                 })
                 .collect(),
             edges: vec![],
@@ -511,11 +512,13 @@ mod tests {
                     name: "Alice".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "a person".to_string(),
+                    original_entity_type: None,
                 },
                 ExtractedEntity {
                     name: "Acme".to_string(),
                     entity_type: "Company".to_string(),
                     summary: "a company".to_string(),
+                    original_entity_type: None,
                 },
             ],
             edges: vec![

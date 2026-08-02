@@ -82,6 +82,7 @@ fn batch(entities: &[&str], edges: &[(&str, &str, &str)]) -> ExtractionResult {
                 name: n.to_string(),
                 entity_type: "Entity".to_string(),
                 summary: format!("{n} summary"),
+                original_entity_type: None,
             })
             .collect(),
         edges: edges

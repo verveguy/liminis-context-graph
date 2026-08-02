@@ -345,6 +345,7 @@ mod tests {
                 name: entity_name.to_string(),
                 entity_type: "Thing".to_string(),
                 summary: format!("{entity_name} summary"),
+                original_entity_type: None,
             }],
             edges: vec![ExtractedEdge {
                 source_name: entity_name.to_string(),

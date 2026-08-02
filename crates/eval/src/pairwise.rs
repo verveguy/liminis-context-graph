@@ -366,6 +366,7 @@ mod tests {
                     name: entity_name.to_string(),
                     entity_type: "Thing".to_string(),
                     summary: "a thing".to_string(),
+                    original_entity_type: None,
                 }],
                 edges: vec![],
             }),

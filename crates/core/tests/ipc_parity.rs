@@ -799,6 +799,10 @@ async fn test_knowledge_process_chunk_ok() {
         "expected numeric edges_reclassified_unclassified (FR-005): {v}"
     );
     assert!(
+        r["entities_reclassified_unclassified"].as_u64().is_some(),
+        "expected numeric entities_reclassified_unclassified (issue #312 FR-004): {v}"
+    );
+    assert!(
         r["duration_seconds"].as_f64().is_some(),
         "expected numeric duration_seconds: {v}"
     );

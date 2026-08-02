@@ -130,6 +130,7 @@ async fn successful_backend_run_reports_zero_errors_and_captures_latency() {
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         }]));
@@ -284,11 +285,13 @@ async fn judged_score_beats_strict_score_on_wording_variance_sc004() {
         name: "Alice Smith".to_string(),
         entity_type: "Person".to_string(),
         summary: "a person".to_string(),
+        original_entity_type: None,
     }];
     let candidate_entities = vec![ExtractedEntity {
         name: "Alice".to_string(),
         entity_type: "Person".to_string(),
         summary: "a person".to_string(),
+        original_entity_type: None,
     }];
 
     let strict = entity_strict_prf1(&reference_entities, &candidate_entities);
@@ -332,6 +335,7 @@ async fn structured_output_reliability_is_independent_of_extraction_f1() {
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         }]));
@@ -386,6 +390,7 @@ async fn budget_exhaustion_after_retry_produces_non_zero_truncated_count_sc002()
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         }]));
@@ -455,6 +460,7 @@ async fn genuinely_empty_result_without_truncation_is_reported_clean() {
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         }]));
@@ -494,6 +500,7 @@ async fn cassette_replay_reproduces_recorded_run_via_backend_pipeline() {
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -502,6 +509,7 @@ async fn cassette_replay_reproduces_recorded_run_via_backend_pipeline() {
                 name: "Bob".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "a person".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -616,11 +624,13 @@ async fn ontology_fixture_loads_and_drives_strict_vocabulary_compliance() {
                     name: "Alan Bean".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "an astronaut".to_string(),
+                    original_entity_type: None,
                 },
                 ExtractedEntity {
                     name: "Some Widget".to_string(),
                     entity_type: "Gadget".to_string(),
                     summary: "not in the declared vocabulary".to_string(),
+                    original_entity_type: None,
                 },
             ],
             edges: vec![
@@ -679,6 +689,7 @@ async fn cassette_recorded_freeform_misses_against_strict_ontology_replay() {
             name: "Alan Bean".to_string(),
             entity_type: "Person".to_string(),
             summary: "an astronaut".to_string(),
+            original_entity_type: None,
         }],
         edges: vec![],
     }]));
@@ -735,6 +746,7 @@ impl Extractor for SelectivelyFailingExtractor {
                         name: "Fallback".to_string(),
                         entity_type: "Thing".to_string(),
                         summary: "a thing".to_string(),
+                        original_entity_type: None,
                     }],
                     edges: vec![],
                 })
@@ -776,6 +788,7 @@ async fn pairwise_repeat_run_against_same_cache_makes_zero_new_judge_calls_sc005
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s1".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -784,6 +797,7 @@ async fn pairwise_repeat_run_against_same_cache_makes_zero_new_judge_calls_sc005
                 name: "Bob".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s2".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -794,6 +808,7 @@ async fn pairwise_repeat_run_against_same_cache_makes_zero_new_judge_calls_sc005
                 name: "Carol".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s3".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -802,6 +817,7 @@ async fn pairwise_repeat_run_against_same_cache_makes_zero_new_judge_calls_sc005
                 name: "Dave".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s4".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -884,6 +900,7 @@ async fn pairwise_chunk_missing_on_one_side_is_skipped_not_scored_as_loss_fr010(
                 name: "Alice".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s1".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },
@@ -892,6 +909,7 @@ async fn pairwise_chunk_missing_on_one_side_is_skipped_not_scored_as_loss_fr010(
                 name: "Bob".to_string(),
                 entity_type: "Person".to_string(),
                 summary: "s2".to_string(),
+                original_entity_type: None,
             }],
             edges: vec![],
         },

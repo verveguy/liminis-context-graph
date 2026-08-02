@@ -31,6 +31,11 @@ pub struct AddEpisodeResult {
     /// above). The original relation type is preserved in the stored edge's `attributes` field,
     /// not lost.
     pub edges_reclassified_unclassified: usize,
+    /// Strict-mode entities whose type was outside the ontology's declared vocabulary after
+    /// normalisation, reclassified to `Unclassified` rather than dropped (issue #312 FR-004).
+    /// The original entity type is preserved in the stored entity's `attributes` field, not
+    /// lost.
+    pub entities_reclassified_unclassified: usize,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -41,6 +46,11 @@ impl Drop for ActiveWriteGuard {
 }
 
 const DEDUP_THRESHOLD: f32 = 0.85;
+/// Entity-side counterpart of `reprocess_relations::UNCLASSIFIED`, matching entity-type
+/// (PascalCase) rather than relation-type (SCREAMING_SNAKE_CASE) casing conventions. Has
+/// exactly one call site today; promote to a shared export if a future entity-side
+/// canonicalize pass needs it (see ADR-0312).
+const ENTITY_UNCLASSIFIED: &str = "Unclassified";
 
 static HYBRID_THRESHOLD: OnceLock<usize> = OnceLock::new();
 
@@ -188,40 +198,60 @@ pub async fn add_episode(
         e.original_relation_type = None;
     }
 
-    // Strict-mode entity filtering: drop entities not in the declared vocabulary.
-    //
-    // FR-006 audit (issue #310): this filter still drops rather than reclassifies, unlike the
-    // edge-side filter below. That's not an oversight — `EntityTypeDef` (ontology.rs) has no
-    // `aliases`/`keywords` fields at all, so the alias-blindness defect this issue fixes on the
-    // edge side cannot exist here: there is no alias map to consult, and adding one is out of
-    // scope for #310 (see ADR-0310). This behavior is locked in by
-    // `strict_mode_entity_type_still_drops_not_reclassifies` in
-    // `crates/core/tests/ontology_integration.rs`.
+    // `original_entity_type` is deserialized directly from raw, untrusted extractor/LLM JSON
+    // (`#[serde(default)]`, no `deny_unknown_fields`) — a hallucinated or prompt-injected key of
+    // that name in the model's entity output must never survive to storage. Clear it here,
+    // unconditionally and regardless of ontology mode/config, before any mode-specific filtering
+    // runs below. It is set again, only by this function's own logic, in the strict-mode
+    // out-of-vocabulary branch further down.
+    for e in extraction.entities.iter_mut() {
+        e.original_entity_type = None;
+    }
+
+    // Drop entities with empty or whitespace-only names before any strict-mode filtering that
+    // tallies counts (also before edge validation, so any edges referencing them are dropped as
+    // unresolvable — spec edge case: treat empty-name extraction as a failure and do not create
+    // a node for it). Doing this before the reclassify loop below, rather than after, matters:
+    // an empty-named entity must never be counted toward `entities_reclassified_unclassified`
+    // since it never reaches storage — counting it first and dropping it after would desync the
+    // tally from what's actually persisted (review finding on issue #312).
+    extraction.entities.retain(|e| !e.name.trim().is_empty());
+
+    // Strict-mode entity filtering (issue #312): an entity is never dropped for its entity_type
+    // alone. An entity whose normalized type is empty or the literal "Entity" means "no specific
+    // type" — as it does everywhere else in this function — and passes through unchanged (FR-007),
+    // with `entity_type` rewritten to its normalized form (empty or "Entity") so a raw case/
+    // separator variant (e.g. "entity", "ENTITY") can never leak into `EntityRow.labels` via
+    // `make_insert_row`'s raw-string check (review finding on issue #312). A non-empty,
+    // non-matching type is reclassified to `Unclassified`, with the original label preserved on
+    // `original_entity_type` for later storage in `attributes` (FR-002/FR-003) — never deleted,
+    // consistent with ADR-0033/ADR-0037/ADR-0310/ADR-0312. Unlike the edge-side reclassify tally
+    // (deferred to Phase C per ADR-0051, since an edge can still be dropped afterward), the
+    // entity tally is counted directly here: because the empty-name retain above already ran,
+    // every entity reaching this loop is guaranteed to be persisted, so there's no desync risk.
+    let mut entities_reclassified_unclassified = 0usize;
     if let Some(onto) = ontology_ref {
         if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
             let vocab = onto.entity_type_names();
-            extraction.entities.retain(|e| {
+            for e in extraction.entities.iter_mut() {
                 let normalized = normalize_entity_type(&e.entity_type);
+                if normalized.is_empty() || normalized == "Entity" {
+                    // No specific type extracted — resolves as a plain untyped Entity, same as
+                    // every other ontology mode. Not a reclassification.
+                    e.entity_type = normalized;
+                    continue;
+                }
                 if vocab.contains(&normalized) {
-                    true
+                    e.entity_type = normalized;
                 } else {
                     eprintln!(
-                        "liminis-context-graph: ontology strict: dropping entity '{}' (type '{}' not in vocabulary)",
+                        "liminis-context-graph: ontology strict: reclassifying entity '{}' to Unclassified (type '{}' not in vocabulary)",
                         e.name, e.entity_type
                     );
-                    false
+                    e.original_entity_type = Some(e.entity_type.clone());
+                    e.entity_type = ENTITY_UNCLASSIFIED.to_string();
+                    entities_reclassified_unclassified += 1;
                 }
-            });
-            // Rewrite entity_type to the canonical normalized form so DB labels are consistent.
-            for e in extraction.entities.iter_mut() {
-                e.entity_type = normalize_entity_type(&e.entity_type);
-            }
-            if extraction.entities.is_empty() {
-                eprintln!(
-                    "liminis-context-graph: ontology strict: no entities remain after vocabulary filtering for this chunk"
-                );
-                // Clear edges to avoid wasted embedding work; endpoints are gone.
-                extraction.edges.clear();
             }
         }
     }
@@ -270,11 +300,6 @@ pub async fn add_episode(
             }
         }
     }
-
-    // Drop entities with empty or whitespace-only names before edge validation so that
-    // any edges referencing them are also dropped as unresolvable (spec edge case: treat
-    // empty-name extraction as a failure and do not create a node for it).
-    extraction.entities.retain(|e| !e.name.trim().is_empty());
 
     // Load the DB handle here (rather than at Phase B, below) — Phase B's entity-count check
     // and dedup resolution reuse this same Arc. Phase C, below, reloads its own handle
@@ -511,7 +536,10 @@ pub async fn add_episode(
                 created_at: ref_time_owned.clone(),
                 name_embedding,
                 summary: extracted.summary.clone(),
-                attributes: "{}".to_string(),
+                attributes: match &extracted.original_entity_type {
+                    Some(orig) => serde_json::json!({ "original_entity_type": orig }).to_string(),
+                    None => "{}".to_string(),
+                },
                 episode_uuids: vec![],
                 source_descriptions: vec![],
             },
@@ -794,6 +822,7 @@ pub async fn add_episode(
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
         edges_reclassified_unclassified,
+        entities_reclassified_unclassified,
     })
 }
 

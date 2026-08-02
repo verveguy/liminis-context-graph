@@ -311,6 +311,7 @@ impl Extractor for SelfRefExtractor {
                     name: "Alice".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "Alice is a person".to_string(),
+                    original_entity_type: None,
                 }],
                 edges: vec![ExtractedEdge {
                     source_name: "Alice".to_string(),
@@ -358,6 +359,7 @@ impl Extractor for BadEndpointExtractor {
                     name: "Alice".to_string(),
                     entity_type: "Person".to_string(),
                     summary: "Alice is a person".to_string(),
+                    original_entity_type: None,
                 }],
                 edges: vec![ExtractedEdge {
                     source_name: "Alice".to_string(),
