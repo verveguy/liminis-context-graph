@@ -61,6 +61,15 @@ fetch`/`git diff` failure (rare infra hiccup, e.g. GitHub's `uploadpack
 must never silently satisfy the required check by skipping; the conservative failure
 mode is always "run the suite unnecessarily," never "skip it unnoticed."
 
+The same fail-safe direction extends one level up: `build-lbug` and `test`'s `if:`
+conditions also treat the `changes` *job* failing outright (not just its script logic
+returning an error) as code-changed, via `needs.changes.result != 'success'` combined
+with `!cancelled()` to override the default skip-on-failed-dependency behavior. Without
+this, a checkout infra failure in `changes` would leave its output unset, both
+downstream jobs would evaluate `needs.changes.outputs.code_changed == 'true'` as false,
+and skip — silently satisfying the required check for a PR whose diff was never actually
+classified.
+
 ### 4. Classification is a deny-list keyed on what actually affects the Rust build/test job
 
 | Pattern | Classification | Why |
@@ -125,12 +134,14 @@ exactly the case this issue promises not to touch (FR-003/User Story 2).
   job starts invoking) needs a pattern added there, or it defaults to docs and the full
   suite would not run for a change that actually needs it. This is a known, accepted
   gap — not silently safe, but visible and documented here rather than assumed away.
-- If the `changes` job itself fails outright (e.g. a checkout infra failure), its
-  outputs are unset and both downstream jobs skip via the same
-  `needs.changes.outputs.code_changed == 'true'` check evaluating false. This is a
-  residual gap — a real infra failure could theoretically satisfy the required check via
-  skip — but it is visible: the failed `changes` job shows red on the PR, and a total
-  checkout failure would likely fail every other job too. Not addressed further here.
+- If the `changes` job itself fails outright (e.g. a checkout infra failure), both
+  downstream jobs' `if:` conditions explicitly treat `needs.changes.result != 'success'`
+  as code-changed, and `!cancelled()` overrides the default skip-on-failed-dependency
+  behavior so they still run. A failed classifier job can no longer silently satisfy the
+  required check via a skip — it forces the full suite instead, the same fail-safe
+  direction as the in-script defaults inside the `changes` job. (Flagged in review on
+  PR #323 by a Copilot review comment; fixed before merge rather than left as an
+  accepted gap.)
 
 ## Alternatives Considered
 
