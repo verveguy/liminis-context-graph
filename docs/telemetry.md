@@ -181,7 +181,7 @@ OpenAI-compatible path, recording whether the model's structured output was usab
 |-------|------|-------------|
 | `model` | string | Model that produced the response |
 | `call_type` | string | `"entities"` or `"edges"` |
-| `outcome` | string | `"clean"` (valid JSON as returned), `"recovered"` (needed fence/prefix stripping), or `"malformed"` (unparseable) |
+| `outcome` | string | `"clean"` (valid JSON as returned), `"recovered"` (needed fence/prefix stripping), `"malformed"` (not valid JSON at all), or `"schema_invalid"` (valid JSON that failed schema/field validation on a genuinely required field, [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md)) |
 
 A high `"recovered"` or `"malformed"` rate is the main signal that a local model is a poor fit for
 extraction. The Anthropic path uses tool-use and does not emit this event.
@@ -189,6 +189,28 @@ extraction. The Anthropic path uses tool-use and does not emit this event.
 Example:
 ```json
 {"type":"structured_output_parse","ts_ms":1716100000060,"model":"qwen3.6-27b","call_type":"edges","outcome":"recovered"}
+```
+
+### `entities_missing_summary`
+
+Emitted by `OaiExtractor::do_extract_entities` on every successful entity-extraction parse that
+produced at least one entity — OAI-only; the Anthropic path's tool-use schema doesn't need this
+signal and never emits it. Its `tool_use` schema requires the `summary` key to be present but not
+non-empty, so a model can satisfy the schema while still returning entities with no summary text.
+This event surfaces that missing-summary rate as its own signal, separate from the pass/fail
+classification in `structured_output_parse`/`extraction_failure`: an empty summary is a degraded
+entity, not a failed extraction. See [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string | Model that produced the response |
+| `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
+| `entities_extracted` | usize | Total entities parsed from this chunk |
+| `missing_summary` | usize | Count of those entities whose `summary` is empty — absent, explicit `null`, and explicit `""` in the source JSON are all indistinguishable after parsing and all count here |
+
+Example:
+```json
+{"type":"entities_missing_summary","ts_ms":1716100000058,"model":"qwen3.6-27b","chunk_key":"notes-0001","entities_extracted":6,"missing_summary":1}
 ```
 
 ### `extraction_failure`
@@ -206,7 +228,7 @@ not by the counting sink `ipc_call`/`token_usage` use.
 | `model` | string | The model name in force for the failing call |
 | `call_type` | string | `"entities"` or `"edges"` |
 | `chunk_key` | string or null | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
-| `classification` | string | `"http_error"`, `"truncation"`, or `"malformed"` |
+| `classification` | string | `"http_error"`, `"truncation"`, `"malformed"` (content that never parsed as JSON at all), or `"schema_invalid"` (valid JSON that failed schema/field validation, [ADR-0314](adr/0314-missing-summary-salvage-and-schema-invalid-classification.md)) |
 | `raw_body` | string | The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. May echo back source-text content from the failing call; apply the same review-before-sharing care as [LLM cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
 | `finish_reason` | string or null | The provider's stop/finish reason, or `null` for an HTTP-level failure |
 | `completion_tokens` | u64 or null | Output token count, or `null` if unavailable |
