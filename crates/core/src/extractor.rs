@@ -376,7 +376,7 @@ impl AnthropicExtractor {
                     self.emit_extraction_failure(
                         "entities",
                         chunk_key.clone(),
-                        "malformed",
+                        classify_parse_failure(&e),
                         &resp_for_failure,
                         current_max_tokens,
                         None,
@@ -550,7 +550,7 @@ impl AnthropicExtractor {
                     self.emit_extraction_failure(
                         "edges",
                         chunk_key.clone(),
-                        "malformed",
+                        classify_parse_failure(&e),
                         &resp_for_failure,
                         current_max_tokens,
                         entities_extracted,
@@ -903,6 +903,21 @@ enum EdgeOutcome {
     Success(Vec<ExtractedEdge>),
     BudgetExhausted,
     ParseError(Error),
+}
+
+/// Classifies why a response failed to parse, per #314 FR-003: distinguishes content that never
+/// parsed as JSON at all (`"malformed"`) from content that parsed as valid JSON but failed
+/// schema/field validation, e.g. a genuinely required field missing (`"schema_invalid"`).
+/// `serde_json::Error::classify()`'s `Category::Data` covers exactly the latter case; every other
+/// category (syntax errors, EOF, I/O) and every non-JSON `Error::Ipc` case (no JSON was ever
+/// available to validate against, e.g. a missing tool_use block) fall through to `"malformed"`.
+/// Applied uniformly at both providers' `ParseError` sites so `StructuredOutputParse.outcome` and
+/// `ExtractionFailure.classification` agree.
+fn classify_parse_failure(e: &Error) -> &'static str {
+    match e {
+        Error::Json(err) if err.classify() == serde_json::error::Category::Data => "schema_invalid",
+        _ => "malformed",
+    }
 }
 
 fn parse_entity_response(mut resp: Value) -> EntityOutcome {
@@ -1532,6 +1547,17 @@ impl OaiExtractor {
                             chunk_key: chunk_key.clone(),
                         });
                     }
+                    if !entities.is_empty() {
+                        let missing_summary =
+                            entities.iter().filter(|e| e.summary.is_empty()).count();
+                        self.sink.emit(TelemetryEvent::EntitiesMissingSummary {
+                            ts_ms: now_ms(),
+                            model: self.model.clone(),
+                            chunk_key: chunk_key.clone(),
+                            entities_extracted: entities.len(),
+                            missing_summary,
+                        });
+                    }
                     return Ok(entities);
                 }
                 OaiChatOutcome::BudgetExhausted => {
@@ -1563,16 +1589,17 @@ impl OaiExtractor {
                     ));
                 }
                 OaiChatOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "entities".to_string(),
-                        outcome: "malformed".to_string(),
+                        outcome: classification.to_string(),
                     });
                     self.emit_extraction_failure(
                         "entities",
                         chunk_key.clone(),
-                        "malformed",
+                        classification,
                         &resp,
                         max_tokens,
                         None,
@@ -1731,16 +1758,17 @@ impl OaiExtractor {
                     ));
                 }
                 OaiChatOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "edges".to_string(),
-                        outcome: "malformed".to_string(),
+                        outcome: classification.to_string(),
                     });
                     self.emit_extraction_failure(
                         "edges",
                         chunk_key.clone(),
-                        "malformed",
+                        classification,
                         &resp,
                         max_tokens,
                         entities_extracted,
@@ -2669,6 +2697,111 @@ mod tests {
             e,
             TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
                 if call_type == "entities" && outcome == "malformed"
+        )));
+    }
+
+    #[test]
+    fn parse_oai_entity_response_missing_summary_retains_all_entities() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"entities\": [{\"name\": \"Apollo 11\", \"entity_type\": \"Mission\"}, {\"name\": \"Neil Armstrong\", \"entity_type\": \"Person\"}]}"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success {
+                value: entities,
+                defensive_parse,
+            } => {
+                assert_eq!(entities.len(), 2, "no entities should be dropped");
+                assert!(entities.iter().all(|e| e.summary.is_empty()));
+                assert!(!defensive_parse);
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // US1 AS1/AS2 (#314): a response with valid JSON entities missing `summary` retains every
+    // entity (defaulted to an empty summary) and is classified `clean`, never `malformed`/
+    // `schema_invalid`.
+    #[tokio::test]
+    async fn do_extract_entities_missing_summary_retains_entities_and_stays_clean() {
+        let content = r#"{"entities": [{"name": "Apollo 11", "entity_type": "Mission"}, {"name": "Neil Armstrong", "entity_type": "Person"}]}"#;
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let entities = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 2, "no entities should be dropped");
+        assert!(entities.iter().all(|e| e.summary.is_empty()));
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "entities" && outcome == "clean"
+        )));
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                TelemetryEvent::StructuredOutputParse { outcome, .. }
+                    if outcome == "malformed" || outcome == "schema_invalid"
+            )),
+            "a missing-summary response must never classify as malformed or schema_invalid"
+        );
+    }
+
+    // US2 AS2 (#314): valid JSON that fails schema validation on a genuinely required field
+    // (`name`/`entity_type` missing) classifies distinctly from unparseable content.
+    #[tokio::test]
+    async fn do_extract_entities_missing_required_field_classifies_schema_invalid() {
+        let content = r#"{"entities": [{"entity_type": "Mission", "summary": "no name here"}]}"#;
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let result = extractor.do_extract_entities(&test_extract_options()).await;
+        assert!(result.is_err());
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
+                if call_type == "entities" && outcome == "schema_invalid"
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::ExtractionFailure { call_type, classification, .. }
+                if call_type == "entities" && classification == "schema_invalid"
+        )));
+    }
+
+    // FR-004 (#314): a mixed batch (some entities with a summary, some without) fires
+    // `EntitiesMissingSummary` with the correct counts.
+    #[tokio::test]
+    async fn do_extract_entities_emits_entities_missing_summary_on_mixed_batch() {
+        let content = r#"{"entities": [{"name": "Apollo 11", "entity_type": "Mission", "summary": "A NASA mission."}, {"name": "Neil Armstrong", "entity_type": "Person"}]}"#;
+        let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let entities = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert_eq!(entities.len(), 2);
+
+        let events = sink.events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            TelemetryEvent::EntitiesMissingSummary { entities_extracted, missing_summary, .. }
+                if *entities_extracted == 2 && *missing_summary == 1
         )));
     }
 

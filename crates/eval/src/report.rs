@@ -39,6 +39,10 @@ pub struct StructuredOutputReliability {
     pub recovered: u64,
     pub malformed: u64,
     pub malformed_rate: f64,
+    /// Valid JSON that failed schema/field validation on a genuinely required field — distinct
+    /// from `malformed` (content that never parsed as JSON at all), per #314 FR-003/SC-003.
+    pub schema_invalid: u64,
+    pub schema_invalid_rate: f64,
 }
 
 /// #306 FR-005: per-candidate truncation visibility — distinguishes a retry that ultimately
@@ -71,6 +75,20 @@ pub struct VocabularyComplianceReport {
     pub edge_violation_rate: f64,
 }
 
+/// #314 FR-004: how often a candidate's entities arrived with no usable summary text (absent,
+/// `null`, or empty string — all indistinguishable after parsing). Always zero for the
+/// Anthropic path — not because its tool_use schema forbids an empty `summary` string (it only
+/// requires the key to be present), but because only `OaiExtractor` emits the
+/// `EntitiesMissingSummary` telemetry this report is built from (SC-004). Independent of
+/// `StructuredOutputReliability`: a chunk can be entirely `clean` while some of its entities
+/// carry no summary.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
+pub struct MissingSummaryReport {
+    pub entities_extracted: u64,
+    pub missing_summary: u64,
+    pub missing_summary_rate: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CandidateReport {
     pub backend_name: String,
@@ -86,6 +104,8 @@ pub struct CandidateReport {
     pub structured_output: StructuredOutputReliability,
     /// #306 FR-005/SC-002: aggregate truncation visibility — see `TruncationReport`.
     pub truncated: TruncationReport,
+    /// #314 FR-004: aggregate missing-summary visibility — see `MissingSummaryReport`.
+    pub missing_summary: MissingSummaryReport,
     /// `Some` only for a `Strict`-mode run (FR-007); `None` for freeform/`Open` runs.
     pub vocabulary_compliance: Option<VocabularyComplianceReport>,
     pub strict_entity_f1: f64,
@@ -238,7 +258,8 @@ impl Report {
             out.push_str(&format!(
                 "== {} ==\n  chunks run: {}  chunks scored: {}  errors: {} ({:.1}%)\n  \
                  latency p50/p95/p99 (ms): {}/{}/{}\n  \
-                 structured output: clean={} recovered={} malformed={} (malformed rate {:.1}%)\n",
+                 structured output: clean={} recovered={} malformed={} (malformed rate {:.1}%) \
+                 schema_invalid={} (schema_invalid rate {:.1}%)\n",
                 c.backend_name,
                 c.chunks_run,
                 c.chunks_scored,
@@ -251,7 +272,20 @@ impl Report {
                 c.structured_output.recovered,
                 c.structured_output.malformed,
                 c.structured_output.malformed_rate * 100.0,
+                c.structured_output.schema_invalid,
+                c.structured_output.schema_invalid_rate * 100.0,
             ));
+            // #314 FR-004: rendered only when non-zero, matching `truncated`'s convention —
+            // a run with no missing-summary entities (e.g. every Anthropic-path run, SC-004)
+            // stays unchanged.
+            if c.missing_summary.missing_summary > 0 {
+                out.push_str(&format!(
+                    "  missing summary: {}/{} entities ({:.1}%)\n",
+                    c.missing_summary.missing_summary,
+                    c.missing_summary.entities_extracted,
+                    c.missing_summary.missing_summary_rate * 100.0,
+                ));
+            }
             // #306 FR-005/FR-006: rendered only when non-zero, matching `judge_errors`'
             // convention below — a clean run's output stays unchanged (SC-004), and a
             // truncated chunk is never silently folded into "clean".
@@ -399,10 +433,17 @@ mod tests {
                     recovered: 0,
                     malformed: 0,
                     malformed_rate: 0.0,
+                    schema_invalid: 0,
+                    schema_invalid_rate: 0.0,
                 },
                 truncated: TruncationReport {
                     retry_succeeded: 0,
                     exhausted: 0,
+                },
+                missing_summary: MissingSummaryReport {
+                    entities_extracted: 0,
+                    missing_summary: 0,
+                    missing_summary_rate: 0.0,
                 },
                 vocabulary_compliance: None,
                 strict_entity_f1: 0.771,
@@ -463,9 +504,13 @@ mod tests {
     ///
     /// Moved a second time in #306: `truncated` (FR-005) was added to `CandidateReport`,
     /// another intentional schema addition unrelated to pairwise.
+    ///
+    /// Moved a third time in #314: `structured_output.schema_invalid`/`schema_invalid_rate`
+    /// (FR-003) and `missing_summary` (FR-004) were added to `CandidateReport`, again an
+    /// intentional schema addition unrelated to pairwise.
     #[test]
     fn json_report_is_byte_identical_to_pre_pairwise_golden_sc004() {
-        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0\n      },\n      \"truncated\": {\n        \"retry_succeeded\": 0,\n        \"exhausted\": 0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
+        let golden = "{\n  \"corpus_size\": 2,\n  \"reference_backend\": \"baseline\",\n  \"ontology_mode\": \"freeform\",\n  \"candidates\": [\n    {\n      \"backend_name\": \"baseline\",\n      \"chunks_run\": 2,\n      \"chunks_scored\": 2,\n      \"errors\": 0,\n      \"error_rate\": 0.0,\n      \"latency\": {\n        \"p50_ms\": 10,\n        \"p95_ms\": 20,\n        \"p99_ms\": 30\n      },\n      \"structured_output\": {\n        \"clean\": 2,\n        \"recovered\": 0,\n        \"malformed\": 0,\n        \"malformed_rate\": 0.0,\n        \"schema_invalid\": 0,\n        \"schema_invalid_rate\": 0.0\n      },\n      \"truncated\": {\n        \"retry_succeeded\": 0,\n        \"exhausted\": 0\n      },\n      \"missing_summary\": {\n        \"entities_extracted\": 0,\n        \"missing_summary\": 0,\n        \"missing_summary_rate\": 0.0\n      },\n      \"vocabulary_compliance\": null,\n      \"strict_entity_f1\": 0.771,\n      \"strict_edge_f1\": 0.771,\n      \"judged_entity_f1\": 0.978,\n      \"judged_entity_precision\": 0.981,\n      \"judged_entity_recall\": 0.975,\n      \"judged_edge_f1\": 0.978,\n      \"judged_edge_precision\": 0.981,\n      \"judged_edge_recall\": 0.975,\n      \"judged_summary_f1\": null,\n      \"judge_errors\": 0\n    }\n  ]\n}";
         assert_eq!(sample_report().to_json(), golden);
     }
 

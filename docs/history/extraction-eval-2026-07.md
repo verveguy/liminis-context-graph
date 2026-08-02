@@ -242,6 +242,25 @@ So the local model is roughly **4.5× slower at p50**, and far worse in the tail
 Added 2026-08-01. The April eval ranked this MoE ~8.8pp behind `qwen3.6-27b` on edges and
 sold it as the speed-for-quality option. **On this corpus that deficit does not reproduce.**
 
+> **Correction (#314, added 2026-08-02): the error/chunk-loss numbers in this section are
+> inflated by a since-fixed defect, not a genuine qwen3.6-35b-a3b reliability gap.**
+> `ExtractedEntity.summary` had no `#[serde(default)]`, so a response with valid JSON and every
+> entity present but missing only the `summary` field failed deserialization and **discarded
+> the entire chunk's entities**, then reported the chunk as `structured_output.malformed` —
+> indistinguishable from a genuinely unparseable response. The #306 failure-sidecar re-capture
+> that motivated #314 found exactly this on two of this run's seven "malformed" chunks
+> (`Apollo 11`: 29 entities, `Astronaut`: 18 entities — both valid JSON, both missing only
+> `summary`), alongside at least one genuinely broken chunk (`History of the Earth`). #314 made
+> a missing `summary` default to an empty string instead of failing the whole chunk, and split
+> the failure classification so schema-shortfall and truly-unparseable content are no longer
+> the same bucket. **This section's numbers are left as originally recorded — see FR-006 in
+> [#314](https://github.com/verveguy/liminis-context-graph/issues/314) — but every error-rate,
+> chunk-loss, and "excluded chunks" claim below should be read as an upper bound, not a
+> corrected measurement.** A re-run with the fix applied would very likely show a lower error
+> rate, entities from more chunks retained (with some empty summaries), and a residue of
+> genuinely-broken chunks only. That re-run is out of scope for #314 (FR-006 requires
+> annotation, not re-measurement) and has not happened as of this note.
+
 | leg | judged entities | judged edges | judged summaries | strict edges | error rate |
 |---|---:|---:|---:|---:|---:|
 | Haiku 2nd sample (**ceiling**) | 0.956 | 0.882 | 0.942 | 0.380 | 0.0% |
@@ -263,7 +282,9 @@ different ratios and should not be quoted as one: wall-clock also absorbs queuin
 and the per-call latency tail, so it outruns the raw token rate. It errors **3.5× more
 often** (7 chunks vs 2). Its tail is also
 worse: p50 16.8s but **p99 321s**, a five-minute worst chunk. All 7 *counted* failures were
-malformed parses (`structured_output.malformed: 7`, equal to `errors`). Because entity-side
+malformed parses (`structured_output.malformed: 7`, equal to `errors`) — **at least 2 of these
+7 are the #314 missing-`summary` defect, not genuinely malformed output; see the correction
+above.** Because entity-side
 budget exhaustion returns `Err` and would appear in `errors`, that equality rules truncation
 out **on the entity path only** — it says nothing about edges, for the reason in the warning
 below. (A direct probe at 17000 chars *does* truncate, but it bypasses the retry path; don't
@@ -271,7 +292,10 @@ quote it as the pipeline's behaviour.)
 
 Two rates are easy to confuse here. Per **call**, malformed is 7/446 = **1.57%**; per
 **chunk** it is 7/228 = **3.07%**, because a chunk needs both its entity and edge call to
-succeed. The chunk rate is the one that matters operationally and the one quoted above.
+succeed. The chunk rate is the one that matters operationally and the one quoted above. **Both
+rates are inflated by #314** — the missing-`summary` defect described in the correction above
+means some of these 7 "malformed" chunks were valid extractions discarded over one absent
+string field, not model failures.
 
 ⚠ **The edge comparison has a known defect — do not quote the edge gap.** qwen35 returned
 **zero edges on two chunks where Haiku found 36 and 38 and qwen27b found 49 each**. Zero is
@@ -303,9 +327,14 @@ nothing; the lost chunk belongs to `baseline`.
 The excluded chunks are exactly the ones the MoE could not parse, which flatters it — most
 likely the longest, densest chunks, which are also the hardest. A 1.1pp entity advantage
 should not survive that caveat as a claim of superiority; "tied" is the defensible reading.
+**This "flatters it" framing is itself #314-affected**: some of those excluded chunks (e.g.
+`Apollo 11`, `Astronaut`) were not genuinely hard-and-unparseable — they were fully valid
+extractions dropped over a missing `summary` field, so their exclusion does not necessarily
+correlate with chunk difficulty the way this paragraph assumes.
 
 **Operationally:** the MoE is the right pick only where throughput dominates and a 3.1%
-chunk-loss rate is acceptable — bulk backfill, for instance. For interactive ingest the 27b's
+chunk-loss rate is acceptable — bulk backfill, for instance (**this 3.1% figure is inflated by
+#314; see the correction above**). For interactive ingest the 27b's
 0.9% and tighter tail are worth more than the 1.7× speed, since a lost chunk is silent
 missing knowledge rather than a visible error.
 

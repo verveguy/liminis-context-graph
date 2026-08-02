@@ -8,10 +8,12 @@ use crate::judge::{precision_recall_f1, JudgeClient, JudgeVerdict};
 use crate::judge_cache::{cache_key, JudgeCache};
 use crate::metrics::{edge_strict_prf1, entity_strict_prf1};
 use crate::report::{
-    percentiles, CandidateReport, StructuredOutputReliability, TruncationReport,
-    VocabularyComplianceReport,
+    percentiles, CandidateReport, MissingSummaryReport, StructuredOutputReliability,
+    TruncationReport, VocabularyComplianceReport,
 };
-use crate::runner::{BackendRunResult, TruncationCounts, VocabularyComplianceCounts};
+use crate::runner::{
+    BackendRunResult, MissingSummaryCounts, TruncationCounts, VocabularyComplianceCounts,
+};
 
 pub async fn score_candidate(
     run_result: &BackendRunResult,
@@ -157,6 +159,8 @@ pub async fn score_candidate(
         recovered: run_result.structured_output.recovered,
         malformed: run_result.structured_output.malformed,
         malformed_rate: run_result.structured_output.malformed_rate(),
+        schema_invalid: run_result.structured_output.schema_invalid,
+        schema_invalid_rate: run_result.structured_output.schema_invalid_rate(),
     };
 
     Ok(CandidateReport {
@@ -168,6 +172,7 @@ pub async fn score_candidate(
         latency: percentiles(latencies),
         structured_output,
         truncated: truncation_report(run_result.truncated),
+        missing_summary: missing_summary_report(run_result.missing_summary),
         vocabulary_compliance: run_result.vocabulary_compliance.map(vocab_report),
         strict_entity_f1: strict_entity.f1,
         strict_edge_f1: strict_edge.f1,
@@ -187,6 +192,15 @@ fn truncation_report(t: TruncationCounts) -> TruncationReport {
     TruncationReport {
         retry_succeeded: t.retry_succeeded,
         exhausted: t.exhausted,
+    }
+}
+
+/// Maps the harness-internal #314 FR-004 tally to the report's serializable shape.
+fn missing_summary_report(m: MissingSummaryCounts) -> MissingSummaryReport {
+    MissingSummaryReport {
+        entities_extracted: m.entities_extracted,
+        missing_summary: m.missing_summary,
+        missing_summary_rate: m.rate(),
     }
 }
 
@@ -364,6 +378,7 @@ mod tests {
             structured_output: Default::default(),
             vocabulary_compliance: None,
             truncated: Default::default(),
+            missing_summary: Default::default(),
         }
     }
 

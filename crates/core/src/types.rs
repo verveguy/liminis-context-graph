@@ -95,7 +95,19 @@ pub struct ExtractionResult {
 pub struct ExtractedEntity {
     pub name: String,
     pub entity_type: String,
+    #[serde(default, deserialize_with = "deserialize_summary_or_default")]
     pub summary: String,
+}
+
+/// Deserializes `summary` as `""` when the field is absent or explicitly `null`, rather than
+/// failing deserialization. Text-instructed (non-schema-enforced) OAI-compatible models may omit
+/// this field even when the rest of the payload is well-formed; per issue #314, losing an entire
+/// chunk's entities over one missing string field is a disproportionate trade.
+fn deserialize_summary_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -128,4 +140,50 @@ pub struct PassageResult {
     pub created_at: String,
     pub valid_at: Option<String>,
     pub score: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_entity_summary_absent_defaults_to_empty_string() {
+        let entity: ExtractedEntity =
+            serde_json::from_str(r#"{"name": "Apollo 11", "entity_type": "Mission"}"#).unwrap();
+        assert_eq!(entity.summary, "");
+    }
+
+    #[test]
+    fn extracted_entity_summary_null_defaults_to_empty_string() {
+        let entity: ExtractedEntity = serde_json::from_str(
+            r#"{"name": "Apollo 11", "entity_type": "Mission", "summary": null}"#,
+        )
+        .unwrap();
+        assert_eq!(entity.summary, "");
+    }
+
+    #[test]
+    fn extracted_entity_summary_explicit_empty_string_stays_empty() {
+        let entity: ExtractedEntity = serde_json::from_str(
+            r#"{"name": "Apollo 11", "entity_type": "Mission", "summary": ""}"#,
+        )
+        .unwrap();
+        assert_eq!(entity.summary, "");
+    }
+
+    #[test]
+    fn extracted_entity_summary_present_is_preserved() {
+        let entity: ExtractedEntity = serde_json::from_str(
+            r#"{"name": "Apollo 11", "entity_type": "Mission", "summary": "A NASA mission."}"#,
+        )
+        .unwrap();
+        assert_eq!(entity.summary, "A NASA mission.");
+    }
+
+    #[test]
+    fn extracted_entity_missing_name_still_fails() {
+        let result: Result<ExtractedEntity, _> =
+            serde_json::from_str(r#"{"entity_type": "Mission", "summary": "x"}"#);
+        assert!(result.is_err());
+    }
 }
