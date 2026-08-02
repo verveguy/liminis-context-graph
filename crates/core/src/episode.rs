@@ -243,6 +243,12 @@ pub async fn add_episode(
                 match alias_map.get(&normalized) {
                     Some(canonical) => {
                         e.relation_type = Some(canonical.clone());
+                        // `original_relation_type` is deserialized directly from raw extractor
+                        // JSON with `#[serde(default)]` and no `deny_unknown_fields` — a
+                        // hallucinated or injected key of that name in the model's output would
+                        // otherwise survive an alias match untouched. Clear it so the field can
+                        // only ever be set by this filter's own out-of-vocabulary branch below.
+                        e.original_relation_type = None;
                     }
                     None => {
                         eprintln!(
