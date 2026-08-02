@@ -2596,6 +2596,12 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
         "rebuild_from_workspace_wal" => {
             let wal_dir = wal_dir.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+            // Preset to false before attempting the rebuild: this strategy actively drops and
+            // rebuilds the indices, and build_indices_and_constraints() below is fatal via `?`,
+            // so there is no later success-path hook to store `false` from on failure. Scoped to
+            // this arm only — drop_lbug_wal/restore_from_backup never touch indices, so a failed
+            // call there must leave indices_built at its prior value, not force it to false.
+            state.indices_built.store(false, Ordering::Release);
             recover_rebuild_from_workspace_wal(
                 &db_path,
                 &wal_dir,
@@ -2616,6 +2622,11 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             restart_required: false,
         }) => {
             state.db.store(Some(Arc::new(new_db)));
+            // Indices are known-good here for all three strategies: drop_lbug_wal/
+            // restore_from_backup reopen an existing, already-indexed checkpoint or backup
+            // (trust assumption, issue #297); rebuild_from_workspace_wal only reaches this arm
+            // because its internal build_indices_and_constraints()? already succeeded.
+            state.indices_built.store(true, Ordering::Release);
             // Clear degraded reason
             if let Ok(mut g) = state.degraded_reason.lock() {
                 *g = None;
@@ -2694,6 +2705,11 @@ async fn handle_knowledge_recover_full(
     let embedding_dim = state.embedder.dim();
     let sink = Arc::clone(&state.sink);
 
+    // Preset to false before attempting the sequence: run_full_recovery_sequence rebuilds
+    // indices via a fatal `build_indices_and_constraints()?`, so there is no later success-path
+    // hook to store `false` from if it fails partway through.
+    state.indices_built.store(false, Ordering::Release);
+
     let result = tokio::task::spawn_blocking(move || {
         crate::recovery::run_full_recovery_sequence(&db_path, &wal_dir, embedding_dim, sink)
     })
@@ -2703,6 +2719,12 @@ async fn handle_knowledge_recover_full(
     match result {
         Ok((new_db, report)) => {
             state.db.store(Some(Arc::new(new_db)));
+            // report.indexes_rebuilt is always true when Ok is reached (the function only
+            // constructs RecoveryReport post-success), but storing the field rather than a bare
+            // `true` keeps this coupled to that invariant if the build ever becomes non-fatal.
+            state
+                .indices_built
+                .store(report.indexes_rebuilt, Ordering::Release);
             if let Ok(mut g) = state.degraded_reason.lock() {
                 *g = None;
             }
@@ -2749,6 +2771,19 @@ async fn recover_drop_lbug_wal(
                     });
                 }
             }
+        }
+
+        // drop_lbug_wal's entire premise is reopening an existing, already-indexed checkpoint
+        // (issue #297's trust assumption) — but Db::open has open-or-create semantics (see
+        // Db::open_or_rebuild's doc comment), so if the checkpoint file itself is missing, it
+        // would silently create a fresh, unindexed DB rather than fail, and init_schema() below
+        // never calls build_indices_and_constraints(). handle_knowledge_recover's shared success
+        // arm would then report indices_built: true for a DB with no indices at all. Fail fast
+        // instead: no checkpoint to reopen means this strategy doesn't apply.
+        if !std::path::Path::new(&db_path).is_file() {
+            return Err(Error::Ipc(format!(
+                "drop_lbug_wal requires an existing checkpoint file; none found at {db_path}"
+            )));
         }
 
         let db = Db::open(&db_path)?;

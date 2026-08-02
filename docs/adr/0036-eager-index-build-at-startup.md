@@ -3,7 +3,8 @@
 **Status**: Accepted
 **Date**: 2026-07-24
 **Issues**: #208 (this fix); reported in #203, field context in discussion #207; extends ADR-0025;
-closes ADR-0034 §5's deferred gap
+closes the startup half of ADR-0034 §5's deferred gap (the runtime `knowledge_recover`/
+`knowledge_recover_full` half was closed separately by #297)
 
 ## Context
 
@@ -128,15 +129,21 @@ alongside.
 - The hybrid-dedup threshold (1,000 entities per `group_id` by default,
   `LIMINIS_DEDUP_HYBRID_THRESHOLD`-overridable) and the brute-force/hybrid selection logic are
   unchanged — only the reliability of the index the hybrid path depends on changes.
-- This closes ADR-0034 §5's explicitly deferred gap: `recovery.rs`'s successful index build is now
-  reflected in `AppState.indices_built` rather than under-reported until the next auto-heal event.
+- This closes the **startup** half of ADR-0034 §5's explicitly deferred gap: a healthy direct-open
+  or a startup-time auto-recovery is now reflected in `AppState.indices_built` immediately, rather
+  than under-reported until the next auto-heal event. The **runtime** half — `knowledge_recover`
+  and `knowledge_recover_full` called after startup — remained unfixed by this change and was
+  closed separately by #297.
 
 ## Related
 
 - ADR-0025: Auto-Heal Index Build and Bulk-Load Reload Pattern — the precedent pattern this issue
   extends to the ingest dedup path.
 - ADR-0034: Observable Index-Build Outcome — made index-build functions genuinely fallible and
-  `indices_built` reflect real outcomes; §5 flagged the `recovery.rs` gap this issue closes.
+  `indices_built` reflect real outcomes; §5 flagged the `recovery.rs` gap, of which this issue
+  closes only the startup half.
+- Issue #297: closes the runtime half of the same gap — `knowledge_recover` and
+  `knowledge_recover_full` now update `AppState.indices_built` themselves.
 - ADR-0009: Degraded-Mode Startup and In-Process Recovery — governs why `maybe_db` can be `None`
   (degraded mode); the eager build only applies once a DB is open, unchanged by this issue.
 - `crates/core/tests/dedup_auto_heal_integration.rs`: concurrent ingest past the hybrid threshold

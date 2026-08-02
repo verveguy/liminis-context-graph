@@ -348,6 +348,16 @@ accepts any request, so `indices_built` is normally `true` from the very first `
 call onward (see ADR-0036). A genuine build failure during that eager startup build fails startup
 outright rather than silently leaving indices unbuilt.
 
+A runtime recovery — any `knowledge_recover` strategy (`drop_lbug_wal`, `rebuild_from_workspace_wal`,
+`restore_from_backup`) or `knowledge_recover_full` — also leaves `indices_built` correctly `true`
+on success: `drop_lbug_wal`/`restore_from_backup` reopen an already-indexed checkpoint or backup,
+while `rebuild_from_workspace_wal`/`knowledge_recover_full` explicitly rebuild the indices before
+reporting success. Failure handling differs by strategy: `rebuild_from_workspace_wal` and
+`knowledge_recover_full` invalidate indices as part of the attempt, so a failure that aborts before
+the rebuild completes leaves the flag `false` rather than reporting stale readiness; `drop_lbug_wal`
+and `restore_from_backup` never touch indices, so a failed call leaves the flag at whatever it was
+before the attempt.
+
 `indices_built` still goes back to `false` in narrower, later situations: after
 `knowledge_clear_all`, or if a post-rebuild index build genuinely fails (as opposed to the common,
 harmless "already built" case). In those cases `false` does not mean search or ingest is broken —

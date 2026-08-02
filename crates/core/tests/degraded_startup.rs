@@ -167,7 +167,16 @@ async fn test_recovery_drop_lbug_wal() {
     let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
     let wal_path = format!("{}.wal", db_path);
 
-    // Write garbage bytes to simulate a corrupt WAL
+    // Create a real checkpoint first — drop_lbug_wal's premise is reopening an existing,
+    // already-indexed checkpoint after discarding a corrupt WAL tail (issue #297), not creating
+    // a fresh DB from nothing.
+    {
+        let db = Db::open(&db_path).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+    }
+
+    // Write garbage bytes to simulate a torn WAL tail on top of that checkpoint
     std::fs::write(&wal_path, b"CORRUPT_WAL_DATA").unwrap();
 
     // Verify the WAL file exists before recovery
@@ -200,10 +209,15 @@ async fn test_recovery_drop_lbug_wal() {
     assert_eq!(result["strategy"], "drop_lbug_wal");
     assert_eq!(result["success"], true, "Recovery should succeed: {result}");
 
-    // (a) The original .wal file should be renamed (not exist at original path)
-    assert!(
-        !std::path::Path::new(&wal_path).exists(),
-        "Original WAL file should be renamed after drop_lbug_wal"
+    // (a) The corrupt WAL bytes must have been moved aside — a fresh `.wal` legitimately
+    // reappears at the original path once the reopened checkpoint is written to again (e.g. by
+    // init_schema's idempotent DDL), so the invariant is "corrupt content is gone", not
+    // "no file ever exists at this path again".
+    let wal_contents_after = std::fs::read(&wal_path).ok();
+    assert_ne!(
+        wal_contents_after.as_deref(),
+        Some(b"CORRUPT_WAL_DATA".as_slice()),
+        "Corrupt WAL bytes should no longer be at the original path after drop_lbug_wal"
     );
 
     // A .wal.corrupt-* file should exist in the same directory
@@ -257,6 +271,259 @@ async fn test_recovery_drop_lbug_wal() {
         state.degraded_reason.lock().unwrap().is_none(),
         "degraded_reason should be cleared after recovery"
     );
+
+    // (e) issue #297: indices_built should be true after drop_lbug_wal recovery — the reopened
+    // checkpoint carries valid indices even though this path never calls build_indices_and_constraints.
+    assert!(
+        state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built should be true after successful drop_lbug_wal recovery"
+    );
+    let status_resp = dispatch_val(12, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_resp["result"]["indices_built"], true,
+        "knowledge_status should report indices_built: true after drop_lbug_wal recovery"
+    );
+}
+
+/// issue #297: knowledge_recover with rebuild_from_workspace_wal explicitly rebuilds indices
+/// (build_indices_and_constraints), and must set indices_built: true on success.
+#[tokio::test]
+async fn test_recovery_rebuild_from_workspace_wal() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+    let wal_dir = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(None),
+        degraded_reason: Arc::new(Mutex::new(Some("lbug_wal_corrupt".to_string()))),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink: sink as Arc<dyn TelemetrySink>,
+        db_path,
+        wal_dir: Some(wal_dir),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    });
+
+    let recover_resp = dispatch_val(
+        20,
+        "knowledge_recover",
+        json!({"strategy": "rebuild_from_workspace_wal"}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let result = &recover_resp["result"];
+    assert_eq!(
+        result["success"], true,
+        "rebuild_from_workspace_wal recovery should succeed: {result}"
+    );
+    assert!(
+        state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built should be true after successful rebuild_from_workspace_wal recovery"
+    );
+}
+
+/// issue #297: knowledge_recover with restore_from_backup reopens an existing, already-indexed
+/// backup file without rebuilding indices — indices_built must still become true on success.
+#[tokio::test]
+async fn test_recovery_restore_from_backup() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+
+    // Create a healthy DB first so we have valid bytes to use as the backup file.
+    {
+        let db = Db::open(&db_path).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+    }
+    let backup_path = format!("{}.pre-test-backup", db_path);
+    std::fs::copy(&db_path, &backup_path).unwrap();
+    // Simulate the live DB file being corrupt/missing so restore_from_backup has to act.
+    std::fs::remove_file(&db_path).unwrap();
+
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+    let state =
+        make_degraded_state_with_capture("lbug_wal_corrupt", db_path.clone(), Arc::clone(&sink));
+
+    let recover_resp = dispatch_val(
+        30,
+        "knowledge_recover",
+        json!({"strategy": "restore_from_backup"}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let result = &recover_resp["result"];
+    assert_eq!(
+        result["success"], true,
+        "restore_from_backup recovery should succeed: {result}"
+    );
+    assert!(
+        state
+            .indices_built
+            .load(std::sync::atomic::Ordering::Acquire),
+        "indices_built should be true after successful restore_from_backup recovery"
+    );
+}
+
+/// issue #297 edge case: a failed drop_lbug_wal call (no corrupt WAL to act on, and no live DB
+/// to reopen) must leave indices_built at its prior value rather than forcing it to false — the
+/// reopen-based strategies never touch indices, so a failure there says nothing about whether
+/// the previous state's indices were valid.
+#[tokio::test]
+async fn test_failed_drop_lbug_wal_leaves_indices_built_unchanged() {
+    for prior in [true, false] {
+        let dir = TempDir::new().unwrap();
+        // Nonexistent db_path with no parent dir on disk — Db::open should fail to reopen.
+        let db_path = dir
+            .path()
+            .join("missing")
+            .join("recovery.db")
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+        let state = make_degraded_state_with_capture(
+            "lbug_wal_corrupt",
+            db_path.clone(),
+            Arc::clone(&sink),
+        );
+        state
+            .indices_built
+            .store(prior, std::sync::atomic::Ordering::Release);
+
+        let recover_resp = dispatch_val(
+            40,
+            "knowledge_recover",
+            json!({"strategy": "drop_lbug_wal"}),
+            Arc::clone(&state),
+        )
+        .await;
+
+        let result = &recover_resp["result"];
+        assert_eq!(
+            result["success"], false,
+            "recovery should fail against a missing parent dir: {result}"
+        );
+        assert_eq!(
+            state
+                .indices_built
+                .load(std::sync::atomic::Ordering::Acquire),
+            prior,
+            "indices_built should remain unchanged ({prior}) after a failed drop_lbug_wal call"
+        );
+    }
+}
+
+/// CodeRabbit review finding on PR #302 (issue #297): drop_lbug_wal's premise is reopening an
+/// existing, already-indexed checkpoint. If the checkpoint file itself is missing — parent dir
+/// present, but no db file — Db::open has open-or-create semantics and would otherwise silently
+/// create a fresh, unindexed DB, which handle_knowledge_recover's shared success arm would then
+/// mislabel indices_built: true for. The strategy must fail instead of masking this as success,
+/// and indices_built must remain unchanged (matching the reopen-based failure regime).
+#[tokio::test]
+async fn test_failed_drop_lbug_wal_missing_checkpoint_leaves_indices_built_unchanged() {
+    for prior in [true, false] {
+        let dir = TempDir::new().unwrap();
+        // Parent dir exists, but no db file at db_path, and no .wal sibling either — there is no
+        // checkpoint to reopen.
+        let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+        let state = make_degraded_state_with_capture(
+            "lbug_wal_corrupt",
+            db_path.clone(),
+            Arc::clone(&sink),
+        );
+        state
+            .indices_built
+            .store(prior, std::sync::atomic::Ordering::Release);
+
+        let recover_resp = dispatch_val(
+            45,
+            "knowledge_recover",
+            json!({"strategy": "drop_lbug_wal"}),
+            Arc::clone(&state),
+        )
+        .await;
+
+        let result = &recover_resp["result"];
+        assert_eq!(
+            result["success"], false,
+            "recovery should fail when there is no checkpoint file to reopen: {result}"
+        );
+        assert!(
+            !std::path::Path::new(&db_path).exists(),
+            "drop_lbug_wal must not silently create a fresh DB file when no checkpoint exists"
+        );
+        assert_eq!(
+            state
+                .indices_built
+                .load(std::sync::atomic::Ordering::Acquire),
+            prior,
+            "indices_built should remain unchanged ({prior}) when no checkpoint exists to reopen"
+        );
+    }
+}
+
+/// issue #297 edge case: a failed restore_from_backup call (no backup file present) must leave
+/// indices_built at its prior value, matching drop_lbug_wal's failure-handling regime.
+#[tokio::test]
+async fn test_failed_restore_from_backup_leaves_indices_built_unchanged() {
+    for prior in [true, false] {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+        // No .pre-*-backup file exists in `dir`.
+
+        let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+        let state = make_degraded_state_with_capture(
+            "lbug_wal_corrupt",
+            db_path.clone(),
+            Arc::clone(&sink),
+        );
+        state
+            .indices_built
+            .store(prior, std::sync::atomic::Ordering::Release);
+
+        let recover_resp = dispatch_val(
+            50,
+            "knowledge_recover",
+            json!({"strategy": "restore_from_backup"}),
+            Arc::clone(&state),
+        )
+        .await;
+
+        let result = &recover_resp["result"];
+        assert_eq!(
+            result["success"], false,
+            "recovery should fail with no backup file present: {result}"
+        );
+        assert_eq!(
+            state.indices_built.load(std::sync::atomic::Ordering::Acquire),
+            prior,
+            "indices_built should remain unchanged ({prior}) after a failed restore_from_backup call"
+        );
+    }
 }
 
 /// Tests that knowledge_recover with an unknown strategy returns an error.
