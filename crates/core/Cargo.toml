@@ -40,7 +40,23 @@ name = "placeholder"
 harness = false
 
 [[bench]]
-name = "search"
+name = "dedup_overlap_check"
+harness = false
+
+[[bench]]
+name = "dedup_search"
+harness = false
+
+[[bench]]
+name = "dedup_50k"
+harness = false
+
+[[bench]]
+name = "name_lookup"
+harness = false
+
+[[bench]]
+name = "hybrid_search"
 harness = false
 
 [[bench]]
