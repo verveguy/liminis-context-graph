@@ -93,19 +93,30 @@ pub struct LexicalIndex {
     canonical_names: std::collections::HashSet<String>,
 }
 
-pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
+/// Builds the alias→canonical relation-type map: each canonical name maps to itself, and each
+/// declared alias maps to its canonical name. Shared by `build_lexical_index` (the offline
+/// `knowledge_canonicalize_relations` pass) and the ingest-time strict-mode filter in
+/// `episode.rs` (FR-001) — one map, two consumers, per ADR-0310.
+pub fn build_alias_map(ontology: &Ontology) -> HashMap<String, String> {
     let mut exact: HashMap<String, String> = HashMap::new();
-    let mut keywords: Vec<(String, String)> = Vec::new();
-    let mut canonical_names = std::collections::HashSet::new();
-
     for rt in &ontology.relation_types {
-        canonical_names.insert(rt.name.clone());
         // Canonical name maps to itself
         exact.insert(rt.name.clone(), rt.name.clone());
         // Aliases map to the canonical name
         for alias in &rt.aliases {
             exact.insert(alias.clone(), rt.name.clone());
         }
+    }
+    exact
+}
+
+pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
+    let exact = build_alias_map(ontology);
+    let mut keywords: Vec<(String, String)> = Vec::new();
+    let mut canonical_names = std::collections::HashSet::new();
+
+    for rt in &ontology.relation_types {
+        canonical_names.insert(rt.name.clone());
         // Keywords for substring matching
         for kw in &rt.keywords {
             keywords.push((kw.clone(), rt.name.clone()));
