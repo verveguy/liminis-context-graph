@@ -79,8 +79,10 @@ one classification mechanism instead of two divergent ones.
 ### 3. Missing-summary visibility via a dedicated telemetry event, not a repair pass
 
 `TelemetryEvent::EntitiesMissingSummary { ts_ms, model, chunk_key, entities_extracted,
-missing_summary }` is emitted from `OaiExtractor::do_extract_entities`'s success arm only
-(Anthropic can never produce this — SC-004), computed post-parse via
+missing_summary }` is emitted from `OaiExtractor::do_extract_entities`'s success arm only —
+Anthropic never emits it (SC-004), since only `OaiExtractor` calls this emit site (not because
+its tool_use schema forbids an empty `summary` string; `"required"` only guarantees the key is
+present, not that its value is non-empty). Computed post-parse via
 `entities.iter().filter(|e| e.summary.is_empty()).count()`. This mirrors the existing
 `ExtractionTruncated` pattern — a dedicated, lightweight event rather than a field bolted onto
 `StructuredOutputParse` (whose `outcome` is a closed pass/fail vocabulary, not a place for a

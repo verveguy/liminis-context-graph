@@ -257,7 +257,9 @@ pub struct BackendRunResult {
     /// chunk-level attribution lives solely in the `<cassette>.failures.jsonl` sidecar.
     pub truncated: TruncationCounts,
     /// #314 FR-004: aggregate missing-summary visibility for this candidate. Always zero for
-    /// the Anthropic path (SC-004: its tool_use schema structurally prevents an empty summary).
+    /// the Anthropic path (SC-004) — not because its tool_use schema forbids an empty `summary`
+    /// string (it only requires the key to be present), but because only `OaiExtractor` emits
+    /// the `EntitiesMissingSummary` telemetry this is tallied from.
     pub missing_summary: MissingSummaryCounts,
 }
 

@@ -109,11 +109,13 @@ pub enum TelemetryEvent {
         entities_extracted: Option<usize>,
     },
     /// Emitted by `OaiExtractor::do_extract_entities` on a successful parse (#314 FR-004) —
-    /// the Anthropic path can never produce this, since its `tool_use` schema's `"required":
-    /// ["name", "entity_type", "summary"]` structurally prevents an empty summary from reaching
-    /// this point. Surfaces the missing-summary rate as its own signal, separate from the
-    /// pass/fail classification in `StructuredOutputParse`/`ExtractionFailure`: an empty summary
-    /// is a degraded entity, not a failed extraction.
+    /// OAI-only because only `OaiExtractor` emits it; the Anthropic path never calls this. (Its
+    /// `tool_use` schema's `"required": ["name", "entity_type", "summary"]` only guarantees the
+    /// key is present, not that its value is non-empty, so this isn't a structural guarantee —
+    /// just a fact about which extractor emits the event.) Surfaces the missing-summary rate as
+    /// its own signal, separate from the pass/fail classification in
+    /// `StructuredOutputParse`/`ExtractionFailure`: an empty summary is a degraded entity, not a
+    /// failed extraction.
     EntitiesMissingSummary {
         ts_ms: u64,
         model: String,

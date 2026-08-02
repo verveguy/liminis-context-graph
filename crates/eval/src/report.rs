@@ -77,9 +77,11 @@ pub struct VocabularyComplianceReport {
 
 /// #314 FR-004: how often a candidate's entities arrived with no usable summary text (absent,
 /// `null`, or empty string — all indistinguishable after parsing). Always zero for the
-/// Anthropic path (SC-004: its tool_use schema structurally prevents an empty summary), so this
-/// is a signal specific to the OAI-compatible path. Independent of `StructuredOutputReliability`:
-/// a chunk can be entirely `clean` while some of its entities carry no summary.
+/// Anthropic path — not because its tool_use schema forbids an empty `summary` string (it only
+/// requires the key to be present), but because only `OaiExtractor` emits the
+/// `EntitiesMissingSummary` telemetry this report is built from (SC-004). Independent of
+/// `StructuredOutputReliability`: a chunk can be entirely `clean` while some of its entities
+/// carry no summary.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq)]
 pub struct MissingSummaryReport {
     pub entities_extracted: u64,
