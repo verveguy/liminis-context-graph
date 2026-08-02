@@ -101,6 +101,7 @@ async fn passthrough_dedup_adapter_always_returns_true() {
         name: "Alice".to_string(),
         entity_type: "Person".to_string(),
         summary: "Alice is a software engineer".to_string(),
+        original_entity_type: None,
     };
     let result = adapter.is_duplicate(&candidate, &incoming).await.unwrap();
     assert!(result, "PassthroughDedupAdapter should always return true");
