@@ -390,7 +390,7 @@ fn mcp_admin_data_operations_over_real_corpus_fixture() {
 
         let rebuild_resp = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us2-us4-full-rebuild",
             Duration::from_secs(600),
         );
@@ -511,7 +511,7 @@ fn mcp_admin_data_operations_over_real_corpus_fixture() {
 
         let rebuild_resp = client.call_tool_with_progress(
             "knowledge_rebuild_from_wal",
-            json!({}),
+            json!({"force_clear": true}),
             "us5-post-checkpoint-rebuild",
             Duration::from_secs(600),
         );
