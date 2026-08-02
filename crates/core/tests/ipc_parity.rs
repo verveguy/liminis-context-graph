@@ -795,6 +795,10 @@ async fn test_knowledge_process_chunk_ok() {
         "expected numeric edges_dropped_unresolvable: {v}"
     );
     assert!(
+        r["edges_reclassified_unclassified"].as_u64().is_some(),
+        "expected numeric edges_reclassified_unclassified (FR-005): {v}"
+    );
+    assert!(
         r["duration_seconds"].as_f64().is_some(),
         "expected numeric duration_seconds: {v}"
     );

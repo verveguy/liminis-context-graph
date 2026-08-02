@@ -58,6 +58,12 @@ fn build_entity_types_section(ontology: Option<&Ontology>) -> String {
     section
 }
 
+// FR-002/FR-003 (issue #310): under `strict` mode, this section also lists each relation
+// type's declared aliases/keywords and appends an instruction restricting the model to the
+// declared vocabulary — mirroring `build_entity_types_section`'s mode-aware pattern. Under
+// `open` mode, output is deliberately unchanged from before this issue: Acceptance Scenario 2
+// requires the open-mode rendering stay byte-identical, so the `Open` arm below is a no-op
+// rather than adding both-modes text like the entity-type section does (see ADR-0310).
 fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
     let onto = match ontology {
         Some(o) if o.has_relation_types() => o,
@@ -77,8 +83,24 @@ fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
         } else {
             section.push_str(&format!("- {}{}\n", rt.name, sig));
         }
+        if onto.mode == OntologyMode::Strict {
+            if !rt.aliases.is_empty() {
+                section.push_str(&format!("  Aliases: {}\n", rt.aliases.join(", ")));
+            }
+            if !rt.keywords.is_empty() {
+                section.push_str(&format!("  Keywords: {}\n", rt.keywords.join(", ")));
+            }
+        }
     }
     section.push_str("</FACT_TYPES>\n");
+    match onto.mode {
+        OntologyMode::Strict => section.push_str(
+            "Only use relation types from the list above. If a fact matches one of a listed \
+             type's aliases or keywords, use that type's canonical name, not the alias itself; \
+             do not invent or use relation types not in this list or its declared aliases.\n",
+        ),
+        OntologyMode::Open => {}
+    }
     section
 }
 
@@ -291,6 +313,102 @@ mod tests {
                 "{label}: must carry the specificity/Wikipedia-article test for concepts"
             );
         }
+    }
+
+    fn ontology_with_relation_types(mode: OntologyMode) -> Ontology {
+        Ontology {
+            mode,
+            entity_types: vec![],
+            relation_types: vec![
+                crate::ontology::RelationTypeDef {
+                    name: "LAUNCHED".to_string(),
+                    description: Some("One entity launched another".to_string()),
+                    source_type: None,
+                    target_type: None,
+                    aliases: vec!["LAUNCHED_BY".to_string(), "LAUNCHED_FROM".to_string()],
+                    keywords: vec!["launch".to_string()],
+                },
+                crate::ontology::RelationTypeDef {
+                    name: "USES".to_string(),
+                    description: None,
+                    source_type: None,
+                    target_type: None,
+                    aliases: vec![],
+                    keywords: vec![],
+                },
+            ],
+            ancestor_map: std::collections::HashMap::new(),
+        }
+    }
+
+    // SC-002/Acceptance Scenario 2: open-mode rendering is byte-identical to before this issue
+    // — no aliases/keywords, no mode-instruction sentence.
+    #[test]
+    fn open_mode_fact_types_section_unchanged() {
+        let onto = ontology_with_relation_types(OntologyMode::Open);
+        let prompt = edge_system_prompt(Some(&onto));
+        assert!(
+            !prompt.contains("Aliases:"),
+            "open mode must not list aliases: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Keywords:"),
+            "open mode must not list keywords: {prompt}"
+        );
+        assert!(
+            !prompt.contains("Only use relation types"),
+            "open mode must not add a vocabulary-restriction instruction: {prompt}"
+        );
+    }
+
+    // SC-002/Acceptance Scenario 1: strict-mode rendering differs from open-mode for the same
+    // ontology, and contains an explicit vocabulary-restriction instruction.
+    #[test]
+    fn strict_and_open_fact_types_sections_differ() {
+        let open_prompt =
+            edge_system_prompt(Some(&ontology_with_relation_types(OntologyMode::Open)));
+        let strict_prompt =
+            edge_system_prompt(Some(&ontology_with_relation_types(OntologyMode::Strict)));
+        assert_ne!(
+            open_prompt, strict_prompt,
+            "strict and open renderings must differ for the same ontology"
+        );
+        assert!(
+            strict_prompt.contains("Only use relation types"),
+            "strict mode must state the vocabulary-restriction instruction: {strict_prompt}"
+        );
+    }
+
+    // Acceptance Scenario 3: declared aliases/keywords are visible in the strict-mode rendering.
+    #[test]
+    fn strict_mode_exposes_aliases_and_keywords() {
+        let onto = ontology_with_relation_types(OntologyMode::Strict);
+        let prompt = edge_system_prompt(Some(&onto));
+        assert!(
+            prompt.contains("Aliases: LAUNCHED_BY, LAUNCHED_FROM"),
+            "strict mode must list LAUNCHED's aliases: {prompt}"
+        );
+        assert!(
+            prompt.contains("Keywords: launch"),
+            "strict mode must list LAUNCHED's keywords: {prompt}"
+        );
+    }
+
+    // Edge Case: a relation type with no declared aliases/keywords must not print empty
+    // "Aliases:"/"Keywords:" lines.
+    #[test]
+    fn strict_mode_omits_alias_keyword_lines_when_absent() {
+        let onto = ontology_with_relation_types(OntologyMode::Strict);
+        let prompt = edge_system_prompt(Some(&onto));
+        let uses_line_idx = prompt.find("- USES").expect("USES type must be listed");
+        let after_uses = &prompt[uses_line_idx..];
+        let next_line_end = after_uses.find('\n').unwrap_or(after_uses.len());
+        let following = &after_uses[next_line_end..];
+        assert!(
+            !following.trim_start().starts_with("Aliases:")
+                && !following.trim_start().starts_with("Keywords:"),
+            "USES has no declared aliases/keywords and must not print empty lines: {prompt}"
+        );
     }
 
     #[test]

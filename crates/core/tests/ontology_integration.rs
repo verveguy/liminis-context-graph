@@ -421,8 +421,8 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
         }],
         ancestor_map: HashMap::new(),
     };
-    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
-        ExtractionResult {
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
             entities: vec![
                 ExtractedEntity {
                     name: "Rocket".to_string(),
@@ -444,8 +444,7 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
                 invalid_at: None,
                 original_relation_type: None,
             }],
-        },
-    ]));
+        }]));
     let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
 
     let result = episode::add_episode(
@@ -515,8 +514,8 @@ async fn strict_mode_alias_case_variant_recognized() {
         }],
         ancestor_map: HashMap::new(),
     };
-    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
-        ExtractionResult {
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
             entities: vec![
                 ExtractedEntity {
                     name: "Rocket".to_string(),
@@ -538,8 +537,7 @@ async fn strict_mode_alias_case_variant_recognized() {
                 invalid_at: None,
                 original_relation_type: None,
             }],
-        },
-    ]));
+        }]));
     let state = make_state_with_extractor(db.clone(), Some(ontology), extractor);
 
     let result = episode::add_episode(
@@ -706,9 +704,11 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
             original_relation_type: None,
         },
     ];
-    let extractor: Arc<dyn Extractor> = Arc::new(ConfigurableExtractor::new(vec![
-        ExtractionResult { entities, edges },
-    ]));
+    let extractor: Arc<dyn Extractor> =
+        Arc::new(ConfigurableExtractor::new(vec![ExtractionResult {
+            entities,
+            edges,
+        }]));
     let state = make_state_with_extractor(db, Some(ontology), extractor);
 
     let result = episode::add_episode(
