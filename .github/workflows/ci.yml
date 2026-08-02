@@ -98,7 +98,16 @@ jobs:
     name: build lbug cache
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code_changed == 'true'
+    # `!cancelled()` overrides the default "skip if a dependency didn't succeed" behavior
+    # so this still runs when `changes` itself fails outright (e.g. a checkout infra
+    # failure) rather than just left its output unset. Without this, `needs.changes
+    # .outputs.code_changed == 'true'` would evaluate false on an unset output — skipping
+    # the Rust suite via a failed classifier job instead of running it, which would
+    # silently satisfy the required `test (ubuntu-latest)` check on a PR that was never
+    # actually classified. `needs.changes.result != 'success'` is the fail-safe: any
+    # non-success classifier outcome is treated as code-changed, same direction as the
+    # in-script fail-safe defaults in the `changes` job itself.
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     outputs:
       cache-hit: ${{ steps.lbug-cache.outputs.cache-hit }}
     steps:
@@ -143,7 +152,9 @@ jobs:
     # The `needs.build-lbug.result == 'success'` clause restates the implicit default
     # ("only run if build-lbug succeeded") that a custom `if:` would otherwise drop —
     # without it, `test` could attempt to run after a real `build-lbug` failure.
-    if: needs.changes.outputs.code_changed == 'true' && needs.build-lbug.result == 'success'
+    # `!cancelled()` + `needs.changes.result != 'success'` mirror build-lbug's fail-safe
+    # above, for the same reason: a failed `changes` job must not silently skip `test`.
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-lbug.result == 'success'"
     steps:
       - uses: actions/checkout@v4
 
