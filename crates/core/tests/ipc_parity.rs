@@ -1186,6 +1186,84 @@ async fn test_knowledge_process_chunk_replace_crosses_threshold() {
 }
 
 #[tokio::test]
+async fn test_knowledge_process_chunk_replace_crosses_threshold_reverse() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    // First ingest: an oversized, multi-unit split episode.
+    let big_text = "The quick brown fox jumps over the lazy dog. ".repeat(300);
+    let v1 = dispatch_val(
+        44,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": big_text,
+            "chunk_id": "shrinking-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 44);
+    let uuids1: Vec<String> = v1["result"]["episode_uuids"]
+        .as_array()
+        .expect("episode_uuids array")
+        .iter()
+        .map(|u| u.as_str().unwrap().to_string())
+        .collect();
+    assert!(uuids1.len() > 1, "expected a multi-unit split: {v1}");
+
+    // Resubmit the same chunk_id with now-below-threshold text: the split lineage must be
+    // fully replaced by a single fresh episode, not left alongside it (FR-006/FR-007 must
+    // hold symmetrically regardless of which direction the threshold is crossed).
+    let v2 = dispatch_val(
+        45,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "shrinking-chunk",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v2, 45);
+    assert!(
+        v2["result"].get("episode_uuids").is_none(),
+        "expected a singular episode_uuid, not a split shape: {v2}"
+    );
+    let uuid2 = v2["result"]["episode_uuid"].as_str().unwrap().to_string();
+    assert!(!uuids1.contains(&uuid2));
+    let mut replaced: Vec<String> = v2["result"]["replaced_uuids"]
+        .as_array()
+        .expect("replaced_uuids array")
+        .iter()
+        .map(|u| u.as_str().unwrap().to_string())
+        .collect();
+    replaced.sort();
+    let mut expected = uuids1.clone();
+    expected.sort();
+    assert_eq!(
+        replaced, expected,
+        "every unit of the prior split must be replaced: {v2}"
+    );
+
+    let del = dispatch_val(
+        46,
+        "knowledge_delete_chunk_episode",
+        json!({ "chunk_id": "shrinking-chunk" }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&del, 46);
+    assert_eq!(
+        del["result"]["deleted_count"], 1,
+        "delete must account for exactly the current (single) episode, not the replaced split units: {del}"
+    );
+}
+
+#[tokio::test]
 async fn test_knowledge_process_chunk_splits_oversized_text() {
     let (db, _dir) = make_db(4);
     let (state, sink) = make_state_with_capture_sink(Arc::clone(&db));

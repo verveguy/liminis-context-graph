@@ -336,6 +336,10 @@ naming what was deleted, on top of whatever shape the fresh ingest of the new te
     once the split loop finishes (the `chunk_id` then has exactly the surviving new units), but
     unlike the mid-split-extraction-failure case there is no reconstruction step re-run
     automatically afterward — the caller sees this only if it happens to read during the window.
+  - **The lookup-guard code comment now cross-links #288 directly** (raised in Validate-stage
+    review of PR #286, 2026-08-02), not just this ADR, so the caveat travels with the code at
+    `handlers.rs::handle_knowledge_process_chunk`'s lookup step rather than requiring a reader to
+    already know to check the ADR.
   - **Two concurrent resubmissions with different `chunk_text` (both taking the Replace path)**
     can both reconstruct the same prior state, both run their own fresh ingest, and both then
     delete the same prior UUIDs via `Db::remove_episodes_by_uuids` — the loser's delete is a

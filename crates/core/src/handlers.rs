@@ -504,17 +504,18 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
         };
     }
 
-    // `unit_count` here is scoped entirely to this reconstruction: it's read from whichever row
+    // `expected_n` here is scoped entirely to this reconstruction: it's read from whichever row
     // `get_episodes_by_chunk_id` happens to return first (iteration-order-dependent, not a
     // stable value), used only to drive the `consistent_n`/`complete_sequence` checks below, and
     // never returned from this function or exposed in a response/telemetry field. Any
     // inconsistency in what the rows actually report falls through to `Anomalous` regardless of
-    // which row was seen first. This is unrelated to the response-level `unit_count` field
-    // (`handle_knowledge_process_chunk`'s split branch, and `ChunkTextOversized` telemetry),
-    // which is always computed fresh from `chunk_split::split_into_units(..).len()`.
-    let unit_count = split_units[0].1;
-    let consistent_n = split_units.iter().all(|(_, n, _, _)| *n == unit_count);
-    if !consistent_n || split_units.len() != unit_count {
+    // which row was seen first. Deliberately named differently from the response-level
+    // `unit_count` field (`handle_knowledge_process_chunk`'s split branch, and
+    // `ChunkTextOversized` telemetry), which is always computed fresh from
+    // `chunk_split::split_into_units(..).len()` and is otherwise unrelated to this local value.
+    let expected_n = split_units[0].1;
+    let consistent_n = split_units.iter().all(|(_, n, _, _)| *n == expected_n);
+    if !consistent_n || split_units.len() != expected_n {
         return PriorState::Anomalous {
             uuids: family_uuids,
         };
@@ -523,7 +524,7 @@ fn reconstruct_prior_chunk_text(rows: Vec<(String, String, String)>, chunk_id: &
     split_units.sort_by_key(|(i, _, _, _)| *i);
     let mut seen = std::collections::HashSet::new();
     let all_unique = split_units.iter().all(|(i, _, _, _)| seen.insert(*i));
-    let complete_sequence = split_units.iter().map(|(i, _, _, _)| *i).eq(1..=unit_count);
+    let complete_sequence = split_units.iter().map(|(i, _, _, _)| *i).eq(1..=expected_n);
     if !all_unique || !complete_sequence {
         return PriorState::Anomalous {
             uuids: family_uuids,
@@ -664,6 +665,11 @@ async fn handle_knowledge_process_chunk(
     // a pure query); the write lock is acquired only if a replace turns out to be necessary, so
     // a resubmission that no-ops (the common retry case) never blocks concurrent ingestion of
     // unrelated chunk_ids behind an exclusive lock.
+    //
+    // KNOWN LIMITATION (see ADR-0284, tracked in #288): this read guard is dropped below, before
+    // the fresh ingest runs. Two callers racing on the same chunk_id — including two first-time
+    // submissions — can both observe the same prior_state and both proceed to insert, producing
+    // duplicate/divergent episodes until a later resubmission self-heals via the Anomalous path.
     let db_for_lookup = load_db(&state)?;
     let chunk_id_lookup = chunk_id.clone();
     let group_id_lookup = group_id.clone();
