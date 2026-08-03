@@ -12,7 +12,7 @@ name: Real-Corpus E2E
 # Per #328: these five jobs also now run in parallel on code-touching PRs (gated by the
 # same shared classifier ci.yml uses, see the `changes` job below), reporting but not
 # gating — the suite's own wall clock (~9 min) finishes well before the required `test
-# (ubuntu-latest)` check (~17-20 min), so this is measured to add zero latency to a PR's
+# (ubuntu-latest)` check (~17-20 min), so this is expected to add zero latency to a PR's
 # time-to-mergeable. See docs/adr/0328-real-corpus-e2e-on-pr-path.md for the full
 # rationale, the cache-race analysis, and the promotion-to-required criteria.
 #
@@ -29,6 +29,9 @@ concurrency:
   group: real-corpus-e2e-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   LBUG_CACHE_BUST: "2026-07-13"
 
@@ -39,13 +42,22 @@ jobs:
   # maintained copies (FR-003/SC-005). The extra-deny-pattern below additionally treats
   # a change to the golden real-corpus WAL fixture as code-relevant even though its
   # files (.json/.jsonl/.yaml) don't match the base pattern (Edge Cases).
+  # Scoped to `pull_request` only: the composite action always short-circuits to
+  # code_changed=true for any other event (push/workflow_dispatch), so running it there
+  # would just add a checkout + action invocation for no behavioral benefit. The five
+  # e2e jobs' existing fail-safe `if:` (`needs.changes.result != 'success' || ...`)
+  # already treats a skipped `changes` job the same as a non-code-changed-classified
+  # one — defaulting to "run" — so skipping this job on non-PR events is safe.
   changes:
     name: classify changes
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     outputs:
       code_changed: ${{ steps.classify.outputs.code_changed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Classify diff (docs-only vs code-touching)
         id: classify
@@ -63,6 +75,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -99,6 +113,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -139,6 +155,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -181,6 +199,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -223,6 +243,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 

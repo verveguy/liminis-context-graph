@@ -17,6 +17,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   # Bump this date to manually bust the lbug C++ build cache (e.g., if a cache entry is corrupted).
   # Incrementing this invalidates ALL existing lbug cache entries across all branches.
@@ -41,6 +44,8 @@ jobs:
       code_changed: ${{ steps.classify.outputs.code_changed }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Classify diff (docs-only vs code-touching)
         id: classify
@@ -64,6 +69,8 @@ jobs:
       cache-hit: ${{ steps.lbug-cache.outputs.cache-hit }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -109,6 +116,8 @@ jobs:
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-lbug.result == 'success'"
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
         with:
