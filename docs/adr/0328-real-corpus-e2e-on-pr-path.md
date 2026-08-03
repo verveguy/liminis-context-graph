@@ -138,10 +138,21 @@ open-ended "revisit later" that a permanently non-required check tends to become
   default `types:` (opened/synchronize/reopened) excludes `closed`, so merging a PR does
   not re-trigger `real-corpus-e2e.yml` a second time — only the unchanged
   `push: branches: [main]` trigger fires post-merge.
-- `ci-failure-notify.yml` (#298)'s `workflow_run` listener already guards its `notify`
-  job with `if: github.event.workflow_run.head_branch == 'main'`; a PR-path e2e failure
-  does not file or update a tracking issue, exactly as before this change. No code
-  change was needed for this.
+- `ci-failure-notify.yml` (#298)'s `workflow_run` listener guards its `notify` job on
+  `head_branch == 'main'`. Adding a `pull_request` trigger to `real-corpus-e2e.yml`
+  makes that guard alone unreliable: `head_branch` isn't namespaced by repository, so
+  a *fork* PR whose own branch happens to be named "main" (a common default branch
+  name) would report `head_branch == 'main'` on a `pull_request`-triggered run, even
+  though it's a PR-path run against the fork's main, not a push to this repo's main.
+  Fixed by also requiring `github.event.workflow_run.event != 'pull_request'` — this
+  preserves the existing push-to-main and workflow_dispatch-against-main cases the
+  guard was written for, while excluding every `pull_request`-triggered run
+  regardless of its reported `head_branch`.
+- Five additional full `cargo build --release` jobs now run per code-touching PR push
+  (previously only on push-to-main/dispatch), a real recurring increase in Actions
+  minutes consumed. Per the issue's own framing, this carries no billing cost (the
+  repo is public, so Actions minutes are free) and reducing the suite's runtime is
+  explicitly out of scope for this issue — an accepted tradeoff, not an oversight.
 - `ci.yml`'s `changes` job now delegates to the shared composite action instead of
   inlining the script; its behavior (outputs, fail-safe paths) is unchanged — confirmed
   during PR #329's Review stage, where both workflows' `changes` jobs classified that
