@@ -9,14 +9,20 @@ name: Real-Corpus E2E
 # only ~5 min of that job; the ~15-18 min total predating #316 was dominated by a Criterion
 # bench-harness footgun in the R-003 gate, since fixed — see ADR-0316.)
 #
-# But an un-run test rots, so per review discussion on #217 (matching the bench.yml
-# precedent of gating expensive-but-important checks out of the PR path while still running
-# them automatically somewhere): this workflow runs the ignored tests on every push to main
-# (post-merge verification, before a regression reaches a release) and supports
-# workflow_dispatch for manual runs during development.
+# Per #328: these five jobs also now run in parallel on code-touching PRs (gated by the
+# same shared classifier ci.yml uses, see the `changes` job below), reporting but not
+# gating — the suite's own wall clock (~9 min) finishes well before the required `test
+# (ubuntu-latest)` check (~17-20 min), so this is measured to add zero latency to a PR's
+# time-to-mergeable. See docs/adr/0328-real-corpus-e2e-on-pr-path.md for the full
+# rationale, the cache-race analysis, and the promotion-to-required criteria.
+#
+# This still runs on every push to main (post-merge verification, before a regression
+# reaches a release) and supports workflow_dispatch for manual runs during development —
+# both unchanged from before #328.
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -27,9 +33,34 @@ env:
   LBUG_CACHE_BUST: "2026-07-13"
 
 jobs:
+  # Shared classifier (see docs/adr/0322-ci-docs-only-fast-path.md,
+  # docs/adr/0328-real-corpus-e2e-on-pr-path.md) — same composite action ci.yml's
+  # `changes` job calls, so there is exactly one deny-list, not two independently
+  # maintained copies (FR-003/SC-005). The extra-deny-pattern below additionally treats
+  # a change to the golden real-corpus WAL fixture as code-relevant even though its
+  # files (.json/.jsonl/.yaml) don't match the base pattern (Edge Cases).
+  changes:
+    name: classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      code_changed: ${{ steps.classify.outputs.code_changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Classify diff (docs-only vs code-touching)
+        id: classify
+        uses: ./.github/actions/classify-changes
+        with:
+          extra-deny-pattern: "^crates/core/tests/fixtures/real_corpus_wal/"
+
   real-corpus-e2e:
     name: real_corpus_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: changes
+    # Same fail-safe pattern as ci.yml's build-lbug/test: a failed `changes` job (not
+    # just a code_changed=false result) must never silently skip this — see
+    # docs/adr/0322-ci-docs-only-fast-path.md Decision 3.
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
 
@@ -64,6 +95,8 @@ jobs:
   mcp-real-corpus-e2e:
     name: mcp_real_corpus_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
 
@@ -102,6 +135,8 @@ jobs:
   mcp-write-mutation-e2e:
     name: mcp_real_corpus_mutation_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
 
@@ -142,6 +177,8 @@ jobs:
   mcp-admin-data-e2e:
     name: mcp_real_corpus_admin_data_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
 
@@ -182,6 +219,8 @@ jobs:
   mcp-admin-lifecycle-e2e:
     name: mcp_real_corpus_admin_lifecycle_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
+    needs: changes
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
     steps:
       - uses: actions/checkout@v4
 
