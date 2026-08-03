@@ -501,8 +501,12 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Reclassify relation types via the configured extraction LLM, using \
                            each edge's fact against the ontology's declared relation types. \
                            Honestly abstains to UNCLASSIFIED rather than force-assigning the \
-                           nearest type. Supports MCP progress notifications when called with a \
-                           progress token.",
+                           nearest type. Both the dry-run (`would_reclassify_count`, `plan`) and \
+                           apply (`reclassified_count`, `unchanged_count`) responses include a \
+                           `breakdown` object mapping each relation type (including UNCLASSIFIED) \
+                           to the count of relations written that type, so callers can see \
+                           classification quality without a second dry-run pass. Supports MCP \
+                           progress notifications when called with a progress token.",
             scope: Scope::Write,
             input_schema: || {
                 json!({

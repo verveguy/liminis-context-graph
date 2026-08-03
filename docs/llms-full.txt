@@ -530,6 +530,12 @@ genuine fact-based classification instead of lexical matching or pseudo-typing:
 - **`dry_run: true`** returns `would_reclassify_count`, a `plan` array of per-edge
   `{edge_id, fact, old_type, new_type}` entries, and a `breakdown` object counting edges per
   assigned `new_type` (including an `UNCLASSIFIED` count) — without mutating the graph.
+- **`dry_run: false` (apply)** returns `reclassified_count`, `unchanged_count`, and — since
+  issue #332 — the same `breakdown` object as the dry-run path, so callers can see the per-type
+  classification distribution (including how many candidates abstained to `UNCLASSIFIED`)
+  without a separate dry-run call. `plan` and `would_reclassify_count` remain dry-run-only, since
+  they describe a proposed mutation rather than one that already happened; `breakdown` is always
+  present on a successful apply response, as `{}` when there were zero in-scope candidates.
 
 ### Progress notifications
 
