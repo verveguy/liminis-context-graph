@@ -12,7 +12,7 @@ use crate::{
     backfill, canonicalize, corrections,
     db::Db,
     episode,
-    error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
+    error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
     ipc::{IpcRequest, IpcResponse},
     ontology_sidecar,
     rebuild_job::{JobStatus, RebuildJob},
@@ -200,19 +200,37 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
     }
 }
 
-/// Aggregated counts + WAL metadata gathered inside one blocking task.
-type StatusFields = (
-    u64,
-    u64,
-    u64,
-    bool,
-    u64,
-    u64,
-    Option<String>,
-    Option<String>,
-    bool,
-    u64,
-);
+/// Aggregated counts + WAL metadata gathered inside one blocking task, for the healthy
+/// (graph queryable) case.
+struct StatusFields {
+    entity_count: u64,
+    episode_count: u64,
+    edge_count: u64,
+    wal_exists: bool,
+    wal_file_count: u64,
+    wal_byte_size: u64,
+    last_index_time: Option<String>,
+    index_created_at: Option<String>,
+    name_index_trusted: bool,
+    name_index_fallback_scans: u64,
+}
+
+/// Outcome of the status-gathering blocking task: either the graph is open and every
+/// table-touching query succeeded, or a core table (e.g. `Entity`) is missing and the graph is
+/// open-but-not-queryable — a second degraded state distinct from ADR-0009's "DB never opened"
+/// (see ADR-0325). WAL metadata and the in-memory name-index counters don't depend on the
+/// broken table, so both outcomes carry them.
+enum StatusOutcome {
+    Queryable(StatusFields),
+    NotQueryable {
+        reason: String,
+        wal_exists: bool,
+        wal_file_count: u64,
+        wal_byte_size: u64,
+        name_index_trusted: bool,
+        name_index_fallback_scans: u64,
+    },
+}
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let ontology_summary = {
@@ -264,6 +282,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "reason": reason,
             "context_graph_initialized": false,
             "connected": false,
+            "queryable": false,
             "initializing": false,
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
@@ -279,68 +298,128 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let wal_dir = state.wal_dir.clone();
 
     let _guard = state.write_lock.read().await;
-    let (
-        entity_count,
-        episode_count,
-        edge_count,
-        wal_exists,
-        wal_file_count,
-        wal_byte_size,
-        last_index_time,
-        index_created_at,
-        name_index_trusted,
-        name_index_fallback_scans,
-    ) = tokio::task::spawn_blocking(move || -> Result<StatusFields, crate::error::Error> {
-        let conn = db.connect()?;
-        let entity_count = conn.count_nodes("Entity")?;
-        let episode_count = conn.count_nodes("Episodic")?;
-        let edge_count = conn.count_relates_to_edges()?;
-        let last_index_time = conn.get_latest_episode_time()?;
-        let index_created_at = conn.get_earliest_episode_time()?;
-        let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
-        let name_index_trusted = conn.name_index_trusted();
-        let name_index_fallback_scans = conn.name_index_fallback_scan_count();
-        Ok((
-            entity_count,
-            episode_count,
-            edge_count,
-            wal_exists,
-            wal_file_count,
-            wal_byte_size,
-            last_index_time,
-            index_created_at,
-            name_index_trusted,
-            name_index_fallback_scans,
-        ))
-    })
-    .await??;
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
+            let conn = db.connect()?;
+            let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+            let name_index_trusted = conn.name_index_trusted();
+            let name_index_fallback_scans = conn.name_index_fallback_scan_count();
+
+            // Only the table-touching queries below can hit "table does not exist" (FR-001); the
+            // WAL scan and name-index counters above are in-memory/filesystem and always succeed.
+            let table_result: Result<_, crate::error::Error> = (|| {
+                let entity_count = conn.count_nodes("Entity")?;
+                let episode_count = conn.count_nodes("Episodic")?;
+                let edge_count = conn.count_relates_to_edges()?;
+                let last_index_time = conn.get_latest_episode_time()?;
+                let index_created_at = conn.get_earliest_episode_time()?;
+                Ok((
+                    entity_count,
+                    episode_count,
+                    edge_count,
+                    last_index_time,
+                    index_created_at,
+                ))
+            })();
+
+            match table_result {
+                Ok((
+                    entity_count,
+                    episode_count,
+                    edge_count,
+                    last_index_time,
+                    index_created_at,
+                )) => Ok(StatusOutcome::Queryable(StatusFields {
+                    entity_count,
+                    episode_count,
+                    edge_count,
+                    wal_exists,
+                    wal_file_count,
+                    wal_byte_size,
+                    last_index_time,
+                    index_created_at,
+                    name_index_trusted,
+                    name_index_fallback_scans,
+                })),
+                // A missing core table means the graph is open but not queryable — degrade to a
+                // status response (FR-001) rather than propagating (see ADR-0325). Any other error
+                // (a genuinely different query failure) still propagates via `?` below (FR-006).
+                Err(e) if is_missing_table_error(&e) => Ok(StatusOutcome::NotQueryable {
+                    reason: e.to_string(),
+                    wal_exists,
+                    wal_file_count,
+                    wal_byte_size,
+                    name_index_trusted,
+                    name_index_fallback_scans,
+                }),
+                Err(e) => Err(e),
+            }
+        })
+        .await??;
     drop(_guard);
 
     // startup sequence (Db::open → init_schema → bind socket) completes before any request
     // can arrive, so these lifecycle values are always true/true/false at handler time
-    let mut result = json!({
-        "database_path": db_path,
-        "embedding_model": embedding_model,
-        "embedding_dim": embedding_dim,
-        "entity_count": entity_count,
-        "relationship_count": edge_count,
-        "episode_count": episode_count,
-        "last_index_time": last_index_time,
-        "context_graph_initialized": true,
-        "connected": true,
-        "initializing": false,
-        "wal": {
-            "exists": wal_exists,
-            "file_count": wal_file_count,
-            "byte_size": wal_byte_size,
-        },
-        "indices_built": state.indices_built.load(Ordering::Acquire),
-        "name_index_trusted": name_index_trusted,
-        "name_index_fallback_scans": name_index_fallback_scans,
-    });
-    if let Some(t) = index_created_at {
-        result["index_created_at"] = json!(t);
-    }
+    let mut result = match outcome {
+        StatusOutcome::Queryable(fields) => {
+            let mut result = json!({
+                "database_path": db_path,
+                "embedding_model": embedding_model,
+                "embedding_dim": embedding_dim,
+                "entity_count": fields.entity_count,
+                "relationship_count": fields.edge_count,
+                "episode_count": fields.episode_count,
+                "last_index_time": fields.last_index_time,
+                "context_graph_initialized": true,
+                "connected": true,
+                "queryable": true,
+                "initializing": false,
+                "wal": {
+                    "exists": fields.wal_exists,
+                    "file_count": fields.wal_file_count,
+                    "byte_size": fields.wal_byte_size,
+                },
+                "indices_built": state.indices_built.load(Ordering::Acquire),
+                "name_index_trusted": fields.name_index_trusted,
+                "name_index_fallback_scans": fields.name_index_fallback_scans,
+            });
+            if let Some(t) = fields.index_created_at {
+                result["index_created_at"] = json!(t);
+            }
+            result
+        }
+        StatusOutcome::NotQueryable {
+            reason,
+            wal_exists,
+            wal_file_count,
+            wal_byte_size,
+            name_index_trusted,
+            name_index_fallback_scans,
+        } => json!({
+            "database_path": db_path,
+            "embedding_model": embedding_model,
+            "embedding_dim": embedding_dim,
+            // Counts are null, not 0, so a broken graph can never be mistaken for an empty one
+            // (FR-003) — a genuinely empty graph reports 0 via the Queryable branch above.
+            "entity_count": null,
+            "relationship_count": null,
+            "episode_count": null,
+            "last_index_time": null,
+            "context_graph_initialized": true,
+            "connected": true,
+            "queryable": false,
+            "reason": reason,
+            "initializing": false,
+            "wal": {
+                "exists": wal_exists,
+                "file_count": wal_file_count,
+                "byte_size": wal_byte_size,
+            },
+            "indices_built": state.indices_built.load(Ordering::Acquire),
+            "name_index_trusted": name_index_trusted,
+            "name_index_fallback_scans": name_index_fallback_scans,
+        }),
+    };
     result["ontology"] = ontology_summary;
     Ok(result)
 }

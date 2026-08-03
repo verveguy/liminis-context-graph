@@ -85,3 +85,15 @@ pub fn is_already_exists_error(err: &Error) -> bool {
     let s = err.to_string();
     s.contains("Binder exception:") && s.contains("already exists in table")
 }
+
+/// True if `err` is lbug's "table does not exist" binder exception, raised when a query
+/// references a node/rel label that isn't present in the schema (e.g. `Entity` renamed or
+/// dropped out from under an otherwise-open database). Used by `handle_knowledge_status`
+/// (issue #325) to distinguish "graph open but a core table is broken" — which must degrade to
+/// a status response — from any other query failure, which must still propagate (FR-006).
+/// Textually disjoint from [`is_missing_index_error`] ("doesn't have an index with name") and
+/// [`is_already_exists_error`] ("already exists in table").
+pub fn is_missing_table_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("Binder exception:") && s.contains("Table ") && s.contains("does not exist")
+}

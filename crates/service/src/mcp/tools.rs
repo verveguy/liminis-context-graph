@@ -48,7 +48,11 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
                            embedding config, WAL state, ontology summary, and whether search \
-                           indices are built.",
+                           indices are built. Always returns a status object, never a JSON-RPC \
+                           error, even when the database is open but a core table is broken — \
+                           check the `queryable` field (and `reason` when false) to distinguish \
+                           that state from a genuinely empty graph, whose counts read as 0 \
+                           rather than null.",
             scope: Scope::Read,
             input_schema: empty_schema,
         },
