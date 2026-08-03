@@ -81,7 +81,7 @@ The maintainer works in git worktrees and never commits directly to `main`. See 
 
 ### CI failure issues
 
-If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md).
+If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md). (`real-corpus-e2e` also now runs on the PR path as a non-required check — see [ADR-0328](docs/adr/0328-real-corpus-e2e-on-pr-path.md) — but this notifier only ever fires for its post-merge run on `main`.)
 
 ## Release runbook (maintainers)
 
@@ -90,9 +90,11 @@ release from it and **requires the pushed tag to match that version**, so the bu
 must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
 never commit release prep directly to `main` — then tag the merge commit.
 
-0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, and `eval` run outside the
+0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, and `eval` are not part of the
    required PR gate (deliberately, for cost reasons) and can go silently red for days — see
-   [ADR-0298](docs/adr/0298-ci-failure-notification.md). Run
+   [ADR-0298](docs/adr/0298-ci-failure-notification.md). (`real-corpus-e2e` also runs, non-gating,
+   on the PR path per [ADR-0328](docs/adr/0328-real-corpus-e2e-on-pr-path.md); `bench` and `eval`
+   still don't.) Run
    `gh issue list --label ci-failure --state open` before proceeding. If it's empty, continue. If
    it isn't, either fix the underlying failure first or record in the release PR why the release
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
