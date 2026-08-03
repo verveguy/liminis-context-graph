@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
@@ -805,6 +805,40 @@ async fn test_knowledge_status_missing_entity_table_reports_not_queryable() {
     assert_eq!(
         r["indices_built"], false,
         "expected indices_built:false: {v}"
+    );
+}
+
+/// Regression for issue #325 FR-002: `indices_built` must report `false` while a core table is
+/// missing even if it was `true` *before* the table broke and no intervening
+/// `knowledge_build_indices` call has stored a fresh `false` — otherwise a caller could see
+/// `queryable:false` alongside a stale `indices_built:true`, the same class of staleness bug
+/// #297 fixed for a different code path.
+#[tokio::test]
+async fn test_knowledge_status_missing_entity_table_forces_indices_built_false() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    state.indices_built.store(true, Ordering::Release);
+
+    let rename_away = dispatch_val(
+        32,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Entity RENAME TO EntityTmp"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rename_away, 32);
+
+    let v = dispatch_val(33, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 33);
+    let r = &v["result"];
+    assert_eq!(
+        r["queryable"], false,
+        "expected queryable:false while Entity is renamed away: {v}"
+    );
+    assert_eq!(
+        r["indices_built"], false,
+        "expected indices_built:false even though the atomic was pre-set true, since indices \
+         on a missing table are meaningless: {v}"
     );
 }
 

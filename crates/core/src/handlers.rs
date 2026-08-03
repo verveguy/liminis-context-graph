@@ -415,7 +415,13 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "file_count": wal_file_count,
                 "byte_size": wal_byte_size,
             },
-            "indices_built": state.indices_built.load(Ordering::Acquire),
+            // Forced false rather than reading the live atomic (FR-002): if the core table is
+            // missing, any index built against it is meaningless, regardless of whether a
+            // `knowledge_build_indices` call has run since the table broke to store `false`
+            // itself. Reading the atomic here would let a stale `true` from before the table
+            // went missing leak into a `queryable:false` response — the same class of staleness
+            // bug #297 fixed for a different code path.
+            "indices_built": false,
             "name_index_trusted": name_index_trusted,
             "name_index_fallback_scans": name_index_fallback_scans,
         }),

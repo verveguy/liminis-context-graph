@@ -75,11 +75,16 @@ The not-queryable branch reuses the existing `reason` field name (already used b
 DB-not-open branch) rather than inventing a second field, so a caller already handling degraded
 `reason` gets the new state for free.
 
-`indices_built` needed no independent fix: `handle_build_indices` already stores the real
-`build_result.is_ok()` into `state.indices_built` *before* propagating its own error, and
-`handle_knowledge_status` already reads that atomic on every branch. Once the handler stops
-hard-erroring, the correct `false` (set by the preceding failed `knowledge_build_indices` call)
-surfaces on its own.
+`indices_built` is forced to a literal `false` in the not-queryable branch, rather than read from
+the live atomic as in the healthy branch. `handle_build_indices` already stores the real
+`build_result.is_ok()` into `state.indices_built` before propagating its own error, so in the
+sequence this issue's repro exercises (a failed `knowledge_build_indices` call precedes
+`knowledge_status`) the atomic already reads `false` on its own. But `knowledge_status` can be
+called directly after a table breaks, without an intervening failed build call — if indices were
+built successfully *before* the table went missing, the atomic would still read stale `true`. That
+is the exact class of staleness bug #297 already fixed once for a different code path; forcing the
+literal here (instead of trusting the atomic) closes it for this one too, since indices on a
+missing table are meaningless regardless of what was last recorded.
 
 Nothing is cached: like every other field this handler already reports, `queryable` is derived
 per-request from the live query result, not stored in `AppState`. Renaming the table back and
@@ -100,7 +105,7 @@ calling `knowledge_status` again immediately reports `queryable: true` with no i
 
 ### Negative / Residual risks
 
-- **Scope is deliberately limited to `knowledge_status`.** Research's FR-005 audit found 7 other
+- **Scope is deliberately limited to `knowledge_status`.** Research's FR-005 audit found 10 other
   read-side handlers (`knowledge_find_entities`, `knowledge_find_relationships`,
   `knowledge_search_passages`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`,
   `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`,
