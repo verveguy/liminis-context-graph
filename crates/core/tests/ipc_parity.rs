@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio_util::sync::CancellationToken;
@@ -750,6 +750,160 @@ async fn test_knowledge_status_counts() {
         iso8601.is_match(ica),
         "expected index_created_at to be ISO 8601 UTC, got: {ica}"
     );
+}
+
+/// Regression for issue #325: `knowledge_status` must degrade to a status response, not a
+/// JSON-RPC error, when a core table (`Entity`) is missing on an otherwise-open database
+/// (FR-001). `indices_built` must report `false` (FR-002), and counts must be `null` — not
+/// `0` — so the caller can never mistake a broken graph for an empty one (FR-003).
+#[tokio::test]
+async fn test_knowledge_status_missing_entity_table_reports_not_queryable() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+
+    let rename_away = dispatch_val(
+        24,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Entity RENAME TO EntityTmp"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rename_away, 24);
+
+    let v = dispatch_val(25, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 25);
+    let r = &v["result"];
+    assert_eq!(
+        r["queryable"], false,
+        "expected queryable:false while Entity is renamed away: {v}"
+    );
+    assert_eq!(r["connected"], true, "expected connected:true: {v}");
+    assert_eq!(
+        r["context_graph_initialized"], true,
+        "expected context_graph_initialized:true: {v}"
+    );
+    assert!(
+        r["entity_count"].is_null(),
+        "expected entity_count:null, not 0, so a broken graph can't be mistaken for an \
+         empty one: {v}"
+    );
+    assert!(
+        r["relationship_count"].is_null(),
+        "expected relationship_count:null: {v}"
+    );
+    assert!(
+        r["episode_count"].is_null(),
+        "expected episode_count:null: {v}"
+    );
+    assert!(
+        r["reason"]
+            .as_str()
+            .map(|s| s.contains("Entity"))
+            .unwrap_or(false),
+        "expected reason to mention the missing table: {v}"
+    );
+    assert_eq!(
+        r["indices_built"], false,
+        "expected indices_built:false: {v}"
+    );
+}
+
+/// Regression for issue #325 FR-002: `indices_built` must report `false` while a core table is
+/// missing even if it was `true` *before* the table broke and no intervening
+/// `knowledge_build_indices` call has stored a fresh `false` — otherwise a caller could see
+/// `queryable:false` alongside a stale `indices_built:true`, the same class of staleness bug
+/// #297 fixed for a different code path.
+#[tokio::test]
+async fn test_knowledge_status_missing_entity_table_forces_indices_built_false() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    state.indices_built.store(true, Ordering::Release);
+
+    let rename_away = dispatch_val(
+        32,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Entity RENAME TO EntityTmp"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rename_away, 32);
+
+    let v = dispatch_val(33, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 33);
+    let r = &v["result"];
+    assert_eq!(
+        r["queryable"], false,
+        "expected queryable:false while Entity is renamed away: {v}"
+    );
+    assert_eq!(
+        r["indices_built"], false,
+        "expected indices_built:false even though the atomic was pre-set true, since indices \
+         on a missing table are meaningless: {v}"
+    );
+}
+
+/// Regression for issue #325 Edge Cases: no caching of schema state must survive a rename-back
+/// — `knowledge_status` re-queries live every call, so restoring the table must self-heal the
+/// very next status call without any extra invalidation step.
+#[tokio::test]
+async fn test_knowledge_status_rename_back_self_heals() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+
+    dispatch_val(
+        26,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Entity RENAME TO EntityTmp"}),
+        Arc::clone(&state),
+    )
+    .await;
+    let broken = dispatch_val(27, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        broken["result"]["queryable"], false,
+        "expected queryable:false immediately after rename: {broken}"
+    );
+
+    let rename_back = dispatch_val(
+        28,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE EntityTmp RENAME TO Entity"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rename_back, 28);
+
+    let healed = dispatch_val(29, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&healed, 29);
+    let r = &healed["result"];
+    assert_eq!(
+        r["queryable"], true,
+        "expected queryable:true after rename-back: {healed}"
+    );
+    assert_eq!(
+        r["entity_count"], 0,
+        "expected entity_count:0 (numeric, not null) after rename-back: {healed}"
+    );
+}
+
+/// Regression for issue #325 FR-006 (SC-003): a query failure for a reason *other* than a
+/// missing table must still surface as a genuine JSON-RPC error, proving the missing-table
+/// classifier doesn't mask unrelated failures.
+#[tokio::test]
+async fn test_knowledge_status_other_query_failure_still_errors() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+
+    let drop_col = dispatch_val(
+        31,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Episodic DROP created_at"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&drop_col, 31);
+
+    let v = dispatch_val(32, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_err_resp(&v, 32, -32000);
 }
 
 // ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────

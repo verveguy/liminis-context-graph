@@ -2520,6 +2520,73 @@ mod fts_missing_index_tests {
 }
 
 #[cfg(test)]
+mod missing_table_error_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Regression guard for issue #325: `count_nodes` against a label whose table doesn't exist
+    /// (schema never initialized) must classify as `is_missing_table_error`, and must not be
+    /// misclassified as either of the other two `Binder exception:` classifiers.
+    #[test]
+    fn missing_table_error_matches_binder_exception() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("missing_table_probe.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        // No init_schema() — the Entity table doesn't exist.
+        let err = conn
+            .count_nodes("Entity")
+            .expect_err("should fail with missing table");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Binder exception:") && msg.contains("does not exist"),
+            "missing-table error must match the expected binder exception pattern — got: {msg}"
+        );
+        assert!(
+            crate::error::is_missing_table_error(&err),
+            "is_missing_table_error must classify a genuine missing-table error: {msg}"
+        );
+        assert!(
+            !crate::error::is_missing_index_error(&err),
+            "missing-table error must not be misclassified as missing-index: {msg}"
+        );
+        assert!(
+            !crate::error::is_already_exists_error(&err),
+            "missing-table error must not be misclassified as already-exists: {msg}"
+        );
+    }
+
+    /// The other two `Binder exception:` classifiers must not misclassify their own errors as
+    /// missing-table, keeping all three variants textually disjoint.
+    #[test]
+    fn missing_index_error_is_not_misclassified_as_missing_table() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("fts_vs_table_probe.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        crate::schema::drop_fts_indexes(&conn);
+        conn.insert_entity(&crate::EntityRow {
+            uuid: "missing-table-probe-1".to_string(),
+            name: "MissingTableProbeEntity".to_string(),
+            group_id: "g".to_string(),
+            labels: vec![],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0f32; 4],
+            summary: "probe".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        let err = conn
+            .fts_search_entities("probe", &["g"], 5)
+            .expect_err("should fail with missing FTS index");
+        assert!(
+            !crate::error::is_missing_table_error(&err),
+            "missing-index error must not be misclassified as missing-table: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod create_vector_indexes_tests {
     use super::*;
     use tempfile::TempDir;
