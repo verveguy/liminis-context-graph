@@ -1,0 +1,111 @@
+name: Classify changes
+description: >
+  Classifies a PR diff as docs-only or code-touching, so callers can skip
+  expensive jobs on docs-only PRs. Single source of truth shared by
+  ci.yml and real-corpus-e2e.yml — see docs/adr/0322-ci-docs-only-fast-path.md
+  and docs/adr/0328-real-corpus-e2e-on-pr-path.md. Fail-safe by construction:
+  every early return below defaults to code_changed=true. The only path to
+  code_changed=false is the single success branch at the bottom, where the
+  diff was actually computed and matched against the deny-list. An infra
+  hiccup must never silently skip a caller's suite.
+
+inputs:
+  extra-deny-pattern:
+    description: >
+      Optional additional regex, OR'd into the base deny-list, for a
+      caller-specific code-relevant path the base list doesn't cover (e.g.
+      real-corpus-e2e.yml's fixture directory). Must not contain a `|`
+      char at the start/end (it is embedded directly inside the base
+      pattern's outer parens).
+    required: false
+    default: ""
+
+outputs:
+  code_changed:
+    description: "'true' if the diff matches the deny-list (or classification could not be computed), 'false' otherwise"
+    value: ${{ steps.classify.outputs.code_changed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Classify diff (docs-only vs code-touching)
+      id: classify
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        EXTRA_DENY_PATTERN: ${{ inputs.extra-deny-pattern }}
+      run: |
+        set -uo pipefail
+
+        emit() {
+          echo "code_changed=$1" >> "$GITHUB_OUTPUT"
+          echo "$2"
+        }
+
+        if [ "$EVENT_NAME" != "pull_request" ]; then
+          # push is scoped to branches: [main] in every caller (post-merge only) —
+          # nobody is blocked waiting on it, so it always runs the full suite
+          # unconditionally.
+          emit true "non-pull_request event ($EVENT_NAME): running full suite unconditionally"
+          exit 0
+        fi
+
+        # Relies on GitHub.com's uploadpack.allowReachableSHA1InWant support for
+        # fetching arbitrary commit SHAs by ID; a platform behavior, not repo config.
+        # No --depth here: a shallow single-commit fetch has no shared history to
+        # compute a merge-base from, and diffing BASE_SHA..HEAD_SHA directly
+        # (two-dot) would then pick up unrelated commits landed on the base branch
+        # after this PR branched, over-classifying stale/long-lived PRs as
+        # code-touching for reasons unrelated to their own diff.
+        # For a fork-based PR, HEAD_SHA only exists on the fork; fetching it by raw
+        # SHA from `origin` (the base repo) works because GitHub materializes an
+        # open PR's head commit under the base repo's hidden refs/pull/<n>/head ref,
+        # making it fetchable there too — not verified against a live fork PR in
+        # this repo's validation, but the fail-safe below covers the failure mode
+        # either way: a fetch failure defaults to running the full suite, never to
+        # a silent skip.
+        if ! git fetch origin "$BASE_SHA" "$HEAD_SHA"; then
+          emit true "WARNING: git fetch of base/head SHA failed, defaulting to full suite (fail-safe)"
+          exit 0
+        fi
+
+        MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+        if [ $? -ne 0 ]; then
+          emit true "WARNING: git merge-base failed, defaulting to full suite (fail-safe)"
+          exit 0
+        fi
+
+        CHANGED_FILES=$(git diff --no-renames --name-only "$MERGE_BASE" "$HEAD_SHA")
+        if [ $? -ne 0 ]; then
+          emit true "WARNING: git diff failed, defaulting to full suite (fail-safe)"
+          exit 0
+        fi
+
+        echo "Changed files:"
+        echo "$CHANGED_FILES"
+
+        # Deny-list: any match anywhere in the diff forces the full suite.
+        # Unmatched paths default to docs. This is a known, accepted gap, not a
+        # safe default: a genuinely new code-relevant path that isn't yet in the
+        # pattern below WILL be classified as docs and skip the caller's suite.
+        # Keeping this a deny-list rather than an allow-list is still the right
+        # tradeoff (see docs/adr/0322-ci-docs-only-fast-path.md, Consequences),
+        # but adding a new code-relevant path requires remembering to add a
+        # pattern here — it is not automatic.
+        # --no-renames makes a rename (e.g. `.rs` moved into `docs/`) show as a
+        # delete of the old path plus an add of the new one, so the old path's
+        # extension still trips this pattern instead of being hidden behind git's
+        # rename heuristics.
+        PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^crates/eval/scripts/'
+        if [ -n "$EXTRA_DENY_PATTERN" ]; then
+          PATTERN="${PATTERN}|${EXTRA_DENY_PATTERN}"
+        fi
+        PATTERN="${PATTERN})"
+
+        if echo "$CHANGED_FILES" | grep -E "$PATTERN"; then
+          emit true "code-relevant path(s) matched above: running full suite"
+        else
+          emit false "no code-relevant paths matched: skipping"
+        fi
