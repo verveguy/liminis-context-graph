@@ -98,14 +98,23 @@ runs:
         # delete of the old path plus an add of the new one, so the old path's
         # extension still trips this pattern instead of being hidden behind git's
         # rename heuristics.
-        PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^crates/eval/scripts/'
+        # ^\.github/actions/ is included so this classifier can't classify a change
+        # to its own logic as docs-only — without it, a PR touching only this file
+        # (which lives outside ^\.github/workflows/) would skip the very suites it
+        # exists to gate.
+        PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^\.github/actions/|^crates/eval/scripts/'
         if [ -n "$EXTRA_DENY_PATTERN" ]; then
           PATTERN="${PATTERN}|${EXTRA_DENY_PATTERN}"
         fi
         PATTERN="${PATTERN})"
 
-        if echo "$CHANGED_FILES" | grep -E "$PATTERN"; then
+        MATCHES=$(echo "$CHANGED_FILES" | grep -E "$PATTERN")
+        GREP_STATUS=$?
+        if [ "$GREP_STATUS" -eq 0 ]; then
+          echo "$MATCHES"
           emit true "code-relevant path(s) matched above: running full suite"
-        else
+        elif [ "$GREP_STATUS" -eq 1 ]; then
           emit false "no code-relevant paths matched: skipping"
+        else
+          emit true "WARNING: grep failed (exit $GREP_STATUS, likely an invalid extra-deny-pattern), defaulting to full suite (fail-safe)"
         fi
