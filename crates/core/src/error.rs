@@ -93,7 +93,40 @@ pub fn is_already_exists_error(err: &Error) -> bool {
 /// a status response — from any other query failure, which must still propagate (FR-006).
 /// Textually disjoint from [`is_missing_index_error`] ("doesn't have an index with name") and
 /// [`is_already_exists_error`] ("already exists in table").
+///
+/// Anchored on `Table <single-identifier> does not exist` rather than three independent
+/// substrings, so it does not also match lbug's distinct `Table function <name> does not exist`
+/// binder exception (raised for an unknown table function/pragma) — a different failure that
+/// must still propagate rather than degrade.
 pub fn is_missing_table_error(err: &Error) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"Table \S+ does not exist").unwrap());
     let s = err.to_string();
-    s.contains("Binder exception:") && s.contains("Table ") && s.contains("does not exist")
+    s.contains("Binder exception:") && re.is_match(&s)
+}
+
+#[cfg(test)]
+mod is_missing_table_error_tests {
+    use super::*;
+
+    #[test]
+    fn matches_genuine_missing_table() {
+        let err = Error::QueryFailed(
+            "Query execution failed: Binder exception: Table Entity does not exist.".to_string(),
+        );
+        assert!(is_missing_table_error(&err));
+    }
+
+    #[test]
+    fn does_not_match_missing_table_function() {
+        // A distinct lbug binder exception for an unknown table function/pragma — must not be
+        // misclassified as a missing node/rel table, or a genuine failure would silently
+        // degrade instead of propagating (FR-006).
+        let err = Error::QueryFailed(
+            "Query execution failed: Binder exception: Table function some_pragma does not \
+             exist."
+                .to_string(),
+        );
+        assert!(!is_missing_table_error(&err));
+    }
 }
