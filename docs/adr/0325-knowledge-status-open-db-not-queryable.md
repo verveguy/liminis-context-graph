@@ -139,9 +139,9 @@ Rejected: violates FR-006. A blanket catch would silently degrade genuine failur
 query, resource exhaustion, a real bug) into an innocuous-looking status response instead of
 surfacing them as errors — exactly the "mask real errors" failure mode the spec calls out.
 
-### Fix all 8 handlers found by the FR-005 audit in this PR
+### Fix all 10 handlers found by the FR-005 audit in this PR
 
-Rejected for this issue: an ~8-handler diff the spec doesn't require (FR-005 asks to audit and
+Rejected for this issue: an ~10-handler diff the spec doesn't require (FR-005 asks to audit and
 state, not fix). Documented as explicit deferred scope instead of expanded silently mid-implementation.
 
 ## Related
