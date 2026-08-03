@@ -74,11 +74,12 @@ check to first use as well; the precedence order below is unchanged.
    pre-existing Anthropic path), byte-for-byte unchanged. This is the load-bearing
    backward-compatibility guarantee (FR-007): a reachable local sidecar never silently steals
    traffic from an already-configured hosted key.
-3. Neither of the above — `LCG_EXTRACTION_URL` env override if set, else — at the time this ADR
-   was written — a fatal, actionable startup error identifying the missing configuration
-   (FR-011). **Superseded**: since [ADR-0331](0331-lazy-extraction-provider-validation.md), this
-   case no longer prevents startup; the same actionable message is instead returned by the first
-   extraction-dependent call. The precedence order in items 1–3 is otherwise unchanged.
+3. Neither of the above — `LCG_EXTRACTION_URL` env override if set, else no provider is
+   configured. **Superseded** by [ADR-0331](0331-lazy-extraction-provider-validation.md): at the
+   time this ADR was written, that case was a fatal, actionable startup error identifying the
+   missing configuration (FR-011); it is now deferred to the first extraction-dependent call,
+   which returns the same actionable message instead. The precedence order in items 1–3 is
+   otherwise unchanged.
 
 Deliberately **not** mirrored from the embedder: there is no "does the default UDS socket exist"
 auto-detection tier. The embedder's tier-3 ladder auto-selects `/tmp/liminis-inference.sock`
