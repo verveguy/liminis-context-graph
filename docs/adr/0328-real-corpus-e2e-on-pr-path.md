@@ -27,9 +27,11 @@ does not hold — see Decision 1.
 Measured on run 30776173198 on `main`: the five jobs' wall clock is 8m46s (longest job
 6m09s). The required `test (ubuntu-latest)` check measured 17m45s–19m48s across four
 PRs the same evening. Run in parallel alongside `test` (not appended after it), the e2e
-suite finishes roughly 10 minutes before the check that already gates every PR.
-Expected added latency to a PR's mergeable time: zero, and PR #328 (this change) is
-itself a live measurement of that expectation.
+suite is expected to finish roughly 10 minutes before the check that already gates every
+PR. Expected added latency to a PR's mergeable time: zero — PR #329 (implementing this
+change) is the live measurement of that expectation; see its own Test Plan for the
+observed delta once its CI run completes (FR-006/SC-003 remain pending confirmation
+until then, not yet a completed result as of this writing).
 
 ### 2. Non-required, non-gating (FR-002)
 
@@ -83,8 +85,10 @@ The existing group, `real-corpus-e2e-${{ github.ref }}`, already resolves to
 `refs/pull/<PR#>/merge` for a `pull_request` event — stable across every push to that
 PR, and distinct from `refs/heads/main` used by the `push` trigger. A PR's superseded
 runs cancel each other without touching `main`'s post-merge run, with no expression
-change required (FR-004). This was verified empirically against this PR's own runs
-during implementation rather than only reasoned about.
+change required (FR-004). This was confirmed empirically, not just reasoned about: when
+PR #329's Review stage pushed a follow-up commit, GitHub cancelled that PR's own
+in-flight `real-corpus-e2e`/`ci.yml` runs from the prior commit while `main`'s separate
+post-merge concurrency group was untouched.
 
 ### 6. Promotion criteria (FR-007)
 
@@ -114,8 +118,10 @@ open-ended "revisit later" that a permanently non-required check tends to become
   does not file or update a tracking issue, exactly as before this change. No code
   change was needed for this.
 - `ci.yml`'s `changes` job now delegates to the shared composite action instead of
-  inlining the script; its behavior (outputs, fail-safe paths) is unchanged, verified by
-  this PR's own run classifying itself as code-changed on both workflows.
+  inlining the script; its behavior (outputs, fail-safe paths) is unchanged — confirmed
+  during PR #329's Review stage, where both workflows' `changes` jobs classified that
+  PR's own diff (which touches `.github/workflows/**` and `.github/actions/**`) as
+  code-changed and ran the full suite.
 
 ## Alternatives Considered
 
