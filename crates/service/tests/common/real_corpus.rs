@@ -69,12 +69,12 @@ impl SeededWorkspace {
         let mut cmd = Command::new(binary_path());
         cmd.env("LCG_DB_PATH", self.db_path.to_str().unwrap())
             .env("LCG_WAL_DIR", self.wal_dir.to_str().unwrap())
+            // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment, and no
+            // --extractor-uds/--extractor-http flag either: since #331, a missing extraction
+            // provider no longer prevents startup — this suite never calls extraction, so there
+            // is nothing left to work around (previously required the never-dialed placeholder
+            // `--extractor-http http://127.0.0.1:1/v1/chat/completions`, per #330).
             .args(["--mcp-stdio", "--embedder-http", embedder_url])
-            // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: the
-            // binary refuses to start at all without an extraction provider configured
-            // (main.rs's FR-011 fatal-startup error), even though this suite never calls
-            // extraction — mirrors mcp_stdio.rs's precedent with a never-dialed stub URL.
-            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
             .args(extra_args);
         McpClient::spawn(cmd)
     }
