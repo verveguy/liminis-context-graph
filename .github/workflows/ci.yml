@@ -100,9 +100,13 @@ jobs:
           echo "$CHANGED_FILES"
 
           # Deny-list: any match anywhere in the diff forces the full suite. Unmatched
-          # paths default to docs — safe because this is a deny-list, not an allow-list,
-          # so a newly-added code-relevant path just needs a pattern added later; it
-          # doesn't silently skip today by being unrecognized in the dangerous direction.
+          # paths default to docs. This is a known, accepted gap, not a safe default: a
+          # genuinely new code-relevant path (e.g. a future top-level scripts/** the test
+          # job starts invoking) that isn't yet in the pattern below WILL be classified as
+          # docs and skip the Rust suite. Keeping this a deny-list rather than an
+          # allow-list is still the right tradeoff (see docs/adr/0322-ci-docs-only-fast-path.md,
+          # Consequences), but adding a new code-relevant path requires remembering to add
+          # a pattern here — it is not automatic.
           # --no-renames makes a rename (e.g. `.rs` moved into `docs/`) show as a delete
           # of the old path plus an add of the new one, so the old path's extension still
           # trips this pattern instead of being hidden behind git's rename heuristics.

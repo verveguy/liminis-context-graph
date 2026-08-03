@@ -89,12 +89,16 @@ while a top-level `scripts/**` (docs-generation tooling from #295/PR #320) is do
 Rust suite never runs it. The distinction is what each path is actually exercised by,
 not its directory name.
 
-Unmatched/unrecognized paths default to docs. This is safe only because the overall
-decision is a deny-list (any code-pattern match anywhere in the diff forces the full
-suite), not an allow-list — a genuinely new code-relevant path just needs a pattern
-added here later; it does not silently skip today by being unrecognized in the
-dangerous direction. (The dangerous direction — silently skipping on an actual error —
-is handled separately by the fail-safe default in Decision 3.)
+Unmatched/unrecognized paths default to docs. This is a known, accepted gap, not a safe
+default: a genuinely new code-relevant path that isn't yet in the pattern above will be
+classified as docs and skip the Rust suite, exactly like any other unmatched path — see
+Consequences below. Choosing a deny-list over an allow-list is still the right tradeoff
+(a short list of paths that actually affect the build, rather than enumerating every
+legitimately-docs path in the repo), but it does not make an unrecognized path safe by
+construction; it only means the fix, when the gap is discovered, is adding one pattern
+here rather than restructuring the classifier. This is a distinct risk from a
+classifier *error* (a failed `git fetch`/`git diff`), which is handled separately by the
+fail-safe default in Decision 3 and always defaults to running the full suite.
 
 `git diff --no-renames` is used deliberately: a `.rs` file renamed into `docs/` shows as
 a delete of the old path plus an add of the new one, so the old path's `.rs` extension
