@@ -500,6 +500,12 @@ async fn bootstrap_app_state(
             // record, and recording a stub that never dials out is meaningless.
             ResolvedExtractor::Unconfigured => {
                 eprintln!("extractor: provider=none, extraction calls will fail until configured");
+                if record_llm_path.is_some() {
+                    eprintln!(
+                        "extractor: LCG_RECORD_LLM is set but ignored — no extraction provider \
+                         is configured, so there is nothing to record"
+                    );
+                }
                 Arc::new(UnconfiguredExtractor)
             }
         }
