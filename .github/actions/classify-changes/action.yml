@@ -52,6 +52,15 @@ runs:
           exit 0
         fi
 
+        # Every caller checks out with persist-credentials: false (see #328's checkout
+        # hardening), so this fetch runs with no git credentials configured — it works
+        # today only because this repo is public and GitHub serves anonymous git-protocol
+        # reads for public repos. If this repo ever goes private, the fetch below 403s and
+        # the fail-safe (defaulting to code_changed=true) takes over, so the classifier
+        # degrades to "always run" rather than failing silently — but the fast path this
+        # workflow exists for would stop working until a `token:` is added back to the
+        # calling job's checkout step.
+        #
         # Relies on GitHub.com's uploadpack.allowReachableSHA1InWant support for
         # fetching arbitrary commit SHAs by ID; a platform behavior, not repo config.
         # No --depth here: a shallow single-commit fetch has no shared history to
