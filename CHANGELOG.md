@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.12.0] - 2026-08-02
+
+Extraction-behaviour and reliability fixes from the parallel benchmarking effort, plus a
+new documentation site.
+
+### Known issues
+
+- **`real-corpus-e2e` has been red on `main` throughout this release cycle.** Its
+  `mcp_real_corpus_admin_data_e2e` job (defined in
+  [`.github/workflows/real-corpus-e2e.yml`](.github/workflows/real-corpus-e2e.yml)) has failed
+  since 2026-07-26, bisected to `f51c40c` (#239 / [ADR-0046](docs/adr/0046-wal-replay-failure-dedup-and-rebuild-idempotency.md)).
+  The root cause, tracked in #325 (auto-filed by CI as #317, both still open at release time), is
+  `knowledge_status` erroring instead of degrading gracefully when a core table is missing — not a
+  defect in this release's changeset. The other four e2e jobs pass, and nothing points to a specific
+  problem with the 0.12.0 contents, but this release shipped without the assurance that suite exists
+  to provide. Per the release runbook's `ci-failure`-label check, we are proceeding rather than
+  holding the release on an unrelated, already-tracked issue.
+
+### Upgrade notes
+
+- **Extraction output changes.** #307 replaces hardcoded `max_tokens` constants with a proportional
+  token-budget policy and makes edge-budget exhaustion fatal instead of silently returning empty
+  ([ADR-0307](docs/adr/0307-token-budget-policy-and-edge-exhaustion-semantics.md)). #310 and #312
+  make strict-ontology mode reclassify out-of-vocabulary edges and entities instead of dropping them
+  ([ADR-0310](docs/adr/0310-strict-mode-reclassifies-not-drops.md),
+  [ADR-0312](docs/adr/0312-entity-strict-mode-reclassifies-not-drops.md)). #314 stops discarding an
+  entire chunk when a model omits the `summary` field
+  ([ADR-0314](docs/adr/0314-missing-summary-salvage-and-schema-invalid-classification.md)).
+  Re-ingesting a corpus with 0.12.0 will not reproduce 0.11.0's output. As with 0.11.0's own upgrade
+  note, nothing migrates automatically and existing data is untouched, but new ingest will differ
+  from old ingest.
+
+### Fixed
+
+- **`indices_built` was never set after runtime recovery**, so `knowledge_status` under-reported
+  readiness following `knowledge_recover` / `knowledge_recover_full`. (#297)
+- **Extraction failures left no trace.** A failed extraction was dropped on error, and
+  edge-budget exhaustion was indistinguishable from a clean empty response in the LLM cassette.
+  Failures are now captured whole via `TelemetryEvent::ExtractionFailure` (full raw response) and a
+  `<cassette>.failures.jsonl` sidecar surfaces truncation in the eval report.
+  ([ADR-0306](docs/adr/0306-extraction-failure-sidecar-and-truncation-visibility.md), #306)
+- **Token-budget policy and edge budget-exhaustion semantics.** See Upgrade notes above.
+  ([ADR-0307](docs/adr/0307-token-budget-policy-and-edge-exhaustion-semantics.md), #307)
+- **Strict ontology mode dropped declared aliases and never told the model about the alias
+  constraint**, so edges referencing an aliased entity were filtered as out-of-vocabulary even
+  though the alias was declared. Out-of-vocabulary edges are now reclassified rather than dropped.
+  ([ADR-0310](docs/adr/0310-strict-mode-reclassifies-not-drops.md), #310)
+- **Strict mode still deleted out-of-vocabulary entities while their edges were preserved**,
+  producing edges to entities that no longer existed. Entities are now reclassified the same way
+  edges are, closing the "no entities remain" cascade that unconditionally cleared all edges for a
+  chunk. ([ADR-0312](docs/adr/0312-entity-strict-mode-reclassifies-not-drops.md), #312)
+- **A missing or null `summary` field discarded the whole chunk**, misreported as malformed JSON
+  rather than schema-invalid. The chunk's entities/edges are now salvaged and the failure is
+  classified correctly. ([ADR-0314](docs/adr/0314-missing-summary-salvage-and-schema-invalid-classification.md), #314)
+- E2E admin/mutation tests called `knowledge_rebuild_from_wal` without `force_clear`, stale since
+  the non-empty-DB guard landed ([ADR-0046](docs/adr/0046-wal-replay-failure-dedup-and-rebuild-idempotency.md)).
+  Product behaviour was correct; the tests were stale. (#301)
+
+### Documentation
+
+- **New documentation site**, published from `docs/` via GitHub Pages at
+  [v3rv.com/liminis-context-graph](https://v3rv.com/liminis-context-graph/), replacing a single long
+  README. ([ADR-0295](docs/adr/0295-github-pages-documentation-site.md), #295)
+- **CI failure notification for non-gating workflows** (`real-corpus-e2e`, `bench`, `eval`): a red
+  run now files or reuses a durable, assigned issue instead of failing silently — the mechanism
+  behind this release's own `ci-failure` honesty check, above.
+  ([ADR-0298](docs/adr/0298-ci-failure-notification.md), #298)
+- Recorded the 2026-07 extraction evaluation (hosted vs. local models, ontology effect). (#304)
+- Corrected `CLAUDE.md`'s long-task guidance, which previously omitted CI/benchmark-wait handling.
+  (#315)
+- **Split the CI benchmark gate's `search.rs` into five per-`criterion_group!` targets**, fixing a
+  Criterion footgun where a filtered `cargo bench` invocation still ran every group's setup —
+  cutting the CI bench step from ~10.5–11 minutes to ~1m19s.
+  ([ADR-0316](docs/adr/0316-bench-target-per-criterion-group.md), #316)
+
 ## [0.11.0] - 2026-07-30
 
 The first release driven substantially by outside bug reports. Six issues filed by
