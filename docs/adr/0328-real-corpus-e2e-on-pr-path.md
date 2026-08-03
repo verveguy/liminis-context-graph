@@ -90,6 +90,31 @@ PR #329's Review stage pushed a follow-up commit, GitHub cancelled that PR's own
 in-flight `real-corpus-e2e`/`ci.yml` runs from the prior commit while `main`'s separate
 post-merge concurrency group was untouched.
 
+**Merge-train trial branches (`merge_train: on`, ADR-059) resolve the same way, with no
+special-casing needed.** ADR-059 and the trial-branch git mechanics live in the Fabrik
+engine, not this repo, so this was confirmed by reading the engine's implementation
+(`fabrik/engine/merge_train.go`) rather than from anything visible in
+`liminis-context-graph` alone. Two facts settle it:
+
+- `PushTrainBranch` pushes each trial branch to `origin` for real, and the train opens a
+  genuine draft "integration PR" against it (`assembleAndValidate`) — so a trial branch
+  *does* fire a real `pull_request` event, and the five e2e jobs run on it exactly like
+  any other PR.
+- Every trial — the initial batch and every bisection sub-trial spawned while isolating
+  a poisoning member (ADR-059 D4) — gets a distinct branch name and its own draft PR
+  (`baseTrialName := fmt.Sprintf("merge-train-%s-%d", ...)`, incremented per re-form/
+  bisection). A distinct PR means a distinct `github.ref` (`refs/pull/<integration-PR#>
+  /merge`), so each trial's concurrency group is already isolated from every other
+  trial, from any individual member's own PR group, and from `main`'s post-merge group —
+  by the same `github.ref`-keyed mechanism as ordinary PRs, with nothing train-specific
+  to add. Repeated pushes to the *same* trial branch (e.g. force-pushes within one
+  bisection attempt) still correctly cancel only that trial's own stale e2e runs.
+
+The practical effect: each merge-train trial/bisection draft PR picks up an extra ~9
+minutes of restore-only e2e jobs, same as any code-touching PR. Since the checks are
+non-required (Decision 2), this cannot affect a landing decision — the train's combined
+Validate only polls required checks.
+
 ### 6. Promotion criteria (FR-007)
 
 These jobs stay non-required until **14 consecutive calendar days of PR-path runs with
