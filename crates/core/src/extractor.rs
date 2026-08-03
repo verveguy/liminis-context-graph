@@ -2132,6 +2132,50 @@ impl Extractor for ConfigurableExtractor {
     }
 }
 
+// ── UnconfiguredExtractor ─────────────────────────────────────────────────────
+
+/// Message shown when no extraction provider was configured. Moved verbatim (#331 FR-002) from
+/// what used to be a startup-fatal error in `main.rs` — only the timing changed, not the content.
+pub const NO_EXTRACTION_PROVIDER_MSG: &str =
+    "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
+     LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into \
+     local extraction with --extractor-uds <path>, --extractor-http <url>, or \
+     LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
+     bundled macOS sidecar — note its Foundation Models backend is not recommended \
+     for extraction quality; \
+     see docs/adr/0041-local-openai-compatible-extraction-adapter.md).";
+
+/// Stands in for "no extraction provider configured" (#331). Every method fails immediately with
+/// `Error::Config(NO_EXTRACTION_PROVIDER_MSG)` rather than the process refusing to start — a
+/// read-only deployment that never calls an extraction-dependent method never observes this at
+/// all (ADR-0331).
+pub struct UnconfiguredExtractor;
+
+impl Extractor for UnconfiguredExtractor {
+    fn extract<'a>(
+        &'a self,
+        _opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        _entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        _edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
+    }
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn extract_json_block(s: &str) -> &str {
