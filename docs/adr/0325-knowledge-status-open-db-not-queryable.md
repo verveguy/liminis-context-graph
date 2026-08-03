@@ -11,7 +11,7 @@
 to exercise `knowledge_build_indices`'s genuine-failure path, then checks that `knowledge_status`
 still reports `indices_built: false` honestly. Instead, `knowledge_status` itself hard-errored:
 
-```
+```text
 database error: Query execution failed: Binder exception: Table Entity does not exist.
 ```
 

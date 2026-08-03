@@ -20,7 +20,7 @@ assert_eq!(
 
 `knowledge_status` does not return a status. It errors:
 
-```
+```text
 database error: Query execution failed: Binder exception: Table Entity does not exist.
 ```
 
@@ -53,7 +53,7 @@ It is also possible the product is not at fault at all: the test may be stale re
 
 Observed sequence (second server instance, scope `[Admin, Read, Cypher]`, after a successful replay of 12,482 mutations):
 
-```
+```text
 knowledge_query_cypher    success: true
 knowledge_build_indices   success: false
 knowledge_status          success: false
@@ -62,7 +62,7 @@ knowledge_status          success: false
 
 ### Repro
 
-```
+```shell
 cargo test --release --test mcp_real_corpus_admin_data_e2e -- --ignored
 ```
 
