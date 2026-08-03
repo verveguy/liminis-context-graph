@@ -120,4 +120,4 @@ An operator who has already configured a provider (via `ANTHROPIC_API_KEY`, `--e
 - #330 — the report, with repro and the placeholder-workaround observation
 - #212 / ADR-0041 — introduced the startup requirement; its selection rules must survive unchanged
 - #201 — bdueck's original report that #212 answered
-- `crates/service/src/main.rs:399` — the current startup-time fatal check
+- `crates/service/src/main.rs` (`bootstrap_app_state`'s extractor-resolution terminal branch) — the startup-time fatal check this issue moved to call time (see ADR-0331)
