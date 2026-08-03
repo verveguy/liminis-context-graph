@@ -35,9 +35,9 @@ fn spawn_unconfigured(dir: &TempDir, embedder_url: &str, extra_args: &[&str]) ->
     McpClient::spawn(cmd)
 }
 
-/// Writes a single minimal WAL line (`CREATE (:Episodic {uuid: $uuid})`) — the same
-/// hand-crafted-fixture pattern `crates/core/src/recovery.rs`'s test helpers use — so
-/// `knowledge_rebuild_from_wal` has something to replay without depending on the large
+/// Writes a single hand-crafted WAL line creating one `Episodic` node with every column the
+/// schema requires — the same fixture pattern `crates/core/src/recovery.rs`'s test helpers use —
+/// so `knowledge_rebuild_from_wal` has something to replay without depending on the large
 /// real-corpus fixture or any extraction/embedding call having ever produced it.
 fn write_minimal_wal_file(wal_dir: &std::path::Path) {
     std::fs::create_dir_all(wal_dir).expect("create wal dir");
@@ -81,6 +81,12 @@ fn starts_with_no_provider_and_completes_wal_rebuild() {
     );
 
     let status = client.call_tool("knowledge_status", json!({}));
+    assert_eq!(
+        status["result"]["structuredContent"]["episode_count"],
+        json!(1),
+        "the rebuild should have replayed the fixture's one Episodic node — a no-op rebuild \
+         would leave this at 0: {status:?}"
+    );
     assert_eq!(
         status["result"]["structuredContent"]["entity_count"],
         json!(0),
@@ -152,7 +158,9 @@ fn extraction_call_fails_cleanly_and_process_keeps_serving_reads() {
         .as_str()
         .unwrap_or_default();
     assert!(
-        message.contains("ANTHROPIC_API_KEY") && message.contains("extractor"),
+        message.contains("No extraction provider configured")
+            && message.contains("ANTHROPIC_API_KEY")
+            && message.contains("LCG_EXTRACTION_URL"),
         "error should name what to configure (the FR-002 guidance): {message:?}"
     );
 
