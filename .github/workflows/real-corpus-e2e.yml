@@ -4,8 +4,10 @@ name: Real-Corpus E2E
 # of the default `cargo test --release` run: a full WAL replay + HNSW/FTS index build over
 # the golden fixture's 1,506 entities takes roughly a minute each, and this file runs three
 # of them (~190-240s / 3-4 min total, see crates/core/tests/fixtures/real_corpus_wal/README.md
-# for the measured figure) — adding that to every PR's ~16-17 min `cargo test --release` job
-# would be a material tax on a repo with several issues often in flight at once.
+# for the measured figure) — adding that to every PR's `test` job would be a material tax on
+# a repo with several issues often in flight at once. (Note: `cargo test --release` itself is
+# only ~5 min of that job; the ~15-18 min total predating #316 was dominated by a Criterion
+# bench-harness footgun in the R-003 gate, since fixed — see ADR-0316.)
 #
 # But an un-run test rots, so per review discussion on #217 (matching the bench.yml
 # precedent of gating expensive-but-important checks out of the PR path while still running

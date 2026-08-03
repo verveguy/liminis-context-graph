@@ -76,22 +76,50 @@ The `ideas/` directory (created on demand) holds pre-spec sketches and design no
 
 ## Rust pre-commit checks (MUST run before every commit)
 
-CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget. Full release verification is CI's job, not yours.
+CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget on a warm cache (see below for the cold-worktree case). Full release verification is CI's job, not yours.
 
-> **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite — measures **15–18 minutes** even on a warm cache, so `cargo test --release` cannot be run in the foreground, and CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
+> **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite plus the R-003 bench correctness gate — used to measure **15–18 minutes** even on a warm cache, so the complete release verification path cannot be run in the foreground; CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
+>
+> **The local gate's measured cost is ~8.6 minutes on a worktree with a warm debug-profile
+> cache**: `cargo fmt --all` (< 1s) + `cargo test` (~8.5 min, the dominant cost) + `cargo clippy
+> --all-targets -- -D warnings` (< 10s once `test` has already built the debug artifacts) — see
+> #316. Run each of the three as its own foreground call (as the numbered list below does), not
+> chained into one command — that keeps every individual call comfortably under the 10-minute
+> budget even though their sum approaches it, and `cargo test` is the one to watch since it alone
+> can approach a full 10-minute call on a warm cache.
+>
+> **A genuinely cold worktree (no prior debug build at all) is unmeasured** and pays additional
+> first-time dependency-compile cost on top of the warm-cache figure above — #316 did not capture
+> this number, since it found the debug dependency graph is not the bottleneck driving the failure
+> class this budget note exists to prevent (see below). If `cargo test` alone exceeds a single
+> foreground call on a cold worktree, fall back to the "Long-running commands" section's narrower-scope
+> option: split the run per crate (`cargo test -p lcg-core`, then `-p lcg-service`, then `-p
+> lcg-eval`) rather than chaining a longer combined command.
 
 1. `cargo fmt --all` — auto-format. Never commit without running this. Rust treats whitespace as binary pass/fail; even a single misaligned brace fails `cargo fmt --check` in CI.
-2. `cargo test` — compiles lib + tests and runs them, in **debug**. CI runs `cargo test --release` because the 6 integration tests require release-mode linking; that is CI's job, not yours (see the budget note above). If your change touches release-only behavior, say so in the PR body so a reviewer knows CI is the first place it gets exercised — do not run the release suite locally to pre-empt it. Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
-3. `cargo clippy --release -- -D warnings` — CI runs this exact form (release profile, to reuse cached lbug artifacts). Locally, `cargo clippy --all-targets -- -D warnings` is **stricter** on targets (covers tests, benches, and examples in one pass) but uses the debug profile, so it will miss release-only warnings (e.g., `dead_code` on `#[cfg(not(debug_assertions))]` paths). The `--release --all-targets` combination mirrors CI most closely but pays a full release build, so leave it to CI unless you are specifically chasing a release-only lint. CI's `-D warnings` means any warning blocks merge. Common traps:
+2. `cargo test` — compiles lib + tests and runs them, in **debug**. CI runs `cargo test --release` because the ~50 integration-test binaries (crates/core: 37, crates/service: 11, crates/eval: 2 — not "six", a stale figure corrected by #316) require release-mode linking; that is CI's job, not yours (see the budget note above). Measured: compile+link for all ~50 binaries is ~4 minutes, execution ~1 minute — this was never actually the dominant CI cost (see below). If your change touches release-only behavior, say so in the PR body so a reviewer knows CI is the first place it gets exercised — do not run the release suite locally to pre-empt it. Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
+3. `cargo clippy --all-targets -- -D warnings` — run this debug-profile local gate. It's **stricter** on targets than CI's own check (covers tests, benches, and examples in one pass), but uses the debug profile, so it will miss release-only warnings (e.g., `dead_code` on `#[cfg(not(debug_assertions))]` paths). CI separately runs `cargo clippy --release -- -D warnings` (release profile, to reuse cached lbug artifacts) — that's CI's job, not yours. The `--release --all-targets` combination mirrors CI most closely but pays a full release build, so leave it to CI unless you are specifically chasing a release-only lint. CI's `-D warnings` means any warning blocks merge. Common traps:
    - `dead_code` on test-only helpers → add `#[allow(dead_code)]`
    - `items_after_test_module` → put any non-test helpers BEFORE `#[cfg(test)] mod tests { }`, never after
    - New clippy lints introduced by a toolchain bump
 
 **lbug is not compiled from C++ — it is a downloaded prebuilt bundle.** Since 0.17.0 the crate ships a self-contained "fat bundle": `build.rs`'s `try_download_prebuilt_lbug()` fetches a prebuilt `liblbug.a` from the `LadybugDB/ladybug` releases and caches it under the crate's registry source directory (`.cache/lbug-prebuilt/<key>`). Because that lives in the shared cargo registry rather than in `target/`, it is downloaded **once per machine** and reused by every worktree. **Do not set `LBUG_BUILD_FROM_SOURCE` — the source-build path is broken.** Since the fat bundle already contains every third-party archive, a cmake source build links both the bundle and the individual archives and fails with 7399 duplicate-symbol errors (`link_bundled_deps=true`; upstream `LadybugDB/ladybug-rust#18`). The flag was removed from `ci.yml`, `release.yml`, and `bench.yml` for exactly this reason. The only supported override is an external library via `LBUG_LIBRARY_DIR` + `LBUG_INCLUDE_DIR`.
 
-**`.cargo/config.toml` pins `LBUG_VERSION = "0.17.0"`, and that pin is load-bearing.** Without it `build.rs` downloads the *floating* `latest` ladybug release, building the 0.17.0 crate's FFI against a newer native bundle. That skew broke the v0.9.0 release: 0.18.1 links httplib against OpenSSL rather than the bundled mbedtls, and the macOS build failed with `ld: symbol(s) not found`. The same file sets `RUST_TEST_THREADS = "4"` because lbug mmaps an 8 TB virtual region per `Db::open()` and default parallelism exhausts the macOS VM ceiling — which is also part of why the suite is slow enough to matter for the budget above.
+**`.cargo/config.toml` pins `LBUG_VERSION = "0.17.0"`, and that pin is load-bearing.** Without it `build.rs` downloads the *floating* `latest` ladybug release, building the 0.17.0 crate's FFI against a newer native bundle. That skew broke the v0.9.0 release: 0.18.1 links httplib against OpenSSL rather than the bundled mbedtls, and the macOS build failed with `ld: symbol(s) not found`. The same file sets `RUST_TEST_THREADS = "4"` because lbug mmaps an 8 TB virtual region per `Db::open()` and default parallelism exhausts the macOS VM ceiling.
 
-So the 15–18 minutes CI spends is **Rust compilation and the test suite**, not C++ — do not expect build-cache work to move that number.
+**The 15–18 minutes CI used to spend was not, in fact, dominated by `cargo test --release`.**
+Issue `#316` measured it: `cargo build --release` (~2–2.5m) + `cargo test --release` (~5m, of which only
+~1m is test *execution* — the rest is compile+link) + the R-003 `dedup_overlap_check` bench step
+(**~10.5–11m — 58–60% of the job**) + clippy/fmt (negligible). The bench step was the dominant
+cost, caused by a Criterion footgun: `crates/core/benches/search.rs` bundled four
+`criterion_group!`s behind one `criterion_main!`, and Criterion's `--` filter only gates the
+measurement loop inside `bench_function`, not each group's setup code — so a single filtered
+invocation still built+indexed ~143,200 rows across every group before reaching the ~1,000-row
+check it was actually asked for. Issue `#316` split this into five separate `[[bench]]` targets (one per
+former group), making isolation a target-layout property instead of a filter string — see
+**ADR-0316**. The R-003 gate now runs in ~1–2 minutes, and it stays PR-blocking (nothing moved
+post-merge). Do not expect further build-cache work on the test-suite side to move the CI job's
+total time; that was never where the time was going.
 
 **CI's lbug cache** stores only the Rust-side build-script outputs (`target/release/build/lbug-*`, `target/release/.fingerprint/lbug-*`, `target/release/deps/liblbug-*`), so the build script isn't re-run on every job. Note it does **not** cover the cargo registry source directory where `.cache/lbug-prebuilt/<key>` lives, so a cold runner still downloads the bundle once; the cache saves the build-script re-run, not the fetch. The key includes `runner.os`, the resolved `rustc` version, and a hash of the `lbug` stanza in `Cargo.lock`, so unrelated dep bumps don't invalidate it. To bust a corrupted cache, bump `LBUG_CACHE_BUST` in `.github/workflows/ci.yml`'s top-level `env:` block — that invalidates every lbug cache entry across branches.
 

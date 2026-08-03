@@ -43,7 +43,17 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-All three must pass. CI runs the same checks; a failure blocks merge. See [`CLAUDE.md`](CLAUDE.md) for the detailed rationale and CI configuration notes.
+All three must pass. Measured on a worktree with a warm `target/debug` cache: ~8.6 minutes total
+(`cargo test` is the dominant cost at ~8.5 min; `fmt` and `clippy` are each under 10s once `test`
+has already built the debug artifacts) — inside the ~10-minute foreground-call budget documented
+in `CLAUDE.md`. This gate deliberately does **not** include a release build or `cargo bench`: CI's
+release-linked test suite and its R-003 dedup-overlap correctness gate (a `cargo bench` target)
+are CI's job, not this gate's — see `CLAUDE.md` for why, and see ADR-0316 for how the bench gate
+itself was made fast enough to stay PR-blocking.
+
+CI runs additional checks beyond this local gate (the release build/test, the R-003 bench gate,
+eval-script guards, an ML-dependency check); a failure in any of them blocks merge. See
+[`CLAUDE.md`](CLAUDE.md) for the detailed rationale and CI configuration notes.
 
 ## No CLA, no DCO
 

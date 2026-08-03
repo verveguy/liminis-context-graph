@@ -6,10 +6,11 @@ resolver = "2"
 version = "0.11.0"
 repository = "https://github.com/verveguy/liminis-context-graph"
 
-# Strip debuginfo from dev/test builds. Linking the six integration-test
-# binaries against the full lbug static archive (+ third-party deps) with
-# default `debug = "full"` blows the 7GB Ubuntu CI runner's RAM during
-# `ld` and triggers "collect2: fatal error: ld terminated with signal 7".
+# Strip debuginfo from dev/test builds. Linking the ~50 integration-test
+# binaries (crates/core: 37, crates/service: 11, crates/eval: 2 — see #316)
+# against the full lbug static archive (+ third-party deps) with default
+# `debug = "full"` blows the 7GB Ubuntu CI runner's RAM during `ld` and
+# triggers "collect2: fatal error: ld terminated with signal 7".
 # We don't need debug symbols on CI; if a dev wants them locally they can
 # override with `RUSTFLAGS="-C debuginfo=2"`.
 [profile.dev]

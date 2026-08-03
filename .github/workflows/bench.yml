@@ -29,18 +29,24 @@ jobs:
         run: cargo bench --no-run
 
       - name: dedup bench 1k
+        env:
+          MEASUREMENT_TIME: ${{ inputs.measurement_time || '30' }}
         run: |
-          cargo bench --bench search -- 1k --measurement-time "${{ inputs.measurement_time || '30' }}" \
+          cargo bench --bench dedup_search -- 1k --measurement-time "$MEASUREMENT_TIME" \
             2>&1 | tee bench-1k.txt
 
       - name: dedup bench 10k
+        env:
+          MEASUREMENT_TIME: ${{ inputs.measurement_time || '30' }}
         run: |
-          cargo bench --bench search -- 10k --measurement-time "${{ inputs.measurement_time || '30' }}" \
+          cargo bench --bench dedup_search -- 10k --measurement-time "$MEASUREMENT_TIME" \
             2>&1 | tee bench-10k.txt
 
       - name: dedup bench 50k
+        env:
+          MEASUREMENT_TIME: ${{ inputs.measurement_time || '30' }}
         run: |
-          cargo bench --bench search -- dedup_50k \
+          cargo bench --bench dedup_50k -- --measurement-time "$MEASUREMENT_TIME" \
             2>&1 | tee bench-50k.txt
 
       - name: upload bench results (text)

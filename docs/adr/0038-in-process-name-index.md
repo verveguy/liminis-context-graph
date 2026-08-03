@@ -143,7 +143,7 @@ is negligible next to the HNSW/FTS build it already runs alongside, and eager av
 
 - Entity name lookup during ingest (dedup and edge-endpoint resolution) no longer scans the
   `Entity` table — confirmed by the `name_lookup_scan_baseline_10k` vs. `name_lookup_indexed_10k`
-  benchmarks in `crates/core/benches/search.rs` (SC-001/SC-002/FR-011).
+  benchmarks in `crates/core/benches/name_lookup.rs` (SC-001/SC-002/FR-011).
 - A stale or missing index entry can only ever produce a miss, never a wrong entity — exercised
   directly by `crates/core/tests/name_index_coherence.rs`'s
   `stale_index_entry_after_out_of_band_delete_degrades_to_miss` test (SC-004).
@@ -211,7 +211,7 @@ contributor who *does* add entity deletion knows what else needs updating.
 - `crates/core/tests/name_index_coherence.rs`: FR-005/FR-008 coherence tests across every
   mutation path (insert, merge-driven reorder, label-only corrections, episode deletion,
   WAL replay, `open_or_rebuild`) and the stale-entry-degrades-to-miss property.
-- `crates/core/benches/search.rs`: `bench_name_lookup_scan_baseline_10k` /
+- `crates/core/benches/name_lookup.rs`: `bench_name_lookup_scan_baseline_10k` /
   `bench_name_lookup_indexed_10k` — before/after measurement (FR-011/SC-002).
 - **#220**: lbug 0.18.x upgrade, which adds non-PK secondary ART indexes.
 - **#221**: follow-on issue tracking the drop-in replacement of this fix's `NameIndex` with a
