@@ -405,9 +405,12 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "relationship_count": null,
             "episode_count": null,
             "last_index_time": null,
-            // Present as null (not omitted) so the key set matches the Queryable branch, which
-            // only sets this key when a value exists — a caller that expects a uniform shape
-            // across all three status states shouldn't see this key silently missing.
+            // Present as null (not omitted) so a caller reading this specific field doesn't see
+            // it silently disappear the moment the table breaks. This does not make the key's
+            // presence uniform across all three status states in general: the Queryable branch
+            // above only sets it when a value exists (an empty graph omits it, matching
+            // pre-existing behavior — see `test_knowledge_status_empty_db`), and the DB-not-open
+            // branch (ADR-0009) omits it too. A caller must still treat the key as optional.
             "index_created_at": null,
             "context_graph_initialized": true,
             "connected": true,
