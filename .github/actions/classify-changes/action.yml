@@ -117,8 +117,15 @@ runs:
         fi
         PATTERN="${PATTERN})"
 
-        MATCHES=$(echo "$CHANGED_FILES" | grep -E "$PATTERN")
-        GREP_STATUS=$?
+        # `shell: bash` runs with `-eo pipefail`. A bare command substitution whose grep
+        # exits 1 (no match) therefore aborts the step *before* the next line executes —
+        # `GREP_STATUS=$?` never runs, and the `-eq 1` arm below is unreachable. That is
+        # precisely the docs-only case this action exists to detect, so every genuinely
+        # docs-only PR failed closed instead of skipping. `|| GREP_STATUS=$?` keeps the
+        # assignment from tripping `-e` while still capturing grep's real exit status, so
+        # the three-way branch (matched / no match / grep error) behaves as written.
+        GREP_STATUS=0
+        MATCHES=$(echo "$CHANGED_FILES" | grep -E "$PATTERN") || GREP_STATUS=$?
         if [ "$GREP_STATUS" -eq 0 ]; then
           echo "$MATCHES"
           emit true "code-relevant path(s) matched above: running full suite"
