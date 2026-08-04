@@ -1,22 +1,25 @@
 name: Classify changes
 description: >
   Classifies a PR diff as docs-only or code-touching, so callers can skip
-  expensive jobs on docs-only PRs. Single source of truth shared by
-  ci.yml and real-corpus-e2e.yml — see docs/adr/0322-ci-docs-only-fast-path.md
-  and docs/adr/0328-real-corpus-e2e-on-pr-path.md. Fail-safe by construction:
-  every early return below defaults to code_changed=true. The only path to
-  code_changed=false is the single success branch at the bottom, where the
-  diff was actually computed and matched against the deny-list. An infra
-  hiccup must never silently skip a caller's suite.
+  expensive jobs on docs-only PRs. Single source of truth, called once from
+  ci.yml's `changes` job (see docs/adr/0322-ci-docs-only-fast-path.md,
+  docs/adr/0328-real-corpus-e2e-on-pr-path.md, and docs/adr/0341-*.md — the
+  real-corpus e2e jobs were originally in their own workflow file with their
+  own call to this action; #341 merged them into ci.yml, leaving one caller
+  and one classifier output shared by all downstream jobs). Fail-safe by
+  construction: every early return below defaults to code_changed=true. The
+  only path to code_changed=false is the single success branch at the
+  bottom, where the diff was actually computed and matched against the
+  deny-list. An infra hiccup must never silently skip a caller's suite.
 
 inputs:
   extra-deny-pattern:
     description: >
       Optional additional regex, OR'd into the base deny-list, for a
       caller-specific code-relevant path the base list doesn't cover (e.g.
-      real-corpus-e2e.yml's fixture directory). Must not contain a `|`
-      char at the start/end (it is embedded directly inside the base
-      pattern's outer parens).
+      the real-corpus e2e jobs' golden WAL fixture directory). Must not
+      contain a `|` char at the start/end (it is embedded directly inside
+      the base pattern's outer parens).
     required: false
     default: ""
 

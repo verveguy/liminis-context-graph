@@ -1,23 +1,35 @@
 name: CI Failure Notify
 
-# Turns a failing run of one of this repo's non-gating workflows (real-corpus-e2e,
-# bench, eval — see docs/adr/0298-ci-failure-notification.md) into a durable,
+# Turns a failing run of one of this repo's non-gating workflows/jobs (the real-corpus
+# e2e jobs, bench, eval — see docs/adr/0298-ci-failure-notification.md) into a durable,
 # human-visible GitHub issue instead of a result that only shows up if someone opens
-# the Actions tab. #298: real-corpus-e2e failed 24 consecutive runs over 4 days with
+# the Actions tab. #298: the e2e suite failed 24 consecutive runs over 4 days with
 # no signal to anyone, and the first any human noticed was during v0.11.0 release
 # smoke-testing, after the tag had already been pushed.
 #
 # Deliberately NOT a required PR check (FR-006) — it is a workflow_run listener that
 # fires strictly after the watched workflows complete, so it cannot appear in branch
 # protection's required_status_checks and cannot block a merge. Coverage today:
-# real-corpus-e2e.yml, bench.yml, eval.yml. swift.yml is excluded because it is
-# currently `if: false` (dormant pending a GHA macOS image update) — add "Swift" to
+# "CI" (ci.yml — see note below), bench.yml, eval.yml. swift.yml is excluded because it
+# is currently `if: false` (dormant pending a GHA macOS image update) — add "Swift" to
 # the `workflows:` list below when it's re-enabled. claude-review.yml is excluded
 # because it only triggers on pull_request and never runs against main directly.
+#
+# #341: the five real-corpus e2e jobs used to live in their own top-level workflow file
+# ("Real-Corpus E2E") specifically so they'd have their own workflow_run identity for
+# this listener, independent of ci.yml's required `test` job. They were merged bodily
+# into ci.yml (see docs/adr/0341-*.md) so `needs:`/artifact sharing could gate them on
+# a shared build job at job granularity — a restructuring `workflow_run` can't see
+# through. "Real-Corpus E2E" no longer exists as a workflow, so it's replaced by "CI"
+# below. This is a deliberate broadening, not just a rename: this listener now also
+# fires for a post-merge failure of `test` itself (release build, clippy, fmt, R-003
+# bench), which it never did before. That's an intentional side effect (a `test`
+# failure on `main` going unnoticed is arguably worse than the gap this widens), not an
+# oversight — see ADR-0341.
 on:
   workflow_run:
     workflows:
-      - "Real-Corpus E2E"
+      - "CI"
       - "Perf Benchmarks"
       - "Extraction-Quality Eval"
     types: [completed]
@@ -50,19 +62,19 @@ jobs:
   notify:
     name: notify (${{ github.event.workflow_run.name }})
     runs-on: ubuntu-latest
-    # real-corpus-e2e.yml also declares workflow_dispatch with no branch restriction
-    # (in addition to push: branches: [main]), and bench.yml/eval.yml are
+    # ci.yml also declares workflow_dispatch with no branch restriction (in addition to
+    # push: branches: [main] and pull_request), and bench.yml/eval.yml are
     # workflow_dispatch-only — all three can be run against any ref. Without this
     # guard, a developer's manual dispatch of any of them on a feature branch would
     # file a "main is broken" issue.
     #
-    # #328 added a `pull_request` trigger to real-corpus-e2e.yml, which makes
-    # head_branch alone unreliable: it isn't namespaced by repository, so a *fork*
-    # PR whose own branch happens to be named "main" (a common default branch name)
-    # reports head_branch == 'main' even though the run is a PR-path run against
-    # the fork's main, not a push to this repo's main. Excluding event ==
-    # 'pull_request' closes that gap while still firing for push-to-main and
-    # workflow_dispatch-against-main — the two cases the guard above exists for.
+    # ci.yml has a `pull_request` trigger, which makes head_branch alone unreliable:
+    # it isn't namespaced by repository, so a *fork* PR whose own branch happens to be
+    # named "main" (a common default branch name) reports head_branch == 'main' even
+    # though the run is a PR-path run against the fork's main, not a push to this
+    # repo's main. Excluding event == 'pull_request' closes that gap while still
+    # firing for push-to-main and workflow_dispatch-against-main — the two cases the
+    # guard above exists for.
     if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event != 'pull_request'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,8 +85,8 @@ jobs:
       WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
       WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
     steps:
-      # cancel-in-progress: true on real-corpus-e2e.yml means a superseded run
-      # reports 'cancelled' — that must never be treated as a failure signal.
+      # cancel-in-progress: true on ci.yml means a superseded run reports 'cancelled' —
+      # that must never be treated as a failure signal.
       - name: Skip cancelled/superseded runs
         if: env.CONCLUSION == 'cancelled' || env.CONCLUSION == 'skipped'
         run: echo "Run concluded '$CONCLUSION' (superseded or skipped) — not a signal, no-op."
@@ -146,10 +158,10 @@ jobs:
           {
             echo "log_excerpt<<EOF_$RUN_ID"
             if [ -n "$first_failing_id" ]; then
-              # Bounded excerpt from the first failing job only — real-corpus-e2e.yml
-              # can have several of its 5 jobs fail at once, and a full dump from all
-              # of them would make the issue body unreadable. Full detail is always
-              # one click away via $RUN_URL.
+              # Bounded excerpt from the first failing job only — ci.yml can have
+              # several of its jobs (including any of the five e2e jobs) fail at once,
+              # and a full dump from all of them would make the issue body unreadable.
+              # Full detail is always one click away via $RUN_URL.
               gh run view "$RUN_ID" --job "$first_failing_id" --log-failed 2>/dev/null \
                 | tail -n 100 | tail -c 8000
             else
