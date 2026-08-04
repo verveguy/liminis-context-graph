@@ -587,7 +587,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(replayed.result.entities.len(), result.result.entities.len());
-        assert_eq!(replayed.result.entities[0].name, result.result.entities[0].name);
+        assert_eq!(
+            replayed.result.entities[0].name,
+            result.result.entities[0].name
+        );
         assert_eq!(replayed.result.edges[0].fact, result.result.edges[0].fact);
     }
 

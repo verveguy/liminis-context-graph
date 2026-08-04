@@ -914,13 +914,19 @@ enum SendOutcome {
 // ── EntityOutcome / EdgeOutcome ───────────────────────────────────────────────
 
 enum EntityOutcome {
-    Success { entities: Vec<ExtractedEntity>, dropped: usize },
+    Success {
+        entities: Vec<ExtractedEntity>,
+        dropped: usize,
+    },
     BudgetExhausted,
     ParseError(Error),
 }
 
 enum EdgeOutcome {
-    Success { edges: Vec<ExtractedEdge>, dropped: usize },
+    Success {
+        edges: Vec<ExtractedEdge>,
+        dropped: usize,
+    },
     BudgetExhausted,
     ParseError(Error),
 }
@@ -2911,7 +2917,9 @@ mod tests {
                 if call_type == "entities" && outcome == "salvaged"
         )));
         assert!(
-            !events.iter().any(|e| matches!(e, TelemetryEvent::ExtractionFailure { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, TelemetryEvent::ExtractionFailure { .. })),
             "a salvaged response must not emit ExtractionFailure — it's a success, not a failure"
         );
     }

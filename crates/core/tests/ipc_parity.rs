@@ -1102,7 +1102,11 @@ async fn test_knowledge_process_chunk_multi_chunk_document_survives_one_malforme
             r["success"], true,
             "chunk {i} must succeed even when chunk 2 (0-indexed) has a malformed item: {v}"
         );
-        let expected_dropped = if body.contains("BAD_CHUNK_MARKER") { 1 } else { 0 };
+        let expected_dropped = if body.contains("BAD_CHUNK_MARKER") {
+            1
+        } else {
+            0
+        };
         assert_eq!(
             r["entities_dropped_malformed"], expected_dropped,
             "chunk {i} entities_dropped_malformed mismatch: {v}"
