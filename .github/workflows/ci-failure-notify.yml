@@ -55,7 +55,15 @@ jobs:
     # workflow_dispatch-only — all three can be run against any ref. Without this
     # guard, a developer's manual dispatch of any of them on a feature branch would
     # file a "main is broken" issue.
-    if: github.event.workflow_run.head_branch == 'main'
+    #
+    # #328 added a `pull_request` trigger to real-corpus-e2e.yml, which makes
+    # head_branch alone unreliable: it isn't namespaced by repository, so a *fork*
+    # PR whose own branch happens to be named "main" (a common default branch name)
+    # reports head_branch == 'main' even though the run is a PR-path run against
+    # the fork's main, not a push to this repo's main. Excluding event ==
+    # 'pull_request' closes that gap while still firing for push-to-main and
+    # workflow_dispatch-against-main — the two cases the guard above exists for.
+    if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.event != 'pull_request'
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
