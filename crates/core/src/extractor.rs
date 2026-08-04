@@ -2399,6 +2399,44 @@ mod tests {
         }
     }
 
+    // #342 US1 AS1 / SC-001: N well-formed entities plus 1 missing `name` in the same batch
+    // must salvage — the N valid entities are kept and the one bad item is dropped and counted,
+    // rather than failing the whole batch.
+    #[test]
+    fn parse_entity_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_04",
+                    "name": "extract_entities",
+                    "input": {
+                        "entities": [
+                            {"name": "Alice", "entity_type": "Person", "summary": "A person"},
+                            {"name": "Acme Corp", "entity_type": "Organization", "summary": "A company"},
+                            {"entity_type": "Mission", "summary": "no name here"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_entity_response(resp) {
+            EntityOutcome::Success { entities, dropped } => {
+                assert_eq!(entities.len(), 2, "the 2 well-formed entities must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the 1 name-less entity must be dropped and counted"
+                );
+                assert_eq!(entities[0].name, "Alice");
+                assert_eq!(entities[1].name, "Acme Corp");
+            }
+            EntityOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EntityOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
     #[test]
     fn parse_entity_response_missing_tool_block() {
         let resp = json!({
@@ -2505,6 +2543,41 @@ mod tests {
                 assert!(edges[0].invalid_at.is_none());
             }
             _ => panic!("expected success"),
+        }
+    }
+
+    // #342 US1 AS2 / SC-002: N well-formed edges plus 1 missing `source_name` in the same batch
+    // must salvage — same shape as the entity case, applied to edges.
+    #[test]
+    fn parse_edge_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_05",
+                    "name": "extract_edges",
+                    "input": {
+                        "edges": [
+                            {"source_name": "Alice", "target_name": "Acme", "fact": "Alice works at Acme", "relation_type": "works_at"},
+                            {"target_name": "Acme", "fact": "missing source_name", "relation_type": "works_at"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_edge_response(resp) {
+            EdgeOutcome::Success { edges, dropped } => {
+                assert_eq!(edges.len(), 1, "the 1 well-formed edge must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the edge missing source_name must be dropped and counted"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
+            }
+            EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
         }
     }
 
@@ -2616,6 +2689,37 @@ mod tests {
         }
     }
 
+    // #342 US1 AS3 / SC-003: same N-valid-plus-1-malformed shape as the Anthropic path, on the
+    // OAI-compatible parse site.
+    #[test]
+    fn parse_oai_entity_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}, {\"name\": \"Acme Corp\", \"entity_type\": \"Organization\", \"summary\": \"A company\"}, {\"entity_type\": \"Mission\", \"summary\": \"no name here\"}]}"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success {
+                value: entities,
+                dropped,
+                ..
+            } => {
+                assert_eq!(entities.len(), 2, "the 2 well-formed entities must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the 1 name-less entity must be dropped and counted"
+                );
+                assert_eq!(entities[0].name, "Alice");
+                assert_eq!(entities[1].name, "Acme Corp");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
     #[test]
     fn parse_oai_entity_response_malformed_content_is_parse_error() {
         let resp = json!({
@@ -2673,6 +2777,36 @@ mod tests {
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
                 assert!(!defensive_parse, "raw content was already valid JSON");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #342 US1 AS3 / SC-003: same N-valid-plus-1-malformed shape as the Anthropic edge path, on
+    // the OAI-compatible parse site.
+    #[test]
+    fn parse_oai_edge_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"edges\": [{\"source_name\": \"Alice\", \"target_name\": \"Acme\", \"fact\": \"Alice works at Acme\", \"relation_type\": \"works_at\"}, {\"target_name\": \"Acme\", \"fact\": \"missing source_name\", \"relation_type\": \"works_at\"}]}"
+                }
+            }]
+        });
+        match parse_oai_edge_response(&resp) {
+            OaiChatOutcome::Success {
+                value: edges,
+                dropped,
+                ..
+            } => {
+                assert_eq!(edges.len(), 1, "the 1 well-formed edge must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the edge missing source_name must be dropped and counted"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
             }
             OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
