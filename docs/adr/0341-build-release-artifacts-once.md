@@ -67,6 +67,21 @@ ever observe this key, written or not. Within this run, exactly one job writes i
 (`build-release`, once) and exactly one job reads it (`test`, once, after `needs:`
 guarantees `build-release` completed). There is no second writer to race against.
 
+**Cross-job mtime normalization, required for the `test` hand-off to actually be a
+cache hit.** Cargo's freshness check for path-dependency crates (every crate in this
+workspace) is mtime-based, not content-hash-based: a unit is stale if any source file's
+mtime differs from what was recorded when its fingerprint was written. `actions/checkout`
+does not preserve git commit timestamps — each job's checkout stamps files with that
+job's own wall-clock checkout time. Since `test` checks out independently and strictly
+*after* `build-release` finishes building, its sources would always read as newer than
+the fingerprints recorded during `build-release`'s build, making cargo recompile the
+entire workspace on every run regardless of the cache restore — silently defeating
+FR-001 and tripping the FR-006 guard every time. Both `build-release` and `test` run an
+identical `git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"` step right
+after checkout, stamping every tracked file to the commit's own timestamp — a value
+that's identical and deterministic across both jobs' independent checkouts, so the
+mtime comparison lines up and the restored build is recognized as fresh.
+
 ### 3. Bodily merge into `ci.yml`, not a `workflow_call` orchestrator
 
 GitHub Actions' `needs:` and job-level artifact/cache dependencies only work between

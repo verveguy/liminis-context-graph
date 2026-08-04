@@ -105,6 +105,22 @@ jobs:
         with:
           persist-credentials: false
 
+      # Cargo's freshness check for path-dependency crates (lcg-core, lcg-service,
+      # lcg-eval — everything in this workspace) is mtime-based: it treats a unit as
+      # stale if any of its source files has a different mtime than what was recorded
+      # when its fingerprint was written. `actions/checkout` does not preserve git
+      # commit timestamps — every checkout stamps files with that job's own wall-clock
+      # checkout time. Since `test` (below) checks out independently, *after*
+      # build-release finishes (`needs:`), its sources would always appear newer than
+      # the cached target/release fingerprints it restores, making cargo recompile the
+      # entire workspace on every run and tripping the FR-006 "no Compiling" guard.
+      # Stamping every tracked file to the commit's own timestamp makes that value
+      # identical and deterministic across both jobs' independent checkouts, so the
+      # mtime comparison lines up and the restored build is recognized as fresh. This
+      # step is a no-op for content — it only touches mtimes, never file contents.
+      - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
+        run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Get rustc version for cache key
@@ -232,6 +248,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      # Must match build-release's own normalization step exactly (same commit, same
+      # deterministic timestamp) — see that step's comment for why this is required
+      # for the restored target/release below to be recognized as fresh rather than
+      # triggering a full recompile.
+      - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
+        run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
       # Restores the entire `target/release` tree `build-release` just produced and
       # cached under this run's own id. `fail-on-cache-miss: true` makes a missing
