@@ -587,6 +587,13 @@ impl AnthropicExtractor {
         }
     }
 
+    /// Known asymmetry: if salvage drops every entity, `edges_dropped_malformed` is forced to 0
+    /// below because the edge call is never made — edges reference entities by name, so a batch
+    /// with zero surviving entities has nothing for the edge schema's `enum` to constrain against.
+    /// If the model *also* sent a malformed edge in the same response, that drop is never observed
+    /// (`parse_edge_response`/`salvage_items` never runs on it). This mirrors the pre-existing
+    /// genuine-zero-entities short-circuit and is considered acceptable: a malformed edge alongside
+    /// an all-malformed entity batch would reference entities that don't exist anyway.
     async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
         let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
@@ -1851,6 +1858,13 @@ impl OaiExtractor {
         }
     }
 
+    /// Known asymmetry: if salvage drops every entity, `edges_dropped_malformed` is forced to 0
+    /// below because the edge call is never made — edges reference entities by name, so a batch
+    /// with zero surviving entities has nothing for the edge schema's `enum` to constrain against.
+    /// If the model *also* sent a malformed edge in the same response, that drop is never observed
+    /// (`parse_edge_response`/`salvage_items` never runs on it). This mirrors the pre-existing
+    /// genuine-zero-entities short-circuit and is considered acceptable: a malformed edge alongside
+    /// an all-malformed entity batch would reference entities that don't exist anyway.
     async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
         let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
