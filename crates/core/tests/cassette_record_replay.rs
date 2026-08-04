@@ -649,11 +649,16 @@ async fn malformed_response_produces_one_complete_sidecar_record() {
 }
 
 #[tokio::test]
-async fn schema_invalid_response_produces_one_complete_sidecar_record() {
-    // A 200 OK response with a well-formed JSON tool_use block, but one entity in it is missing
-    // the genuinely required `name` field. This is valid JSON that fails schema validation —
-    // distinct from `malformed_response_produces_one_complete_sidecar_record`'s missing
-    // tool_use block, which has no JSON to validate against at all (#314 FR-003/US2 AS2).
+async fn single_item_all_malformed_batch_salvages_to_empty_success_no_sidecar_record() {
+    // A 200 OK response with a well-formed JSON tool_use block, but the one entity in it is
+    // missing the genuinely required `name` field. Before #342 this was valid JSON that failed
+    // schema validation and hard-failed the whole call (`schema_invalid`) — distinct from
+    // `malformed_response_produces_one_complete_sidecar_record`'s missing tool_use block, which
+    // has no JSON to validate against at all (#314 FR-003/US2 AS2). Since #342, a malformed item
+    // is salvaged (dropped and counted) rather than failing the batch: with nothing else in this
+    // one-item batch, the call succeeds with an empty result and `entities_dropped_malformed: 1`
+    // — FR-004's "all malformed" case, not an error, so no sidecar record and no schema_invalid
+    // classification (a salvaged response is not a failure).
     let schema_invalid_body = serde_json::json!({
         "stop_reason": "tool_use",
         "content": [{
@@ -685,21 +690,31 @@ async fn schema_invalid_response_produces_one_complete_sidecar_record() {
     ));
     let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
 
-    let err = recorder
+    let outcome = recorder
         .extract(opts_with_chunk_key(
             "Alice works at Acme Corp.",
             "chunk-schema-invalid",
         ))
         .await
-        .unwrap_err();
-    assert!(matches!(err, Error::Json(_)), "got {err:?}");
+        .unwrap();
+    assert!(outcome.result.entities.is_empty());
+    assert_eq!(outcome.entities_dropped_malformed, 1);
 
-    let records = read_sidecar_records(&sidecar_path);
-    assert_eq!(records.len(), 1);
-    let r = &records[0];
-    assert_eq!(r["call_type"], "entities");
-    assert_eq!(r["chunk_key"], "chunk-schema-invalid");
-    assert_eq!(r["classification"], "schema_invalid");
+    // No sidecar record — a salvaged response is a success, not a failure (#306's sidecar only
+    // ever captures the three hard-failure classes: http_error, truncation, malformed/schema_invalid).
+    assert!(
+        !sidecar_path.exists() || read_sidecar_records(&sidecar_path).is_empty(),
+        "a salvaged (successful) response must not produce a sidecar failure record"
+    );
+
+    // Unlike a failed call, RecordingExtractor::extract records on success — a salvaged response
+    // now produces exactly one cassette record, where before #342 it produced none.
+    let cassette_records = std::fs::read_to_string(&cassette_path).unwrap();
+    assert_eq!(
+        cassette_records.lines().count(),
+        1,
+        "a successful (salvaged) extract() call must produce one cassette record"
+    );
 }
 
 #[tokio::test]
