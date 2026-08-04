@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.12.0] - 2026-08-04
+
+An extraction-quality release. Strict-ontology mode stopped destroying data it couldn't classify,
+malformed model output stopped discarding whole chunks, and extraction failures became visible
+instead of silent. Alongside that, two regressions reported by downstream consumers are fixed, and
+the project gained a documentation site.
+
+### Upgrade notes
+
+- **Ingest output changes again.** Four separate changes alter what extraction produces (#306, #307,
+  #310, #312). Re-ingesting a corpus will not reproduce a 0.11.0 graph. As with 0.11.0, nothing
+  migrates automatically and existing data is untouched — but new ingest differs from old.
+- **Strict-ontology users should re-read the ontology section.** Strict mode previously *deleted*
+  entities and edges whose type fell outside the declared vocabulary. It now reclassifies them and
+  preserves the original label. If you relied on strict mode as a filter, it is no longer one.
+- **`knowledge_reprocess_relation_types` gained a response field.** Additive; existing clients are
+  unaffected.
+- **Read-only deployments no longer need an extraction provider.** If you were passing a placeholder
+  endpoint to satisfy the 0.11.0 startup check, you can drop it.
+
+### Added
+
+- **Documentation site** at **<https://v3rv.com/liminis-context-graph/>** — getting started,
+  configuration, IPC/MCP reference, telemetry, ontology, operations, and the ADR index, published
+  from `docs/` on every merge. The README is now an overview that links into it rather than a
+  950-line reference. Machine-readable `llms.txt` / `llms-full.txt` ship alongside, with a CI check
+  that fails if they drift from source. (#295, ADR-0295)
+- **`breakdown` in `knowledge_reprocess_relation_types`' apply response**, matching the shape the
+  dry-run path already returned. Abstention is the headline behaviour of that method, and after an
+  apply the `UNCLASSIFIED` count was previously unrecoverable — 500 confidently-classified relations
+  and 500 abstentions both reported `reclassified_count: 500`. (#305, #332)
+- **Extraction-failure capture**, recording failures whole rather than as a count, and surfacing
+  truncation in the report. (#306)
+- **Published extraction-quality evaluation** for 2026-07 — hosted vs local backends and the
+  measured effect of an ontology. (#304, `docs/history/extraction-eval-2026-07.md`)
+
+### Fixed
+
+- **Strict ontology mode deleted out-of-vocabulary entities.** An entity whose type wasn't in the
+  declared vocabulary was dropped entirely. It is now reclassified to `Unclassified` with the
+  original type preserved in the entity's attributes — never deleted. Edges were already being
+  preserved by #310; this closes the entity half of the same defect.
+  ([ADR-0312](docs/adr/0312-entity-strict-mode-reclassifies-not-drops.md), #312)
+- **Strict ontology mode dropped declared aliases and never told the model the constraint.** A
+  declared alias like `LAUNCHED_BY` was destroyed rather than normalised to its canonical
+  `LAUNCHED`, and the model was never informed of the vocabulary it was expected to honour.
+  ([ADR-0310](docs/adr/0310-strict-mode-reclassifies-not-drops.md), #310)
+- **A missing `summary` field discarded the whole chunk** and reported it as malformed JSON — so a
+  single absent field lost every entity and relationship in that chunk, under a misleading
+  diagnosis. (#314)
+- **Token-budget policy and edge budget-exhaustion semantics** are now defined rather than
+  incidental. ([ADR-0307](docs/adr/0307-token-budget-policy-and-edge-exhaustion-semantics.md), #307)
+- **`lcg-service` refused to start without an extraction provider** — a 0.11.0 regression for
+  read-only consumers, who never extract. Validation moved from startup to first use, so a reader
+  serving `knowledge_find_*` and hydrating via `knowledge_rebuild_from_wal` needs no provider
+  configured. Extraction calls without one still fail with the same actionable error.
+  ([ADR-0331](docs/adr/0331-lazy-extraction-provider-validation.md), #330, #331)
+- **`indices_built` was not set after a runtime recovery**, so `knowledge_status` under-reported
+  readiness while the indices genuinely existed. (#297)
+- **`knowledge_status` errored instead of reporting degraded state when a core table was missing** —
+  the health-check endpoint failing at exactly the moment it is most needed. It now reports a
+  `queryable` field distinguishing "graph not queryable" from "graph empty".
+  ([ADR-0325](docs/adr/0325-knowledge-status-open-db-not-queryable.md), #325)
+
+### Documentation
+
+- The docs are now the published site above; `CONTRIBUTING.md` gained the ADR-numbering rule
+  external contributors need, and `CLAUDE.md`'s long-running-command guidance was corrected. (#315)
+
+### Internal
+
+Not user-facing, but this cycle's development-loop work is why the above could be verified:
+`real-corpus-e2e` now runs on every PR rather than only post-merge (#328, ADR-0328), failing
+non-gating workflows file a tracking issue automatically (#298), docs-only PRs skip the Rust suite
+(#322, ADR-0322), and the required CI check dropped from ~18 minutes to ~8–10 by fixing a Criterion
+target-layout footgun (#316, ADR-0316).
+
 ## [0.11.0] - 2026-07-30
 
 The first release driven substantially by outside bug reports. Six issues filed by
