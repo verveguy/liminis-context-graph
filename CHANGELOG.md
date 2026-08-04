@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.12.1] - 2026-08-04
+
+A patch release fixing a data-loss bug reported against 0.11.0/0.12.0 (#340): a single malformed
+entity or edge in an extraction response could lose an entire chunk, and for a client that treats
+a chunk-level error as fatal, an entire multi-chunk document.
+
+### Fixed
+
+- **A single malformed entity or edge failed the whole chunk.** `knowledge_process_chunk` returned
+  a hard `-32000` error whenever the extraction LLM emitted one entity or edge missing its `name`
+  (or, for an edge, `source_name`/`target_name`), even though every other item in the response was
+  well-formed. The malformed item is now dropped and counted; the rest of the chunk's items are
+  processed normally, and the chunk succeeds. A community report (#340) traced a ~40-chunk document
+  lost in full to exactly this: one field-less item in chunk 13. (#342, [ADR-0342](docs/adr/0342-salvage-malformed-extraction-items.md))
+
+### Added
+
+- **`entities_dropped_malformed` / `edges_dropped_malformed` in `knowledge_process_chunk`'s
+  response**, reporting how many entities/edges were dropped in that chunk for failing
+  required-field validation during extraction-response parsing. Additive; existing clients are
+  unaffected. (#342)
+- **A `"salvaged"` `structured_output` telemetry outcome**, distinguishing "parsed successfully but
+  one or more items were dropped" from `clean`/`recovered`/`malformed`/`schema_invalid`. Emitted by
+  both the Anthropic and OAI-compatible extraction paths — the Anthropic path now emits
+  `structured_output` telemetry on a successful call for the first time (previously silent on
+  success). (#342)
+
 ## [0.12.0] - 2026-08-04
 
 An extraction-quality release. Strict-ontology mode stopped destroying data it couldn't classify,
