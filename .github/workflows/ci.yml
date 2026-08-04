@@ -277,6 +277,16 @@ jobs:
           name: release-build
           path: target/release
 
+      # `actions/upload-artifact@v4` zips the tree and does not preserve POSIX
+      # executable bits (files come back 644) — without this, every compiled test
+      # binary under target/release/deps/, every build-script-build executable under
+      # target/release/build/*, and the liminis-context-graph service binary itself
+      # would fail with "Permission denied" the moment cargo or a test harness tries
+      # to run them. The five e2e jobs below chmod their two known binaries by name;
+      # this job restores the whole tree, so it recurses over every regular file.
+      - name: Restore executable bits (actions/upload-artifact does not preserve them)
+        run: find target/release -type f -exec chmod +x {} +
+
       # With the full tree restored, this should be a pure cache hit: no compilation,
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
