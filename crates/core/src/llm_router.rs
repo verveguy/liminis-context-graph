@@ -308,7 +308,7 @@ mod tests {
         fn extract<'a>(
             &'a self,
             _opts: ExtractOptions<'a>,
-        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { Err(Error::Ipc(self.message.to_string())) })
         }
@@ -348,7 +348,7 @@ mod tests {
         fn extract<'a>(
             &'a self,
             _opts: ExtractOptions<'a>,
-        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(ExtractionResult {
@@ -359,7 +359,8 @@ mod tests {
                         original_entity_type: None,
                     }],
                     edges: vec![],
-                })
+                }
+                .into())
             })
         }
 
@@ -418,7 +419,7 @@ mod tests {
         // First call: primary's edge-exhaustion Err triggers the switch; the fallback serves
         // this call and every one after it.
         let first = router.extract(opts("chunk one")).await.unwrap();
-        assert_eq!(first.entities.len(), 1);
+        assert_eq!(first.result.entities.len(), 1);
         assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
         assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
 
@@ -437,7 +438,7 @@ mod tests {
         // process lifetime, even though the second call has nothing to do with the original
         // edge-truncation event.
         let second = router.extract(opts("chunk two")).await.unwrap();
-        assert_eq!(second.entities.len(), 1);
+        assert_eq!(second.result.entities.len(), 1);
         assert_eq!(
             primary.calls.load(Ordering::SeqCst),
             1,

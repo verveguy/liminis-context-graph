@@ -22,7 +22,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::NoopSink,
-    types::{ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
     EntityRow,
 };
 use serde_json::json;
@@ -67,7 +67,7 @@ impl Extractor for UniqueEntityExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let n = self.counter.fetch_add(1, Ordering::Relaxed);
         Box::pin(async move {
             Ok(ExtractionResult {
@@ -78,7 +78,8 @@ impl Extractor for UniqueEntityExtractor {
                     original_entity_type: None,
                 }],
                 edges: vec![],
-            })
+            }
+            .into())
         })
     }
 

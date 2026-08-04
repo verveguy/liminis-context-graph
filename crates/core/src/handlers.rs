@@ -530,6 +530,8 @@ async fn handle_knowledge_process_chunk(
         "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
+        "entities_dropped_malformed": result.entities_dropped_malformed,
+        "edges_dropped_malformed": result.edges_dropped_malformed,
         "duration_seconds": start.elapsed().as_secs_f64(),
     }))
 }

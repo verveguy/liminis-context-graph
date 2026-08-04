@@ -14,7 +14,8 @@ use tempfile::TempDir;
 use lcg_core::ontology::load_ontology_from_path;
 use lcg_core::{
     CassetteWriter, ConfigurableExtractor, Error, ExtractOptions, ExtractedEdge, ExtractedEntity,
-    ExtractionResult, Extractor, OntologyMode, RecordingExtractor, TelemetrySink,
+    ExtractionOutcome, ExtractionResult, Extractor, OntologyMode, RecordingExtractor,
+    TelemetrySink,
 };
 use lcg_eval::backend::{build_extractor, parse_backend_spec};
 use lcg_eval::corpus::{load_corpus, select_subset, CorpusChunk};
@@ -77,7 +78,7 @@ impl Extractor for FailingExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async { Err(Error::Ipc("simulated backend failure".to_string())) })
     }
     fn classify_entities<'a>(
@@ -735,7 +736,7 @@ impl Extractor for SelectivelyFailingExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let should_fail = opts.episode_body.contains(self.fail_marker);
         Box::pin(async move {
             if should_fail {
@@ -749,7 +750,8 @@ impl Extractor for SelectivelyFailingExtractor {
                         original_entity_type: None,
                     }],
                     edges: vec![],
-                })
+                }
+                .into())
             }
         })
     }

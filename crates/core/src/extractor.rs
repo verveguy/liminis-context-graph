@@ -2384,8 +2384,9 @@ mod tests {
         });
 
         match parse_entity_response(resp) {
-            EntityOutcome::Success(result) => {
-                assert_eq!(result.len(), 101);
+            EntityOutcome::Success { entities, dropped } => {
+                assert_eq!(entities.len(), 101);
+                assert_eq!(dropped, 0);
             }
             EntityOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             EntityOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2454,8 +2455,9 @@ mod tests {
         });
 
         match parse_edge_response(resp) {
-            EdgeOutcome::Success(edges) => {
+            EdgeOutcome::Success { edges, dropped } => {
                 assert_eq!(edges.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
                 assert_eq!(edges[0].valid_at.as_deref(), Some("2026-01-01T00:00:00Z"));
@@ -2490,7 +2492,7 @@ mod tests {
         });
 
         match parse_edge_response(resp) {
-            EdgeOutcome::Success(edges) => {
+            EdgeOutcome::Success { edges, .. } => {
                 assert_eq!(edges.len(), 1);
                 assert!(edges[0].relation_type.is_none());
                 assert!(edges[0].valid_at.is_none());
@@ -2568,8 +2570,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(entities[0].name, "Alice");
                 assert!(!defensive_parse, "raw content was already valid JSON");
             }
@@ -2592,8 +2596,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 1);
+                assert_eq!(dropped, 0);
                 assert!(
                     defensive_parse,
                     "fenced content required extract_json_block stripping"
@@ -2654,8 +2660,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: edges,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(edges.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
                 assert!(!defensive_parse, "raw content was already valid JSON");
@@ -2762,11 +2770,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2783,11 +2792,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2828,8 +2838,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 2, "no entities should be dropped");
+                assert_eq!(dropped, 0);
                 assert!(entities.iter().all(|e| e.summary.is_empty()));
                 assert!(!defensive_parse);
             }
@@ -2848,11 +2860,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 2, "no entities should be dropped");
+        assert_eq!(dropped, 0);
         assert!(entities.iter().all(|e| e.summary.is_empty()));
 
         let events = sink.events();
@@ -2871,29 +2884,36 @@ mod tests {
         );
     }
 
-    // US2 AS2 (#314): valid JSON that fails schema validation on a genuinely required field
-    // (`name`/`entity_type` missing) classifies distinctly from unparseable content.
+    // #342: a single-item batch where that item is missing `name` (a genuinely required field)
+    // is salvaged, not a hard failure — the batch becomes an empty success with the drop
+    // counted, exactly like #314's "all malformed" edge case. This inverts the pre-#342
+    // assertion (`result.is_err()` + `outcome == "schema_invalid"`); see the Plan stage's Key
+    // Decisions for why `types.rs`'s single-struct deserialize test does NOT flip alongside
+    // this one — `salvage_items` relies on that lower-level deserialize continuing to fail.
     #[tokio::test]
-    async fn do_extract_entities_missing_required_field_classifies_schema_invalid() {
+    async fn do_extract_entities_all_malformed_batch_salvages_to_empty_success() {
         let content = r#"{"entities": [{"entity_type": "Mission", "summary": "no name here"}]}"#;
         let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let result = extractor.do_extract_entities(&test_extract_options()).await;
-        assert!(result.is_err());
+        let (entities, dropped) = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert!(entities.is_empty());
+        assert_eq!(dropped, 1);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
             TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
-                if call_type == "entities" && outcome == "schema_invalid"
+                if call_type == "entities" && outcome == "salvaged"
         )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            TelemetryEvent::ExtractionFailure { call_type, classification, .. }
-                if call_type == "entities" && classification == "schema_invalid"
-        )));
+        assert!(
+            !events.iter().any(|e| matches!(e, TelemetryEvent::ExtractionFailure { .. })),
+            "a salvaged response must not emit ExtractionFailure — it's a success, not a failure"
+        );
     }
 
     // FR-004 (#314): a mixed batch (some entities with a summary, some without) fires
@@ -2905,11 +2925,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 2);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2926,11 +2947,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let edges = extractor
+        let (edges, dropped) = extractor
             .do_extract_edges(&test_extract_options(), &["Alice".to_string()])
             .await
             .unwrap();
         assert_eq!(edges.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2974,7 +2996,7 @@ mod tests {
             sink,
         );
 
-        let edges = extractor
+        let (edges, dropped) = extractor
             .do_extract_edges(
                 &test_extract_options(),
                 &["   ".to_string(), "\n".to_string()],
@@ -2982,5 +3004,6 @@ mod tests {
             .await
             .unwrap();
         assert!(edges.is_empty());
+        assert_eq!(dropped, 0);
     }
 }

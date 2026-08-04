@@ -31,7 +31,7 @@ use lcg_core::{
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     telemetry::{NoopSink, TelemetrySink},
-    types::ExtractionResult,
+    types::{ExtractionOutcome, ExtractionResult},
     EntityRow, Ontology, RelatesToEdge,
 };
 use regex::Regex;
@@ -455,8 +455,8 @@ impl Extractor for ClassifyingExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
-        Box::pin(async { Ok(ExtractionResult::default()) })
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
+        Box::pin(async { Ok(ExtractionOutcome::from(ExtractionResult::default())) })
     }
 
     fn classify_entities<'a>(
@@ -563,8 +563,8 @@ impl Extractor for RelationClassifyingExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
-        Box::pin(async { Ok(ExtractionResult::default()) })
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
+        Box::pin(async { Ok(ExtractionOutcome::from(ExtractionResult::default())) })
     }
 
     fn classify_entities<'a>(
@@ -955,6 +955,14 @@ async fn test_knowledge_process_chunk_ok() {
     assert!(
         r["entities_reclassified_unclassified"].as_u64().is_some(),
         "expected numeric entities_reclassified_unclassified (issue #312 FR-004): {v}"
+    );
+    assert!(
+        r["entities_dropped_malformed"].as_u64().is_some(),
+        "expected numeric entities_dropped_malformed (issue #342 FR-003): {v}"
+    );
+    assert!(
+        r["edges_dropped_malformed"].as_u64().is_some(),
+        "expected numeric edges_dropped_malformed (issue #342 FR-003): {v}"
     );
     assert!(
         r["duration_seconds"].as_f64().is_some(),

@@ -26,7 +26,7 @@ use lcg_core::{
     ontology::{EntityTypeDef, Ontology, OntologyMode},
     prompts,
     telemetry::{NoopSink, TelemetrySink},
-    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
     Extractor,
 };
 use tempfile::TempDir;
@@ -304,7 +304,7 @@ impl Extractor for SelfRefExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async {
             Ok(ExtractionResult {
                 entities: vec![ExtractedEntity {
@@ -322,7 +322,8 @@ impl Extractor for SelfRefExtractor {
                     invalid_at: None,
                     original_relation_type: None,
                 }],
-            })
+            }
+            .into())
         })
     }
 
@@ -352,7 +353,7 @@ impl Extractor for BadEndpointExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async {
             Ok(ExtractionResult {
                 entities: vec![ExtractedEntity {
@@ -370,7 +371,8 @@ impl Extractor for BadEndpointExtractor {
                     invalid_at: None,
                     original_relation_type: None,
                 }],
-            })
+            }
+            .into())
         })
     }
 

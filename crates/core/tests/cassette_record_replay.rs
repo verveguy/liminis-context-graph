@@ -283,7 +283,8 @@ async fn record_then_replay_bare_anthropic_extractor() {
     let recorded = recorder
         .extract(opts("Alice works at Acme Corp."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     assert_eq!(recorded.entities.len(), 2);
     assert_eq!(recorded.edges.len(), 1);
 
@@ -293,7 +294,8 @@ async fn record_then_replay_bare_anthropic_extractor() {
     let replayed = replayer
         .extract(opts("Alice works at Acme Corp."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(replayed.entities.len(), recorded.entities.len());
     for (r, o) in replayed.entities.iter().zip(recorded.entities.iter()) {
@@ -376,7 +378,8 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let result_a = router_a
         .extract(opts("Router A episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     // Router B: primary unreachable, fallback reachable — only the fallback call, under
     // "model-b-fallback", should be recorded; the failed primary attempt must not appear.
@@ -418,7 +421,8 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let result_b = router_b
         .extract(opts("Router B episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     // Exactly two records: RecordingExtractor only appends after `inner.extract()` succeeds,
     // so the failed primary_b attempt never produced a cassette entry.
@@ -449,11 +453,13 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let replayed_a = replayer
         .extract(opts("Router A episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     let replayed_b = replayer
         .extract(opts("Router B episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(replayed_a.entities.len(), result_a.entities.len());
     assert_eq!(replayed_b.entities.len(), result_b.entities.len());
@@ -870,7 +876,8 @@ async fn chunk_key_does_not_affect_the_cassette_request_hash() {
             "a-completely-different-key",
         ))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     assert_eq!(replayed.entities.len(), 2);
 }
 
