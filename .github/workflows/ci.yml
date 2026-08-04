@@ -4,6 +4,16 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      e2e_only:
+        description: >
+          Skip the test job (release build verification, clippy, fmt, R-003 bench) and
+          run only build-release plus the five real-corpus e2e jobs. Mirrors the old
+          standalone `real-corpus-e2e.yml` workflow_dispatch path (see #341) now that
+          its jobs live in this file.
+        type: boolean
+        default: false
 
 # Run CI once per change, not twice. Previously `on: { push, pull_request }` with no
 # concurrency control meant every push to a PR branch triggered two concurrent CI runs
@@ -13,6 +23,18 @@ on:
 # falsely failed the build and paused Fabrik. Scoping `push` to `main` means a PR branch runs
 # CI exactly once (via `pull_request`); `main` still runs on merge. The concurrency group
 # additionally cancels superseded in-flight runs when new commits land on the same ref.
+#
+# #341: this same race resurfaced once `real-corpus-e2e.yml` started running five more
+# release-build jobs in parallel on every PR (#328) — five more concurrent readers of the
+# same lbug cache key, one landing mid-write (#336). `build-release` below is now the
+# *only* job in the entire run that performs a full `cargo build --release`, and it
+# remains the sole writer of the lbug cache (as `build-lbug` already was before this
+# change — see ADR-0341 for why this reduces the pool of concurrent readers racing a
+# same-run write without eliminating the underlying cross-run key collision). Every other
+# job (including what used to be `real-corpus-e2e.yml`'s five jobs, merged into this file
+# below) only restores — either a same-run artifact of the full release tree (`test`) or
+# a same-run artifact of six specific binaries (the five e2e jobs) — and neither of those
+# artifacts touches the lbug cache at all. See docs/adr/0341-build-release-artifacts-once.md.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -26,17 +48,22 @@ env:
   LBUG_CACHE_BUST: "2026-07-13"
 
 jobs:
-  # Classifies the PR diff so docs-only PRs can skip the expensive Rust build/test job
-  # while still satisfying the required `test (ubuntu-latest)` status check. This job
-  # is gated by `if:` on the two downstream jobs, NOT by `paths`/`paths-ignore` on the
+  # Classifies the PR diff so docs-only PRs can skip the expensive Rust build/test/e2e
+  # jobs while still satisfying the required `test (ubuntu-latest)` status check. This
+  # job is gated by `if:` on the downstream jobs, NOT by `paths`/`paths-ignore` on the
   # `on:` trigger above — filtering the workflow itself would mean the required check
   # never posts on a docs-only PR, leaving it permanently blocked by branch protection.
   # A job skipped via `if:` reports a "skipped" (passing) conclusion instead.
   # See docs/adr/0322-ci-docs-only-fast-path.md and issue #322 for the full rationale,
   # including the classification table and the fail-safe-defaults-to-full-suite design.
-  # The classification logic itself lives in ./.github/actions/classify-changes, shared
-  # with real-corpus-e2e.yml (docs/adr/0328-real-corpus-e2e-on-pr-path.md) — there must
-  # be exactly one classifier, not two independently maintained deny-lists.
+  # The classification logic itself lives in ./.github/actions/classify-changes. Per
+  # #341, this is now the *only* classify job in the repo — it used to be duplicated
+  # between this file and the now-deleted real-corpus-e2e.yml, one call each. The
+  # extra-deny-pattern below (previously real-corpus-e2e.yml-only) is now applied
+  # unconditionally: a change to the golden real-corpus WAL fixture is code-relevant
+  # for the e2e jobs even though it isn't for `test`, and unifying into one classifier
+  # output that both consume is simpler and safer than threading two outputs through
+  # six downstream jobs for that narrow efficiency gain (see ADR-0341, Key Decisions).
   changes:
     name: classify changes
     runs-on: ubuntu-latest
@@ -50,9 +77,15 @@ jobs:
       - name: Classify diff (docs-only vs code-touching)
         id: classify
         uses: ./.github/actions/classify-changes
+        with:
+          extra-deny-pattern: "^crates/core/tests/fixtures/real_corpus_wal/"
 
-  build-lbug:
-    name: build lbug cache
+  # #341: the single build job for the whole workspace. Produces everything every other
+  # job needs: the lbug cache (unchanged), a same-run artifact of the full `target/release`
+  # tree for `test`, and a small artifact of exactly the six binaries the five e2e jobs
+  # need. Nothing downstream of this job invokes `cargo build`/`cargo test --no-run` again.
+  build-release:
+    name: build release artifacts
     runs-on: ubuntu-latest
     needs: changes
     # `!cancelled()` overrides the default "skip if a dependency didn't succeed" behavior
@@ -72,6 +105,22 @@ jobs:
         with:
           persist-credentials: false
 
+      # Cargo's freshness check for path-dependency crates (lcg-core, lcg-service,
+      # lcg-eval — everything in this workspace) is mtime-based: it treats a unit as
+      # stale if any of its source files has a different mtime than what was recorded
+      # when its fingerprint was written. `actions/checkout` does not preserve git
+      # commit timestamps — every checkout stamps files with that job's own wall-clock
+      # checkout time. Since `test` (below) checks out independently, *after*
+      # build-release finishes (`needs:`), its sources would always appear newer than
+      # the cached target/release fingerprints it restores, making cargo recompile the
+      # entire workspace on every run and tripping the FR-006 "no Compiling" guard.
+      # Stamping every tracked file to the commit's own timestamp makes that value
+      # identical and deterministic across both jobs' independent checkouts, so the
+      # mtime comparison lines up and the restored build is recognized as fresh. This
+      # step is a no-op for content — it only touches mtimes, never file contents.
+      - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
+        run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Get rustc version for cache key
@@ -85,6 +134,14 @@ jobs:
         # Unrelated Cargo.lock changes (serde, tokio, etc.) do NOT affect this hash.
         run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
 
+      # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
+      # /home/runner/work/liminis-context-graph/liminis-context-graph/ — stable on GHA ubuntu-latest
+      # but not portable to self-hosted runners with non-standard workspace paths.
+      # Note: lbug 0.17.0+ prebuilt is a self-contained fat bundle; LBUG_BUILD_FROM_SOURCE
+      # is no longer needed. This is a plain (restore-and-auto-save) cache: this job is
+      # the ONLY job in the whole run that ever writes this key (#341/FR-003) — every
+      # other job that used to restore-only against it now gets its binaries from this
+      # job's outputs instead of touching the lbug cache at all.
       - name: Restore/cache lbug build artifacts
         id: lbug-cache
         uses: actions/cache@v4
@@ -95,25 +152,103 @@ jobs:
             target/release/.fingerprint/lbug-*
             target/release/deps/liblbug-*
 
-      # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
-      # /home/runner/work/liminis-context-graph/liminis-context-graph/ — stable on GHA ubuntu-latest
-      # but not portable to self-hosted runners with non-standard workspace paths.
-      # Note: lbug 0.17.0+ prebuilt is a self-contained fat bundle; LBUG_BUILD_FROM_SOURCE
-      # is no longer needed. This step just populates the cache so the test job gets a hit.
-      - name: Populate lbug prebuilt cache (skipped on cache hit)
-        if: steps.lbug-cache.outputs.cache-hit != 'true'
-        run: cargo build --release -p lcg-core
+      # The one and only `cargo build --release` in the whole CI run (#341/FR-001).
+      # Builds the `liminis-context-graph` service binary the five e2e jobs need.
+      - name: cargo build --release
+        run: cargo build --release
+
+      # Compiles (links, but does not run) every integration test target, including the
+      # five real-corpus e2e test binaries — without this flag the same command would
+      # both compile AND run every non-`#[ignore]`d test, which `test` (below) already
+      # does against this job's restored output. `--message-format=json` lets the next
+      # step locate each target's compiled executable path (cargo hashes the filename,
+      # e.g. `real_corpus_e2e-<hash>`, so the path isn't guessable ahead of time).
+      - name: cargo test --release --no-run (compile e2e + all other test binaries)
+        run: cargo test --release --no-run --message-format=json > /tmp/cargo-test-no-run.json
+
+      # Stages exactly the six binaries the five e2e jobs need (FR-002/FR-004) under
+      # fixed names, so the artifact transferred below is tens/hundreds of MB, not the
+      # ~2.7GB full `target/release` tree. Fails loudly (not silently short) if any of
+      # the five expected test targets didn't produce an executable in the json stream —
+      # e.g. because a rename in Cargo.toml or the test file itself broke discovery.
+      - name: Stage e2e artifacts (5 test binaries + service binary)
+        run: |
+          set -euo pipefail
+          mkdir -p target/release/e2e-artifacts
+
+          for name in \
+            real_corpus_e2e \
+            mcp_real_corpus_e2e \
+            mcp_real_corpus_mutation_e2e \
+            mcp_real_corpus_admin_data_e2e \
+            mcp_real_corpus_admin_lifecycle_e2e \
+          ; do
+            exe=$(jq -r --arg name "$name" \
+              'select(.reason=="compiler-artifact" and .executable != null and (.target.kind[]? == "test") and .target.name == $name) | .executable' \
+              /tmp/cargo-test-no-run.json | tail -n1)
+            if [ -z "$exe" ] || [ "$exe" = "null" ]; then
+              echo "ERROR: could not locate a compiled test binary for target '$name' in cargo's --message-format=json output"
+              exit 1
+            fi
+            cp "$exe" "target/release/e2e-artifacts/$name"
+          done
+
+          # Left at its original build path (target/release/liminis-context-graph), NOT
+          # copied into e2e-artifacts/: the five test binaries embed
+          # env!("CARGO_BIN_EXE_liminis-context-graph") as a compile-time absolute path
+          # constant pointing at that exact location, so the consuming job must restore
+          # the service binary there, not to an arbitrary renamed path.
+          chmod +x target/release/e2e-artifacts/* target/release/liminis-context-graph
+          ls -la target/release/e2e-artifacts/
+
+      # Short retention: this artifact is consumed only by sibling jobs in this same
+      # run, never across runs. `if-no-files-found: error` is a second, independent
+      # guard against the staging step above silently producing fewer than expected.
+      - name: Upload e2e artifacts (5 test binaries + service binary)
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: |
+            target/release/e2e-artifacts/
+            target/release/liminis-context-graph
+          retention-days: 1
+          if-no-files-found: error
+
+      # `test` (below) needs the *entire* built tree (clippy and the R-003 bench operate
+      # over more than the six e2e binaries; `cargo fmt --check` does not need it, but
+      # runs in the same job), so it gets a full-tree hand-off via a same-run artifact
+      # rather than the small artifact above (FR-004 is scoped to what the e2e jobs need,
+      # not to this hand-off — see ADR-0341, Key Decisions). `actions/cache` was
+      # considered and rejected for this specific hand-off: this ~2.7GB payload is
+      # genuinely single-use (written once, read once by `test`, dead afterward), but a
+      # cache entry would still count against this repo's shared 10GB total cache quota
+      # alongside the long-lived `lbug-cache-*` entry — repeated multi-GB single-use
+      # entries at PR volume risk evicting `lbug-cache-*` ahead of schedule, or evicting
+      # this very entry before `test` restores it. `upload-artifact`/`download-artifact`
+      # don't share that quota, so this hand-off can't contend with lbug's cache
+      # regardless of concurrent CI volume, and (being scoped to this run) needs no
+      # explicit cleanup step the way the cache alternative would have.
+      - name: Upload full release build for the test job (same-run artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build
+          path: target/release/
+          retention-days: 1
+          if-no-files-found: error
 
   test:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
-    needs: [changes, build-lbug]
-    # The `needs.build-lbug.result == 'success'` clause restates the implicit default
-    # ("only run if build-lbug succeeded") that a custom `if:` would otherwise drop —
-    # without it, `test` could attempt to run after a real `build-lbug` failure.
-    # `!cancelled()` + `needs.changes.result != 'success'` mirror build-lbug's fail-safe
-    # above, for the same reason: a failed `changes` job must not silently skip `test`.
-    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-lbug.result == 'success'"
+    needs: [changes, build-release]
+    # The `needs.build-release.result == 'success'` clause restates the implicit default
+    # ("only run if build-release succeeded") that a custom `if:` would otherwise drop —
+    # without it, `test` could attempt to run after a real `build-release` failure.
+    # `!cancelled()` + `needs.changes.result != 'success'` mirror build-release's
+    # fail-safe above, for the same reason: a failed `changes` job must not silently
+    # skip `test`. The final clause implements the `e2e_only` workflow_dispatch input
+    # (#341): a manual "e2e only" run still needs `build-release` (the e2e jobs depend
+    # on it) but skips this job's own release-verification/clippy/fmt/bench tail.
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.e2e_only)"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -123,48 +258,56 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      - name: Get rustc version for cache key
-        id: rustc-ver
-        run: echo "version=$(rustc --version | sha256sum | cut -c1-8)" >> "$GITHUB_OUTPUT"
+      # Must match build-release's own normalization step exactly (same commit, same
+      # deterministic timestamp) — see that step's comment for why this is required
+      # for the restored target/release below to be recognized as fresh rather than
+      # triggering a full recompile.
+      - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
+        run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
-      - name: Get lbug version hash for cache key
-        id: lbug-hash
-        run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore lbug build artifacts from cache
-        id: lbug-cache-restore
-        uses: actions/cache/restore@v4
+      # Restores the entire `target/release` tree `build-release` just produced and
+      # uploaded as a same-run artifact. `download-artifact` already fails the step if
+      # the named artifact isn't present in this run — a missing artifact is a loud job
+      # failure, not a silent fall-back to rebuilding — per the spec's Edge Cases, a job
+      # that can't obtain its binaries must fail loudly, not quietly recompile and
+      # reintroduce the redundant-build problem this exists to fix.
+      - name: Download full release build from build-release (same-run artifact)
+        uses: actions/download-artifact@v4
         with:
-          key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
-          path: |
-            target/release/build/lbug-*
-            target/release/.fingerprint/lbug-*
-            target/release/deps/liblbug-*
+          name: release-build
+          path: target/release
 
-      # `cargo test` must stay --release: linking the ~50 integration-test
-      # binaries (crates/core: 37, crates/service: 11, crates/eval: 2) against
-      # lbug + third-party static archives in debug mode OOMs the 7GB Ubuntu
-      # runner during `ld` (bus error / signal 7). Release dead-code-eliminates
-      # enough to fit. Measured cost here is modest (~4m compile+link, ~1m
-      # execution across all 50 binaries) — see ADR-0316 and #316 for why the
-      # dominant CI cost was actually the R-003 bench step below, not this.
-      - name: cargo build --release (capture output for cache regression check)
-        run: cargo build --release 2>&1 | tee /tmp/build.log
+      # `actions/upload-artifact@v4` zips the tree and does not preserve POSIX
+      # executable bits (files come back 644) — without this, every compiled test
+      # binary under target/release/deps/, every build-script-build executable under
+      # target/release/build/*, and the liminis-context-graph service binary itself
+      # would fail with "Permission denied" the moment cargo or a test harness tries
+      # to run them. The five e2e jobs below chmod their two known binaries by name;
+      # this job restores the whole tree, so it recurses over every regular file.
+      - name: Restore executable bits (actions/upload-artifact does not preserve them)
+        run: find target/release -type f -exec chmod +x {} +
 
-      # FR-008: assert that lbug's C++ cmake build did NOT run on a cache-hit.
-      # If "Compiling lbug" appears in the build log on a cache-hit, the cache
-      # is silently broken and CI would creep back to ~1h wall-clock.
-      - name: Assert lbug not recompiled on cache-hit run (FR-008)
-        if: steps.lbug-cache-restore.outputs.cache-hit == 'true'
+      # With the full tree restored, this should be a pure cache hit: no compilation,
+      # only running the ~50 already-linked integration-test binaries (crates/core: 37,
+      # crates/service: 11, crates/eval: 2). The output is captured so the next step can
+      # assert that was actually true.
+      - name: cargo test --release (restored build; captured for recompile-regression check)
+        run: cargo test --release 2>&1 | tee /tmp/build.log
+
+      # #341/FR-006: generalized regression guard for Story 4. Previously this only
+      # checked for "Compiling lbug " specifically (the original FR-008, from when this
+      # job did its own `cargo build --release`). Now that `test` never builds anything
+      # itself — it only restores build-release's output — ANY "Compiling " line here
+      # means the restore silently failed to avoid recompilation for some crate, not
+      # just lbug, so the check is no longer lbug-specific.
+      - name: Assert no workspace code recompiled after restoring build-release's output (FR-006)
         run: |
-          if grep -q "Compiling lbug " /tmp/build.log; then
-            echo "ERROR: lbug C++ recompiled despite cache-hit — cache is not working"
+          if grep -q "Compiling " /tmp/build.log; then
+            echo "ERROR: workspace code recompiled despite restoring build-release's target/release artifact — the hand-off is broken"
+            grep "Compiling " /tmp/build.log
             exit 1
           fi
-          echo "OK: lbug cache hit confirmed, no recompilation"
-
-      - name: cargo test
-        run: cargo test --release
+          echo "OK: full cache hit confirmed, no recompilation after restoring build-release's output"
 
       # The benchmark scripts' guards decide whether to spend money on a multi-hour run, and
       # they had no automated coverage — #278 took seven review rounds, with roughly half the
@@ -176,8 +319,8 @@ jobs:
         run: crates/eval/scripts/test-scripts.sh
 
       # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
-      # Runs here (not bench-dedup) so it shares the lbug build artifacts already in ./target/.
-      # `dedup_overlap_check` is its own [[bench]] target (not a group sharing a
+      # Runs here (not bench-dedup) so it shares the release build artifacts already restored
+      # into ./target/. `dedup_overlap_check` is its own [[bench]] target (not a group sharing a
       # criterion_main! with other benches, see ADR-0316) so this invocation pays only its
       # own ~1k-entity setup, not the other bench groups' — the previous shared-binary
       # layout made this step ~10-11 minutes; isolated, it's ~1-2.
@@ -191,7 +334,7 @@ jobs:
       # targets, nothing else in the PR-blocking job compiles them — `cargo build`/`test`
       # --release don't touch bench targets, and bench.yml (the only thing that would)
       # is workflow_dispatch-only. `check` (not `bench --no-run`) keeps this cheap: it
-      # type-checks without codegen, ~10-30s reusing this job's already-built release deps.
+      # type-checks without codegen, ~10-30s reusing this job's already-restored release deps.
       - name: compile-check remaining bench targets
         run: cargo check --release --benches -p lcg-core
 
@@ -215,3 +358,231 @@ jobs:
 
       - name: cargo fmt
         run: cargo fmt --check
+
+  # #341: the five real-corpus e2e jobs, merged in from the now-deleted
+  # real-corpus-e2e.yml so a single `needs: build-release` can gate them at job
+  # granularity — GitHub Actions' `needs:`/artifact sharing only works between jobs in
+  # the same workflow file, not across two independently-triggered top-level workflows
+  # (see ADR-0341 for why a `workflow_call` orchestrator can't do this at sub-job
+  # granularity). Each job here downloads exactly the two binaries it needs (its own
+  # test binary + the service binary) from build-release's artifact and invokes the
+  # test binary directly. Unlike build-release/test, these jobs don't add an explicit
+  # `dtolnay/rust-toolchain@stable` step — but that alone is not a structural guarantee:
+  # `ubuntu-latest` images ship a preinstalled Rust toolchain regardless, so `cargo`/
+  # `rustc` are on PATH here whether or not this workflow asks for them. FR-006/Story 4's
+  # actual guard for these five jobs is the same mechanism `test` uses: each job's test
+  # binary invocation is captured to a log and grepped for a "Compiling " line, failing
+  # loudly if a future change adds a recompile step after the artifact download.
+  #
+  # The real_corpus_e2e tests (crates/core/tests/real_corpus_e2e.rs, #217) and their MCP
+  # siblings are #[ignore]d out of the default `cargo test --release` run: a full WAL
+  # replay + HNSW/FTS index build over the golden fixture's 1,506 entities takes roughly
+  # a minute each. Per #328: these run in parallel with `test` (not appended after it,
+  # and not gating merge) — the suite's own wall clock finishes well before the required
+  # `test (ubuntu-latest)` check, so this is expected to add zero latency to a PR's
+  # time-to-mergeable. See docs/adr/0328-real-corpus-e2e-on-pr-path.md for the original
+  # rationale and docs/adr/0341-build-release-artifacts-once.md for why these jobs now live in this file.
+  real-corpus-e2e:
+    name: real_corpus_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Restores to target/release/ so the service binary lands at exactly the path
+      # (target/release/liminis-context-graph) baked into the test binary's
+      # CARGO_BIN_EXE_liminis-context-graph compile-time constant, and the checkout
+      # above puts CARGO_MANIFEST_DIR-relative fixtures at the same paths they had
+      # during the build — both jobs run on ubuntu-latest with the same standard
+      # /home/runner/work/... checkout path.
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      # Direct invocation of the compiled test binary, equivalent to what
+      # `cargo test -p lcg-core --release --test real_corpus_e2e -- --ignored` did
+      # before #341: everything after `--` there was already passed straight through
+      # to this same binary. RUST_TEST_THREADS=4 replicates .cargo/config.toml's
+      # workspace-wide `[env]` setting, which only applies when cargo itself spawns the
+      # process — invoking the binary directly bypasses that, so it's set explicitly here.
+      - name: real_corpus_e2e -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
+
+  mcp-real-corpus-e2e:
+    name: mcp_real_corpus_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      # MCP read-path e2e suite (#234): seeds a workspace from the same golden real-corpus WAL
+      # fixture consumed by real_corpus_e2e above, then spawns the real compiled binary over
+      # MCP-over-stdio against it.
+      - name: mcp_real_corpus_e2e -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
+
+  mcp-write-mutation-e2e:
+    name: mcp_real_corpus_mutation_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      # MCP write/mutation-path e2e suite (#235): the sibling of mcp_real_corpus_e2e above,
+      # covering the mutation surface (deletes, merges/corrections, entity/relation retyping,
+      # ingest into the pre-populated graph, knowledge_clear_all).
+      - name: mcp_real_corpus_mutation_e2e -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_mutation_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
+
+  mcp-admin-data-e2e:
+    name: mcp_real_corpus_admin_data_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      # MCP admin/lifecycle e2e suite, data-plane half (#236): dump→rebuild round-trips
+      # (including group_id scoping), full rebuild with progress notifications, checkpoint
+      # coherence, and index rebuild on an index-less graph.
+      - name: mcp_real_corpus_admin_data_e2e -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_data_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
+
+  mcp-admin-lifecycle-e2e:
+    name: mcp_real_corpus_admin_lifecycle_e2e (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      # MCP admin/lifecycle e2e suite, process-lifecycle half (#236): degraded-mode startup and
+      # recovery (ADR-0009, the direct regression guard for #207), knowledge_close checkpoint
+      # semantics (ADR-0017) and attached-mode --allow-remote-close gating, and admin-scope
+      # tool-visibility gating.
+      - name: mcp_real_corpus_admin_lifecycle_e2e -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
