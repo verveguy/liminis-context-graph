@@ -8,7 +8,7 @@ use crate::{
     error::Error,
     extractor::{AnthropicExtractor, ExtractOptions, Extractor},
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
-    types::ExtractionResult,
+    types::ExtractionOutcome,
 };
 
 /// Routes extraction calls to a primary LLM with optional fallback (AD-5).
@@ -208,7 +208,7 @@ impl LlmRouter {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
         // primary_failed is only ever set to true when a fallback is configured, so if it is
         // true here there must be a fallback to try.
         if !self.primary_failed.load(Ordering::Acquire) {
@@ -259,7 +259,7 @@ impl Extractor for LlmRouter {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -284,7 +284,7 @@ impl Extractor for LlmRouter {
 mod tests {
     use super::*;
     use crate::telemetry::CaptureSink;
-    use crate::types::{ExtractedEntity, SourceType};
+    use crate::types::{ExtractedEntity, ExtractionResult, SourceType};
     use std::sync::atomic::AtomicUsize;
 
     /// Always fails `extract()` with the given message, counting how many times it was called

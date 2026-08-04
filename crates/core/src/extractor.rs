@@ -17,7 +17,7 @@ use crate::{
         compute_initial_max_tokens, next_retry_max_tokens, resolve_max_tokens_ceiling,
         ExtractionCallType,
     },
-    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -47,7 +47,7 @@ pub trait Extractor: Send + Sync {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>>;
 
     /// Classifies entity types for a batch of (name, summary) pairs.
     ///
@@ -234,7 +234,7 @@ impl AnthropicExtractor {
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
-    ) -> Result<Vec<ExtractedEntity>, Error> {
+    ) -> Result<(Vec<ExtractedEntity>, usize), Error> {
         let system_text = prompts::entity_system_prompt(opts.source_type, opts.ontology);
         let user_text = prompts::entity_user_prompt_for(
             opts.source_type,
@@ -331,7 +331,13 @@ impl AnthropicExtractor {
             let resp_for_failure = resp.clone();
 
             match parse_entity_response(resp) {
-                EntityOutcome::Success(entities) => {
+                EntityOutcome::Success { entities, dropped } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: if dropped > 0 { "salvaged" } else { "clean" }.to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -342,7 +348,7 @@ impl AnthropicExtractor {
                             chunk_key: chunk_key.clone(),
                         });
                     }
-                    return Ok(entities);
+                    return Ok((entities, dropped));
                 }
                 EntityOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -391,12 +397,12 @@ impl AnthropicExtractor {
         &self,
         opts: &ExtractOptions<'_>,
         entity_names: &[String],
-    ) -> Result<Vec<ExtractedEdge>, Error> {
+    ) -> Result<(Vec<ExtractedEdge>, usize), Error> {
         // FR-001 edge case: an empty (or all-empty-after-sanitizing) entity list has no valid
         // endpoints to constrain the schema `enum` to — skip the call rather than send one.
         let sanitized_names = prompts::sanitize_entity_names(entity_names);
         if sanitized_names.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
 
         let system_text = prompts::edge_system_prompt(opts.ontology);
@@ -476,7 +482,13 @@ impl AnthropicExtractor {
             let resp_for_failure = resp.clone();
 
             match parse_edge_response(resp) {
-                EdgeOutcome::Success(mut edges) => {
+                EdgeOutcome::Success { mut edges, dropped } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: if dropped > 0 { "salvaged" } else { "clean" }.to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -511,7 +523,7 @@ impl AnthropicExtractor {
                             _ => {}
                         }
                     }
-                    return Ok(edges);
+                    return Ok((edges, dropped));
                 }
                 EdgeOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -561,17 +573,25 @@ impl AnthropicExtractor {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
-        let entities = self.do_extract_entities(&opts).await?;
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
+        let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
-            return Ok(ExtractionResult {
-                entities,
-                edges: vec![],
+            return Ok(ExtractionOutcome {
+                result: ExtractionResult {
+                    entities,
+                    edges: vec![],
+                },
+                entities_dropped_malformed,
+                edges_dropped_malformed: 0,
             });
         }
         let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
-        let edges = self.do_extract_edges(&opts, &entity_names).await?;
-        Ok(ExtractionResult { entities, edges })
+        let (edges, edges_dropped_malformed) = self.do_extract_edges(&opts, &entity_names).await?;
+        Ok(ExtractionOutcome {
+            result: ExtractionResult { entities, edges },
+            entities_dropped_malformed,
+            edges_dropped_malformed,
+        })
     }
 
     async fn do_classify_entities(
@@ -850,7 +870,7 @@ impl Extractor for AnthropicExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -894,15 +914,32 @@ enum SendOutcome {
 // ── EntityOutcome / EdgeOutcome ───────────────────────────────────────────────
 
 enum EntityOutcome {
-    Success(Vec<ExtractedEntity>),
+    Success { entities: Vec<ExtractedEntity>, dropped: usize },
     BudgetExhausted,
     ParseError(Error),
 }
 
 enum EdgeOutcome {
-    Success(Vec<ExtractedEdge>),
+    Success { edges: Vec<ExtractedEdge>, dropped: usize },
     BudgetExhausted,
     ParseError(Error),
+}
+
+/// Deserializes each element of `raw` independently, dropping and counting elements that fail
+/// to satisfy `T`'s required fields rather than failing the whole batch (#342 FR-001). The
+/// wrapper-level check (is the array key present at all, is its value an array) already ran
+/// before this is called — `salvage_items` only handles per-item defects such as a missing
+/// `name`, never a structurally broken response (FR-005).
+fn salvage_items<T: serde::de::DeserializeOwned>(raw: Vec<Value>) -> (Vec<T>, usize) {
+    let mut items = Vec::with_capacity(raw.len());
+    let mut dropped = 0usize;
+    for value in raw {
+        match serde_json::from_value::<T>(value) {
+            Ok(item) => items.push(item),
+            Err(_) => dropped += 1,
+        }
+    }
+    (items, dropped)
 }
 
 /// Classifies why a response failed to parse, per #314 FR-003: distinguishes content that never
@@ -947,11 +984,14 @@ fn parse_entity_response(mut resp: Value) -> EntityOutcome {
 
     #[derive(serde::Deserialize)]
     struct EntityPayload {
-        entities: Vec<ExtractedEntity>,
+        entities: Vec<Value>,
     }
 
     match serde_json::from_value::<EntityPayload>(input) {
-        Ok(payload) => EntityOutcome::Success(payload.entities),
+        Ok(payload) => {
+            let (entities, dropped) = salvage_items(payload.entities);
+            EntityOutcome::Success { entities, dropped }
+        }
         Err(e) => EntityOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -983,11 +1023,14 @@ fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
 
     #[derive(serde::Deserialize)]
     struct EdgePayload {
-        edges: Vec<ExtractedEdge>,
+        edges: Vec<Value>,
     }
 
     match serde_json::from_value::<EdgePayload>(input) {
-        Ok(payload) => EdgeOutcome::Success(payload.edges),
+        Ok(payload) => {
+            let (edges, dropped) = salvage_items(payload.edges);
+            EdgeOutcome::Success { edges, dropped }
+        }
         Err(e) => EdgeOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -1462,7 +1505,7 @@ impl OaiExtractor {
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
-    ) -> Result<Vec<ExtractedEntity>, Error> {
+    ) -> Result<(Vec<ExtractedEntity>, usize), Error> {
         let system_text = format!(
             "{}{}",
             prompts::entity_system_prompt(opts.source_type, opts.ontology),
@@ -1525,12 +1568,15 @@ impl OaiExtractor {
                 OaiChatOutcome::Success {
                     value: entities,
                     defensive_parse,
+                    dropped,
                 } => {
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "entities".to_string(),
-                        outcome: if defensive_parse {
+                        outcome: if dropped > 0 {
+                            "salvaged"
+                        } else if defensive_parse {
                             "recovered"
                         } else {
                             "clean"
@@ -1558,7 +1604,7 @@ impl OaiExtractor {
                             missing_summary,
                         });
                     }
-                    return Ok(entities);
+                    return Ok((entities, dropped));
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -1614,7 +1660,7 @@ impl OaiExtractor {
         &self,
         opts: &ExtractOptions<'_>,
         entity_names: &[String],
-    ) -> Result<Vec<ExtractedEdge>, Error> {
+    ) -> Result<(Vec<ExtractedEdge>, usize), Error> {
         let system_text = format!(
             "{}{}",
             prompts::edge_system_prompt(opts.ontology),
@@ -1679,12 +1725,15 @@ impl OaiExtractor {
                 OaiChatOutcome::Success {
                     value: mut edges,
                     defensive_parse,
+                    dropped,
                 } => {
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "edges".to_string(),
-                        outcome: if defensive_parse {
+                        outcome: if dropped > 0 {
+                            "salvaged"
+                        } else if defensive_parse {
                             "recovered"
                         } else {
                             "clean"
@@ -1722,7 +1771,7 @@ impl OaiExtractor {
                             _ => {}
                         }
                     }
-                    return Ok(edges);
+                    return Ok((edges, dropped));
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -1779,17 +1828,25 @@ impl OaiExtractor {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
-        let entities = self.do_extract_entities(&opts).await?;
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
+        let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
-            return Ok(ExtractionResult {
-                entities,
-                edges: vec![],
+            return Ok(ExtractionOutcome {
+                result: ExtractionResult {
+                    entities,
+                    edges: vec![],
+                },
+                entities_dropped_malformed,
+                edges_dropped_malformed: 0,
             });
         }
         let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
-        let edges = self.do_extract_edges(&opts, &entity_names).await?;
-        Ok(ExtractionResult { entities, edges })
+        let (edges, edges_dropped_malformed) = self.do_extract_edges(&opts, &entity_names).await?;
+        Ok(ExtractionOutcome {
+            result: ExtractionResult { entities, edges },
+            entities_dropped_malformed,
+            edges_dropped_malformed,
+        })
     }
 
     async fn do_classify_entities(
@@ -1933,7 +1990,7 @@ impl Extractor for OaiExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -1959,10 +2016,12 @@ impl Extractor for OaiExtractor {
 enum OaiChatOutcome<T> {
     /// `defensive_parse` is `true` when `extract_json_block`'s fence/prefix stripping was
     /// needed to isolate the JSON payload (i.e. the raw content wasn't already valid JSON
-    /// on its own), `false` when the raw content parsed as-is.
+    /// on its own), `false` when the raw content parsed as-is. `dropped` is the count of
+    /// per-item elements salvaged (dropped) during deserialization (#342 FR-001).
     Success {
         value: T,
         defensive_parse: bool,
+        dropped: usize,
     },
     BudgetExhausted,
     ParseError(Error),
@@ -1990,13 +2049,17 @@ fn parse_oai_entity_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEntity
     let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EntityPayload {
-        entities: Vec<ExtractedEntity>,
+        entities: Vec<Value>,
     }
     match serde_json::from_str::<EntityPayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success {
-            value: payload.entities,
-            defensive_parse,
-        },
+        Ok(payload) => {
+            let (entities, dropped) = salvage_items(payload.entities);
+            OaiChatOutcome::Success {
+                value: entities,
+                defensive_parse,
+                dropped,
+            }
+        }
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -2015,13 +2078,17 @@ fn parse_oai_edge_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEdge>> {
     let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EdgePayload {
-        edges: Vec<ExtractedEdge>,
+        edges: Vec<Value>,
     }
     match serde_json::from_str::<EdgePayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success {
-            value: payload.edges,
-            defensive_parse,
-        },
+        Ok(payload) => {
+            let (edges, dropped) = salvage_items(payload.edges);
+            OaiChatOutcome::Success {
+                value: edges,
+                defensive_parse,
+                dropped,
+            }
+        }
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -2035,7 +2102,7 @@ impl Extractor for MockExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         use crate::types::{ExtractedEdge, ExtractedEntity};
         Box::pin(async {
             Ok(ExtractionResult {
@@ -2062,7 +2129,8 @@ impl Extractor for MockExtractor {
                     invalid_at: None,
                     original_relation_type: None,
                 }],
-            })
+            }
+            .into())
         })
     }
 
@@ -2108,9 +2176,9 @@ impl Extractor for ConfigurableExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let result = self.queue.lock().unwrap().pop_front().unwrap_or_default();
-        Box::pin(async move { Ok(result) })
+        Box::pin(async move { Ok(result.into()) })
     }
 
     fn classify_entities<'a>(
@@ -2155,7 +2223,7 @@ impl Extractor for UnconfiguredExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
     }
 
