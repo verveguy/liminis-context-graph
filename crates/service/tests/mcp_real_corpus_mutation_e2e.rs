@@ -1172,6 +1172,10 @@ fn mcp_write_path_over_real_corpus_fixture() {
                 real_result["reclassified_count"], dry_result["would_reclassify_count"],
                 "scope={scope}: dry-run plan must match applied result"
             );
+            assert_eq!(
+                real_result["breakdown"], dry_result["breakdown"],
+                "scope={scope}: apply breakdown must match the dry-run breakdown (issue #332)"
+            );
             let selected = real_result["reclassified_count"].as_i64().unwrap()
                 + real_result["unchanged_count"].as_i64().unwrap();
             assert_eq!(

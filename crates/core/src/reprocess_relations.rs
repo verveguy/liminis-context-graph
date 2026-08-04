@@ -166,6 +166,7 @@ pub async fn reprocess_relation_types(
             "reclassified_count": 0,
             "unchanged_count": 0,
             "group_id": params.group_id,
+            "breakdown": {},
         }));
     }
 
@@ -298,6 +299,7 @@ pub async fn reprocess_relation_types(
         "reclassified_count": reclassified,
         "unchanged_count": unchanged_count,
         "group_id": params.group_id,
+        "breakdown": breakdown,
     }))
 }
 

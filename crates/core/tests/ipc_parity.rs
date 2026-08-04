@@ -3060,6 +3060,11 @@ async fn test_reprocess_relation_scope_untyped_default() {
         v["result"]["reclassified_count"], 0,
         "no edges → 0 reclassified: {v}"
     );
+    assert_eq!(
+        v["result"]["breakdown"],
+        json!({}),
+        "zero-candidate apply → breakdown: {{}}: {v}"
+    );
 }
 
 /// `scope=off_ontology` without an ontology loaded → structured error, not a crash (FR-002, SC-002).
@@ -3378,6 +3383,11 @@ async fn test_reprocess_relation_scope_off_ontology_idempotency() {
         v1["result"]["reclassified_count"], 1,
         "first run must reclassify 1 edge: {v1}"
     );
+    assert_eq!(
+        v1["result"]["breakdown"],
+        json!({"AFFILIATED_WITH": 1}),
+        "first run breakdown must reflect the single reclassified edge: {v1}"
+    );
 
     let conn = db.connect().unwrap();
     let edge = conn.get_edge_by_uuid("rrid-edge-1").unwrap().unwrap();
@@ -3496,6 +3506,70 @@ async fn test_reprocess_relation_scope_untyped_mixed_classify_and_abstain() {
     }
 }
 
+/// Issue #332 (FR-006): an apply run whose candidates *all* abstain must report a `breakdown`
+/// distinguishing it from an all-confident run of the same size — the case the reporter
+/// identified as indistinguishable from `reclassified_count` alone today.
+#[tokio::test]
+async fn test_reprocess_relation_apply_all_abstain_breakdown() {
+    let (db, _dir) = make_db(4);
+    insert_test_entity(
+        &db,
+        "abstain-src",
+        "Erin",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+    insert_test_entity(
+        &db,
+        "abstain-dst",
+        "Org",
+        "liminis",
+        vec!["Entity".to_string()],
+    );
+
+    // 3 edges, none with a verdict entry → RelationClassifyingExtractor abstains on every one.
+    for i in 0..3 {
+        insert_test_edge(
+            &db,
+            &format!("abstain-edge-{i}"),
+            "abstain-src",
+            "abstain-dst",
+            "liminis",
+            &format!("Erin has unclassifiable fact {i}"),
+            None,
+        );
+    }
+
+    let ontology = make_relation_ontology();
+    let extractor = Arc::new(RelationClassifyingExtractor::new(HashMap::new()));
+    let workspace = TempDir::new().unwrap();
+    let state = make_state_with_ontology_and_extractor(
+        db.clone(),
+        ontology,
+        extractor,
+        workspace.path().to_path_buf(),
+    );
+
+    let v = dispatch_val(
+        110,
+        "knowledge_reprocess_relation_types",
+        json!({"scope": "untyped"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 110);
+    assert_eq!(
+        v["result"]["reclassified_count"], 3,
+        "all 3 abstained edges are still real writes to UNCLASSIFIED (ADR-0037): {v}"
+    );
+    assert_eq!(
+        v["result"]["breakdown"],
+        json!({"UNCLASSIFIED": 3}),
+        "all-abstain breakdown must show UNCLASSIFIED == reclassified_count, \
+         distinguishing this from an all-confident apply of the same size: {v}"
+    );
+}
+
 /// US2: `scope=off_ontology` picks up untyped, fact-prefix-pseudo-typed, and prior-UNCLASSIFIED
 /// edges while leaving correctly-typed edges untouched (FR-005).
 #[tokio::test]
@@ -3600,6 +3674,11 @@ async fn test_reprocess_relation_scope_off_ontology_mixed_candidates() {
     assert_eq!(
         v["result"]["unchanged_count"], 1,
         "(c) re-abstaining to UNCLASSIFIED is a no-op (FR-009): {v}"
+    );
+    assert_eq!(
+        v["result"]["breakdown"],
+        json!({"AFFILIATED_WITH": 1, "AUTHORED": 1}),
+        "breakdown counts only newly-written types (a) and (b); (c)'s idempotent no-op is excluded: {v}"
     );
 
     let conn = db.connect().unwrap();
