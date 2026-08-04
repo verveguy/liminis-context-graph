@@ -659,7 +659,7 @@ async fn single_item_all_malformed_batch_salvages_to_empty_success_no_sidecar_re
     // one-item batch, the call succeeds with an empty result and `entities_dropped_malformed: 1`
     // — FR-004's "all malformed" case, not an error, so no sidecar record and no schema_invalid
     // classification (a salvaged response is not a failure).
-    let schema_invalid_body = serde_json::json!({
+    let salvaged_entity_body = serde_json::json!({
         "stop_reason": "tool_use",
         "content": [{
             "type": "tool_use",
@@ -674,7 +674,7 @@ async fn single_item_all_malformed_batch_salvages_to_empty_success_no_sidecar_re
     .to_string();
     let (addr, _server) = spawn_stub_server_with_fixed_response(
         "HTTP/1.1 200 OK",
-        Box::leak(schema_invalid_body.into_boxed_str()),
+        Box::leak(salvaged_entity_body.into_boxed_str()),
     )
     .await;
     let dir = tempfile::TempDir::new().unwrap();

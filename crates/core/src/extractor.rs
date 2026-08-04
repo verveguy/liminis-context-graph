@@ -379,10 +379,17 @@ impl AnthropicExtractor {
                     ));
                 }
                 EntityOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: classification.to_string(),
+                    });
                     self.emit_extraction_failure(
                         "entities",
                         chunk_key.clone(),
-                        classify_parse_failure(&e),
+                        classification,
                         &resp_for_failure,
                         current_max_tokens,
                         None,
@@ -559,10 +566,17 @@ impl AnthropicExtractor {
                     ));
                 }
                 EdgeOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: classification.to_string(),
+                    });
                     self.emit_extraction_failure(
                         "edges",
                         chunk_key.clone(),
-                        classify_parse_failure(&e),
+                        classification,
                         &resp_for_failure,
                         current_max_tokens,
                         entities_extracted,
@@ -932,10 +946,13 @@ enum EdgeOutcome {
 }
 
 /// Deserializes each element of `raw` independently, dropping and counting elements that fail
-/// to satisfy `T`'s required fields rather than failing the whole batch (#342 FR-001). The
-/// wrapper-level check (is the array key present at all, is its value an array) already ran
-/// before this is called — `salvage_items` only handles per-item defects such as a missing
-/// `name`, never a structurally broken response (FR-005).
+/// to satisfy `T`'s required fields rather than failing the whole batch (#342 FR-001). This drops
+/// an item on *any* deserialize failure — not just a missing `name`/`source_name`/`target_name`,
+/// but any other non-defaulted required field too (e.g. a missing `entity_type` or `fact`) — since
+/// `T::deserialize` has no way to distinguish which field caused the failure. The wrapper-level
+/// check (is the array key present at all, is its value an array) already ran before this is
+/// called — `salvage_items` only handles per-item defects, never a structurally broken response
+/// (FR-005).
 fn salvage_items<T: serde::de::DeserializeOwned>(raw: Vec<Value>) -> (Vec<T>, usize) {
     let mut items = Vec::with_capacity(raw.len());
     let mut dropped = 0usize;
