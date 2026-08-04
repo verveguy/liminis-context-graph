@@ -9,12 +9,14 @@
 On a code-touching PR, six CI jobs each ran a full `cargo build --release` of the same
 workspace at the same commit: `ci.yml`'s `test` job, plus the five jobs in
 `real-corpus-e2e.yml` (`real-corpus-e2e`, `mcp-real-corpus-e2e`, `mcp-write-mutation-e2e`,
-`mcp-admin-data-e2e`, `mcp-admin-lifecycle-e2e`). ADR-0328 put those five jobs on the PR
-path, running in parallel with `test` specifically so they'd add no latency to a PR's
-time-to-mergeable — but it also made them five more concurrent readers of the shared
-`lbug-cache-*` key that `ci.yml`'s `build-lbug` job writes.
+`mcp-admin-data-e2e`, `mcp-admin-lifecycle-e2e`). A seventh job, `ci.yml`'s `build-lbug`,
+ran a narrower `cargo build --release -p lcg-core`, package-scoped and skipped outright
+on a cache hit — not a full workspace build, and not counted among the six. ADR-0328 put
+the five e2e jobs on the PR path, running in parallel with `test` specifically so they'd
+add no latency to a PR's time-to-mergeable — but it also made them five more concurrent
+readers of the shared `lbug-cache-*` key that `build-lbug` writes.
 
-#336 (2026-08-04, `main`) failed `mcp_real_corpus_e2e` with a `duplicate symbol:
+Issue #336 (2026-08-04, `main`) failed `mcp_real_corpus_e2e` with a `duplicate symbol:
 antlr4::atn::ATNConfig::ATNConfig(...)` link error — the exact race `ci.yml`'s own header
 comment already documented from an earlier incident (two jobs racing on the same cache
 key, one linking against a half-written archive set). A re-run of the identical commit
@@ -36,61 +38,59 @@ This is the sole full-workspace compile in the entire CI run (FR-001/SC-001). It
 now the *only* writer of the `lbug-cache-*` key (FR-003) — every job downstream of it
 only restores build outputs, never builds them.
 
-### 2. Two different hand-off mechanisms, chosen by what each consumer actually needs
+### 2. One mechanism (same-run artifacts), two different scopes
 
-- **`test`** needs the *entire* compiled `target/release` tree — clippy, the R-003 bench
-  gate, and `cargo fmt` all operate over more than the six e2e binaries. It restores the
-  whole tree via a **run-scoped `actions/cache`** key, `target-release-${{
-  github.run_id }}`, saved explicitly by `build-release` and restored by `test` with
-  `fail-on-cache-miss: true`.
+Both hand-offs use `actions/upload-artifact`/`download-artifact`, scoped differently to
+what each consumer actually needs:
+
+- **`test`** needs the *entire* compiled `target/release` tree — clippy and the R-003
+  bench gate both operate over more than the six e2e binaries (`cargo fmt --check` does
+  not need it, but runs in the same job). It downloads the whole tree from a same-run
+  artifact (`release-build`) that `build-release` uploads.
 - **The five e2e jobs** need exactly six binaries: their own compiled test executable
-  plus the `liminis-context-graph` service binary. They get these via a small
-  `actions/upload-artifact`/`download-artifact` pair, scoped to a
-  `target/release/e2e-artifacts/` staging directory that `build-release` populates by
-  locating each test binary's cargo-hashed path via `cargo test --no-run`'s
-  `--message-format=json` stream and copying it to a fixed name.
+  plus the `liminis-context-graph` service binary. They get these from a separate,
+  smaller same-run artifact (`e2e-artifacts`), scoped to a `target/release/e2e-artifacts/`
+  staging directory that `build-release` populates by locating each test binary's
+  cargo-hashed path via `cargo test --no-run`'s `--message-format=json` stream and
+  copying it to a fixed name.
 
-**Why not one uniform mechanism for both?** Forcing everything through one channel means
-either transferring the full ~2.7GB tree to five jobs that need six binaries (violates
-FR-004, which explicitly forbids this), or giving `test` only six binaries and making it
-recompile everything else (violates FR-001). FR-004's own text names exactly the six
-binaries FR-002 lists as what the e2e jobs need — reading it as scoped to those five
-jobs, not to `test`'s hand-off, is the only interpretation under which FR-001 and FR-004
-are simultaneously satisfiable. `test`'s cache-based hand-off still independently
-satisfies FR-003 (no job reads a key another job is concurrently writing): the run-scoped
-key makes it a strict single-writer/single-reader relationship regardless of transfer
-size.
+**Why not scope both hand-offs the same way?** Forcing everything through the same
+six-binary scope means either transferring the full ~2.7GB tree to five jobs that only
+need six binaries (violates FR-004, which explicitly forbids this), or giving `test`
+only six binaries and making it recompile everything else (violates FR-001). FR-004's
+own text names exactly the six binaries FR-002 lists as what the e2e jobs need — reading
+it as scoped to those five jobs, not to `test`'s hand-off, is the only interpretation
+under which FR-001 and FR-004 are simultaneously satisfiable.
 
-**Why the run-scoped cache key structurally prevents the #336 race, not just makes it
-less likely:** `github.run_id` is unique per workflow run. No job in any other run can
-ever observe this key, written or not. Within this run, exactly one job writes it
-(`build-release`, once) and exactly one job reads it (`test`, once, after `needs:`
-guarantees `build-release` completed). There is no second writer to race against.
+**Why `actions/cache` was rejected for the `test` hand-off.** An earlier version of this
+design used a run-scoped `actions/cache` key (`target-release-${{ github.run_id }}`) for
+this specific transfer, reasoning that `github.run_id` makes it a strict
+single-writer/single-reader pair within the run. That reasoning is correct as far as it
+goes, but review caught a real cost it missed: this ~2.7GB payload is genuinely
+single-use, yet a cache entry still counts against this repo's shared 10GB total
+`actions/cache` quota — the same quota `lbug-cache-*` depends on staying warm. Enough
+concurrent PR activity risks evicting `lbug-cache-*` ahead of its own schedule, or
+evicting this very entry before `test` restores it (previously a hard failure, since the
+restore used `fail-on-cache-miss: true`). Same-run artifacts don't share that quota and
+expire on their own (`retention-days: 1`), so this hand-off can't contend with lbug's
+cache regardless of concurrent CI volume, and needs no explicit cleanup step.
 
-**Cross-job mtime normalization, required for the `test` hand-off to actually be a
-cache hit.** Cargo's freshness check for path-dependency crates (every crate in this
+**Cross-job mtime normalization, required for the `test` hand-off to actually avoid
+recompilation.** Cargo's freshness check for path-dependency crates (every crate in this
 workspace) is mtime-based, not content-hash-based: a unit is stale if any source file's
 mtime differs from what was recorded when its fingerprint was written. `actions/checkout`
 does not preserve git commit timestamps — each job's checkout stamps files with that
 job's own wall-clock checkout time. Since `test` checks out independently and strictly
 *after* `build-release` finishes building, its sources would always read as newer than
 the fingerprints recorded during `build-release`'s build, making cargo recompile the
-entire workspace on every run regardless of the cache restore — silently defeating
-FR-001 and tripping the FR-006 guard every time. Both `build-release` and `test` run an
-identical `git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"` step right
-after checkout, stamping every tracked file to the commit's own timestamp — a value
-that's identical and deterministic across both jobs' independent checkouts, so the
-mtime comparison lines up and the restored build is recognized as fresh.
-
-**The run-scoped key is cleaned up explicitly, not left to default eviction.** Every CI
-run writes a brand-new `target-release-<run_id>` entry (multi-GB) that is read exactly
-once and then dead. Left to GitHub's own LRU/7-day eviction, PR volume could grow total
-cache usage enough to evict the long-lived `lbug-cache-*` entry ahead of its own
-eviction schedule, forcing a lbug rebuild-from-download on some runs — a real cost this
-design is supposed to avoid, just relocated to a different cache. A `cleanup-release-cache`
-job, gated only on `build-release` succeeding (so it also fires when `test` is skipped via
-the `e2e_only` dispatch path), deletes the key with `gh cache delete` once `test` is done
-with it.
+entire workspace on every run regardless of how `target/release` was restored — silently
+defeating FR-001 and tripping the FR-006 guard every time. Both `build-release` and
+`test` run an identical `git ls-files -z | xargs -0 touch -d "@$(git log -1
+--format=%ct)"` step right after checkout, stamping every tracked file to the commit's
+own timestamp — a value that's identical and deterministic across both jobs' independent
+checkouts, so the mtime comparison lines up and the restored build is recognized as
+fresh. This requirement is unrelated to the cache-vs-artifact choice above; it applies
+identically either way.
 
 ### 3. Bodily merge into `ci.yml`, not a `workflow_call` orchestrator
 
@@ -105,22 +105,26 @@ against. Merging the job *definitions* bodily into one file is the only way to g
 job-level dependency granularity, so `real-corpus-e2e.yml` is deleted and its five jobs
 now live in `ci.yml`.
 
-### 4. The five e2e jobs no longer install a Rust toolchain (FR-006/Story 4)
+### 4. Every job gets the same log-grep recompile guard (FR-006/Story 4)
 
 Each e2e job now only checks out the repo, downloads its two binaries, and runs the test
 binary directly (e.g. `./target/release/e2e-artifacts/real_corpus_e2e --ignored`,
 equivalent to what `cargo test ... -- --ignored` did before — everything after `--` was
-already passed straight through to the same binary). No `cargo`/`rustc` is present, so a
-future change that accidentally adds a build step after the artifact download fails
-immediately and loudly (there is nothing to invoke it with) rather than merely being
-flagged by a heuristic.
+already passed straight through to the same binary). Unlike `build-release`/`test`,
+these jobs don't add an explicit `dtolnay/rust-toolchain@stable` step — but that alone is
+*not* the structural guarantee an earlier version of this ADR claimed. `ubuntu-latest`
+runner images ship a preinstalled Rust toolchain regardless of whether a workflow asks
+for one, so `cargo`/`rustc` are on PATH in these jobs whether or not this workflow
+installs them; a future change could still invoke `cargo build` here and it would run.
 
-`test` still needs `cargo` for clippy/fmt/bench, so it keeps a log-grep guard —
-generalized from the original FR-008 check (`grep -q "Compiling lbug "`, written when
-`test` did its own `cargo build --release`) to `grep -q "Compiling "` against *any* crate.
-Since `test` no longer builds anything itself, any `Compiling` line in its `cargo test
---release` output now means the cache hand-off failed to avoid recompilation for some
-crate, not specifically lbug.
+The actual guard is the same mechanism `test` already used, generalized from the
+original FR-008 check (`grep -q "Compiling lbug "`, written when `test` did its own
+`cargo build --release`) to `grep -q "Compiling "` against *any* crate: each of the six
+jobs (`test` and the five e2e jobs) captures its own output to a log file and fails
+loudly if a `Compiling` line appears anywhere in it. Since none of the six jobs builds
+anything itself anymore, any `Compiling` line in that captured output means something —
+a future change, a misconfigured step — recompiled workspace code after the shared
+artifact was supposed to be the only source of binaries, not specifically lbug.
 
 `RUST_TEST_THREADS=4` (set via `.cargo/config.toml`'s `[env]`, applied by cargo when it
 spawns a process) does not apply when a test binary is invoked directly. Each e2e job
@@ -168,8 +172,19 @@ it is a real behavior change worth naming explicitly rather than treating as inc
 - Exactly one full `cargo build --release` (plus one `cargo test --release --no-run`)
   runs per CI run, down from six independent `cargo build --release` invocations
   (FR-001/SC-001).
-- The `lbug-cache-*` key has exactly one writer per run (FR-003/SC-002); the specific
-  duplicate-symbol failure class from #336 cannot recur for this structural reason.
+- The `lbug-cache-*` key retains its pre-existing single-writer-per-run property
+  (`build-release`, like `build-lbug` before it, is the only job in a given run that
+  writes it) — this PR does not change that write pattern, and FR-003/SC-002 is
+  satisfied for the same reason it already was. What changes is the number of concurrent
+  *readers* touching that key per run: previously `test` plus the five e2e jobs (six)
+  all restored it; now only `build-release` itself does (one), since the e2e jobs get
+  their binaries from `build-release`'s artifact instead and never touch the lbug cache.
+  This shrinks the window in which a run's own restore could observe a different run's
+  concurrent write, but the key itself is not run-scoped — a genuine cross-run
+  write-write race (two different runs' `build-release` jobs cache-missing and writing
+  the same key at once, the actual mechanism behind #336's observed overlap of the
+  release build, a release PR's CI, and post-merge e2e) is not structurally eliminated by
+  this change; it predates and survives it.
 - The e2e jobs' pass/fail signal continues to land in parallel with `test`, not after it
   — `build-release`'s own compile cost is the same work `test` used to do itself, just
   relocated to run once instead of six times, so it does not add sequential latency

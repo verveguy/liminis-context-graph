@@ -8,17 +8,18 @@
 ## Background
 
 On a code-touching PR, **six CI jobs each run a full `cargo build --release`** of the same
-workspace at the same commit:
+workspace at the same commit, plus a seventh job that runs a narrower, package-scoped
+build only on a cache miss:
 
 | Workflow | Job | Build step |
 |---|---|---|
-| `ci.yml` | `build-lbug` | `cargo build --release -p lcg-core` (cache-miss only) |
 | `ci.yml` | `test` | `cargo build --release` |
 | `real-corpus-e2e.yml` | `real_corpus_e2e` | `cargo build --release` |
 | `real-corpus-e2e.yml` | `mcp_real_corpus_e2e` | `cargo build --release` |
 | `real-corpus-e2e.yml` | `mcp_real_corpus_mutation_e2e` | `cargo build --release` |
 | `real-corpus-e2e.yml` | `mcp_real_corpus_admin_data_e2e` | `cargo build --release` |
 | `real-corpus-e2e.yml` | `mcp_real_corpus_admin_lifecycle_e2e` | `cargo build --release` |
+| `ci.yml` | `build-lbug` | `cargo build --release -p lcg-core` (package-scoped, cache-miss only — not a full workspace build, not one of the six above) |
 
 `real-corpus-e2e.yml` runs alongside `ci.yml` on every code-touching PR as of #328 / ADR-0328
 (PR #329) — before that change these five jobs ran only on push-to-`main` and
@@ -38,7 +39,7 @@ duplicate symbols (upstream `LadybugDB/ladybug-rust#18`).
 
 So `lbug-cache-*` covers only three paths:
 
-```
+```text
 target/release/build/lbug-*
 target/release/.fingerprint/lbug-*
 target/release/deps/liblbug-*
@@ -50,9 +51,9 @@ other dependencies. Everything else in `target/release/` is rebuilt from scratch
 
 ### Observed cost: the duplicate-symbol race, now with five more contenders
 
-#336 (2026-08-04, `main`) failed `mcp_real_corpus_e2e` with:
+Issue #336 (2026-08-04, `main`) failed `mcp_real_corpus_e2e` with:
 
-```
+```text
 rust-lld: error: duplicate symbol: antlr4::atn::ATNConfig::ATNConfig(...)
 >>> defined at ATNConfig.cpp
 ... in archive .../target/release/deps/rustcEXyILw/libantlr4_runtime.a
@@ -310,6 +311,9 @@ not introduce or modify any data entities.
 - ADR-0316 — why the R-003 bench step, not the release test build, was the historical dominant
   CI cost; this change is not expected to move that number.
 - `.github/workflows/ci.yml` — the `build-lbug`/`test` jobs and the existing FR-008
-  lbug-recompilation guard this issue's FR-006 mirrors.
-- `.github/workflows/real-corpus-e2e.yml` — the five e2e jobs and their current independent
-  `cargo build --release` steps.
+  lbug-recompilation guard this issue's FR-006 mirrors. The implementation deleted
+  `real-corpus-e2e.yml` and merged its five jobs into this file — see below.
+- `.github/workflows/real-corpus-e2e.yml` *(historical — deleted by this issue's
+  implementation)* — the five e2e jobs and their independent `cargo build --release`
+  steps as they existed before this change; their current definitions live in
+  `.github/workflows/ci.yml`.

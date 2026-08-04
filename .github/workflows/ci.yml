@@ -26,15 +26,15 @@ on:
 #
 # #341: this same race resurfaced once `real-corpus-e2e.yml` started running five more
 # release-build jobs in parallel on every PR (#328) — five more concurrent readers of the
-# same lbug cache key, one landing mid-write (#336). The fix here is structural, not just
-# fewer concurrent readers: `build-release` below is now the *only* job in the entire run
-# that performs a full `cargo build --release`, and it is the sole writer of the lbug
-# cache. Every other job (including what used to be `real-corpus-e2e.yml`'s five jobs,
-# merged into this file below) only restores — either the run-scoped `target-release-*`
-# cache (`test`) or a same-run artifact of six specific binaries (the five e2e jobs). A
-# restore-only reader can be mid-read while the cache is unrelated to it being written
-# elsewhere, but it can never read a key that is *itself* still being written, because
-# only one job writes any given key in a given run. See docs/adr/0341-build-release-artifacts-once.md.
+# same lbug cache key, one landing mid-write (#336). `build-release` below is now the
+# *only* job in the entire run that performs a full `cargo build --release`, and it
+# remains the sole writer of the lbug cache (as `build-lbug` already was before this
+# change — see ADR-0341 for why this reduces the pool of concurrent readers racing a
+# same-run write without eliminating the underlying cross-run key collision). Every other
+# job (including what used to be `real-corpus-e2e.yml`'s five jobs, merged into this file
+# below) only restores — either a same-run artifact of the full release tree (`test`) or
+# a same-run artifact of six specific binaries (the five e2e jobs) — and neither of those
+# artifacts touches the lbug cache at all. See docs/adr/0341-build-release-artifacts-once.md.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -81,9 +81,9 @@ jobs:
           extra-deny-pattern: "^crates/core/tests/fixtures/real_corpus_wal/"
 
   # #341: the single build job for the whole workspace. Produces everything every other
-  # job needs: the lbug cache (unchanged), a run-scoped full `target/release` cache for
-  # `test`, and a small artifact of exactly the six binaries the five e2e jobs need.
-  # Nothing downstream of this job invokes `cargo build`/`cargo test --no-run` again.
+  # job needs: the lbug cache (unchanged), a same-run artifact of the full `target/release`
+  # tree for `test`, and a small artifact of exactly the six binaries the five e2e jobs
+  # need. Nothing downstream of this job invokes `cargo build`/`cargo test --no-run` again.
   build-release:
     name: build release artifacts
     runs-on: ubuntu-latest
@@ -214,18 +214,27 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      # `test` (below) needs the *entire* built tree (clippy, the R-003 bench, fmt all
-      # operate over more than the six e2e binaries), so it gets a full-tree hand-off via
-      # a run-scoped cache key rather than the small artifact above (FR-004 is scoped to
-      # what the e2e jobs need, not to this hand-off — see ADR-0341, Key Decisions).
-      # `github.run_id` is unique per run, so this is a strict single-writer/single-reader
-      # relationship: no other job in any other run can ever read this key while it's
-      # being written, or read it at all (FR-003).
-      - name: Save full release build for the test job (run-scoped, single writer/reader)
-        uses: actions/cache/save@v4
+      # `test` (below) needs the *entire* built tree (clippy and the R-003 bench operate
+      # over more than the six e2e binaries; `cargo fmt --check` does not need it, but
+      # runs in the same job), so it gets a full-tree hand-off via a same-run artifact
+      # rather than the small artifact above (FR-004 is scoped to what the e2e jobs need,
+      # not to this hand-off — see ADR-0341, Key Decisions). `actions/cache` was
+      # considered and rejected for this specific hand-off: this ~2.7GB payload is
+      # genuinely single-use (written once, read once by `test`, dead afterward), but a
+      # cache entry would still count against this repo's shared 10GB total cache quota
+      # alongside the long-lived `lbug-cache-*` entry — repeated multi-GB single-use
+      # entries at PR volume risk evicting `lbug-cache-*` ahead of schedule, or evicting
+      # this very entry before `test` restores it. `upload-artifact`/`download-artifact`
+      # don't share that quota, so this hand-off can't contend with lbug's cache
+      # regardless of concurrent CI volume, and (being scoped to this run) needs no
+      # explicit cleanup step the way the cache alternative would have.
+      - name: Upload full release build for the test job (same-run artifact)
+        uses: actions/upload-artifact@v4
         with:
-          key: target-release-${{ github.run_id }}
-          path: target/release
+          name: release-build
+          path: target/release/
+          retention-days: 1
+          if-no-files-found: error
 
   test:
     name: test (ubuntu-latest)
@@ -257,16 +266,16 @@ jobs:
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
       # Restores the entire `target/release` tree `build-release` just produced and
-      # cached under this run's own id. `fail-on-cache-miss: true` makes a missing
-      # entry a loud job failure instead of a silent fall-back to rebuilding — per the
-      # spec's Edge Cases, a job that can't obtain its binaries must fail loudly, not
-      # quietly recompile and reintroduce the redundant-build problem this exists to fix.
-      - name: Restore full release build from build-release (run-scoped, single writer/reader)
-        uses: actions/cache/restore@v4
+      # uploaded as a same-run artifact. `download-artifact` already fails the step if
+      # the named artifact isn't present in this run — a missing artifact is a loud job
+      # failure, not a silent fall-back to rebuilding — per the spec's Edge Cases, a job
+      # that can't obtain its binaries must fail loudly, not quietly recompile and
+      # reintroduce the redundant-build problem this exists to fix.
+      - name: Download full release build from build-release (same-run artifact)
+        uses: actions/download-artifact@v4
         with:
-          key: target-release-${{ github.run_id }}
+          name: release-build
           path: target/release
-          fail-on-cache-miss: true
 
       # With the full tree restored, this should be a pure cache hit: no compilation,
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
@@ -284,7 +293,7 @@ jobs:
       - name: Assert no workspace code recompiled after restoring build-release's output (FR-006)
         run: |
           if grep -q "Compiling " /tmp/build.log; then
-            echo "ERROR: workspace code recompiled despite restoring build-release's cached target/release — the hand-off is broken"
+            echo "ERROR: workspace code recompiled despite restoring build-release's target/release artifact — the hand-off is broken"
             grep "Compiling " /tmp/build.log
             exit 1
           fi
@@ -347,10 +356,13 @@ jobs:
   # (see ADR-0341 for why a `workflow_call` orchestrator can't do this at sub-job
   # granularity). Each job here downloads exactly the two binaries it needs (its own
   # test binary + the service binary) from build-release's artifact and invokes the
-  # test binary directly — no Rust toolchain is installed in any of these jobs, which
-  # makes "recompiles after consuming the shared artifact" (FR-006/Story 4) structurally
-  # impossible for these five jobs, not just detected after the fact: there is no
-  # `cargo`/`rustc` on PATH for a future change to accidentally invoke.
+  # test binary directly. Unlike build-release/test, these jobs don't add an explicit
+  # `dtolnay/rust-toolchain@stable` step — but that alone is not a structural guarantee:
+  # `ubuntu-latest` images ship a preinstalled Rust toolchain regardless, so `cargo`/
+  # `rustc` are on PATH here whether or not this workflow asks for them. FR-006/Story 4's
+  # actual guard for these five jobs is the same mechanism `test` uses: each job's test
+  # binary invocation is captured to a log and grepped for a "Compiling " line, failing
+  # loudly if a future change adds a recompile step after the artifact download.
   #
   # The real_corpus_e2e tests (crates/core/tests/real_corpus_e2e.rs, #217) and their MCP
   # siblings are #[ignore]d out of the default `cargo test --release` run: a full WAL
@@ -394,7 +406,19 @@ jobs:
       - name: real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
-        run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored
+        run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
 
   mcp-real-corpus-e2e:
     name: mcp_real_corpus_e2e (ubuntu-latest)
@@ -421,7 +445,19 @@ jobs:
       - name: mcp_real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
-        run: ./target/release/e2e-artifacts/mcp_real_corpus_e2e --ignored
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
 
   mcp-write-mutation-e2e:
     name: mcp_real_corpus_mutation_e2e (ubuntu-latest)
@@ -448,7 +484,19 @@ jobs:
       - name: mcp_real_corpus_mutation_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
-        run: ./target/release/e2e-artifacts/mcp_real_corpus_mutation_e2e --ignored
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_mutation_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
 
   mcp-admin-data-e2e:
     name: mcp_real_corpus_admin_data_e2e (ubuntu-latest)
@@ -475,7 +523,19 @@ jobs:
       - name: mcp_real_corpus_admin_data_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
-        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_data_e2e --ignored
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_data_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
 
   mcp-admin-lifecycle-e2e:
     name: mcp_real_corpus_admin_lifecycle_e2e (ubuntu-latest)
@@ -503,30 +563,16 @@ jobs:
       - name: mcp_real_corpus_admin_lifecycle_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
-        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored
+        run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
 
-  # The `target-release-${{ github.run_id }}` key is single-use by construction (FR-003) —
-  # exactly one writer (build-release), exactly one reader (test) — but nothing evicts it
-  # afterward. Left alone, every run leaves behind a dead multi-GB entry that only default
-  # LRU/7-day eviction ever clears, and at PR volume that risks evicting the long-lived
-  # `lbug-cache-*` entry (the one cache this design actually needs to persist across runs)
-  # before its own eviction is warranted. `needs: [build-release, test]` + `always()` runs
-  # this regardless of test's outcome, including when it's skipped entirely by the
-  # `e2e_only` workflow_dispatch path (see `test`'s `if:`) — the cache still needs cleanup
-  # in that case since build-release still wrote it. `|| true` on the delete: a cache that
-  # was never written (build-release failed before saving) or already expired is not a
-  # cleanup failure.
-  cleanup-release-cache:
-    name: cleanup run-scoped release cache
-    runs-on: ubuntu-latest
-    needs: [build-release, test]
-    if: always() && needs.build-release.result == 'success'
-    permissions:
-      actions: write
-    steps:
-      - name: Delete run-scoped target/release cache
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
         run: |
-          gh cache delete "target-release-${{ github.run_id }}" \
-            --repo "${{ github.repository }}" || true
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
