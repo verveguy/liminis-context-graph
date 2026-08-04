@@ -21,7 +21,7 @@ use lcg_core::{
     extraction_failures::{
         ExtractionFailureSink, ExtractionFailureWriter, DEFAULT_MAX_BYTES_PER_FILE,
     },
-    extractor::{Extractor, OaiExtractor, ANTHROPIC_API_URL},
+    extractor::{Extractor, OaiExtractor, UnconfiguredExtractor, ANTHROPIC_API_URL},
     handlers,
     ipc::IpcRequest,
     llm_router::LlmRouter,
@@ -347,6 +347,10 @@ async fn bootstrap_app_state(
             Http(String),
             #[cfg(unix)]
             Uds(String),
+            /// Nothing configured (#331 FR-001): no longer fatal at startup — extraction
+            /// becomes fatal only if and when an extraction-dependent method is actually
+            /// called (FR-002).
+            Unconfigured,
         }
 
         let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
@@ -395,16 +399,10 @@ async fn bootstrap_app_state(
         } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
             ResolvedExtractor::Http(url)
         } else {
-            return Err(
-                "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
-                 LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into \
-                 local extraction with --extractor-uds <path>, --extractor-http <url>, or \
-                 LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
-                 bundled macOS sidecar — note its Foundation Models backend is not recommended \
-                 for extraction quality; \
-                 see docs/adr/0041-local-openai-compatible-extraction-adapter.md)."
-                    .into(),
-            );
+            // #331 FR-001: a missing extraction provider no longer prevents startup — it only
+            // becomes fatal if and when an extraction-dependent method is actually called (see
+            // the `Unconfigured` arm below and `UnconfiguredExtractor`).
+            ResolvedExtractor::Unconfigured
         };
 
         // record_llm_path, if set, is applied per-arm below: the Anthropic arm wraps each
@@ -496,6 +494,20 @@ async fn bootstrap_app_state(
                     Arc::new(ext)
                 }
             },
+            // #331: no provider configured — startup proceeds; every extraction-dependent
+            // method fails clearly at call time via `UnconfiguredExtractor`. Not wrapped with
+            // `RecordingExtractor` even if `LCG_RECORD_LLM` is set: there is no live call to
+            // record, and recording a stub that never dials out is meaningless.
+            ResolvedExtractor::Unconfigured => {
+                eprintln!("extractor: provider=none, extraction calls will fail until configured");
+                if record_llm_path.is_some() {
+                    eprintln!(
+                        "extractor: LCG_RECORD_LLM is set but ignored — no extraction provider \
+                         is configured, so there is nothing to record"
+                    );
+                }
+                Arc::new(UnconfiguredExtractor)
+            }
         }
     };
 

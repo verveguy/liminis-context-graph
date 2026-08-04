@@ -57,7 +57,9 @@ worse latency regression than the embedder's cheap embed-probe, for no benefit �
 Anthropic path (`AnthropicExtractor::from_env`) also performs zero startup verification.
 
 Genuine unreachability surfaces at call time through the normal `Extractor` error path (FR-010),
-distinct from "no provider configured at all" (FR-011), which is a startup-time fatal error.
+distinct from "no provider configured at all" (FR-011), which was originally a startup-time fatal
+error — superseded by [ADR-0331](0331-lazy-extraction-provider-validation.md), which defers that
+check to first use as well; the precedence order below is unchanged.
 
 ### 3. Endpoint/provider selection precedence (FR-006), resolved once in `main.rs` — no socket
    auto-detection tier
@@ -72,8 +74,12 @@ distinct from "no provider configured at all" (FR-011), which is a startup-time 
    pre-existing Anthropic path), byte-for-byte unchanged. This is the load-bearing
    backward-compatibility guarantee (FR-007): a reachable local sidecar never silently steals
    traffic from an already-configured hosted key.
-3. Neither of the above — `LCG_EXTRACTION_URL` env override if set, else a fatal, actionable
-   startup error identifying the missing configuration (FR-011).
+3. Neither of the above — `LCG_EXTRACTION_URL` env override if set, else no provider is
+   configured. **Superseded** by [ADR-0331](0331-lazy-extraction-provider-validation.md): at the
+   time this ADR was written, that case was a fatal, actionable startup error identifying the
+   missing configuration (FR-011); it is now deferred to the first extraction-dependent call,
+   which returns the same actionable message instead. The precedence order in items 1–3 is
+   otherwise unchanged.
 
 Deliberately **not** mirrored from the embedder: there is no "does the default UDS socket exist"
 auto-detection tier. The embedder's tier-3 ladder auto-selects `/tmp/liminis-inference.sock`
