@@ -82,6 +82,16 @@ after checkout, stamping every tracked file to the commit's own timestamp — a 
 that's identical and deterministic across both jobs' independent checkouts, so the
 mtime comparison lines up and the restored build is recognized as fresh.
 
+**The run-scoped key is cleaned up explicitly, not left to default eviction.** Every CI
+run writes a brand-new `target-release-<run_id>` entry (multi-GB) that is read exactly
+once and then dead. Left to GitHub's own LRU/7-day eviction, PR volume could grow total
+cache usage enough to evict the long-lived `lbug-cache-*` entry ahead of its own
+eviction schedule, forcing a lbug rebuild-from-download on some runs — a real cost this
+design is supposed to avoid, just relocated to a different cache. A `cleanup-release-cache`
+job, gated only on `build-release` succeeding (so it also fires when `test` is skipped via
+the `e2e_only` dispatch path), deletes the key with `gh cache delete` once `test` is done
+with it.
+
 ### 3. Bodily merge into `ci.yml`, not a `workflow_call` orchestrator
 
 GitHub Actions' `needs:` and job-level artifact/cache dependencies only work between

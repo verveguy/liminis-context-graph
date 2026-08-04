@@ -34,7 +34,7 @@ on:
 # cache (`test`) or a same-run artifact of six specific binaries (the five e2e jobs). A
 # restore-only reader can be mid-read while the cache is unrelated to it being written
 # elsewhere, but it can never read a key that is *itself* still being written, because
-# only one job writes any given key in a given run. See docs/adr/0341-*.md.
+# only one job writes any given key in a given run. See docs/adr/0341-build-release-artifacts-once.md.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -359,7 +359,7 @@ jobs:
   # and not gating merge) — the suite's own wall clock finishes well before the required
   # `test (ubuntu-latest)` check, so this is expected to add zero latency to a PR's
   # time-to-mergeable. See docs/adr/0328-real-corpus-e2e-on-pr-path.md for the original
-  # rationale and docs/adr/0341-*.md for why these jobs now live in this file.
+  # rationale and docs/adr/0341-build-release-artifacts-once.md for why these jobs now live in this file.
   real-corpus-e2e:
     name: real_corpus_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -504,3 +504,29 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored
+
+  # The `target-release-${{ github.run_id }}` key is single-use by construction (FR-003) —
+  # exactly one writer (build-release), exactly one reader (test) — but nothing evicts it
+  # afterward. Left alone, every run leaves behind a dead multi-GB entry that only default
+  # LRU/7-day eviction ever clears, and at PR volume that risks evicting the long-lived
+  # `lbug-cache-*` entry (the one cache this design actually needs to persist across runs)
+  # before its own eviction is warranted. `needs: [build-release, test]` + `always()` runs
+  # this regardless of test's outcome, including when it's skipped entirely by the
+  # `e2e_only` workflow_dispatch path (see `test`'s `if:`) — the cache still needs cleanup
+  # in that case since build-release still wrote it. `|| true` on the delete: a cache that
+  # was never written (build-release failed before saving) or already expired is not a
+  # cleanup failure.
+  cleanup-release-cache:
+    name: cleanup run-scoped release cache
+    runs-on: ubuntu-latest
+    needs: [build-release, test]
+    if: always() && needs.build-release.result == 'success'
+    permissions:
+      actions: write
+    steps:
+      - name: Delete run-scoped target/release cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache delete "target-release-${{ github.run_id }}" \
+            --repo "${{ github.repository }}" || true

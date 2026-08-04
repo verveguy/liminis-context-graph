@@ -3,7 +3,7 @@ description: >
   Classifies a PR diff as docs-only or code-touching, so callers can skip
   expensive jobs on docs-only PRs. Single source of truth, called once from
   ci.yml's `changes` job (see docs/adr/0322-ci-docs-only-fast-path.md,
-  docs/adr/0328-real-corpus-e2e-on-pr-path.md, and docs/adr/0341-*.md — the
+  docs/adr/0328-real-corpus-e2e-on-pr-path.md, and docs/adr/0341-build-release-artifacts-once.md — the
   real-corpus e2e jobs were originally in their own workflow file with their
   own call to this action; #341 merged them into ci.yml, leaving one caller
   and one classifier output shared by all downstream jobs). Fail-safe by
