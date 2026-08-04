@@ -2239,6 +2239,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0316](0316-bench-target-per-criterion-group.md) | One `[[bench]]` Target Per `criterion_group!` | 2026-08-02 |
 | [0322](0322-ci-docs-only-fast-path.md) | CI Docs-Only Fast Path via Job-Level Skip | 2026-08-02 |
 | [0325](0325-knowledge-status-open-db-not-queryable.md) | `knowledge_status` Reports "Open But Not Queryable" as a Second Degraded State | 2026-08-02 |
+| [0328](0328-real-corpus-e2e-on-pr-path.md) | Run `real-corpus-e2e` on the PR Path as a Non-Required Check | 2026-08-03 |
 | [0331](0331-lazy-extraction-provider-validation.md) | Validate the Extraction Provider on First Use, Not at Startup | 2026-08-03 |
 
 ## Historical numbering
