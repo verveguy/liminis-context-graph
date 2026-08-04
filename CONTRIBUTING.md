@@ -113,7 +113,29 @@ never commit release prep directly to `main` — then tag the merge commit.
 4. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
 5. The release workflow builds all three platforms and publishes the GitHub Release
-   automatically (~30–45 min).
+   automatically (~5–10 min in practice; `v0.12.0` took under six).
+6. **Announce it.** Post to the repository's **Announcements** discussion category once the
+   release has published. cargo-dist creates the GitHub Release; nothing posts a discussion.
+   Lead with what changed for a user rather than the issue list, and carry the CHANGELOG's
+   upgrade note across if there is one. Precedent to match:
+   [v0.10.0](https://github.com/verveguy/liminis-context-graph/discussions/200),
+   [v0.11.0](https://github.com/verveguy/liminis-context-graph/discussions/338),
+   [v0.12.0](https://github.com/verveguy/liminis-context-graph/discussions/337).
+7. **Confirm the previous release was announced too.** `v0.11.0` shipped with no announcement
+   and the gap went unnoticed for five days — nothing checks, and the release workflow is
+   green either way. Before posting, list the Announcements category and confirm the prior
+   tag has an entry; if it doesn't, backfill it and say so in the post rather than quietly
+   filling the hole. Community reports are usually the substance of a release, and the
+   reporters read the discussion, not the changelog.
+
+   ```sh
+   gh api graphql -f query='query { repository(owner:"verveguy",name:"liminis-context-graph"){
+     discussions(first:20){ nodes { title category{name} createdAt } } } }'
+   ```
+8. **Close the community reports the release resolves.** Comment on each with what shipped and
+   a concrete reopen condition, then move it to **Shipped** on the OSS triage board (see the
+   two-board note above). A report left open after its fix ships reads as unresolved to the
+   person who filed it.
 
 If a release build fails: delete the local and remote tags (`git tag --delete vX.Y.Z` and
 `git push --delete origin vX.Y.Z`), fix the issue on a branch, merge it, then re-tag the
