@@ -31,7 +31,7 @@ is undocumented and easy to violate.
 
 ### Why this blocks #351
 
-#351 proposes a persisted `applied_seq` compared against `max_seq` to decide whether a node's DB
+Issue `#351` proposes a persisted `applied_seq` compared against `max_seq` to decide whether a node's DB
 is consistent with the WAL. That comparison is only sound if `seq` is unique and monotonic across
 the WAL. While this bug exists, a WAL can contain duplicate seqs, and both `applied_seq` and
 `max_seq` become ambiguous — the feature would be built on an unreliable key.
@@ -168,6 +168,10 @@ in the directory contains a duplicate `seq` afterward.
 
 ## Source References
 
+References below are as of the pre-fix state (`main` at `1183160a`) that motivated this issue;
+line numbers shift once the fix lands (see `WalWriter::resync_global_seq` and
+`wal_exec::resync_global_seq_after_rebuild` for the post-fix implementation).
+
 - `crates/core/src/wal.rs:60` — `WalWriter::new`, where `global_seq` is derived once via
   `scan_max_seq`.
 - `crates/core/src/wal.rs:107` — where `global_seq` is incremented in memory per mutation.
@@ -181,4 +185,4 @@ in the directory contains a duplicate `seq` afterward.
   computed as a running max across committed batches.
 - `crates/core/src/app_state.rs` — `AppState::wal_writer` (`Arc<Mutex<Option<WalWriter>>>`) and
   `AppState::write_lock`.
-- #351 — the community report this issue was split out of; blocked by this fix.
+- Issue `#351` — the community report this issue was split out of; blocked by this fix.

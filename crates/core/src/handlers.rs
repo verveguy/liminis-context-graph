@@ -1578,6 +1578,14 @@ async fn handle_rebuild_from_wal(
         }
         let (stats, indices_built) = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
+                // Issue #352 (FR-002): armed whenever this is a real (non-dry-run) attempt, so
+                // an early `?` return below — e.g. `db.connect()` or `replay_opts` failing after
+                // a `force_clear` already ran — still resyncs `global_seq` on the way out,
+                // instead of only on the happy path. `mark_done()` below disarms it once the
+                // normal call site has already resynced with the more accurate
+                // `last_committed_seq`, so a clean run doesn't pay for a second directory scan.
+                let mut resync_guard =
+                    (!dry_run).then(|| wal_exec::GlobalSeqResyncGuard::new(&wal_writer_c));
                 let conn = db.connect()?;
                 // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
                 // eliminated during bulk load, and so a stale pre-rebuild HNSW index (which
@@ -1646,6 +1654,9 @@ async fn handle_rebuild_from_wal(
                         &wal_writer_c,
                         stats.last_committed_seq,
                     );
+                    if let Some(g) = resync_guard.as_mut() {
+                        g.mark_done();
+                    }
                 }
                 Ok((stats, build_ok))
             },
@@ -1871,6 +1882,14 @@ async fn handle_rebuild_from_wal(
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
+                // Issue #352 (FR-002): armed whenever this is a real (non-dry-run) attempt, so
+                // an early `?` return below — e.g. `db.connect()` or `replay_opts` failing after
+                // a `force_clear` already ran — still resyncs `global_seq` on the way out,
+                // instead of only on the happy path. `mark_done()` below disarms it once the
+                // normal call site has already resynced with the more accurate
+                // `last_committed_seq`, so a clean run doesn't pay for a second directory scan.
+                let mut resync_guard =
+                    (!dry_run).then(|| wal_exec::GlobalSeqResyncGuard::new(&bg_wal_writer));
                 let conn = db.connect()?;
                 // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
                 // eliminated during bulk load, and so a stale pre-rebuild HNSW index doesn't
@@ -1931,6 +1950,9 @@ async fn handle_rebuild_from_wal(
                         &bg_wal_writer,
                         stats.last_committed_seq,
                     );
+                    if let Some(g) = resync_guard.as_mut() {
+                        g.mark_done();
+                    }
                 }
                 Ok((stats, build_ok))
             },
