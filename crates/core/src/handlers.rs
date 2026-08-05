@@ -1508,6 +1508,12 @@ async fn handle_rebuild_from_wal(
                     "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
                 )));
             }
+            // Issue #352 (FR-002): clear_db_for_rebuild itself does not re-derive
+            // WalWriter::global_seq. This is only safe because execution always falls through
+            // into one of the two real-replay paths below in this same function call, and both
+            // of those call resync_global_seq_after_rebuild on completion. If clear_db_for_rebuild
+            // ever grows a second caller that doesn't fall through to a replay, that caller needs
+            // its own re-derivation call.
             clear_db_for_rebuild(&state).await?;
         }
     }
@@ -1562,6 +1568,7 @@ async fn handle_rebuild_from_wal(
             }
         }
         let bg_indices_built = Arc::clone(&state.indices_built);
+        let wal_writer_c = Arc::clone(&state.wal_writer);
         // Preset to false before the indexes are actually dropped below: if replay fails, is
         // cancelled, or the spawn_blocking join itself fails (panic), the early `?`/`??` returns
         // downstream must not leave a stale `true` in place after the indexes have already been
@@ -1631,6 +1638,14 @@ async fn handle_rebuild_from_wal(
                         // later rebuild succeeds, instead of silently trusting a stale index.
                         conn.mark_name_index_untrusted();
                     }
+                    // Issue #352: a WAL directory populated after this writer was constructed
+                    // (external seed, restore, distributed-WAL pull) may contain seqs the
+                    // writer doesn't know about — re-derive so the next mutation doesn't
+                    // collide with what was just replayed.
+                    wal_exec::resync_global_seq_after_rebuild(
+                        &wal_writer_c,
+                        stats.last_committed_seq,
+                    );
                 }
                 Ok((stats, build_ok))
             },
@@ -1832,6 +1847,7 @@ async fn handle_rebuild_from_wal(
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
     let bg_sink = Arc::clone(&state.sink);
     let bg_indices_built = Arc::clone(&state.indices_built);
+    let bg_wal_writer = Arc::clone(&state.wal_writer);
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -1907,6 +1923,14 @@ async fn handle_rebuild_from_wal(
                         // later rebuild succeeds, instead of silently trusting a stale index.
                         conn.mark_name_index_untrusted();
                     }
+                    // Issue #352: a WAL directory populated after this writer was constructed
+                    // (external seed, restore, distributed-WAL pull) may contain seqs the
+                    // writer doesn't know about — re-derive so the next mutation doesn't
+                    // collide with what was just replayed.
+                    wal_exec::resync_global_seq_after_rebuild(
+                        &bg_wal_writer,
+                        stats.last_committed_seq,
+                    );
                 }
                 Ok((stats, build_ok))
             },
