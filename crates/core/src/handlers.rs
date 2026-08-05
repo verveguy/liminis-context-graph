@@ -1649,13 +1649,18 @@ async fn handle_rebuild_from_wal(
                     // Issue #352: a WAL directory populated after this writer was constructed
                     // (external seed, restore, distributed-WAL pull) may contain seqs the
                     // writer doesn't know about — re-derive so the next mutation doesn't
-                    // collide with what was just replayed.
-                    wal_exec::resync_global_seq_after_rebuild(
+                    // collide with what was just replayed. Only disarm the safety-net guard if
+                    // this resync actually succeeded; on failure, leave it armed so `Drop`'s
+                    // scan-only fallback gets a second chance instead of leaving `global_seq`
+                    // stale.
+                    let resynced = wal_exec::resync_global_seq_after_rebuild(
                         &wal_writer_c,
                         stats.last_committed_seq,
                     );
-                    if let Some(g) = resync_guard.as_mut() {
-                        g.mark_done();
+                    if resynced {
+                        if let Some(g) = resync_guard.as_mut() {
+                            g.mark_done();
+                        }
                     }
                 }
                 Ok((stats, build_ok))
@@ -1945,13 +1950,18 @@ async fn handle_rebuild_from_wal(
                     // Issue #352: a WAL directory populated after this writer was constructed
                     // (external seed, restore, distributed-WAL pull) may contain seqs the
                     // writer doesn't know about — re-derive so the next mutation doesn't
-                    // collide with what was just replayed.
-                    wal_exec::resync_global_seq_after_rebuild(
+                    // collide with what was just replayed. Only disarm the safety-net guard if
+                    // this resync actually succeeded; on failure, leave it armed so `Drop`'s
+                    // scan-only fallback gets a second chance instead of leaving `global_seq`
+                    // stale.
+                    let resynced = wal_exec::resync_global_seq_after_rebuild(
                         &bg_wal_writer,
                         stats.last_committed_seq,
                     );
-                    if let Some(g) = resync_guard.as_mut() {
-                        g.mark_done();
+                    if resynced {
+                        if let Some(g) = resync_guard.as_mut() {
+                            g.mark_done();
+                        }
                     }
                 }
                 Ok((stats, build_ok))

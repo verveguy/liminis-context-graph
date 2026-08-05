@@ -245,9 +245,14 @@ impl WalWriter {
     /// (`max(current, scanned, last_committed_seq + 1)`), never lowers it (FR-005), so this is a
     /// safe no-op when called over an empty or low-max-seq WAL directory.
     pub fn resync_global_seq(&mut self, last_committed_seq: Option<u64>) -> Result<(), Error> {
-        let scanned = scan_max_seq(&self.wal_dir)?;
+        // Apply the last_committed_seq floor first: it requires no I/O and is already the most
+        // trustworthy source available (it came directly from the replay that just ran). If the
+        // on-disk scan below fails, this floor still stands — a scan failure only forfeits the
+        // scan's extra precision, not the guaranteed floor.
         let from_commit = last_committed_seq.map(|s| s.saturating_add(1)).unwrap_or(0);
-        self.global_seq = self.global_seq.max(scanned).max(from_commit);
+        self.global_seq = self.global_seq.max(from_commit);
+        let scanned = scan_max_seq(&self.wal_dir)?;
+        self.global_seq = self.global_seq.max(scanned);
         Ok(())
     }
 

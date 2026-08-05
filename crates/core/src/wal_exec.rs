@@ -106,15 +106,21 @@ pub(crate) fn wal_flush_ungrouped(
 /// `seq` values that collide with what's already on disk. Non-fatal: a rebuild that already
 /// succeeded shouldn't fail because of a re-derivation I/O error (e.g. the WAL dir vanished
 /// between replay and this call), matching this module's existing failure posture.
+///
+/// Returns `true` if the resync completed without error (including the no-op case of no writer
+/// configured), `false` if the on-disk scan failed. Callers pairing this with
+/// `GlobalSeqResyncGuard` should only `mark_done()` on `true` — on `false` the guard's `Drop`-time
+/// fallback (an on-disk-scan-only resync with no `last_committed_seq` floor) should stay armed as
+/// a second chance, rather than being disarmed by a call that didn't actually update `global_seq`.
 pub(crate) fn resync_global_seq_after_rebuild(
     wal: &Arc<Mutex<Option<WalWriter>>>,
     last_committed_seq: Option<u64>,
-) {
+) -> bool {
     let mut guard = match wal.lock() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("liminis-context-graph: resync_global_seq_after_rebuild: lock poisoned: {e}");
-            return;
+            return false;
         }
     };
     if let Some(ref mut writer) = *guard {
@@ -122,8 +128,10 @@ pub(crate) fn resync_global_seq_after_rebuild(
             eprintln!(
                 "liminis-context-graph: resync_global_seq_after_rebuild: scan failed (non-fatal): {e}"
             );
+            return false;
         }
     }
+    true
 }
 
 /// Safety net for `resync_global_seq_after_rebuild`: a non-dry-run rebuild can exit early — e.g.
@@ -214,6 +222,10 @@ mod tests {
         let wal: Arc<Mutex<Option<WalWriter>>> = Arc::new(Mutex::new(Some(writer)));
 
         resync_global_seq_after_rebuild(&wal, Some(99));
+        // Written after the explicit resync above, so a broken mark_done (one that lets Drop's
+        // fallback resync fire anyway) would pick this up and push global_seq past 100 — making
+        // this test actually distinguish "resynced once" from "resynced twice".
+        write_wal_line(tmp.path(), "late_0000.jsonl", 150);
         {
             let mut guard = GlobalSeqResyncGuard::new(&wal);
             guard.mark_done();
