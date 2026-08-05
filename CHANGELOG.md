@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [0.12.1] - 2026-08-04
+## [0.12.1] - 2026-08-05
 
 A patch release fixing a data-loss bug reported against 0.11.0/0.12.0 (#340): a single malformed
 entity or edge in an extraction response could lose an entire chunk, and for a client that treats
