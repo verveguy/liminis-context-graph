@@ -236,6 +236,26 @@ impl WalWriter {
     pub fn pending_count(&self) -> usize {
         self.pending_lines.len()
     }
+
+    /// Re-derives `global_seq` after a rebuild/clear that may have replayed a WAL directory
+    /// populated after this writer was constructed (issue #352). Combines a fresh on-disk scan
+    /// (the same `scan_max_seq` used at startup) with the replay's own `last_committed_seq` —
+    /// a failed-to-replay line can still have a higher on-disk `seq` than the last commit, so
+    /// neither source alone is trustworthy (FR-003). Monotonic: only ever raises `global_seq`
+    /// (`max(current, scanned, last_committed_seq + 1)`), never lowers it (FR-005), so this is a
+    /// safe no-op when called over an empty or low-max-seq WAL directory.
+    pub fn resync_global_seq(&mut self, last_committed_seq: Option<u64>) -> Result<(), Error> {
+        let scanned = scan_max_seq(&self.wal_dir)?;
+        let from_commit = last_committed_seq.map(|s| s + 1).unwrap_or(0);
+        self.global_seq = self.global_seq.max(scanned).max(from_commit);
+        Ok(())
+    }
+
+    /// Returns the current `global_seq` (for tests).
+    #[cfg(test)]
+    pub fn global_seq(&self) -> u64 {
+        self.global_seq
+    }
 }
 
 fn count_jsonl_files(dir: &Path) -> u32 {
@@ -396,5 +416,73 @@ mod tests {
     fn looks_like_mutation_still_ignores_read_only_queries() {
         assert!(!looks_like_mutation("MATCH (n) RETURN n"));
         assert!(!looks_like_mutation("MATCH(n)RETURN n"));
+    }
+
+    fn write_wal_line(dir: &Path, file_name: &str, seq: u64) {
+        let line = WalLine {
+            seq,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "x" }),
+        };
+        fs::write(
+            dir.join(file_name),
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resync_global_seq_is_monotonic_against_empty_wal_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        // Simulate mutations already emitted this process (in-memory global_seq advanced).
+        writer.global_seq = 10;
+
+        writer.resync_global_seq(None).unwrap();
+
+        assert_eq!(writer.global_seq, 10, "resync must not lower global_seq");
+    }
+
+    #[test]
+    fn resync_global_seq_picks_up_files_written_after_construction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer_state = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        assert_eq!(writer_state.global_seq, 0);
+        let mut writer = writer_state;
+
+        // WAL dir populated out-of-band after the writer was constructed.
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 41);
+
+        writer.resync_global_seq(None).unwrap();
+
+        assert_eq!(writer.global_seq, 42, "resync must pick up on-disk seqs");
+    }
+
+    #[test]
+    fn resync_global_seq_uses_last_committed_seq_as_a_floor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+
+        // No on-disk lines beyond what the replay itself committed; last_committed_seq alone
+        // must be enough to raise the floor.
+        writer.resync_global_seq(Some(99)).unwrap();
+
+        assert_eq!(writer.global_seq, 100);
+    }
+
+    #[test]
+    fn resync_global_seq_prefers_on_disk_scan_over_lower_last_committed_seq() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+
+        // A line that failed to replay still has a higher on-disk seq than the last
+        // successfully committed line (FR-003 edge case).
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 200);
+
+        writer.resync_global_seq(Some(5)).unwrap();
+
+        assert_eq!(writer.global_seq, 201);
     }
 }
