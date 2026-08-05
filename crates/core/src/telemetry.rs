@@ -66,12 +66,18 @@ pub enum TelemetryEvent {
         /// `ExtractOptions.chunk_key` was itself `None`.
         chunk_key: Option<String>,
     },
-    /// Emitted by `OaiExtractor` for every entity/edge extraction response, distinguishing
+    /// Emitted by both `AnthropicExtractor` and `OaiExtractor` for every entity/edge extraction
+    /// response (Anthropic gained this emission in #342 — previously OAI-only), distinguishing
     /// whether the structured-output JSON was well-formed as-is (`"clean"`), required
-    /// `extract_json_block`'s fence/prefix stripping to parse (`"recovered"`), was not valid
-    /// JSON at all (`"malformed"`), or parsed as valid JSON but failed schema/field validation
-    /// on a genuinely required field (`"schema_invalid"`, #314 FR-003). `call_type` is
-    /// `"entities"` or `"edges"`.
+    /// `extract_json_block`'s fence/prefix stripping to parse (`"recovered"`, OAI only —
+    /// Anthropic's tool-use responses are never fence-wrapped), was not valid JSON at all
+    /// (`"malformed"`), parsed as valid JSON but failed schema/field validation on a genuinely
+    /// required field (`"schema_invalid"`, #314 FR-003), or parsed successfully but had one or
+    /// more items dropped during per-item salvage (`"salvaged"`, #342 FR-006). `"salvaged"` takes
+    /// precedence over `"recovered"` when a response is both defensively re-parsed and has
+    /// dropped items — the two are orthogonal axes (whole-body re-parse vs. per-item defects),
+    /// and a single `outcome` string can't represent both, so item-level data loss is treated as
+    /// the more actionable signal. `call_type` is `"entities"` or `"edges"`.
     StructuredOutputParse {
         ts_ms: u64,
         model: String,

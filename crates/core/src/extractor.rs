@@ -17,7 +17,7 @@ use crate::{
         compute_initial_max_tokens, next_retry_max_tokens, resolve_max_tokens_ceiling,
         ExtractionCallType,
     },
-    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -47,7 +47,7 @@ pub trait Extractor: Send + Sync {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>>;
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>>;
 
     /// Classifies entity types for a batch of (name, summary) pairs.
     ///
@@ -234,7 +234,7 @@ impl AnthropicExtractor {
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
-    ) -> Result<Vec<ExtractedEntity>, Error> {
+    ) -> Result<(Vec<ExtractedEntity>, usize), Error> {
         let system_text = prompts::entity_system_prompt(opts.source_type, opts.ontology);
         let user_text = prompts::entity_user_prompt_for(
             opts.source_type,
@@ -331,7 +331,13 @@ impl AnthropicExtractor {
             let resp_for_failure = resp.clone();
 
             match parse_entity_response(resp) {
-                EntityOutcome::Success(entities) => {
+                EntityOutcome::Success { entities, dropped } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: if dropped > 0 { "salvaged" } else { "clean" }.to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -342,7 +348,7 @@ impl AnthropicExtractor {
                             chunk_key: chunk_key.clone(),
                         });
                     }
-                    return Ok(entities);
+                    return Ok((entities, dropped));
                 }
                 EntityOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -373,10 +379,17 @@ impl AnthropicExtractor {
                     ));
                 }
                 EntityOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "entities".to_string(),
+                        outcome: classification.to_string(),
+                    });
                     self.emit_extraction_failure(
                         "entities",
                         chunk_key.clone(),
-                        classify_parse_failure(&e),
+                        classification,
                         &resp_for_failure,
                         current_max_tokens,
                         None,
@@ -391,12 +404,12 @@ impl AnthropicExtractor {
         &self,
         opts: &ExtractOptions<'_>,
         entity_names: &[String],
-    ) -> Result<Vec<ExtractedEdge>, Error> {
+    ) -> Result<(Vec<ExtractedEdge>, usize), Error> {
         // FR-001 edge case: an empty (or all-empty-after-sanitizing) entity list has no valid
         // endpoints to constrain the schema `enum` to — skip the call rather than send one.
         let sanitized_names = prompts::sanitize_entity_names(entity_names);
         if sanitized_names.is_empty() {
-            return Ok(vec![]);
+            return Ok((vec![], 0));
         }
 
         let system_text = prompts::edge_system_prompt(opts.ontology);
@@ -476,7 +489,13 @@ impl AnthropicExtractor {
             let resp_for_failure = resp.clone();
 
             match parse_edge_response(resp) {
-                EdgeOutcome::Success(mut edges) => {
+                EdgeOutcome::Success { mut edges, dropped } => {
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: if dropped > 0 { "salvaged" } else { "clean" }.to_string(),
+                    });
                     if max_tokens_retried {
                         self.sink.emit(TelemetryEvent::ExtractionTruncated {
                             ts_ms: now_ms(),
@@ -511,7 +530,7 @@ impl AnthropicExtractor {
                             _ => {}
                         }
                     }
-                    return Ok(edges);
+                    return Ok((edges, dropped));
                 }
                 EdgeOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -547,10 +566,17 @@ impl AnthropicExtractor {
                     ));
                 }
                 EdgeOutcome::ParseError(e) => {
+                    let classification = classify_parse_failure(&e);
+                    self.sink.emit(TelemetryEvent::StructuredOutputParse {
+                        ts_ms: now_ms(),
+                        model: self.model.clone(),
+                        call_type: "edges".to_string(),
+                        outcome: classification.to_string(),
+                    });
                     self.emit_extraction_failure(
                         "edges",
                         chunk_key.clone(),
-                        classify_parse_failure(&e),
+                        classification,
                         &resp_for_failure,
                         current_max_tokens,
                         entities_extracted,
@@ -561,17 +587,32 @@ impl AnthropicExtractor {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
-        let entities = self.do_extract_entities(&opts).await?;
+    /// Known asymmetry: if salvage drops every entity, `edges_dropped_malformed` is forced to 0
+    /// below because the edge call is never made — edges reference entities by name, so a batch
+    /// with zero surviving entities has nothing for the edge schema's `enum` to constrain against.
+    /// If the model *also* sent a malformed edge in the same response, that drop is never observed
+    /// (`parse_edge_response`/`salvage_items` never runs on it). This mirrors the pre-existing
+    /// genuine-zero-entities short-circuit and is considered acceptable: a malformed edge alongside
+    /// an all-malformed entity batch would reference entities that don't exist anyway.
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
+        let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
-            return Ok(ExtractionResult {
-                entities,
-                edges: vec![],
+            return Ok(ExtractionOutcome {
+                result: ExtractionResult {
+                    entities,
+                    edges: vec![],
+                },
+                entities_dropped_malformed,
+                edges_dropped_malformed: 0,
             });
         }
         let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
-        let edges = self.do_extract_edges(&opts, &entity_names).await?;
-        Ok(ExtractionResult { entities, edges })
+        let (edges, edges_dropped_malformed) = self.do_extract_edges(&opts, &entity_names).await?;
+        Ok(ExtractionOutcome {
+            result: ExtractionResult { entities, edges },
+            entities_dropped_malformed,
+            edges_dropped_malformed,
+        })
     }
 
     async fn do_classify_entities(
@@ -850,7 +891,7 @@ impl Extractor for AnthropicExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -894,15 +935,41 @@ enum SendOutcome {
 // ── EntityOutcome / EdgeOutcome ───────────────────────────────────────────────
 
 enum EntityOutcome {
-    Success(Vec<ExtractedEntity>),
+    Success {
+        entities: Vec<ExtractedEntity>,
+        dropped: usize,
+    },
     BudgetExhausted,
     ParseError(Error),
 }
 
 enum EdgeOutcome {
-    Success(Vec<ExtractedEdge>),
+    Success {
+        edges: Vec<ExtractedEdge>,
+        dropped: usize,
+    },
     BudgetExhausted,
     ParseError(Error),
+}
+
+/// Deserializes each element of `raw` independently, dropping and counting elements that fail
+/// to satisfy `T`'s required fields rather than failing the whole batch (#342 FR-001). This drops
+/// an item on *any* deserialize failure — not just a missing `name`/`source_name`/`target_name`,
+/// but any other non-defaulted required field too (e.g. a missing `entity_type` or `fact`) — since
+/// `T::deserialize` has no way to distinguish which field caused the failure. The wrapper-level
+/// check (is the array key present at all, is its value an array) already ran before this is
+/// called — `salvage_items` only handles per-item defects, never a structurally broken response
+/// (FR-005).
+fn salvage_items<T: serde::de::DeserializeOwned>(raw: Vec<Value>) -> (Vec<T>, usize) {
+    let mut items = Vec::with_capacity(raw.len());
+    let mut dropped = 0usize;
+    for value in raw {
+        match serde_json::from_value::<T>(value) {
+            Ok(item) => items.push(item),
+            Err(_) => dropped += 1,
+        }
+    }
+    (items, dropped)
 }
 
 /// Classifies why a response failed to parse, per #314 FR-003: distinguishes content that never
@@ -947,11 +1014,14 @@ fn parse_entity_response(mut resp: Value) -> EntityOutcome {
 
     #[derive(serde::Deserialize)]
     struct EntityPayload {
-        entities: Vec<ExtractedEntity>,
+        entities: Vec<Value>,
     }
 
     match serde_json::from_value::<EntityPayload>(input) {
-        Ok(payload) => EntityOutcome::Success(payload.entities),
+        Ok(payload) => {
+            let (entities, dropped) = salvage_items(payload.entities);
+            EntityOutcome::Success { entities, dropped }
+        }
         Err(e) => EntityOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -983,11 +1053,14 @@ fn parse_edge_response(mut resp: Value) -> EdgeOutcome {
 
     #[derive(serde::Deserialize)]
     struct EdgePayload {
-        edges: Vec<ExtractedEdge>,
+        edges: Vec<Value>,
     }
 
     match serde_json::from_value::<EdgePayload>(input) {
-        Ok(payload) => EdgeOutcome::Success(payload.edges),
+        Ok(payload) => {
+            let (edges, dropped) = salvage_items(payload.edges);
+            EdgeOutcome::Success { edges, dropped }
+        }
         Err(e) => EdgeOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -1462,7 +1535,7 @@ impl OaiExtractor {
     async fn do_extract_entities(
         &self,
         opts: &ExtractOptions<'_>,
-    ) -> Result<Vec<ExtractedEntity>, Error> {
+    ) -> Result<(Vec<ExtractedEntity>, usize), Error> {
         let system_text = format!(
             "{}{}",
             prompts::entity_system_prompt(opts.source_type, opts.ontology),
@@ -1525,12 +1598,15 @@ impl OaiExtractor {
                 OaiChatOutcome::Success {
                     value: entities,
                     defensive_parse,
+                    dropped,
                 } => {
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "entities".to_string(),
-                        outcome: if defensive_parse {
+                        outcome: if dropped > 0 {
+                            "salvaged"
+                        } else if defensive_parse {
                             "recovered"
                         } else {
                             "clean"
@@ -1558,7 +1634,7 @@ impl OaiExtractor {
                             missing_summary,
                         });
                     }
-                    return Ok(entities);
+                    return Ok((entities, dropped));
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -1614,7 +1690,7 @@ impl OaiExtractor {
         &self,
         opts: &ExtractOptions<'_>,
         entity_names: &[String],
-    ) -> Result<Vec<ExtractedEdge>, Error> {
+    ) -> Result<(Vec<ExtractedEdge>, usize), Error> {
         let system_text = format!(
             "{}{}",
             prompts::edge_system_prompt(opts.ontology),
@@ -1679,12 +1755,15 @@ impl OaiExtractor {
                 OaiChatOutcome::Success {
                     value: mut edges,
                     defensive_parse,
+                    dropped,
                 } => {
                     self.sink.emit(TelemetryEvent::StructuredOutputParse {
                         ts_ms: now_ms(),
                         model: self.model.clone(),
                         call_type: "edges".to_string(),
-                        outcome: if defensive_parse {
+                        outcome: if dropped > 0 {
+                            "salvaged"
+                        } else if defensive_parse {
                             "recovered"
                         } else {
                             "clean"
@@ -1722,7 +1801,7 @@ impl OaiExtractor {
                             _ => {}
                         }
                     }
-                    return Ok(edges);
+                    return Ok((edges, dropped));
                 }
                 OaiChatOutcome::BudgetExhausted => {
                     if !max_tokens_retried {
@@ -1779,17 +1858,32 @@ impl OaiExtractor {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
-        let entities = self.do_extract_entities(&opts).await?;
+    /// Known asymmetry: if salvage drops every entity, `edges_dropped_malformed` is forced to 0
+    /// below because the edge call is never made — edges reference entities by name, so a batch
+    /// with zero surviving entities has nothing for the edge schema's `enum` to constrain against.
+    /// If the model *also* sent a malformed edge in the same response, that drop is never observed
+    /// (`parse_edge_response`/`salvage_items` never runs on it). This mirrors the pre-existing
+    /// genuine-zero-entities short-circuit and is considered acceptable: a malformed edge alongside
+    /// an all-malformed entity batch would reference entities that don't exist anyway.
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
+        let (entities, entities_dropped_malformed) = self.do_extract_entities(&opts).await?;
         if entities.is_empty() {
-            return Ok(ExtractionResult {
-                entities,
-                edges: vec![],
+            return Ok(ExtractionOutcome {
+                result: ExtractionResult {
+                    entities,
+                    edges: vec![],
+                },
+                entities_dropped_malformed,
+                edges_dropped_malformed: 0,
             });
         }
         let entity_names: Vec<String> = entities.iter().map(|e| e.name.clone()).collect();
-        let edges = self.do_extract_edges(&opts, &entity_names).await?;
-        Ok(ExtractionResult { entities, edges })
+        let (edges, edges_dropped_malformed) = self.do_extract_edges(&opts, &entity_names).await?;
+        Ok(ExtractionOutcome {
+            result: ExtractionResult { entities, edges },
+            entities_dropped_malformed,
+            edges_dropped_malformed,
+        })
     }
 
     async fn do_classify_entities(
@@ -1933,7 +2027,7 @@ impl Extractor for OaiExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -1959,10 +2053,12 @@ impl Extractor for OaiExtractor {
 enum OaiChatOutcome<T> {
     /// `defensive_parse` is `true` when `extract_json_block`'s fence/prefix stripping was
     /// needed to isolate the JSON payload (i.e. the raw content wasn't already valid JSON
-    /// on its own), `false` when the raw content parsed as-is.
+    /// on its own), `false` when the raw content parsed as-is. `dropped` is the count of
+    /// per-item elements salvaged (dropped) during deserialization (#342 FR-001).
     Success {
         value: T,
         defensive_parse: bool,
+        dropped: usize,
     },
     BudgetExhausted,
     ParseError(Error),
@@ -1990,13 +2086,17 @@ fn parse_oai_entity_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEntity
     let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EntityPayload {
-        entities: Vec<ExtractedEntity>,
+        entities: Vec<Value>,
     }
     match serde_json::from_str::<EntityPayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success {
-            value: payload.entities,
-            defensive_parse,
-        },
+        Ok(payload) => {
+            let (entities, dropped) = salvage_items(payload.entities);
+            OaiChatOutcome::Success {
+                value: entities,
+                defensive_parse,
+                dropped,
+            }
+        }
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -2015,13 +2115,17 @@ fn parse_oai_edge_response(resp: &Value) -> OaiChatOutcome<Vec<ExtractedEdge>> {
     let defensive_parse = json_str != content.trim();
     #[derive(serde::Deserialize)]
     struct EdgePayload {
-        edges: Vec<ExtractedEdge>,
+        edges: Vec<Value>,
     }
     match serde_json::from_str::<EdgePayload>(json_str) {
-        Ok(payload) => OaiChatOutcome::Success {
-            value: payload.edges,
-            defensive_parse,
-        },
+        Ok(payload) => {
+            let (edges, dropped) = salvage_items(payload.edges);
+            OaiChatOutcome::Success {
+                value: edges,
+                defensive_parse,
+                dropped,
+            }
+        }
         Err(e) => OaiChatOutcome::ParseError(Error::Json(e)),
     }
 }
@@ -2035,7 +2139,7 @@ impl Extractor for MockExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         use crate::types::{ExtractedEdge, ExtractedEntity};
         Box::pin(async {
             Ok(ExtractionResult {
@@ -2062,7 +2166,8 @@ impl Extractor for MockExtractor {
                     invalid_at: None,
                     original_relation_type: None,
                 }],
-            })
+            }
+            .into())
         })
     }
 
@@ -2108,9 +2213,9 @@ impl Extractor for ConfigurableExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let result = self.queue.lock().unwrap().pop_front().unwrap_or_default();
-        Box::pin(async move { Ok(result) })
+        Box::pin(async move { Ok(result.into()) })
     }
 
     fn classify_entities<'a>(
@@ -2155,7 +2260,7 @@ impl Extractor for UnconfiguredExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
     }
 
@@ -2316,8 +2421,47 @@ mod tests {
         });
 
         match parse_entity_response(resp) {
-            EntityOutcome::Success(result) => {
-                assert_eq!(result.len(), 101);
+            EntityOutcome::Success { entities, dropped } => {
+                assert_eq!(entities.len(), 101);
+                assert_eq!(dropped, 0);
+            }
+            EntityOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EntityOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #342 US1 AS1 / SC-001: N well-formed entities plus 1 missing `name` in the same batch
+    // must salvage — the N valid entities are kept and the one bad item is dropped and counted,
+    // rather than failing the whole batch.
+    #[test]
+    fn parse_entity_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_04",
+                    "name": "extract_entities",
+                    "input": {
+                        "entities": [
+                            {"name": "Alice", "entity_type": "Person", "summary": "A person"},
+                            {"name": "Acme Corp", "entity_type": "Organization", "summary": "A company"},
+                            {"entity_type": "Mission", "summary": "no name here"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_entity_response(resp) {
+            EntityOutcome::Success { entities, dropped } => {
+                assert_eq!(entities.len(), 2, "the 2 well-formed entities must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the 1 name-less entity must be dropped and counted"
+                );
+                assert_eq!(entities[0].name, "Alice");
+                assert_eq!(entities[1].name, "Acme Corp");
             }
             EntityOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             EntityOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2386,8 +2530,9 @@ mod tests {
         });
 
         match parse_edge_response(resp) {
-            EdgeOutcome::Success(edges) => {
+            EdgeOutcome::Success { edges, dropped } => {
                 assert_eq!(edges.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
                 assert_eq!(edges[0].valid_at.as_deref(), Some("2026-01-01T00:00:00Z"));
@@ -2422,13 +2567,48 @@ mod tests {
         });
 
         match parse_edge_response(resp) {
-            EdgeOutcome::Success(edges) => {
+            EdgeOutcome::Success { edges, .. } => {
                 assert_eq!(edges.len(), 1);
                 assert!(edges[0].relation_type.is_none());
                 assert!(edges[0].valid_at.is_none());
                 assert!(edges[0].invalid_at.is_none());
             }
             _ => panic!("expected success"),
+        }
+    }
+
+    // #342 US1 AS2 / SC-002: N well-formed edges plus 1 missing `source_name` in the same batch
+    // must salvage — same shape as the entity case, applied to edges.
+    #[test]
+    fn parse_edge_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_05",
+                    "name": "extract_edges",
+                    "input": {
+                        "edges": [
+                            {"source_name": "Alice", "target_name": "Acme", "fact": "Alice works at Acme", "relation_type": "works_at"},
+                            {"target_name": "Acme", "fact": "missing source_name", "relation_type": "works_at"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_edge_response(resp) {
+            EdgeOutcome::Success { edges, dropped } => {
+                assert_eq!(edges.len(), 1, "the 1 well-formed edge must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the edge missing source_name must be dropped and counted"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
+            }
+            EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
         }
     }
 
@@ -2500,8 +2680,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(entities[0].name, "Alice");
                 assert!(!defensive_parse, "raw content was already valid JSON");
             }
@@ -2524,12 +2706,45 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 1);
+                assert_eq!(dropped, 0);
                 assert!(
                     defensive_parse,
                     "fenced content required extract_json_block stripping"
                 );
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #342 US1 AS3 / SC-003: same N-valid-plus-1-malformed shape as the Anthropic path, on the
+    // OAI-compatible parse site.
+    #[test]
+    fn parse_oai_entity_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}, {\"name\": \"Acme Corp\", \"entity_type\": \"Organization\", \"summary\": \"A company\"}, {\"entity_type\": \"Mission\", \"summary\": \"no name here\"}]}"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success {
+                value: entities,
+                dropped,
+                ..
+            } => {
+                assert_eq!(entities.len(), 2, "the 2 well-formed entities must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the 1 name-less entity must be dropped and counted"
+                );
+                assert_eq!(entities[0].name, "Alice");
+                assert_eq!(entities[1].name, "Acme Corp");
             }
             OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2586,11 +2801,43 @@ mod tests {
             OaiChatOutcome::Success {
                 value: edges,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(edges.len(), 1);
+                assert_eq!(dropped, 0);
                 assert_eq!(edges[0].source_name, "Alice");
                 assert_eq!(edges[0].relation_type.as_deref(), Some("works_at"));
                 assert!(!defensive_parse, "raw content was already valid JSON");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #342 US1 AS3 / SC-003: same N-valid-plus-1-malformed shape as the Anthropic edge path, on
+    // the OAI-compatible parse site.
+    #[test]
+    fn parse_oai_edge_response_partial_salvage_drops_one_malformed_keeps_the_rest() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"edges\": [{\"source_name\": \"Alice\", \"target_name\": \"Acme\", \"fact\": \"Alice works at Acme\", \"relation_type\": \"works_at\"}, {\"target_name\": \"Acme\", \"fact\": \"missing source_name\", \"relation_type\": \"works_at\"}]}"
+                }
+            }]
+        });
+        match parse_oai_edge_response(&resp) {
+            OaiChatOutcome::Success {
+                value: edges,
+                dropped,
+                ..
+            } => {
+                assert_eq!(edges.len(), 1, "the 1 well-formed edge must be kept");
+                assert_eq!(
+                    dropped, 1,
+                    "the edge missing source_name must be dropped and counted"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
             }
             OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2694,11 +2941,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2715,11 +2963,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2760,8 +3009,10 @@ mod tests {
             OaiChatOutcome::Success {
                 value: entities,
                 defensive_parse,
+                dropped,
             } => {
                 assert_eq!(entities.len(), 2, "no entities should be dropped");
+                assert_eq!(dropped, 0);
                 assert!(entities.iter().all(|e| e.summary.is_empty()));
                 assert!(!defensive_parse);
             }
@@ -2780,11 +3031,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 2, "no entities should be dropped");
+        assert_eq!(dropped, 0);
         assert!(entities.iter().all(|e| e.summary.is_empty()));
 
         let events = sink.events();
@@ -2803,29 +3055,38 @@ mod tests {
         );
     }
 
-    // US2 AS2 (#314): valid JSON that fails schema validation on a genuinely required field
-    // (`name`/`entity_type` missing) classifies distinctly from unparseable content.
+    // #342: a single-item batch where that item is missing `name` (a genuinely required field)
+    // is salvaged, not a hard failure — the batch becomes an empty success with the drop
+    // counted, exactly like #314's "all malformed" edge case. This inverts the pre-#342
+    // assertion (`result.is_err()` + `outcome == "schema_invalid"`); see the Plan stage's Key
+    // Decisions for why `types.rs`'s single-struct deserialize test does NOT flip alongside
+    // this one — `salvage_items` relies on that lower-level deserialize continuing to fail.
     #[tokio::test]
-    async fn do_extract_entities_missing_required_field_classifies_schema_invalid() {
+    async fn do_extract_entities_all_malformed_batch_salvages_to_empty_success() {
         let content = r#"{"entities": [{"entity_type": "Mission", "summary": "no name here"}]}"#;
         let (url, _server) = spawn_stub_http_server(oai_response_body(content)).await;
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let result = extractor.do_extract_entities(&test_extract_options()).await;
-        assert!(result.is_err());
+        let (entities, dropped) = extractor
+            .do_extract_entities(&test_extract_options())
+            .await
+            .unwrap();
+        assert!(entities.is_empty());
+        assert_eq!(dropped, 1);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
             e,
             TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
-                if call_type == "entities" && outcome == "schema_invalid"
+                if call_type == "entities" && outcome == "salvaged"
         )));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            TelemetryEvent::ExtractionFailure { call_type, classification, .. }
-                if call_type == "entities" && classification == "schema_invalid"
-        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, TelemetryEvent::ExtractionFailure { .. })),
+            "a salvaged response must not emit ExtractionFailure — it's a success, not a failure"
+        );
     }
 
     // FR-004 (#314): a mixed batch (some entities with a summary, some without) fires
@@ -2837,11 +3098,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let entities = extractor
+        let (entities, dropped) = extractor
             .do_extract_entities(&test_extract_options())
             .await
             .unwrap();
         assert_eq!(entities.len(), 2);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2858,11 +3120,12 @@ mod tests {
         let sink = Arc::new(CaptureSink::new());
         let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
 
-        let edges = extractor
+        let (edges, dropped) = extractor
             .do_extract_edges(&test_extract_options(), &["Alice".to_string()])
             .await
             .unwrap();
         assert_eq!(edges.len(), 1);
+        assert_eq!(dropped, 0);
 
         let events = sink.events();
         assert!(events.iter().any(|e| matches!(
@@ -2906,7 +3169,7 @@ mod tests {
             sink,
         );
 
-        let edges = extractor
+        let (edges, dropped) = extractor
             .do_extract_edges(
                 &test_extract_options(),
                 &["   ".to_string(), "\n".to_string()],
@@ -2914,5 +3177,6 @@ mod tests {
             .await
             .unwrap();
         assert!(edges.is_empty());
+        assert_eq!(dropped, 0);
     }
 }

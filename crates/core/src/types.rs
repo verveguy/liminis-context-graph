@@ -91,6 +91,36 @@ pub struct ExtractionResult {
     pub edges: Vec<ExtractedEdge>,
 }
 
+/// Wraps [`ExtractionResult`] with the per-call malformed-item drop counts salvaged during
+/// deserialization (#342 FR-001/FR-003). Kept as a separate wrapper rather than adding fields
+/// directly to `ExtractionResult` — `ExtractionResult` is exhaustively literal-constructed at
+/// dozens of test/fixture sites across the workspace, and this wrapper confines the new fields
+/// to the `Extractor` trait boundary instead of forcing every one of those sites to change.
+///
+/// `#[serde(flatten)]` + `#[serde(default)]` on the two counters keeps the JSON shape backward
+/// compatible with cassette records recorded before this change (`{"entities":[...],
+/// "edges":[...]}`, with no drop counters) — those still deserialize, with both counts
+/// defaulting to `0`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ExtractionOutcome {
+    #[serde(flatten)]
+    pub result: ExtractionResult,
+    #[serde(default)]
+    pub entities_dropped_malformed: usize,
+    #[serde(default)]
+    pub edges_dropped_malformed: usize,
+}
+
+impl From<ExtractionResult> for ExtractionOutcome {
+    fn from(result: ExtractionResult) -> Self {
+        Self {
+            result,
+            entities_dropped_malformed: 0,
+            edges_dropped_malformed: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtractedEntity {
     pub name: String,
@@ -192,5 +222,32 @@ mod tests {
         let result: Result<ExtractedEntity, _> =
             serde_json::from_str(r#"{"entity_type": "Mission", "summary": "x"}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extraction_outcome_deserializes_pre_342_cassette_shape_with_zero_drops() {
+        // A cassette record written before #342 has no drop-counter keys at all — confirms
+        // the #[serde(flatten)] + #[serde(default)] shape stays replayable against pre-existing
+        // recordings on disk.
+        let outcome: ExtractionOutcome = serde_json::from_str(
+            r#"{"entities": [{"name": "Alice", "entity_type": "Person"}], "edges": []}"#,
+        )
+        .unwrap();
+        assert_eq!(outcome.result.entities.len(), 1);
+        assert_eq!(outcome.entities_dropped_malformed, 0);
+        assert_eq!(outcome.edges_dropped_malformed, 0);
+    }
+
+    #[test]
+    fn extraction_outcome_round_trips_drop_counters() {
+        let outcome = ExtractionOutcome {
+            result: ExtractionResult::default(),
+            entities_dropped_malformed: 2,
+            edges_dropped_malformed: 1,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        let round_tripped: ExtractionOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.entities_dropped_malformed, 2);
+        assert_eq!(round_tripped.edges_dropped_malformed, 1);
     }
 }

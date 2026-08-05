@@ -21,7 +21,7 @@ use lcg_core::{
     error::Error,
     extractor::{ExtractOptions, MockExtractor},
     telemetry::NoopSink,
-    types::{ExtractionResult, SourceType},
+    types::{ExtractionOutcome, ExtractionResult, SourceType},
     Extractor,
 };
 use std::sync::atomic::AtomicBool;
@@ -38,13 +38,14 @@ impl Extractor for SlowExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok(ExtractionResult {
                 entities: vec![],
                 edges: vec![],
-            })
+            }
+            .into())
         })
     }
 

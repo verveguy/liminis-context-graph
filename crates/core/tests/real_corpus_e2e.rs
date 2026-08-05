@@ -39,7 +39,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
-    types::ExtractionResult,
+    types::ExtractionOutcome,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -62,7 +62,7 @@ impl Extractor for CountingExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.inner.extract(opts)
     }

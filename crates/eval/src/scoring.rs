@@ -161,6 +161,8 @@ pub async fn score_candidate(
         malformed_rate: run_result.structured_output.malformed_rate(),
         schema_invalid: run_result.structured_output.schema_invalid,
         schema_invalid_rate: run_result.structured_output.schema_invalid_rate(),
+        salvaged: run_result.structured_output.salvaged,
+        salvaged_rate: run_result.structured_output.salvaged_rate(),
     };
 
     Ok(CandidateReport {

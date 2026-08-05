@@ -54,7 +54,7 @@ pub use replay::{FailureSample, ReplayOptions, ReplayProgress, ReplayStats, WalR
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
 pub use types::{
-    EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionResult, MentionsEdge,
-    RelatesToEdge, SourceType,
+    EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult,
+    MentionsEdge, RelatesToEdge, SourceType,
 };
 pub use wal::{WalLine, WalRotationInfo, WalWriter};

@@ -59,7 +59,7 @@ use crate::{
     error::Error,
     extractor::{ExtractOptions, Extractor},
     prompts,
-    types::ExtractionResult,
+    types::ExtractionOutcome,
 };
 
 // ── Canonical request keys ──────────────────────────────────────────────────
@@ -321,7 +321,7 @@ impl Extractor for RecordingExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let request = extract_request_value(&opts);
         let key = request_key(&request);
         Box::pin(async move {
@@ -408,7 +408,7 @@ impl Extractor for ReplayingExtractor {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         let key = request_key(&extract_request_value(&opts));
         Box::pin(async move {
             let response = self.pop("extract", &key)?;
@@ -579,16 +579,19 @@ mod tests {
             .extract(opts("Alice works at Acme."))
             .await
             .unwrap();
-        assert_eq!(result.entities.len(), 2);
+        assert_eq!(result.result.entities.len(), 2);
 
         let replayer = ReplayingExtractor::load(&path).unwrap();
         let replayed = replayer
             .extract(opts("Alice works at Acme."))
             .await
             .unwrap();
-        assert_eq!(replayed.entities.len(), result.entities.len());
-        assert_eq!(replayed.entities[0].name, result.entities[0].name);
-        assert_eq!(replayed.edges[0].fact, result.edges[0].fact);
+        assert_eq!(replayed.result.entities.len(), result.result.entities.len());
+        assert_eq!(
+            replayed.result.entities[0].name,
+            result.result.entities[0].name
+        );
+        assert_eq!(replayed.result.edges[0].fact, result.result.edges[0].fact);
     }
 
     #[tokio::test]

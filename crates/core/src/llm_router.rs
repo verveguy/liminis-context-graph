@@ -8,7 +8,7 @@ use crate::{
     error::Error,
     extractor::{AnthropicExtractor, ExtractOptions, Extractor},
     telemetry::{now_ms, TelemetryEvent, TelemetrySink},
-    types::ExtractionResult,
+    types::ExtractionOutcome,
 };
 
 /// Routes extraction calls to a primary LLM with optional fallback (AD-5).
@@ -208,7 +208,7 @@ impl LlmRouter {
         }
     }
 
-    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionResult, Error> {
+    async fn do_extract(&self, opts: ExtractOptions<'_>) -> Result<ExtractionOutcome, Error> {
         // primary_failed is only ever set to true when a fallback is configured, so if it is
         // true here there must be a fallback to try.
         if !self.primary_failed.load(Ordering::Acquire) {
@@ -259,7 +259,7 @@ impl Extractor for LlmRouter {
     fn extract<'a>(
         &'a self,
         opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         Box::pin(self.do_extract(opts))
     }
 
@@ -284,7 +284,7 @@ impl Extractor for LlmRouter {
 mod tests {
     use super::*;
     use crate::telemetry::CaptureSink;
-    use crate::types::{ExtractedEntity, SourceType};
+    use crate::types::{ExtractedEntity, ExtractionResult, SourceType};
     use std::sync::atomic::AtomicUsize;
 
     /// Always fails `extract()` with the given message, counting how many times it was called
@@ -308,7 +308,7 @@ mod tests {
         fn extract<'a>(
             &'a self,
             _opts: ExtractOptions<'a>,
-        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move { Err(Error::Ipc(self.message.to_string())) })
         }
@@ -348,7 +348,7 @@ mod tests {
         fn extract<'a>(
             &'a self,
             _opts: ExtractOptions<'a>,
-        ) -> BoxFuture<'a, Result<ExtractionResult, Error>> {
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(ExtractionResult {
@@ -359,7 +359,8 @@ mod tests {
                         original_entity_type: None,
                     }],
                     edges: vec![],
-                })
+                }
+                .into())
             })
         }
 
@@ -418,7 +419,7 @@ mod tests {
         // First call: primary's edge-exhaustion Err triggers the switch; the fallback serves
         // this call and every one after it.
         let first = router.extract(opts("chunk one")).await.unwrap();
-        assert_eq!(first.entities.len(), 1);
+        assert_eq!(first.result.entities.len(), 1);
         assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
         assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
 
@@ -437,7 +438,7 @@ mod tests {
         // process lifetime, even though the second call has nothing to do with the original
         // edge-truncation event.
         let second = router.extract(opts("chunk two")).await.unwrap();
-        assert_eq!(second.entities.len(), 1);
+        assert_eq!(second.result.entities.len(), 1);
         assert_eq!(
             primary.calls.load(Ordering::SeqCst),
             1,

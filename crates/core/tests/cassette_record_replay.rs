@@ -283,7 +283,8 @@ async fn record_then_replay_bare_anthropic_extractor() {
     let recorded = recorder
         .extract(opts("Alice works at Acme Corp."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     assert_eq!(recorded.entities.len(), 2);
     assert_eq!(recorded.edges.len(), 1);
 
@@ -293,7 +294,8 @@ async fn record_then_replay_bare_anthropic_extractor() {
     let replayed = replayer
         .extract(opts("Alice works at Acme Corp."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(replayed.entities.len(), recorded.entities.len());
     for (r, o) in replayed.entities.iter().zip(recorded.entities.iter()) {
@@ -376,7 +378,8 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let result_a = router_a
         .extract(opts("Router A episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     // Router B: primary unreachable, fallback reachable — only the fallback call, under
     // "model-b-fallback", should be recorded; the failed primary attempt must not appear.
@@ -418,7 +421,8 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let result_b = router_b
         .extract(opts("Router B episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     // Exactly two records: RecordingExtractor only appends after `inner.extract()` succeeds,
     // so the failed primary_b attempt never produced a cassette entry.
@@ -449,11 +453,13 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
     let replayed_a = replayer
         .extract(opts("Router A episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     let replayed_b = replayer
         .extract(opts("Router B episode text."))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
 
     assert_eq!(replayed_a.entities.len(), result_a.entities.len());
     assert_eq!(replayed_b.entities.len(), result_b.entities.len());
@@ -643,12 +649,17 @@ async fn malformed_response_produces_one_complete_sidecar_record() {
 }
 
 #[tokio::test]
-async fn schema_invalid_response_produces_one_complete_sidecar_record() {
-    // A 200 OK response with a well-formed JSON tool_use block, but one entity in it is missing
-    // the genuinely required `name` field. This is valid JSON that fails schema validation —
-    // distinct from `malformed_response_produces_one_complete_sidecar_record`'s missing
-    // tool_use block, which has no JSON to validate against at all (#314 FR-003/US2 AS2).
-    let schema_invalid_body = serde_json::json!({
+async fn single_item_all_malformed_batch_salvages_to_empty_success_no_sidecar_record() {
+    // A 200 OK response with a well-formed JSON tool_use block, but the one entity in it is
+    // missing the genuinely required `name` field. Before #342 this was valid JSON that failed
+    // schema validation and hard-failed the whole call (`schema_invalid`) — distinct from
+    // `malformed_response_produces_one_complete_sidecar_record`'s missing tool_use block, which
+    // has no JSON to validate against at all (#314 FR-003/US2 AS2). Since #342, a malformed item
+    // is salvaged (dropped and counted) rather than failing the batch: with nothing else in this
+    // one-item batch, the call succeeds with an empty result and `entities_dropped_malformed: 1`
+    // — FR-004's "all malformed" case, not an error, so no sidecar record and no schema_invalid
+    // classification (a salvaged response is not a failure).
+    let salvaged_entity_body = serde_json::json!({
         "stop_reason": "tool_use",
         "content": [{
             "type": "tool_use",
@@ -663,7 +674,7 @@ async fn schema_invalid_response_produces_one_complete_sidecar_record() {
     .to_string();
     let (addr, _server) = spawn_stub_server_with_fixed_response(
         "HTTP/1.1 200 OK",
-        Box::leak(schema_invalid_body.into_boxed_str()),
+        Box::leak(salvaged_entity_body.into_boxed_str()),
     )
     .await;
     let dir = tempfile::TempDir::new().unwrap();
@@ -679,21 +690,31 @@ async fn schema_invalid_response_produces_one_complete_sidecar_record() {
     ));
     let recorder = RecordingExtractor::new(inner, "anthropic", "test-model", cassette_writer);
 
-    let err = recorder
+    let outcome = recorder
         .extract(opts_with_chunk_key(
             "Alice works at Acme Corp.",
             "chunk-schema-invalid",
         ))
         .await
-        .unwrap_err();
-    assert!(matches!(err, Error::Json(_)), "got {err:?}");
+        .unwrap();
+    assert!(outcome.result.entities.is_empty());
+    assert_eq!(outcome.entities_dropped_malformed, 1);
 
-    let records = read_sidecar_records(&sidecar_path);
-    assert_eq!(records.len(), 1);
-    let r = &records[0];
-    assert_eq!(r["call_type"], "entities");
-    assert_eq!(r["chunk_key"], "chunk-schema-invalid");
-    assert_eq!(r["classification"], "schema_invalid");
+    // No sidecar record — a salvaged response is a success, not a failure (#306's sidecar only
+    // ever captures the three hard-failure classes: http_error, truncation, malformed/schema_invalid).
+    assert!(
+        !sidecar_path.exists() || read_sidecar_records(&sidecar_path).is_empty(),
+        "a salvaged (successful) response must not produce a sidecar failure record"
+    );
+
+    // Unlike a failed call, RecordingExtractor::extract records on success — a salvaged response
+    // now produces exactly one cassette record, where before #342 it produced none.
+    let cassette_records = std::fs::read_to_string(&cassette_path).unwrap();
+    assert_eq!(
+        cassette_records.lines().count(),
+        1,
+        "a successful (salvaged) extract() call must produce one cassette record"
+    );
 }
 
 #[tokio::test]
@@ -870,7 +891,8 @@ async fn chunk_key_does_not_affect_the_cassette_request_hash() {
             "a-completely-different-key",
         ))
         .await
-        .unwrap();
+        .unwrap()
+        .result;
     assert_eq!(replayed.entities.len(), 2);
 }
 

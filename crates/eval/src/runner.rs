@@ -27,11 +27,15 @@ pub struct StructuredOutputCounts {
     /// Valid JSON that failed schema/field validation on a genuinely required field — distinct
     /// from `malformed` (content that never parsed as JSON at all), per #314 FR-003.
     pub schema_invalid: u64,
+    /// Parsed successfully but one or more items were dropped during per-item salvage — distinct
+    /// from `recovered` (a whole-body defensive re-parse) and takes precedence over it when a
+    /// response is both defensively re-parsed and has dropped items, per #342 FR-006.
+    pub salvaged: u64,
 }
 
 impl StructuredOutputCounts {
     pub fn total(&self) -> u64 {
-        self.clean + self.recovered + self.malformed + self.schema_invalid
+        self.clean + self.recovered + self.malformed + self.schema_invalid + self.salvaged
     }
 
     pub fn malformed_rate(&self) -> f64 {
@@ -47,6 +51,14 @@ impl StructuredOutputCounts {
             0.0
         } else {
             self.schema_invalid as f64 / self.total() as f64
+        }
+    }
+
+    pub fn salvaged_rate(&self) -> f64 {
+        if self.total() == 0 {
+            0.0
+        } else {
+            self.salvaged as f64 / self.total() as f64
         }
     }
 }
@@ -209,6 +221,7 @@ impl TelemetrySink for CountingSink {
                     "recovered" => counts.recovered += 1,
                     "malformed" => counts.malformed += 1,
                     "schema_invalid" => counts.schema_invalid += 1,
+                    "salvaged" => counts.salvaged += 1,
                     _ => {}
                 }
             }
@@ -293,7 +306,10 @@ pub async fn run_backend(
             chunk_key: Some(&chunk.title),
         };
         let start = Instant::now();
-        let result = extractor.extract(opts).await;
+        // Per-chunk drop-count visibility (#342) comes from the StructuredOutputCounts.salvaged
+        // telemetry tally below, not from ChunkResult — unwrap to `.result` here so the rest of
+        // this function's existing ExtractionResult-typed logic is untouched.
+        let result = extractor.extract(opts).await.map(|outcome| outcome.result);
         let latency_ms = start.elapsed().as_millis() as u64;
 
         if let (Some(tally), Some(onto), Ok(extraction)) =
@@ -398,7 +414,7 @@ mod tests {
             fn extract<'a>(
                 &'a self,
                 _opts: ExtractOptions<'a>,
-            ) -> futures::future::BoxFuture<'a, Result<ExtractionResult, lcg_core::Error>>
+            ) -> futures::future::BoxFuture<'a, Result<lcg_core::ExtractionOutcome, lcg_core::Error>>
             {
                 Box::pin(async { Err(lcg_core::Error::Ipc("boom".to_string())) })
             }

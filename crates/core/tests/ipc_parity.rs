@@ -31,7 +31,7 @@ use lcg_core::{
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     telemetry::{NoopSink, TelemetrySink},
-    types::ExtractionResult,
+    types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
     EntityRow, Ontology, RelatesToEdge,
 };
 use regex::Regex;
@@ -455,8 +455,8 @@ impl Extractor for ClassifyingExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
-        Box::pin(async { Ok(ExtractionResult::default()) })
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
+        Box::pin(async { Ok(ExtractionOutcome::from(ExtractionResult::default())) })
     }
 
     fn classify_entities<'a>(
@@ -563,8 +563,8 @@ impl Extractor for RelationClassifyingExtractor {
     fn extract<'a>(
         &'a self,
         _opts: ExtractOptions<'a>,
-    ) -> BoxFuture<'a, Result<ExtractionResult, LcgError>> {
-        Box::pin(async { Ok(ExtractionResult::default()) })
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
+        Box::pin(async { Ok(ExtractionOutcome::from(ExtractionResult::default())) })
     }
 
     fn classify_entities<'a>(
@@ -957,9 +957,161 @@ async fn test_knowledge_process_chunk_ok() {
         "expected numeric entities_reclassified_unclassified (issue #312 FR-004): {v}"
     );
     assert!(
+        r["entities_dropped_malformed"].as_u64().is_some(),
+        "expected numeric entities_dropped_malformed (issue #342 FR-003): {v}"
+    );
+    assert!(
+        r["edges_dropped_malformed"].as_u64().is_some(),
+        "expected numeric edges_dropped_malformed (issue #342 FR-003): {v}"
+    );
+    assert!(
         r["duration_seconds"].as_f64().is_some(),
         "expected numeric duration_seconds: {v}"
     );
+}
+
+// ── #342 US1 AS4 / SC-004: one malformed item must not sink a multi-chunk ingest ────
+
+/// Test extractor whose `extract()` reports a malformed-item drop for chunks whose
+/// `episode_body` contains `malformed_marker`, and a clean result otherwise. Standing in for
+/// the parse-time salvage that `extractor.rs`'s own unit tests already exercise directly
+/// (T2/T3/T5) — this drives the `episode.rs`/`handlers.rs` layers `knowledge_process_chunk`
+/// actually returns over the wire, which is what #340's reported impact (a whole multi-chunk
+/// document lost because one chunk erred) depends on.
+struct PartiallyMalformedExtractor {
+    malformed_marker: &'static str,
+}
+
+impl Extractor for PartiallyMalformedExtractor {
+    fn extract<'a>(
+        &'a self,
+        opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, LcgError>> {
+        let is_malformed_chunk = opts.episode_body.contains(self.malformed_marker);
+        let chunk_key = opts.chunk_key.unwrap_or("chunk").to_string();
+        Box::pin(async move {
+            let entities = vec![
+                ExtractedEntity {
+                    name: format!("Alice-{chunk_key}"),
+                    entity_type: "Person".to_string(),
+                    summary: "A person".to_string(),
+                    original_entity_type: None,
+                },
+                ExtractedEntity {
+                    name: format!("Acme-{chunk_key}"),
+                    entity_type: "Organization".to_string(),
+                    summary: "A company".to_string(),
+                    original_entity_type: None,
+                },
+            ];
+            Ok(ExtractionOutcome {
+                result: ExtractionResult {
+                    entities,
+                    edges: vec![],
+                },
+                // Simulates one entity in this chunk's raw response having been dropped by
+                // parse-time salvage (e.g. a missing `name`) — the N-valid-plus-1-malformed
+                // shape User Story 1's Independent Test describes.
+                entities_dropped_malformed: if is_malformed_chunk { 1 } else { 0 },
+                edges_dropped_malformed: 0,
+            })
+        })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let count = entities.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, LcgError>> {
+        let count = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+}
+
+fn make_state_with_extractor(db: Arc<Db>, extractor: Arc<dyn Extractor>) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor,
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_dir: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+/// #342 US1 AS4 / SC-004: a multi-chunk document where exactly one chunk's extraction response
+/// contains a malformed item must still complete for every chunk — the regression test for
+/// #340's actual reported impact (a ~40-chunk document lost in full over one chunk's error).
+#[tokio::test]
+async fn test_knowledge_process_chunk_multi_chunk_document_survives_one_malformed_chunk() {
+    let (db, _dir) = make_db(4);
+    let extractor = Arc::new(PartiallyMalformedExtractor {
+        malformed_marker: "BAD_CHUNK_MARKER",
+    });
+    let state = make_state_with_extractor(db, extractor);
+
+    let chunk_bodies = [
+        "Chunk 1: Alice works at Acme Corp.",
+        "Chunk 2: Alice works at Acme Corp.",
+        "Chunk 3 BAD_CHUNK_MARKER: Alice works at Acme Corp.",
+        "Chunk 4: Alice works at Acme Corp.",
+        "Chunk 5: Alice works at Acme Corp.",
+    ];
+
+    for (i, body) in chunk_bodies.iter().enumerate() {
+        let v = dispatch_val(
+            i as i64,
+            "knowledge_process_chunk",
+            json!({
+                "chunk_text": body,
+                "chunk_id": format!("chunk-{i}"),
+                "source_file": "document.txt",
+                "reference_time": "2024-06-01T12:00:00Z",
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_ok_resp(&v, i as i64);
+        let r = &v["result"];
+        assert_eq!(
+            r["success"], true,
+            "chunk {i} must succeed even when chunk 2 (0-indexed) has a malformed item: {v}"
+        );
+        let expected_dropped = if body.contains("BAD_CHUNK_MARKER") {
+            1
+        } else {
+            0
+        };
+        assert_eq!(
+            r["entities_dropped_malformed"], expected_dropped,
+            "chunk {i} entities_dropped_malformed mismatch: {v}"
+        );
+    }
 }
 
 #[tokio::test]

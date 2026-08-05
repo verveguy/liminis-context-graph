@@ -13,7 +13,7 @@ use crate::{
     ontology_sidecar,
     prompts::normalize_name,
     reprocess_relations::UNCLASSIFIED,
-    types::{EntityRow, EpisodicRow, ExtractionResult, MentionsEdge, RelatesToEdge, SourceType},
+    types::{EntityRow, EpisodicRow, ExtractionOutcome, MentionsEdge, RelatesToEdge, SourceType},
     wal_exec,
 };
 
@@ -36,6 +36,17 @@ pub struct AddEpisodeResult {
     /// The original entity type is preserved in the stored entity's `attributes` field, not
     /// lost.
     pub entities_reclassified_unclassified: usize,
+    /// Entities dropped for failing required-field validation — either at parse time (the
+    /// extractor's per-item salvage, e.g. a missing `name`) or by the empty-name `retain` above
+    /// (e.g. an explicit `""` or whitespace-only `name`). Both layers feed this one counter so
+    /// missing/`null`/empty-string `name` all produce the same observable outcome (#342 FR-003,
+    /// FR-007).
+    pub entities_dropped_malformed: usize,
+    /// Edges dropped for failing required-field validation during extraction-response parsing
+    /// (e.g. a missing `source_name`/`target_name`) — distinct from `edges_dropped_unresolvable`,
+    /// which drops a structurally valid edge whose endpoint name couldn't be resolved against
+    /// either this batch or the persisted graph (#342 FR-003).
+    pub edges_dropped_malformed: usize,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -175,7 +186,7 @@ pub async fn add_episode(
         ontology: ontology_ref,
         chunk_key: Some(name),
     };
-    let (content_embedding, mut extraction): (Vec<f32>, ExtractionResult) = tokio::select! {
+    let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {
             tokio::try_join!(
                 state.embedder.embed(body),
@@ -187,6 +198,12 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
+    let mut extraction = extraction_outcome.result;
+    // Parse-time salvage count (#342 FR-003) — folded together with the empty-name `retain`'s
+    // count below (FR-007) into one counter, since both represent the same observable outcome
+    // (a malformed item never reaching storage) even though they're caught at different layers.
+    let mut entities_dropped_malformed = extraction_outcome.entities_dropped_malformed;
+    let edges_dropped_malformed = extraction_outcome.edges_dropped_malformed;
 
     // `original_relation_type` is deserialized directly from raw, untrusted extractor/LLM JSON
     // (`#[serde(default)]`, no `deny_unknown_fields`) — a hallucinated or prompt-injected key of
@@ -215,7 +232,15 @@ pub async fn add_episode(
     // an empty-named entity must never be counted toward `entities_reclassified_unclassified`
     // since it never reaches storage — counting it first and dropping it after would desync the
     // tally from what's actually persisted (review finding on issue #312).
+    //
+    // This drop is disjoint from the parse-time salvage folded into `entities_dropped_malformed`
+    // above: parse-time salvage only ever removes items that failed to deserialize (missing/
+    // `null` name), which never reach this point at all; this `retain` only removes items that
+    // deserialized fine but carry an empty-string name. Folding this count into the same counter
+    // (#342 FR-007) makes missing/`null`/empty-string `name` all produce one observable outcome.
+    let before_empty_name_retain = extraction.entities.len();
     extraction.entities.retain(|e| !e.name.trim().is_empty());
+    entities_dropped_malformed += before_empty_name_retain - extraction.entities.len();
 
     // Strict-mode entity filtering (issue #312): an entity is never dropped for its entity_type
     // alone. An entity whose normalized type is empty or the literal "Entity" means "no specific
@@ -823,6 +848,8 @@ pub async fn add_episode(
         edges_dropped_unresolvable,
         edges_reclassified_unclassified,
         entities_reclassified_unclassified,
+        entities_dropped_malformed,
+        edges_dropped_malformed,
     })
 }
 
