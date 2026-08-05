@@ -101,6 +101,31 @@ pub(crate) fn wal_flush_ungrouped(
     }
 }
 
+/// Re-derives `global_seq` after a non-dry-run WAL rebuild/replay completes (issue #352), so a
+/// WAL directory populated after the writer was constructed doesn't leave the writer emitting
+/// `seq` values that collide with what's already on disk. Non-fatal: a rebuild that already
+/// succeeded shouldn't fail because of a re-derivation I/O error (e.g. the WAL dir vanished
+/// between replay and this call), matching this module's existing failure posture.
+pub(crate) fn resync_global_seq_after_rebuild(
+    wal: &Arc<Mutex<Option<WalWriter>>>,
+    last_committed_seq: Option<u64>,
+) {
+    let mut guard = match wal.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("liminis-context-graph: resync_global_seq_after_rebuild: lock poisoned: {e}");
+            return;
+        }
+    };
+    if let Some(ref mut writer) = *guard {
+        if let Err(e) = writer.resync_global_seq(last_committed_seq) {
+            eprintln!(
+                "liminis-context-graph: resync_global_seq_after_rebuild: scan failed (non-fatal): {e}"
+            );
+        }
+    }
+}
+
 /// Normalizes a recorded params value for the WAL: `raw_query`/`cypher_query` record
 /// `Null` (DDL / non-parameterized statements have no params), which we serialize as an
 /// empty object so the WAL line's `params` field stays a consistent shape.
