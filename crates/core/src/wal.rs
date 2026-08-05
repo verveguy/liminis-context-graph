@@ -246,7 +246,7 @@ impl WalWriter {
     /// safe no-op when called over an empty or low-max-seq WAL directory.
     pub fn resync_global_seq(&mut self, last_committed_seq: Option<u64>) -> Result<(), Error> {
         let scanned = scan_max_seq(&self.wal_dir)?;
-        let from_commit = last_committed_seq.map(|s| s + 1).unwrap_or(0);
+        let from_commit = last_committed_seq.map(|s| s.saturating_add(1)).unwrap_or(0);
         self.global_seq = self.global_seq.max(scanned).max(from_commit);
         Ok(())
     }

@@ -1758,7 +1758,8 @@ async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_rep
 
     // seq 10 (MERGE) replays and commits successfully, creating the entity. seq 20 is a plain
     // CREATE for the SAME primary key, which now collides and fails to replay — so
-    // ReplayStats::last_committed_seq stops at 10, but the on-disk scan sees seq 20.
+    // ReplayStats::last_committed_seq stops at 10, but the highest seq line on disk is 20
+    // (scan_max_seq itself returns 21, the next seq to assign, not the raw max).
     std::fs::write(
         wal_dir.path().join("20260805_000000_ext005_0000.jsonl"),
         format!(
