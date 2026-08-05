@@ -17,7 +17,7 @@ repository: verveguy/liminis-context-graph
 # The release this site documents (FR-010). Kept in sync with Cargo.toml's
 # [workspace.package] version by scripts/generate-docs-llms-full.sh, which fails
 # the build if they diverge.
-version: "0.12.0"
+version: "0.12.1"
 
 # Plugins
 # jekyll-relative-links rewrites relative .md links (e.g. the ADRs' own cross-links,
