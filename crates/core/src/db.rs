@@ -106,8 +106,35 @@ impl Db {
             // insert_entity/update_entity_created_at hooks — a full rebuild is the only
             // way the name index observes replayed data (FR-004).
             conn.rebuild_name_index()?;
+            // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
+            // the replay just computed — a fresh rebuild is exactly as authoritative as
+            // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
+            // only means the boot-time check falls back to a rescan, not that the rebuild
+            // itself is compromised.
+            if let Some(seq) = stats.last_committed_seq {
+                if let Err(e) = conn.set_applied_seq(seq) {
+                    eprintln!(
+                        "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
+                    );
+                }
+            }
             Some(stats)
         } else {
+            // No rebuild ran (DB already existed, or a genuinely fresh DB with no WAL to
+            // replay). init_schema is idempotent (CREATE ... IF NOT EXISTS), so it's safe to
+            // call unconditionally here — previously this branch left a genuinely fresh DB
+            // (no WAL to replay either) with no schema at all.
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            // Backfill applied_seq for a pre-existing populated DB that predates this feature
+            // (FR-007), or set it to 0 for a genuinely fresh DB. Non-fatal: a missed backfill
+            // just leaves the boot-time check reporting null (safe — the documented action is
+            // a full rebuild).
+            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(&conn, wal_dir_path) {
+                eprintln!(
+                    "liminis-context-graph: open_or_rebuild: applied_seq backfill failed (non-fatal): {e}"
+                );
+            }
             None
         };
 

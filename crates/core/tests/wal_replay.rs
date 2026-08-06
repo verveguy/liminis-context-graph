@@ -196,10 +196,7 @@ fn test_open_or_rebuild_from_wal() {
     // DB does not exist yet; open_or_rebuild should replay the WAL.
     let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
         .expect("open_or_rebuild");
-    assert!(
-        stats.is_some(),
-        "a rebuild ran, so ReplayStats must be returned (FR-001)"
-    );
+    let stats = stats.expect("a rebuild ran, so ReplayStats must be returned (FR-001)");
 
     let conn = db.connect().expect("connect");
     let entity_count = conn.count_nodes("Entity").unwrap();
@@ -208,6 +205,14 @@ fn test_open_or_rebuild_from_wal() {
     assert_eq!(
         episodic_count, 2,
         "expected 2 Episodic nodes after WAL rebuild"
+    );
+
+    // issue #353 (FR-004 extension): a fresh open_or_rebuild rebuild is exactly as
+    // authoritative as knowledge_rebuild_from_wal's own post-replay write.
+    assert_eq!(
+        conn.get_applied_seq().unwrap(),
+        stats.last_committed_seq,
+        "open_or_rebuild must persist applied_seq at the replay's last_committed_seq"
     );
 }
 
@@ -264,12 +269,21 @@ fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
     // Create the DB up front so open_or_rebuild sees it as already existing.
     Db::open(db_path.to_str().unwrap()).expect("initial open");
 
-    let (_db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
+    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
         .expect("open_or_rebuild");
 
     assert!(
         stats.is_none(),
         "no rebuild ran (DB already existed), so stats must be None, not Some(default)"
+    );
+
+    // issue #353 (FR-007): the non-replay branch now runs the applied_seq backfill. An empty,
+    // no-episodes DB backfills to 0 rather than leaving it null.
+    let conn = db.connect().expect("connect");
+    assert_eq!(
+        conn.get_applied_seq().unwrap(),
+        Some(0),
+        "an empty pre-existing DB with no episodes must backfill applied_seq to 0"
     );
 }
 
