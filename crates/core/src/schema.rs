@@ -80,6 +80,19 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          created_at TIMESTAMP\
          )",
     )?;
+    // Singleton metadata table recording the highest WAL seq whose mutations are committed
+    // in this graph (issue #353). This is a deliberate divergence from graphiti's
+    // kuzu_driver.py schema-parity rule — graphiti has no equivalent, since it does not
+    // itself track an applied WAL position. See ADR-0353 for the rationale (an O(1) boot
+    // check needs a persisted cursor; ADR-0026's episode-cursor mechanism is retroactive but
+    // requires a WAL scan, unsuitable for a per-`knowledge_status`-call hot path). A single
+    // row with id: 'singleton' holds the current position; row-absence means "unknown".
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS WalPosition (\
+         id STRING PRIMARY KEY, \
+         applied_seq INT64\
+         )",
+    )?;
     Ok(())
 }
 
