@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.12.2] - 2026-08-05
+
+A patch release implementing a community-requested feature (#351): a reliable, O(1) boot-time
+check for whether a local DB is consistent with the WAL. Shipped as a patch alongside the
+prerequisite `global_seq` re-derivation fix (#352) because the requesting deployment needs both
+together.
+
+### Added
+
+- **`wal.applied_seq` and `wal.max_seq` in `knowledge_status`**, letting a client decide — from
+  one call and an integer comparison — whether its DB already reflects the WAL, needs an
+  incremental resume, or needs a full rebuild. `applied_seq` is a new piece of persisted DB
+  state (survives restart, not cached in memory) recording the highest WAL `seq` whose
+  mutations are committed in the current graph; `max_seq` is the highest `seq` actually present
+  across the WAL files, read fresh on every call so an externally-updated WAL is observed
+  immediately. `applied_seq` is `null` (unknown), `0` (nothing applied), or a positive integer
+  (a known position) — see `docs/operations.md` for the full consumer decision table and a
+  cross-language footgun around `null` in numeric comparisons. A pre-existing, populated DB that
+  predates this feature backfills a usable position on first open via
+  [ADR-0026](docs/adr/0026-episode-cursor-wal-resume.md)'s retroactive episode-cursor mechanism,
+  rather than reporting `null`. (#353, [ADR-0353](docs/adr/0353-persist-and-expose-applied-wal-seq.md))
+
 ## [0.12.1] - 2026-08-05
 
 A patch release fixing a data-loss bug reported against 0.11.0/0.12.0 (#340): a single malformed
