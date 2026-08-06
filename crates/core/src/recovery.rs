@@ -132,6 +132,42 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
     Ok(None)
 }
 
+// ── Applied-WAL-seq backfill (issue #353) ──────────────────────────────────────
+
+/// Backfills the persisted applied-WAL-seq position for a pre-existing DB that has content but
+/// no recorded position (FR-007/FR-008) — the state every deployment that pre-dates this
+/// feature hits exactly once, on first open after upgrade. No-op if a position is already
+/// recorded (the common case on every subsequent boot).
+///
+/// - Fresh/empty DB (no `Episodic` nodes) → writes `0` directly, skipping the WAL scan
+///   entirely. This is what distinguishes "genuinely fresh" from "populated but unknown" —
+///   the spec's core ambiguity (see the issue's "gap #351 does not cover" discussion).
+/// - Populated DB whose last episode's uuid is found in the WAL (`CursorReason::UuidMatch`) →
+///   writes that line's `seq`. Reuses ADR-0026's episode-cursor mechanism, which that ADR
+///   documents as explicitly retroactive (works on databases that predate any cursor
+///   mechanism) — exactly the upgrade case. The derived value is conservative (an episode
+///   boundary, so `<=` the true applied position), the same safe direction FR-003 requires.
+/// - Populated DB whose last episode's uuid is not found in the WAL
+///   (`CursorReason::UuidNotFound`) → leaves the row absent (`null`), per FR-008/SC-007; the
+///   documented action for that state is a full rebuild, the same fallback ADR-0026 already
+///   defines for its own recovery path. `CursorReason::NoEpisodes` is unreachable here since
+///   the episode-count guard above already ran.
+pub fn backfill_applied_seq_if_absent(conn: &crate::db::Conn<'_>, wal_dir: &Path) -> Result<(), Error> {
+    if conn.get_applied_seq()?.is_some() {
+        return Ok(());
+    }
+    if conn.count_nodes("Episodic")? == 0 {
+        return conn.set_applied_seq(0);
+    }
+    let (seq, reason) = derive_episode_cursor(conn, wal_dir)?;
+    if reason == CursorReason::UuidMatch {
+        conn.set_applied_seq(seq)?;
+    }
+    // UuidNotFound (and the unreachable NoEpisodes): leave the row absent — null is the
+    // correct, documented "backfill failed, full rebuild required" report (FR-008).
+    Ok(())
+}
+
 // ── Full recovery sequence ────────────────────────────────────────────────────
 
 /// Executes the 4-step WAL-corruption self-recovery sequence synchronously.
@@ -256,6 +292,19 @@ pub fn run_full_recovery_sequence(
         // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
         // a full rebuild is the only way the name index observes the replayed data.
         conn.rebuild_name_index()?;
+        // Persist the applied-WAL-seq position (issue #353) — a deliberate extension beyond
+        // FR-004's literal text (which names knowledge_rebuild_from_wal), since this
+        // autonomous WAL-corruption self-heal produces an equally-precise ReplayStats via the
+        // same replay path. Skipping this would leave applied_seq at null immediately after
+        // every self-heal even though a better value was just computed. Non-fatal: a missed
+        // write doesn't undo the recovery that just succeeded.
+        if let Some(seq) = stats.last_committed_seq {
+            if let Err(e) = conn.set_applied_seq(seq) {
+                eprintln!(
+                    "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} (non-fatal): {e}"
+                );
+            }
+        }
     }
 
     sink.emit(TelemetryEvent::WalAutoRecovery {
@@ -489,5 +538,93 @@ mod tests {
         let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
         assert_eq!(seq, 7);
         assert_eq!(reason, CursorReason::UuidMatch);
+    }
+
+    // ── backfill_applied_seq_if_absent (issue #353) ─────────────────────────────
+
+    /// Fresh DB (no episodes) → backfill writes `0` directly, without touching the WAL dir at
+    /// all (a nonexistent wal_dir must not cause an error, since the episode-count guard short
+    /// -circuits before any WAL scan).
+    #[test]
+    fn backfill_fresh_db_writes_zero_without_scanning_wal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal-does-not-exist");
+        let db = make_db_with_schema(&dir);
+        let conn = db.connect().unwrap();
+
+        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+    }
+
+    /// SC-005: a populated DB with no persisted applied-seq record backfills to the episode
+    /// cursor's seq, derived via ADR-0026's retroactive mechanism — not `null`.
+    #[test]
+    fn backfill_populated_db_uuid_match_writes_cursor_seq() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let ep_uuid = "ep-backfill-match";
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            conn.raw_query(&format!(
+                "CREATE (:Episodic {{uuid: '{ep_uuid}', name: 'Test', group_id: 'g', \
+                 created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')}})"
+            ))
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 41, ep_uuid);
+
+        let conn = db.connect().unwrap();
+        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+    }
+
+    /// SC-007: a populated DB whose last episode's uuid is absent from the WAL leaves
+    /// `applied_seq` as `null` (row absent) — the one case where `null` remains correct,
+    /// documented action being a full rebuild.
+    #[test]
+    fn backfill_populated_db_uuid_not_found_leaves_null() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-backfill-not-found', name: 'Test', \
+                 group_id: 'g', created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 5, "ep-completely-different");
+
+        let conn = db.connect().unwrap();
+        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), None);
+    }
+
+    /// A DB that already has a persisted position must not be overwritten by backfill —
+    /// idempotent, and doesn't relitigate a value that may have advanced since.
+    #[test]
+    fn backfill_is_a_noop_when_row_already_present() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(99).unwrap();
+
+        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(99));
     }
 }
