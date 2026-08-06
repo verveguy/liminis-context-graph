@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [0.12.2] - 2026-08-05
+## [0.12.2] - 2026-08-06
 
 A patch release implementing a community-requested feature (#351): a reliable, cheap boot-time
 check for whether a local DB is consistent with the WAL. Shipped as a patch alongside the
