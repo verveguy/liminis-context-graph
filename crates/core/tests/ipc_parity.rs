@@ -1029,11 +1029,8 @@ async fn test_knowledge_status_applied_seq_persists_across_restart() {
     let restarted_db = Db::open(&db_path).unwrap();
     restarted_db.connect().unwrap().init_schema(4).unwrap();
     let restarted_db = Arc::new(restarted_db);
-    let restarted_state = make_state_with_live_wal(
-        restarted_db,
-        wal_dir.path().to_path_buf(),
-        db_path.clone(),
-    );
+    let restarted_state =
+        make_state_with_live_wal(restarted_db, wal_dir.path().to_path_buf(), db_path.clone());
     let v = dispatch_val(44, "knowledge_status", json!({}), restarted_state).await;
     assert_ok_resp(&v, 44);
     assert!(

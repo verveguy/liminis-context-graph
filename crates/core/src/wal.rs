@@ -579,7 +579,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(read_last_seq(&tmp.path().join("oversized_0000.jsonl")).unwrap(), Some(7));
+        assert_eq!(
+            read_last_seq(&tmp.path().join("oversized_0000.jsonl")).unwrap(),
+            Some(7)
+        );
     }
 
     /// A file well beyond the tail window with many prior lines must still resolve to the last

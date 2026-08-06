@@ -1163,6 +1163,17 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     let _guard = state.write_lock.write().await;
 
+    // Drop the old handle before deleting its files, mirroring clear_db_for_rebuild's existing
+    // pattern (see its own comment): otherwise the old Db stays alive, with its underlying
+    // file deleted out from under it, for the whole Phase-1-delete + Phase-2-reopen window
+    // below. That window grew long enough for lbug's own internal checkpoint to occasionally
+    // fire against the now-deleted file (`Error renaming file ... to ....wal.checkpoint: No
+    // such file or directory`) once Phase 2 started doing more work per reinit (issue #353's
+    // set_applied_seq(0) write below). load_db() already treats a None state.db as
+    // Error::DbUnavailable, so this briefly surfaces as the existing degraded-mode error rather
+    // than a file-not-found.
+    state.db.store(None);
+
     if !preserve_wal {
         // Flush and drop the WalWriter before deleting the WAL directory to avoid
         // writing to a path that no longer exists. The writer is re-initialized below

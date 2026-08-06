@@ -1548,8 +1548,7 @@ impl<'db> Conn<'db> {
     /// Same non-recording bypass as `exec_transaction_control`/`count_nodes`. `seq` is a `u64`
     /// interpolated directly (not a string), so there is no injection surface.
     pub fn set_applied_seq(&self, seq: u64) -> Result<(), Error> {
-        let sql =
-            format!("MERGE (w:WalPosition {{id: 'singleton'}}) SET w.applied_seq = {seq}");
+        let sql = format!("MERGE (w:WalPosition {{id: 'singleton'}}) SET w.applied_seq = {seq}");
         let _ = self.inner.query(&sql)?;
         Ok(())
     }

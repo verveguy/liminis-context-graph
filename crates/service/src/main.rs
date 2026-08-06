@@ -542,10 +542,9 @@ async fn bootstrap_app_state(
                 // (every boot after the first). Non-fatal: a missed backfill just leaves
                 // knowledge_status reporting null (safe — the documented action is a full
                 // rebuild), not a reason to fail startup.
-                if let Err(e) = lcg_core::recovery::backfill_applied_seq_if_absent(
-                    &conn,
-                    &startup_wal_dir,
-                ) {
+                if let Err(e) =
+                    lcg_core::recovery::backfill_applied_seq_if_absent(&conn, &startup_wal_dir)
+                {
                     eprintln!(
                         "liminis-context-graph: startup: applied_seq backfill failed (non-fatal): {e}"
                     );

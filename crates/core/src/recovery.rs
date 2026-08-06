@@ -152,7 +152,10 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
 ///   documented action for that state is a full rebuild, the same fallback ADR-0026 already
 ///   defines for its own recovery path. `CursorReason::NoEpisodes` is unreachable here since
 ///   the episode-count guard above already ran.
-pub fn backfill_applied_seq_if_absent(conn: &crate::db::Conn<'_>, wal_dir: &Path) -> Result<(), Error> {
+pub fn backfill_applied_seq_if_absent(
+    conn: &crate::db::Conn<'_>,
+    wal_dir: &Path,
+) -> Result<(), Error> {
     if conn.get_applied_seq()?.is_some() {
         return Ok(());
     }
