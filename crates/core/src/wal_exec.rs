@@ -37,33 +37,44 @@ fn emit_rotation_if_any(writer: &mut WalWriter, sink: &Arc<dyn TelemetrySink>) {
 /// Flushes `cyphers` to WAL as a single chunk-atomic group.
 ///
 /// Use for episode Phase C where all mutations for one chunk should land atomically.
+///
+/// Returns the max `seq` assigned to this chunk's lines (issue #353), or `None` if nothing was
+/// actually written — an empty `mutations` list, a lock/writer-absent short-circuit, or a chunk
+/// whose entries were all filtered out by `WalWriter::log_mutation` (reads / index DDL), or a
+/// write failure. Callers use `Some(seq)` to advance the persisted `applied_seq` position;
+/// `None` means "leave it where it is" — always the safe direction (FR-003).
 pub(crate) fn wal_flush_chunk(
     wal: &Arc<Mutex<Option<WalWriter>>>,
     mutations: Vec<(String, serde_json::Value)>,
     sink: &Arc<dyn TelemetrySink>,
-) {
+) -> Option<u64> {
     if mutations.is_empty() {
-        return;
+        return None;
     }
     let mut guard = match wal.lock() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("liminis-context-graph: wal_flush_chunk: lock poisoned: {e}");
-            return;
+            return None;
         }
     };
-    if let Some(ref mut writer) = *guard {
-        let result = writer.with_chunk(|w| {
-            for (cypher, params) in &mutations {
-                w.log_mutation(cypher, wal_params(params), "")?;
-            }
-            Ok(())
-        });
-        match result {
-            Ok(_) => emit_rotation_if_any(writer, sink),
-            Err(e) => {
-                eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}")
-            }
+    let writer = guard.as_mut()?;
+    let before = writer.global_seq();
+    let result = writer.with_chunk(|w| {
+        for (cypher, params) in &mutations {
+            w.log_mutation(cypher, wal_params(params), "")?;
+        }
+        Ok(())
+    });
+    match result {
+        Ok(_) => {
+            emit_rotation_if_any(writer, sink);
+            let after = writer.global_seq();
+            (after > before).then(|| after - 1)
+        }
+        Err(e) => {
+            eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}");
+            None
         }
     }
 }
