@@ -256,8 +256,9 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Returns the current `global_seq` (for tests).
-    #[cfg(test)]
+    /// Returns the current `global_seq` — the next seq to be assigned, i.e. one past the
+    /// highest seq actually written so far. Used by `wal_exec::wal_flush_chunk` (issue #353)
+    /// to compute the max seq assigned during a chunk via a before/after diff.
     pub fn global_seq(&self) -> u64 {
         self.global_seq
     }
@@ -300,6 +301,24 @@ fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
 
     Ok(max_seq.map(|s| s + 1).unwrap_or(0))
 }
+
+/// Returns the highest WAL `seq` actually present across `wal_dir` (issue #353), or `None` if
+/// the WAL is empty — the same units as `applied_seq` (a literal seq value), unlike
+/// `scan_max_seq`'s internal "next seq to assign" convention (`scan_max_seq() - 1` when
+/// non-empty). This is what makes the `applied_seq == wal_max_seq` "caught up" check in
+/// `knowledge_status` well-defined. Safe to call fresh on every `knowledge_status` request —
+/// see `read_last_seq`'s bounded tail-read, which keeps this from re-reading the full contents
+/// of every WAL file at production scale (ADR-0026 documents ~43,820 files in one deployment).
+pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
+    let next = scan_max_seq(wal_dir)?;
+    Ok(if next == 0 { None } else { Some(next - 1) })
+}
+
+/// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
+/// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
+/// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
+/// without reading each file's entire contents just to find its last line.
+const TAIL_READ_WINDOW: u64 = 256 * 1024;
 
 /// Returns a copy of `s` with Cypher single-quoted string literals replaced by a single space.
 /// Handles `\'` escape sequences inside literals.  Used by `log_mutation` to prevent DML
@@ -385,10 +404,43 @@ pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
+///
+/// Reads only a bounded tail window (`TAIL_READ_WINDOW`) first — the common case, one complete
+/// trailing line well within the window — and falls back to a full-file read only when the
+/// window yields no parseable `seq` (e.g. a single line larger than the window, such as one
+/// carrying an unusually large embedding vector). This preserves the existing "tolerates
+/// truncated final lines" guarantee: truncation can only affect the *end* of the file, and both
+/// paths always read through to EOF.
 fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
-    let content = fs::read(path)?;
-    let text = String::from_utf8_lossy(&content);
-    for raw in text.lines().rev() {
+    let file_len = fs::metadata(path)?.len();
+    if file_len > TAIL_READ_WINDOW {
+        if let Some(seq) = read_last_seq_in_range(path, file_len - TAIL_READ_WINDOW)? {
+            return Ok(Some(seq));
+        }
+    }
+    read_last_seq_in_range(path, 0)
+}
+
+/// Reads `path` from byte offset `start` through EOF and returns the `seq` of the last
+/// parseable non-empty line. When `start > 0`, the first (possibly partial) line in the window
+/// is discarded, since `start` may land mid-line.
+fn read_last_seq_in_range(path: &Path, start: u64) -> Result<Option<u64>, Error> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+    let mut buf = Vec::new();
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))?;
+    }
+    file.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // drop the partial line the seek landed inside
+    }
+
+    for raw in lines.rev() {
         let raw = raw.trim();
         if raw.is_empty() {
             continue;
@@ -489,5 +541,88 @@ mod tests {
         writer.resync_global_seq(Some(5)).unwrap();
 
         assert_eq!(writer.global_seq, 201);
+    }
+
+    #[test]
+    fn wal_max_seq_is_none_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_max_seq_reports_the_literal_highest_seq() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 41);
+
+        // `scan_max_seq` (next-assignable) would return 42; `wal_max_seq` must report 41 — the
+        // same units as `applied_seq`, so `applied_seq == wal_max_seq` can express "caught up".
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(41));
+    }
+
+    /// A single WAL line larger than `TAIL_READ_WINDOW` (e.g. one carrying an unusually large
+    /// embedding) must still be found via the full-read fallback.
+    #[test]
+    fn read_last_seq_falls_back_to_full_read_for_an_oversized_single_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let line = WalLine {
+            seq: 7,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            // Padding comfortably exceeds TAIL_READ_WINDOW so the tail-read pass alone can't
+            // find a complete line, forcing the full-read fallback path.
+            params: serde_json::json!({ "uuid": "x".repeat((TAIL_READ_WINDOW as usize) + 1024) }),
+        };
+        fs::write(
+            tmp.path().join("oversized_0000.jsonl"),
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(read_last_seq(&tmp.path().join("oversized_0000.jsonl")).unwrap(), Some(7));
+    }
+
+    /// A file well beyond the tail window with many prior lines must still resolve to the last
+    /// line's `seq`, exercising the tail-read path (not the full-read fallback) end to end.
+    #[test]
+    fn read_last_seq_tail_read_finds_last_line_in_large_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("large_0000.jsonl");
+        let mut content = String::new();
+        // Enough short lines to exceed TAIL_READ_WINDOW comfortably.
+        for seq in 0..20_000u64 {
+            let line = WalLine {
+                seq,
+                ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+                db: "default".to_string(),
+                cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+                params: serde_json::json!({ "uuid": "x" }),
+            };
+            content.push_str(&serde_json::to_string(&line).unwrap());
+            content.push('\n');
+        }
+        fs::write(&path, &content).unwrap();
+        assert!(
+            content.len() as u64 > TAIL_READ_WINDOW,
+            "test file must exceed the tail-read window to exercise that path"
+        );
+
+        assert_eq!(read_last_seq(&path).unwrap(), Some(19_999));
+    }
+
+    /// A truncated final line (partial JSON, e.g. from a crash mid-write) must be skipped in
+    /// favor of the last complete line before it — preserved by both the tail-read and
+    /// full-read paths.
+    #[test]
+    fn read_last_seq_tolerates_truncated_final_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("truncated_0000.jsonl");
+        write_wal_line(tmp.path(), "truncated_0000.jsonl", 3);
+        // Append a truncated (invalid JSON) final line, as a crash mid-write would leave.
+        let mut existing = fs::read_to_string(&path).unwrap();
+        existing.push_str(r#"{"seq":4,"ts":"2026-08-05T00:00:00"#);
+        fs::write(&path, existing).unwrap();
+
+        assert_eq!(read_last_seq(&path).unwrap(), Some(3));
     }
 }
