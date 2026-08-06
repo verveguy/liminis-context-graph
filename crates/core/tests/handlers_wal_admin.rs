@@ -1547,3 +1547,289 @@ async fn test_knowledge_status_surfaces_name_index_trust_and_fallback_scan_count
         "status must reflect the fallback-scan count: {v}"
     );
 }
+
+// ── Issue #352: re-derive WalWriter::global_seq after rebuild/clear ────────────
+
+/// A standalone `Entity` WAL line built with a plain `CREATE` (rather than `entity_wal_line`'s
+/// `MERGE ... ON CREATE SET`) — used to engineer a duplicate-primary-key replay failure against
+/// a uuid that a prior line in the same WAL already created.
+fn entity_create_conflict_wal_line(seq: u64, uuid: &str) -> String {
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Entity {{uuid: '{uuid}', name: '{uuid}', group_id: 'g', labels: ['t'], created_at: timestamp('2026-05-22 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{{}}'}})","params":{{}}}}"#
+    )
+}
+
+/// Reads every `.jsonl` file in `dir` and returns all `seq` values found across every line (not
+/// just the last line per file, unlike `WalWriter`'s internal `scan_max_seq`) — used to detect
+/// duplicate `seq`s across the whole WAL directory (SC-003).
+fn all_seqs_in_wal_dir(dir: &std::path::Path) -> Vec<u64> {
+    let mut seqs = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line).unwrap();
+            seqs.push(v["seq"].as_u64().unwrap());
+        }
+    }
+    seqs
+}
+
+/// Dispatches `knowledge_rebuild_from_wal` (background-job path) and polls
+/// `knowledge_rebuild_status` until it completes, returning the final status response. Panics if
+/// the job fails or does not complete within 5 seconds — mirrors the polling pattern used by
+/// `test_rebuild_from_wal_non_empty_db_force_clear_succeeds`.
+async fn rebuild_and_wait(id: i64, params: Value, state: Arc<AppState>) -> Value {
+    let v = dispatch(id, "knowledge_rebuild_from_wal", params, Arc::clone(&state)).await;
+    assert_eq!(v["result"]["success"], true, "rebuild dispatch failed: {v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id (background-job path)")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            id + 1,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => return status_v,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+}
+
+/// Dispatches `knowledge_process_chunk` with fixed content (`MockExtractor` is deterministic).
+async fn process_a_chunk(id: i64, state: Arc<AppState>) -> Value {
+    dispatch(
+        id,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": format!("chunk-{id}"),
+            "source_file": "test.txt",
+            "reference_time": "2026-08-05T00:00:00Z",
+        }),
+        state,
+    )
+    .await
+}
+
+/// SC-001: a WAL directory populated after the service started (and the writer's `global_seq`
+/// was derived), followed by `knowledge_rebuild_from_wal`, must not let the next
+/// `knowledge_process_chunk` collide with a `seq` already present on disk.
+#[tokio::test]
+async fn test_global_seq_resync_after_rebuild_picks_up_externally_populated_wal() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    // Service starts against an EMPTY WAL dir — WalWriter::new derives global_seq = 0.
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // WAL directory populated out-of-band after the service started; highest seq = 5.
+    std::fs::write(
+        wal_dir.path().join("20260805_000000_ext001_0000.jsonl"),
+        format!(
+            "{}\n{}\n",
+            entity_wal_line(4, "external-entity-a"),
+            entity_wal_line(5, "external-entity-b")
+        ),
+    )
+    .unwrap();
+
+    rebuild_and_wait(400, json!({}), Arc::clone(&state)).await;
+
+    let chunk_v = process_a_chunk(410, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let max_seq_after = seqs.iter().copied().max().unwrap();
+    assert!(
+        max_seq_after > 5,
+        "seq written after rebuild must exceed the pre-existing on-disk max of 5, got {max_seq_after} (all seqs: {seqs:?})"
+    );
+
+    // SC-003: no seq value repeats anywhere in the WAL directory.
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seqs.len(),
+        "no seq value may repeat across the WAL directory: {seqs:?}"
+    );
+}
+
+/// SC-002: the same guarantee holds when the rebuild uses `force_clear: true`.
+#[tokio::test]
+async fn test_global_seq_resync_after_force_clear_rebuild() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'stale-entity-352'})")
+            .unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    std::fs::write(
+        wal_dir.path().join("20260805_000000_ext002_0000.jsonl"),
+        entity_wal_line(9, "force-clear-resync-entity") + "\n",
+    )
+    .unwrap();
+
+    rebuild_and_wait(420, json!({"force_clear": true}), Arc::clone(&state)).await;
+
+    let chunk_v = process_a_chunk(430, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let max_seq_after = seqs.iter().copied().max().unwrap();
+    assert!(
+        max_seq_after > 9,
+        "expected a seq > 9 after the force_clear rebuild, got {max_seq_after} (all seqs: {seqs:?})"
+    );
+
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seqs.len(),
+        "no seq value may repeat across the WAL directory: {seqs:?}"
+    );
+}
+
+/// SC-004 (no regression): a service that starts with an already-populated WAL directory (no
+/// external population after start, no rebuild) must still emit exactly the `seq` that
+/// `WalWriter::new`'s startup scan derived — this fix must not change that existing path.
+#[tokio::test]
+async fn test_global_seq_unaffected_without_rebuild_no_regression() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::write(
+        wal_dir.path().join("20260805_000000_ext003_0000.jsonl"),
+        entity_wal_line(7, "preexisting-entity") + "\n",
+    )
+    .unwrap();
+
+    // WalWriter::new scans the pre-existing WAL dir at construction: global_seq = 8.
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    let chunk_v = process_a_chunk(440, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let first_new_seq = seqs.iter().copied().filter(|&s| s != 7).min();
+    assert_eq!(
+        first_new_seq,
+        Some(8),
+        "unchanged behavior: the first seq emitted after a populated-at-startup WAL dir must \
+         be exactly 8, got {seqs:?}"
+    );
+}
+
+/// SC-005 (FR-003 edge case): a WAL line that fails to replay can still have a higher on-disk
+/// `seq` than the last successfully committed line. Re-derivation must take the max of the
+/// fresh on-disk scan and `last_committed_seq`, not trust `last_committed_seq` alone.
+#[tokio::test]
+async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_replay() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // seq 10 (MERGE) replays and commits successfully, creating the entity. seq 20 is a plain
+    // CREATE for the SAME primary key, which now collides and fails to replay — so
+    // ReplayStats::last_committed_seq stops at 10, but the highest seq line on disk is 20
+    // (scan_max_seq itself returns 21, the next seq to assign, not the raw max).
+    std::fs::write(
+        wal_dir.path().join("20260805_000000_ext005_0000.jsonl"),
+        format!(
+            "{}\n{}\n",
+            entity_wal_line(10, "dup-entity-352"),
+            entity_create_conflict_wal_line(20, "dup-entity-352")
+        ),
+    )
+    .unwrap();
+
+    let status_v = rebuild_and_wait(460, json!({}), Arc::clone(&state)).await;
+    assert!(
+        status_v["result"]["result"]["failed_lines"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "expected the conflicting CREATE to fail replay: {status_v}"
+    );
+    assert_eq!(
+        status_v["result"]["result"]["last_committed_seq"], 10,
+        "only the first (MERGE) line should have committed: {status_v}"
+    );
+
+    let chunk_v = process_a_chunk(470, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let max_seq_after = seqs.iter().copied().max().unwrap();
+    assert!(
+        max_seq_after > 20,
+        "resync must use the on-disk scan (seq 20), not last_committed_seq (10) alone: \
+         got max {max_seq_after} (all seqs: {seqs:?})"
+    );
+}
+
+/// SC-006: a `dry_run: true` rebuild MUST NOT re-derive `global_seq` — a dry run is documented
+/// as having no observable side effects, including on in-process writer state (FR-006).
+#[tokio::test]
+async fn test_dry_run_rebuild_does_not_resync_global_seq() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    // Empty WAL dir at startup — WalWriter::new derives global_seq = 0.
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // Populated after start with a much higher seq.
+    std::fs::write(
+        wal_dir.path().join("20260805_000000_ext006_0000.jsonl"),
+        entity_wal_line(99, "dry-run-entity") + "\n",
+    )
+    .unwrap();
+
+    // Non-streaming dry run returns synchronously — no job to poll.
+    let v = dispatch(
+        480,
+        "knowledge_rebuild_from_wal",
+        json!({"dry_run": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["dry_run"], true, "{v}");
+
+    let chunk_v = process_a_chunk(490, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let first_new_seq = seqs.iter().copied().filter(|&s| s != 99).min();
+    assert_eq!(
+        first_new_seq,
+        Some(0),
+        "a dry run must not have re-derived global_seq — the writer must still start from its \
+         pre-dry-run value of 0: {seqs:?}"
+    );
+}
