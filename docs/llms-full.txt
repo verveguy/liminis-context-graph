@@ -1151,30 +1151,33 @@ mechanism.
 
 **`wal.applied_seq`** and **`wal.max_seq`** (issue #353) — let a caller decide, from a single
 `knowledge_status` call and an integer comparison, whether its local DB is already consistent
-with the WAL, needs an incremental resume, or needs a full rebuild. `wal.max_seq` is the highest
-`seq` actually present across the WAL files (`None`/`null` if the WAL is empty or unconfigured);
-`wal.applied_seq` is the highest `seq` whose mutations are actually committed in the current
-graph. Both are read fresh from persisted state on every call — never cached in memory — so an
-externally-updated WAL (e.g. a distributed, git-published WAL pulled by another process) is
-observed on the very next call, and the value survives a service restart.
+with the WAL, needs an incremental resume, or needs a full rebuild. `wal.applied_seq` is read
+from a persisted DB row on every call — never cached in memory, so the value survives a service
+restart. `wal.max_seq` is recomputed fresh from the on-disk WAL files on every call (the highest
+`seq` actually present, or `None`/`null` if the WAL is empty or unconfigured) — never cached,
+so an externally-updated WAL (e.g. a distributed, git-published WAL pulled by another process) is
+observed on the very next call.
 
-The consumer decision, comparing the two fields:
+The consumer decision, comparing the two fields — check both for `null` before any numeric
+comparison:
 
-| `applied_seq` vs. `max_seq` | Meaning | Action |
-|---|---|---|
-| `applied_seq == max_seq` | DB is caught up | none |
-| `applied_seq < max_seq` | DB is behind, as a forward extension | incremental resume from `applied_seq` |
-| `applied_seq` is `null` | position unknown | full rebuild |
+| `applied_seq` | `max_seq` | Meaning | Action |
+|---|---|---|---|
+| `null` | any | position unknown | full rebuild |
+| any | `null` | WAL empty or unconfigured | nothing to resume from; treat like an empty WAL |
+| `N` | `N` (equal) | DB is caught up | none |
+| `N` | `M > N` | DB is behind, as a forward extension | incremental resume from `applied_seq + 1` (not `applied_seq` — replay's `from_seq` filter keeps lines with `seq >= from_seq`, so resuming *at* `applied_seq` would re-replay the last-applied line) |
 
 **`applied_seq` has three distinct values, not two — treat them as different types, not points
 on a number line:**
 
 - **`null`** — unknown position. Only reported when a pre-existing, populated DB has no
-  recorded position and the one-time backfill (below) itself fails — no episodes present, or
-  the last episode's uuid isn't found in the WAL. The documented action is always a full
-  rebuild.
+  recorded position and the one-time backfill (below) itself fails to find the last episode's
+  uuid in the WAL. The documented action is always a full rebuild.
 - **`0`** (integer) — a known position: nothing has been applied yet. Reported for a
-  fresh/cleared DB, or immediately after `knowledge_clear_all`.
+  fresh/cleared DB (including a pre-existing DB with no `Episodic` nodes at all — the backfill
+  treats "no episodes" as "nothing to derive a position from, but known to be empty" and writes
+  `0` directly, without a WAL scan), or immediately after `knowledge_clear_all`.
 - **A positive integer** — a known, applied WAL position.
 
 Do not treat `null` as if it sorted below `0`. **This distinction is not just a Rust/Python
@@ -1182,8 +1185,11 @@ concern — it changes behavior across languages.** `null < 5` throws or is a ty
 and Python (arithmetic on `null`/`None` isn't defined), which tends to surface the bug
 immediately. But in JavaScript, `null < 5` coerces to `true` — a naive port of the "if behind,
 resume" comparison silently takes the *incremental resume* branch on an *unknown* position,
-skipping the full rebuild the `null` state actually calls for. Check for `null` explicitly,
-before doing any numeric comparison, in every client language.
+skipping the full rebuild the `null` state actually calls for. The same footgun applies to a
+`null` `max_seq`: `5 < null` coerces to `false` in JavaScript, so a check written only as
+`applied_seq < max_seq` silently falls through neither branch when the WAL is empty or
+unconfigured. Check both fields for `null` explicitly, before doing any numeric comparison, in
+every client language.
 
 **Upgrading an existing deployment**: a DB populated before this feature existed has content but
 no recorded position on its first boot under the new version. Rather than reporting `null` for

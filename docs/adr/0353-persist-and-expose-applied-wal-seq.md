@@ -37,10 +37,13 @@ This issue diverges deliberately, because it is solving a different problem:
 
 - **ADR-0026** is crash recovery — a one-off WAL scan on the recovery path is acceptable, and
   happens rarely.
-- **This issue** is an **O(1) boot check** that must not scan the WAL on every `knowledge_status`
-  call — ADR-0026 itself documents a production WAL directory with **~43,820 files**, where a
-  scan on every status poll would be slower than the byte-hashing heuristic this feature
-  replaces.
+- **This issue** wants a **cheap boot check**: `applied_seq` is an O(1) persisted-row lookup, but
+  `max_seq` must still observe WAL content written by other processes, so it cannot avoid
+  scanning the WAL directory entirely — it must instead make that scan *cheap enough* to run on
+  every `knowledge_status` call. ADR-0026 itself documents a production WAL directory with
+  **~43,820 files**, where a naive full-file read per file on every status poll would risk being
+  slower than the byte-hashing heuristic this feature replaces (see the tail-read mitigation
+  below).
 
 The two mechanisms are complementary, not competing: **persist a cursor for the fast path** (this
 ADR), and **derive one via ADR-0026's episode-cursor mechanism when the persisted record is
@@ -48,7 +51,7 @@ absent** (the backfill case below, reusing the mechanism rather than inventing a
 
 ### The gap #351's own proposal didn't cover: upgrade semantics
 
-#351 specified `applied_seq` as "integer, or `null` when the graph is empty / nothing applied."
+Issue #351 specified `applied_seq` as "integer, or `null` when the graph is empty / nothing applied."
 That conflates two different states:
 
 | State | Naive `applied_seq` | `entity_count` | Correct action |
@@ -190,9 +193,11 @@ opened.
 
 Three values, three distinct meanings — not points on a single number line:
 
-- **`null`** — unknown position. Reserved for genuine backfill failure only (no episodes, or the
-  last episode's uuid not found in the WAL). The documented action is always a full rebuild, the
-  same fallback ADR-0026 already defines for its own recovery path.
+- **`null`** — unknown position. Reserved for genuine backfill failure only: a populated DB (at
+  least one `Episodic` node) whose last episode's uuid is not found in the WAL. A DB with no
+  episodes at all is not a backfill failure (see step 2 above) — it backfills to `0`. The
+  documented action for `null` is always a full rebuild, the same fallback ADR-0026 already
+  defines for its own recovery path.
 - **`0`** — known position: nothing applied yet.
 - **positive integer** — known, applied WAL position.
 

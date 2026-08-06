@@ -9,7 +9,7 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [0.12.2] - 2026-08-05
 
-A patch release implementing a community-requested feature (#351): a reliable, O(1) boot-time
+A patch release implementing a community-requested feature (#351): a reliable, cheap boot-time
 check for whether a local DB is consistent with the WAL. Shipped as a patch alongside the
 prerequisite `global_seq` re-derivation fix (#352) because the requesting deployment needs both
 together.
@@ -27,7 +27,9 @@ together.
   cross-language footgun around `null` in numeric comparisons. A pre-existing, populated DB that
   predates this feature backfills a usable position on first open via
   [ADR-0026](docs/adr/0026-episode-cursor-wal-resume.md)'s retroactive episode-cursor mechanism,
-  rather than reporting `null`. (#353, [ADR-0353](docs/adr/0353-persist-and-expose-applied-wal-seq.md))
+  rather than reporting `null` — except when that mechanism itself can't find the last episode's
+  uuid in the WAL, the one case where `null` remains the correct, documented report.
+  (#353, [ADR-0353](docs/adr/0353-persist-and-expose-applied-wal-seq.md))
 
 ## [0.12.1] - 2026-08-05
 

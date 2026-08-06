@@ -2297,11 +2297,14 @@ fn value_as_usize(v: &lbug::Value) -> usize {
 
 /// Reads an `INT64` column as `Option<u64>`, treating `Null` as `None` rather than `0` — the
 /// `applied_seq` "unknown" state (issue #353) must stay distinguishable from "nothing applied".
+/// A negative value (never written by `set_applied_seq`, but not excluded by the `INT64` column
+/// type — e.g. a hand-edited or corrupted row) is also treated as `None` rather than wrapping to
+/// a huge `u64` via `as` casting, which would otherwise report a nonsensical applied position.
 fn value_as_optional_u64(v: &lbug::Value) -> Option<u64> {
     match v {
-        lbug::Value::Int64(i) => Some(*i as u64),
+        lbug::Value::Int64(i) if *i >= 0 => Some(*i as u64),
         lbug::Value::UInt64(i) => Some(*i),
-        lbug::Value::Int32(i) => Some(*i as u64),
+        lbug::Value::Int32(i) if *i >= 0 => Some(*i as u64),
         _ => None,
     }
 }

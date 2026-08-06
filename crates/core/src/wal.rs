@@ -258,8 +258,10 @@ impl WalWriter {
 
     /// Returns the current `global_seq` — the next seq to be assigned, i.e. one past the
     /// highest seq actually written so far. Used by `wal_exec::wal_flush_chunk` (issue #353)
-    /// to compute the max seq assigned during a chunk via a before/after diff.
-    pub fn global_seq(&self) -> u64 {
+    /// to compute the max seq assigned during a chunk via a before/after diff. Crate-visible
+    /// only — `WalWriter` is re-exported from the crate root, and nothing outside `lcg-core`
+    /// needs this, so `pub(crate)` avoids committing to it as public API.
+    pub(crate) fn global_seq(&self) -> u64 {
         self.global_seq
     }
 }
