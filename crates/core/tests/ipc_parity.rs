@@ -32,7 +32,7 @@ use lcg_core::{
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     telemetry::{NoopSink, TelemetrySink},
     types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
-    EntityRow, Ontology, RelatesToEdge,
+    EntityRow, Ontology, RelatesToEdge, WalWriter,
 };
 use regex::Regex;
 use serde_json::{json, Value};
@@ -105,6 +105,38 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
         wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+/// Like `make_state_with_wal`, but with a real, live `WalWriter` (issue #353's `applied_seq`
+/// tests need `knowledge_process_chunk` to actually append WAL lines through the normal
+/// write path, unlike `make_state_with_wal`'s callers, which write WAL files directly to
+/// disk and never go through `AppState.wal_writer`).
+fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    let wal_writer = WalWriter::new(&wal_dir, 10_000, 5 * 1024 * 1024).ok();
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path,
+        wal_dir: Some(wal_dir),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(wal_writer)),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -904,6 +936,185 @@ async fn test_knowledge_status_other_query_failure_still_errors() {
 
     let v = dispatch_val(32, "knowledge_status", json!({}), Arc::clone(&state)).await;
     assert_err_resp(&v, 32, -32000);
+}
+
+/// issue #353: an empty DB with no WAL configured reports `applied_seq: null` (row absent —
+/// nothing ever written, no backfill trigger since `make_db`/`make_state` never call the
+/// backfill path a real service startup would) and `max_seq: null` (no WAL dir at all).
+#[tokio::test]
+async fn test_knowledge_status_wal_seq_fields_null_with_no_wal_configured() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(40, "knowledge_status", json!({}), state).await;
+    assert_ok_resp(&v, 40);
+    let r = &v["result"];
+    assert!(
+        r["wal"]["applied_seq"].is_null(),
+        "expected wal.applied_seq:null (no position ever recorded): {v}"
+    );
+    assert!(
+        r["wal"]["max_seq"].is_null(),
+        "expected wal.max_seq:null (no WAL dir configured): {v}"
+    );
+}
+
+/// SC-001: after `knowledge_process_chunk`, `wal.applied_seq` equals the max seq of the WAL
+/// lines just written, and `wal.applied_seq == wal.max_seq` (User Story 1, scenario 1 — the
+/// "caught up" case). Also covers SC-006 (`wal.max_seq` derived from the same on-disk WAL
+/// content `scan_max_seq` reads).
+#[tokio::test]
+async fn test_knowledge_status_applied_seq_matches_max_seq_after_ingest() {
+    let (db, dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
+    let state = make_state_with_live_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    let ingest = dispatch_val(
+        41,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-applied-seq",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 41);
+
+    let v = dispatch_val(42, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 42);
+    let r = &v["result"];
+    let applied_seq = r["wal"]["applied_seq"]
+        .as_u64()
+        .expect("expected an integer wal.applied_seq after ingest");
+    let max_seq = r["wal"]["max_seq"]
+        .as_u64()
+        .expect("expected an integer wal.max_seq after ingest");
+    assert_eq!(
+        applied_seq, max_seq,
+        "a DB just caught up to its own writes must report applied_seq == max_seq: {v}"
+    );
+}
+
+/// SC-001 (restart half): `applied_seq` must survive a service restart — reopening the same
+/// DB file in a fresh `AppState`/`Db` must still report the position, proving persistence
+/// rather than in-process memoisation (FR-001 explicitly forbids caching this on `AppState`).
+#[tokio::test]
+async fn test_knowledge_status_applied_seq_persists_across_restart() {
+    let (db, dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
+    let state = make_state_with_live_wal(db, wal_dir.path().to_path_buf(), db_path.clone());
+
+    let ingest = dispatch_val(
+        43,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Bob manages the project.",
+            "chunk_id": "chunk-restart",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&ingest, 43);
+
+    // Simulate a restart: open a brand-new Db handle (and AppState) against the same on-disk
+    // database file, dropping every in-process value the first AppState/Db held. Mirrors
+    // main.rs's real startup sequence, which always calls init_schema (idempotent) after
+    // Db::open on every boot, not just a fresh DB.
+    let restarted_db = Db::open(&db_path).unwrap();
+    restarted_db.connect().unwrap().init_schema(4).unwrap();
+    let restarted_db = Arc::new(restarted_db);
+    let restarted_state = make_state_with_live_wal(
+        restarted_db,
+        wal_dir.path().to_path_buf(),
+        db_path.clone(),
+    );
+    let v = dispatch_val(44, "knowledge_status", json!({}), restarted_state).await;
+    assert_ok_resp(&v, 44);
+    assert!(
+        v["result"]["wal"]["applied_seq"].as_u64().is_some(),
+        "applied_seq must survive reopening the DB, not just persist within one process: {v}"
+    );
+}
+
+/// SC-003: after `knowledge_clear_all`, `wal.applied_seq` resets to `0` (known position,
+/// nothing applied) — not left at its pre-clear value, and not `null`.
+#[tokio::test]
+async fn test_knowledge_status_clear_all_resets_applied_seq() {
+    let (db, dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
+    let state = make_state_with_live_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    let ingest = dispatch_val(
+        45,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Carol leads the team.",
+            "chunk_id": "chunk-clear",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 45);
+    let before = dispatch_val(46, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(
+        before["result"]["wal"]["applied_seq"].as_u64().is_some(),
+        "sanity check: applied_seq must be set before clearing: {before}"
+    );
+
+    let cleared = dispatch_val(
+        47,
+        "knowledge_clear_all",
+        json!({"confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&cleared, 47);
+
+    let after = dispatch_val(48, "knowledge_status", json!({}), state).await;
+    assert_ok_resp(&after, 48);
+    assert_eq!(
+        after["result"]["wal"]["applied_seq"], 0,
+        "expected wal.applied_seq:0 after knowledge_clear_all: {after}"
+    );
+}
+
+/// `wal.applied_seq`/`wal.max_seq` must also appear (as `null`, not omitted) in the
+/// `NotQueryable` branch — FR-006 is additive to the whole `wal` object, not just the
+/// healthy-path response.
+#[tokio::test]
+async fn test_knowledge_status_not_queryable_includes_wal_seq_fields() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+
+    let rename_away = dispatch_val(
+        49,
+        "knowledge_query_cypher",
+        json!({"query": "ALTER TABLE Entity RENAME TO EntityTmp"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rename_away, 49);
+
+    let v = dispatch_val(50, "knowledge_status", json!({}), state).await;
+    assert_ok_resp(&v, 50);
+    let r = &v["result"];
+    assert!(
+        r["wal"].get("applied_seq").is_some(),
+        "expected wal.applied_seq key present (even if null) in NotQueryable branch: {v}"
+    );
+    assert!(
+        r["wal"].get("max_seq").is_some(),
+        "expected wal.max_seq key present (even if null) in NotQueryable branch: {v}"
+    );
 }
 
 // ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────
@@ -3937,7 +4148,7 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
             "knowledge_rebuild_from_wal",
             json!({"force_clear": true}),
         ),
-        state,
+        Arc::clone(&state),
         Some(tx),
     )
     .await;
@@ -3950,5 +4161,14 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
         v["result"]["failed_samples"],
         json!([]),
         "force_clear must have removed the stale entity, leaving zero duplicate-key failures: {v}"
+    );
+
+    // SC-002: after knowledge_rebuild_from_wal {force_clear: true} over a WAL whose max seq is
+    // N (here, the single line's seq 0), wal.applied_seq == N.
+    let status = dispatch_val(102, "knowledge_status", json!({}), state).await;
+    assert_ok_resp(&status, 102);
+    assert_eq!(
+        status["result"]["wal"]["applied_seq"], 0,
+        "applied_seq must equal the replay's last_committed_seq (the WAL's only line, seq 0): {status}"
     );
 }

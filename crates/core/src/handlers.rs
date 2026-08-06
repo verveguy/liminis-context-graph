@@ -395,6 +395,13 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     "exists": fields.wal_exists,
                     "file_count": fields.wal_file_count,
                     "byte_size": fields.wal_byte_size,
+                    // issue #353: null = unknown (backfill failed — full rebuild required),
+                    // 0 = nothing applied, integer = known applied position. See
+                    // docs/operations.md for the consumer comparison and the JS `null < 5`
+                    // footgun (null coerces to true in JS numeric comparisons, unlike Rust
+                    // and Python where it breaks arithmetic).
+                    "applied_seq": fields.wal_applied_seq,
+                    "max_seq": fields.wal_max_seq,
                 },
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
@@ -410,6 +417,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_exists,
             wal_file_count,
             wal_byte_size,
+            wal_applied_seq,
+            wal_max_seq,
             name_index_trusted,
             name_index_fallback_scans,
         } => json!({
@@ -438,6 +447,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "exists": wal_exists,
                 "file_count": wal_file_count,
                 "byte_size": wal_byte_size,
+                "applied_seq": wal_applied_seq,
+                "max_seq": wal_max_seq,
             },
             // Forced false rather than reading the live atomic (FR-002): if the core table is
             // missing, any index built against it is meaningless, regardless of whether a
