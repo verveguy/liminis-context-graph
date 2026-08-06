@@ -70,7 +70,7 @@ jobs:
     outputs:
       code_changed: ${{ steps.classify.outputs.code_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -101,7 +101,7 @@ jobs:
     outputs:
       cache-hit: ${{ steps.lbug-cache.outputs.cache-hit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -144,7 +144,7 @@ jobs:
       # job's outputs instead of touching the lbug cache at all.
       - name: Restore/cache lbug build artifacts
         id: lbug-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-${{ env.LBUG_CACHE_BUST }}
           path: |
@@ -205,7 +205,7 @@ jobs:
       # run, never across runs. `if-no-files-found: error` is a second, independent
       # guard against the staging step above silently producing fewer than expected.
       - name: Upload e2e artifacts (5 test binaries + service binary)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-artifacts
           path: |
@@ -229,7 +229,7 @@ jobs:
       # regardless of concurrent CI volume, and (being scoped to this run) needs no
       # explicit cleanup step the way the cache alternative would have.
       - name: Upload full release build for the test job (same-run artifact)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-build
           path: target/release/
@@ -250,7 +250,7 @@ jobs:
     # on it) but skips this job's own release-verification/clippy/fmt/bench tail.
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.e2e_only)"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -272,12 +272,12 @@ jobs:
       # that can't obtain its binaries must fail loudly, not quietly recompile and
       # reintroduce the redundant-build problem this exists to fix.
       - name: Download full release build from build-release (same-run artifact)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-build
           path: target/release
 
-      # `actions/upload-artifact@v4` zips the tree and does not preserve POSIX
+      # `actions/upload-artifact@v7` zips the tree and does not preserve POSIX
       # executable bits (files come back 644) — without this, every compiled test
       # binary under target/release/deps/, every build-script-build executable under
       # target/release/build/*, and the liminis-context-graph service binary itself
@@ -388,7 +388,7 @@ jobs:
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
@@ -399,7 +399,7 @@ jobs:
       # during the build — both jobs run on ubuntu-latest with the same standard
       # /home/runner/work/... checkout path.
       - name: Download e2e artifacts (test binary + service binary)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-artifacts
           path: target/release
@@ -436,12 +436,12 @@ jobs:
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Download e2e artifacts (test binary + service binary)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-artifacts
           path: target/release
@@ -475,12 +475,12 @@ jobs:
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Download e2e artifacts (test binary + service binary)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-artifacts
           path: target/release
@@ -514,12 +514,12 @@ jobs:
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Download e2e artifacts (test binary + service binary)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-artifacts
           path: target/release
@@ -553,12 +553,12 @@ jobs:
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - name: Download e2e artifacts (test binary + service binary)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: e2e-artifacts
           path: target/release

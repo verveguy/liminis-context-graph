@@ -136,7 +136,7 @@ jobs:
         id: "lbug-hash"
         run: "echo \"hash=$(grep -A12 '^name = \"lbug\"$' Cargo.lock | shasum -a 256 | cut -c1-12)\" >> \"$GITHUB_OUTPUT\""
       - name: "Restore lbug build artifacts from cache"
-        uses: "actions/cache/restore@v4"
+        uses: "actions/cache/restore@v6"
         with:
           key: "lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-2026-05-29"
           path: |

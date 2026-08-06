@@ -19,7 +19,7 @@ jobs:
     # LBUG_BUILD_FROM_SOURCE removed: lbug 0.17.0+ prebuilt is a self-contained fat bundle.
     # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -50,7 +50,7 @@ jobs:
             2>&1 | tee bench-50k.txt
 
       - name: upload bench results (text)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: bench-results-${{ github.sha }}
@@ -61,7 +61,7 @@ jobs:
           retention-days: 30
 
       - name: upload criterion HTML reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: criterion-html-${{ github.sha }}

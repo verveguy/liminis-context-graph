@@ -55,7 +55,7 @@ jobs:
           echo "number=$num" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # Check out the PR head explicitly so the same steps work for both
           # triggers; on workflow_dispatch the default ref is the base branch.
@@ -97,7 +97,7 @@ jobs:
       # is_error:true failure without exposing it in the run logs.
       - name: Upload Claude execution log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: claude-execution-output
           path: /home/runner/work/_temp/claude-execution-output.json
