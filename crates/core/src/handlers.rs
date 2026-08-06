@@ -209,6 +209,8 @@ struct StatusFields {
     wal_exists: bool,
     wal_file_count: u64,
     wal_byte_size: u64,
+    wal_applied_seq: Option<u64>,
+    wal_max_seq: Option<u64>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
     name_index_trusted: bool,
@@ -227,6 +229,8 @@ enum StatusOutcome {
         wal_exists: bool,
         wal_file_count: u64,
         wal_byte_size: u64,
+        wal_applied_seq: Option<u64>,
+        wal_max_seq: Option<u64>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
     },
@@ -302,6 +306,15 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
             let conn = db.connect()?;
             let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+            // Read fresh on every call, never cached on AppState (FR-001, SC-001: must prove
+            // persistence across restart, not memoisation). Each is best-effort: a read failure
+            // (e.g. the WalPosition table or WAL dir is transiently unreadable) degrades to
+            // `null`, the same "unknown position" value a genuine backfill failure reports —
+            // never fatal to the rest of the status response.
+            let wal_applied_seq = conn.get_applied_seq().unwrap_or(None);
+            let wal_max_seq = wal_dir
+                .as_deref()
+                .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
             let name_index_trusted = conn.name_index_trusted();
             let name_index_fallback_scans = conn.name_index_fallback_scan_count();
 
@@ -336,6 +349,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_exists,
                     wal_file_count,
                     wal_byte_size,
+                    wal_applied_seq,
+                    wal_max_seq,
                     last_index_time,
                     index_created_at,
                     name_index_trusted,
@@ -349,6 +364,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_exists,
                     wal_file_count,
                     wal_byte_size,
+                    wal_applied_seq,
+                    wal_max_seq,
                     name_index_trusted,
                     name_index_fallback_scans,
                 }),
@@ -378,6 +395,13 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     "exists": fields.wal_exists,
                     "file_count": fields.wal_file_count,
                     "byte_size": fields.wal_byte_size,
+                    // issue #353: null = unknown (backfill failed — full rebuild required),
+                    // 0 = nothing applied, integer = known applied position. See
+                    // docs/operations.md for the consumer comparison and the JS `null < 5`
+                    // footgun (null coerces to true in JS numeric comparisons, unlike Rust
+                    // and Python where it breaks arithmetic).
+                    "applied_seq": fields.wal_applied_seq,
+                    "max_seq": fields.wal_max_seq,
                 },
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
@@ -393,6 +417,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_exists,
             wal_file_count,
             wal_byte_size,
+            wal_applied_seq,
+            wal_max_seq,
             name_index_trusted,
             name_index_fallback_scans,
         } => json!({
@@ -421,6 +447,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "exists": wal_exists,
                 "file_count": wal_file_count,
                 "byte_size": wal_byte_size,
+                "applied_seq": wal_applied_seq,
+                "max_seq": wal_max_seq,
             },
             // Forced false rather than reading the live atomic (FR-002): if the core table is
             // missing, any index built against it is meaningless, regardless of whether a
@@ -1135,6 +1163,17 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     let _guard = state.write_lock.write().await;
 
+    // Drop the old handle before deleting its files, mirroring clear_db_for_rebuild's existing
+    // pattern (see its own comment): otherwise the old Db stays alive, with its underlying
+    // file deleted out from under it, for the whole Phase-1-delete + Phase-2-reopen window
+    // below. That window grew long enough for lbug's own internal checkpoint to occasionally
+    // fire against the now-deleted file (`Error renaming file ... to ....wal.checkpoint: No
+    // such file or directory`) once Phase 2 started doing more work per reinit (issue #353's
+    // set_applied_seq(0) write below). load_db() already treats a None state.db as
+    // Error::DbUnavailable, so this briefly surfaces as the existing degraded-mode error rather
+    // than a file-not-found.
+    state.db.store(None);
+
     if !preserve_wal {
         // Flush and drop the WalWriter before deleting the WAL directory to avoid
         // writing to a path that no longer exists. The writer is re-initialized below
@@ -1194,6 +1233,10 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Reset the applied-WAL-seq position (issue #353, FR-005): this DB is freshly
+            // empty, so `0` ("known, nothing applied") is correct — not `null` ("unknown"),
+            // which would otherwise trigger an unnecessary backfill scan on next open.
+            conn.set_applied_seq(0)?;
             // Fresh empty table — a no-op today, kept for uniformity with every other
             // Entity-population path (issue #219).
             conn.rebuild_name_index()?;
@@ -1430,6 +1473,35 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
     }))
 }
 
+/// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
+/// `knowledge_rebuild_from_wal` call may have skipped a range of WAL content relative to the
+/// DB's `applied_seq` before this rebuild started. `from_seq` is trusted at face value by the
+/// caller of this function (per FR-004, `knowledge_rebuild_from_wal` unconditionally advances
+/// `applied_seq` to the replay's `last_committed_seq` on completion) — this is a diagnostic
+/// aid for operators, not a guard, since a caller may legitimately skip a known-bad or
+/// already-applied-elsewhere range. `from_seq == 0` is always a full rebuild (or a resume from
+/// scratch against an empty DB) and never warrants this warning.
+fn warn_on_rebuild_seq_gap(conn: &crate::db::Conn<'_>, from_seq: u64, context: &str) {
+    if from_seq == 0 {
+        return;
+    }
+    if let Ok(Some(prior)) = conn.get_applied_seq() {
+        if from_seq > prior + 1 {
+            eprintln!(
+                "liminis-context-graph: {context}: knowledge_rebuild_from_wal called with \
+                 from_seq={from_seq}, which skips seq range [{gap_start}, {gap_end}] relative \
+                 to this DB's applied_seq={prior} recorded before the rebuild started — the \
+                 resulting applied_seq will report the DB as caught up even though that range \
+                 was never replayed into it. Expected only if the caller intentionally skipped \
+                 known-bad or already-applied-elsewhere WAL content; otherwise this DB may now \
+                 be missing data.",
+                gap_start = prior + 1,
+                gap_end = from_seq - 1,
+            );
+        }
+    }
+}
+
 async fn handle_rebuild_from_wal(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -1660,6 +1732,17 @@ async fn handle_rebuild_from_wal(
                     if resynced {
                         if let Some(g) = resync_guard.as_mut() {
                             g.mark_done();
+                        }
+                    }
+                    // Persist the applied-WAL-seq position at the replay's own
+                    // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
+                    // doesn't undo the rebuild that just succeeded.
+                    if let Some(seq) = stats.last_committed_seq {
+                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload");
+                        if let Err(e) = conn.set_applied_seq(seq) {
+                            eprintln!(
+                                "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
+                            );
                         }
                     }
                 }
@@ -1963,6 +2046,17 @@ async fn handle_rebuild_from_wal(
                             g.mark_done();
                         }
                     }
+                    // Persist the applied-WAL-seq position at the replay's own
+                    // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
+                    // doesn't undo the rebuild that just succeeded.
+                    if let Some(seq) = stats.last_committed_seq {
+                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload(bg)");
+                        if let Err(e) = conn.set_applied_seq(seq) {
+                            eprintln!(
+                                "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"
+                            );
+                        }
+                    }
                 }
                 Ok((stats, build_ok))
             },
@@ -2098,6 +2192,11 @@ async fn clear_db_for_rebuild(state: &Arc<AppState>) -> Result<(), Error> {
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Reset the applied-WAL-seq position (issue #353, FR-005) — this DB is freshly
+            // empty. The subsequent from_seq: 0 rebuild this function exists to enable
+            // (see doc comment above) will overwrite this with the replay's precise
+            // last_committed_seq once it completes.
+            conn.set_applied_seq(0)?;
             conn.rebuild_name_index()?;
         }
         Ok(db)

@@ -37,33 +37,44 @@ fn emit_rotation_if_any(writer: &mut WalWriter, sink: &Arc<dyn TelemetrySink>) {
 /// Flushes `cyphers` to WAL as a single chunk-atomic group.
 ///
 /// Use for episode Phase C where all mutations for one chunk should land atomically.
+///
+/// Returns the max `seq` assigned to this chunk's lines (issue #353), or `None` if nothing was
+/// actually written — an empty `mutations` list, a lock/writer-absent short-circuit, or a chunk
+/// whose entries were all filtered out by `WalWriter::log_mutation` (reads / index DDL), or a
+/// write failure. Callers use `Some(seq)` to advance the persisted `applied_seq` position;
+/// `None` means "leave it where it is" — always the safe direction (FR-003).
 pub(crate) fn wal_flush_chunk(
     wal: &Arc<Mutex<Option<WalWriter>>>,
     mutations: Vec<(String, serde_json::Value)>,
     sink: &Arc<dyn TelemetrySink>,
-) {
+) -> Option<u64> {
     if mutations.is_empty() {
-        return;
+        return None;
     }
     let mut guard = match wal.lock() {
         Ok(g) => g,
         Err(e) => {
             eprintln!("liminis-context-graph: wal_flush_chunk: lock poisoned: {e}");
-            return;
+            return None;
         }
     };
-    if let Some(ref mut writer) = *guard {
-        let result = writer.with_chunk(|w| {
-            for (cypher, params) in &mutations {
-                w.log_mutation(cypher, wal_params(params), "")?;
-            }
-            Ok(())
-        });
-        match result {
-            Ok(_) => emit_rotation_if_any(writer, sink),
-            Err(e) => {
-                eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}")
-            }
+    let writer = guard.as_mut()?;
+    let before = writer.global_seq();
+    let result = writer.with_chunk(|w| {
+        for (cypher, params) in &mutations {
+            w.log_mutation(cypher, wal_params(params), "")?;
+        }
+        Ok(())
+    });
+    match result {
+        Ok(_) => {
+            emit_rotation_if_any(writer, sink);
+            let after = writer.global_seq();
+            (after > before).then(|| after - 1)
+        }
+        Err(e) => {
+            eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}");
+            None
         }
     }
 }
@@ -235,6 +246,65 @@ mod tests {
         assert_eq!(
             global_seq, 100,
             "a marked-done guard must not alter global_seq again on drop"
+        );
+    }
+
+    /// SC-004 (FR-003 crash safety): a crash between a chunk's WAL flush and the
+    /// `set_applied_seq` write that normally follows it (episode.rs, immediately after this
+    /// function returns) must leave `applied_seq` trailing what's actually committed, never
+    /// advancing past it. Simulated deterministically by committing a second chunk's mutation
+    /// and flushing it to WAL — both actually happen — then simply not calling
+    /// `set_applied_seq` for it, mirroring exactly what a `kill -9` between those two steps
+    /// would leave behind.
+    #[test]
+    fn skipped_set_applied_seq_write_leaves_applied_seq_trailing_not_leading() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(db_dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        let wal_dir = tempfile::tempdir().unwrap();
+        let writer = WalWriter::new(wal_dir.path(), 1000, 0).unwrap();
+        let wal: Arc<Mutex<Option<WalWriter>>> = Arc::new(Mutex::new(Some(writer)));
+        let sink: Arc<dyn TelemetrySink> = Arc::new(crate::telemetry::NoopSink);
+
+        // Chunk 1: commit, flush to WAL, and record applied_seq — the normal, successful path.
+        conn.raw_query(
+            "CREATE (:Episodic {uuid: 'ep-1', name: 'n', group_id: 'g', \
+             created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+             content: 'c', valid_at: timestamp('2026-01-01')})",
+        )
+        .unwrap();
+        let seq1 = wal_flush_chunk(&wal, conn.drain_mutations(), &sink)
+            .expect("chunk 1 must assign a seq");
+        conn.set_applied_seq(seq1).unwrap();
+
+        // Chunk 2: commit and flush — both really happen — but the position write that would
+        // normally follow is deliberately skipped, simulating a crash right after the flush.
+        conn.raw_query(
+            "CREATE (:Episodic {uuid: 'ep-2', name: 'n', group_id: 'g', \
+             created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+             content: 'c', valid_at: timestamp('2026-01-01')})",
+        )
+        .unwrap();
+        let seq2 = wal_flush_chunk(&wal, conn.drain_mutations(), &sink)
+            .expect("chunk 2 must assign a seq");
+        assert!(seq2 > seq1, "chunk 2's seq must be strictly higher");
+        // No conn.set_applied_seq(seq2) call here — the simulated crash.
+
+        // Both episodes are actually committed in the graph...
+        assert_eq!(
+            conn.count_nodes("Episodic").unwrap(),
+            2,
+            "both chunks' mutations must be committed, crash or not"
+        );
+        // ...but applied_seq must still report only chunk 1's position — never chunk 2's,
+        // which would wrongly signal chunk 2's mutations are a recorded, skippable position.
+        assert_eq!(
+            conn.get_applied_seq().unwrap(),
+            Some(seq1),
+            "a skipped position write must leave applied_seq trailing the last chunk that \
+             actually recorded it, never advancing to an unrecorded chunk's seq"
         );
     }
 }

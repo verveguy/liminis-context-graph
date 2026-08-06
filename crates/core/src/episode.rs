@@ -815,7 +815,23 @@ pub async fn add_episode(
             })?;
         }
 
-        wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        let flushed_seq = wal_exec::wal_flush_chunk(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // Advance the persisted applied-WAL-seq position (issue #353, FR-002) after the WAL
+        // flush, which itself runs after every graph mutation above already committed
+        // individually (lbug auto-commits per statement; this codebase reserves explicit
+        // transactions for replay's flush_batch only). Writing here — strictly after both the
+        // graph commit and the WAL flush — is the write-after-commit mechanism FR-003 requires:
+        // a crash before this point leaves applied_seq trailing what's actually committed
+        // (safe, redoes a little work on resume), never ahead of it (which would skip
+        // committed-but-unrecorded mutations). Non-fatal: a missed write only means applied_seq
+        // stays stale, not that the chunk's mutations are lost.
+        if let Some(seq) = flushed_seq {
+            if let Err(e) = conn.set_applied_seq(seq) {
+                eprintln!(
+                    "liminis-context-graph: add_episode: failed to persist applied_seq={seq} (non-fatal): {e}"
+                );
+            }
+        }
 
         Ok((
             edges_inserted,

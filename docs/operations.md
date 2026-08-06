@@ -109,6 +109,65 @@ degraded (no connected database). A rising `name_index_fallback_scans` count, or
 investigating — see [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the
 mechanism.
 
+**`wal.applied_seq`** and **`wal.max_seq`** (issue #353) — let a caller decide, from a single
+`knowledge_status` call and an integer comparison, whether its local DB is already consistent
+with the WAL, needs an incremental resume, or needs a full rebuild. `wal.applied_seq` is read
+from a persisted DB row on every call — never cached in memory, so the value survives a service
+restart. `wal.max_seq` is recomputed fresh from the on-disk WAL files on every call (the highest
+`seq` actually present, or `None`/`null` if the WAL is empty or unconfigured) — never cached,
+so an externally-updated WAL (e.g. a distributed, git-published WAL pulled by another process) is
+observed on the very next call.
+
+The consumer decision, comparing the two fields — check both for `null` before any numeric
+comparison:
+
+| `applied_seq` | `max_seq` | Meaning | Action |
+|---|---|---|---|
+| `null` | any | position unknown | full rebuild |
+| any | `null` | WAL empty or unconfigured | nothing to resume from; treat like an empty WAL |
+| `N` | `N` (equal) | DB is caught up | none |
+| `N` | `M > N` | DB is behind, as a forward extension | incremental resume from `applied_seq + 1` (not `applied_seq` — replay's `from_seq` filter keeps lines with `seq >= from_seq`, so resuming *at* `applied_seq` would re-replay the last-applied line) |
+| `N` | `M < N` | DB has advanced beyond what the currently-visible WAL contains (e.g. a corpus reset, or a stale copied-back WAL) — not a forward extension | full rebuild |
+
+**`applied_seq` has three distinct values, not two — treat them as different types, not points
+on a number line:**
+
+- **`null`** — unknown position. Reported when a pre-existing DB has no recorded position and
+  the one-time backfill (below) fails to derive one: either a populated DB (has `Entity` or
+  `Episodic` content) whose last episode's uuid isn't found in the WAL, or a DB with no
+  `Episodic` nodes but surviving `Entity`/relationship content (episode deletion removes only
+  the `Episodic` node, never the entities it created, so a graph can be non-empty with zero
+  episodes — there is nothing left to derive a position from, but real content to lose track
+  of). The documented action is always a full rebuild.
+- **`0`** (integer) — a known position: nothing has been applied yet. Reported for a
+  fresh/cleared DB (including a pre-existing DB with *no* `Episodic` nodes **and** no
+  `Entity`/relationship content either — genuinely nothing to derive a position from and
+  nothing to lose track of, so the backfill writes `0` directly without a WAL scan), or
+  immediately after `knowledge_clear_all`.
+- **A positive integer** — a known, applied WAL position.
+
+Do not treat `null` as if it sorted below `0`. **This distinction is not just a Rust/Python
+concern — it changes behavior across languages.** `null < 5` throws or is a type error in Rust
+and Python (arithmetic on `null`/`None` isn't defined), which tends to surface the bug
+immediately. But in JavaScript, `null < 5` coerces to `true` — a naive port of the "if behind,
+resume" comparison silently takes the *incremental resume* branch on an *unknown* position,
+skipping the full rebuild the `null` state actually calls for. The same footgun applies to a
+`null` `max_seq`: `5 < null` coerces to `false` in JavaScript, so a check written only as
+`applied_seq < max_seq` silently falls through neither branch when the WAL is empty or
+unconfigured. Check both fields for `null` explicitly, before doing any numeric comparison, in
+every client language.
+
+**Upgrading an existing deployment**: a DB populated before this feature existed has content but
+no recorded position on its first boot under the new version. Rather than reporting `null` for
+that (indistinguishable from a genuinely unknown position, and prone to a client either skipping
+a needed rebuild or being unable to tell "empty" from "unknown"), the service backfills a
+conservative position on first open, derived from the last `Episodic` node's location in the WAL
+(the retroactive episode-cursor mechanism from
+[ADR-0026](adr/0026-episode-cursor-wal-resume.md); see [ADR-0353](adr/0353-persist-and-expose-applied-wal-seq.md)
+for why this issue persists a cursor for the fast path in addition to ADR-0026's own recovery-time
+use of the same mechanism). This backfill runs once at startup and is a no-op on every subsequent
+boot once a position is recorded.
+
 ## Streaming progress
 
 Long operations accept a `_progress_token` and stream progress frames before the terminal

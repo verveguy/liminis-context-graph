@@ -106,8 +106,35 @@ impl Db {
             // insert_entity/update_entity_created_at hooks — a full rebuild is the only
             // way the name index observes replayed data (FR-004).
             conn.rebuild_name_index()?;
+            // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
+            // the replay just computed — a fresh rebuild is exactly as authoritative as
+            // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
+            // only means the boot-time check falls back to a rescan, not that the rebuild
+            // itself is compromised.
+            if let Some(seq) = stats.last_committed_seq {
+                if let Err(e) = conn.set_applied_seq(seq) {
+                    eprintln!(
+                        "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
+                    );
+                }
+            }
             Some(stats)
         } else {
+            // No rebuild ran (DB already existed, or a genuinely fresh DB with no WAL to
+            // replay). init_schema is idempotent (CREATE ... IF NOT EXISTS), so it's safe to
+            // call unconditionally here — previously this branch left a genuinely fresh DB
+            // (no WAL to replay either) with no schema at all.
+            let conn = db.connect()?;
+            conn.init_schema(embedding_dim)?;
+            // Backfill applied_seq for a pre-existing populated DB that predates this feature
+            // (FR-007), or set it to 0 for a genuinely fresh DB. Non-fatal: a missed backfill
+            // just leaves the boot-time check reporting null (safe — the documented action is
+            // a full rebuild).
+            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(&conn, wal_dir_path) {
+                eprintln!(
+                    "liminis-context-graph: open_or_rebuild: applied_seq backfill failed (non-fatal): {e}"
+                );
+            }
             None
         };
 
@@ -1500,6 +1527,32 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
+    /// Returns the persisted applied-WAL-seq position (issue #353), or `None` if no position
+    /// has ever been recorded. Row-absence is the sole representation of "unknown" — both
+    /// "never written" (fresh DB, backfill not yet run) and "backfill failed" (FR-008) collapse
+    /// to this, distinct from a written `0` ("nothing applied yet, but known").
+    pub fn get_applied_seq(&self) -> Result<Option<u64>, Error> {
+        let result = self
+            .inner
+            .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
+        Ok(result
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_u64(&row[0])))
+    }
+
+    /// Persists `seq` as the applied-WAL-seq position (issue #353). Uses `Connection::query`
+    /// directly rather than `raw_query`/`exec_params`, so this write is never itself recorded
+    /// into `executed_mutations` and re-logged to the WAL — that would make `applied_seq`
+    /// immediately stale by the write that just recorded it (a self-referential regress).
+    /// Same non-recording bypass as `exec_transaction_control`/`count_nodes`. `seq` is a `u64`
+    /// interpolated directly (not a string), so there is no injection surface.
+    pub fn set_applied_seq(&self, seq: u64) -> Result<(), Error> {
+        let sql = format!("MERGE (w:WalPosition {{id: 'singleton'}}) SET w.applied_seq = {seq}");
+        let _ = self.inner.query(&sql)?;
+        Ok(())
+    }
+
     /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
     pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
         let mut result = self
@@ -2242,6 +2295,20 @@ fn value_as_usize(v: &lbug::Value) -> usize {
     }
 }
 
+/// Reads an `INT64` column as `Option<u64>`, treating `Null` as `None` rather than `0` — the
+/// `applied_seq` "unknown" state (issue #353) must stay distinguishable from "nothing applied".
+/// A negative value (never written by `set_applied_seq`, but not excluded by the `INT64` column
+/// type — e.g. a hand-edited or corrupted row) is also treated as `None` rather than wrapping to
+/// a huge `u64` via `as` casting, which would otherwise report a nonsensical applied position.
+fn value_as_optional_u64(v: &lbug::Value) -> Option<u64> {
+    match v {
+        lbug::Value::Int64(i) if *i >= 0 => Some(*i as u64),
+        lbug::Value::UInt64(i) => Some(*i),
+        lbug::Value::Int32(i) if *i >= 0 => Some(*i as u64),
+        _ => None,
+    }
+}
+
 /// Reads a `RETURN count(*)` probe result as `i64`. See
 /// `Conn::execute_prepared_returning_count` for the "unexpected shape ⇒ treat as matched"
 /// fallback rationale.
@@ -2672,6 +2739,90 @@ mod exec_transaction_control_tests {
             conn.drain_mutations().len(),
             1,
             "the one statement executed between BEGIN and COMMIT must still be recorded"
+        );
+    }
+}
+
+#[cfg(test)]
+mod applied_seq_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Absent row (fresh DB, never written) must read back as `None`, not `0` — the "unknown"
+    /// state (issue #353, FR-008) must stay distinguishable from "nothing applied".
+    #[test]
+    fn get_applied_seq_is_none_when_row_absent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), None);
+    }
+
+    /// Basic write/read round-trip.
+    #[test]
+    fn set_then_get_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq(41).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+    }
+
+    /// `set_applied_seq` MERGEs onto the singleton row rather than inserting a duplicate —
+    /// repeated writes (the normal case, once per chunk) must overwrite, not accumulate.
+    #[test]
+    fn set_applied_seq_overwrites_existing_value() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq(5).unwrap();
+        conn.set_applied_seq(12).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(12));
+        assert_eq!(
+            conn.count_nodes("WalPosition").unwrap(),
+            1,
+            "MERGE must not create a second WalPosition row"
+        );
+    }
+
+    /// An explicit reset to `0` (FR-005: `knowledge_clear_all` / fresh rebuild) must read back
+    /// as `Some(0)`, distinct from row-absence (`None`) — "known, nothing applied" vs. "unknown".
+    #[test]
+    fn set_applied_seq_zero_is_distinct_from_absent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq(0).unwrap();
+
+        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+    }
+
+    /// `get_applied_seq`/`set_applied_seq` must not themselves become a WAL line — using
+    /// `raw_query`/`exec_params` here would make `applied_seq` immediately stale by the write
+    /// that just recorded it.
+    #[test]
+    fn set_applied_seq_does_not_record_into_executed_mutations() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.drain_mutations(); // discard init_schema's own recorded DDL
+
+        conn.set_applied_seq(7).unwrap();
+
+        assert!(
+            conn.drain_mutations().is_empty(),
+            "set_applied_seq must never record into executed_mutations"
         );
     }
 }

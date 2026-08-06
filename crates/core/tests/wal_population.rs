@@ -180,6 +180,59 @@ async fn test_add_episode_populates_wal() {
     );
 }
 
+/// Returns the max `seq` across all WAL lines in `dir`, or `None` if none are found.
+fn max_wal_seq(dir: &std::path::Path) -> Option<u64> {
+    let mut max: Option<u64> = None;
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let val: Value = serde_json::from_str(line).unwrap();
+            let seq = val["seq"].as_u64().unwrap();
+            max = Some(max.map_or(seq, |m: u64| m.max(seq)));
+        }
+    }
+    max
+}
+
+/// SC-001 (partial, live-write half): after `knowledge_add_episode`, the persisted
+/// `applied_seq` must equal the max `seq` of the WAL lines just written for that chunk.
+#[tokio::test]
+async fn test_add_episode_advances_applied_seq_to_chunk_max_seq() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    let v = dispatch(
+        1,
+        "knowledge_add_episode",
+        json!({
+            "name": "applied-seq-chunk",
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "test",
+            "source_description": "test/source",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "test"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v.get("result").is_some(), "expected result, got: {v}");
+
+    let expected_seq = max_wal_seq(wal_dir.path()).expect("WAL must contain at least one line");
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.get_applied_seq().unwrap(),
+        Some(expected_seq),
+        "applied_seq must equal the chunk's max WAL seq"
+    );
+}
+
 // ── User Story 1c: no WAL dir → writes succeed, no WAL dir created ────────────
 
 /// When no WAL directory is configured, writes succeed normally and no WAL
