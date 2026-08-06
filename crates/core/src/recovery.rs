@@ -160,7 +160,18 @@ pub fn backfill_applied_seq_if_absent(
         return Ok(());
     }
     if conn.count_nodes("Episodic")? == 0 {
-        return conn.set_applied_seq(0);
+        // Episodic count alone doesn't prove the graph is empty: `remove_episode` and
+        // `remove_episodes_by_source`/`_by_chunk_id` only `DETACH DELETE` the `Episodic`
+        // node, never the `Entity`/edge data it created (db.rs), so a DB that had all its
+        // episodes deleted can still hold real, unrecorded content with zero episodes left
+        // to anchor a position derivation on. Only collapse to the "genuinely fresh" `0`
+        // case when there is truly nothing else either — otherwise leave the row absent
+        // (`null`, the documented "unknown, full rebuild" signal) rather than falsely
+        // reporting "known, nothing applied" for a populated-but-episode-less graph.
+        if conn.count_nodes("Entity")? == 0 && conn.count_relates_to_edges()? == 0 {
+            return conn.set_applied_seq(0);
+        }
+        return Ok(());
     }
     let (seq, reason) = derive_episode_cursor(conn, wal_dir)?;
     if reason == CursorReason::UuidMatch {
@@ -558,6 +569,33 @@ mod tests {
         backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
 
         assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+    }
+
+    /// A DB with zero `Episodic` nodes but a surviving `Entity` (e.g. every episode was
+    /// deleted via `remove_episode`, which only `DETACH DELETE`s the `Episodic` node, never
+    /// the entities it created — db.rs) must NOT be treated as "genuinely fresh." Backfilling
+    /// to `0` here would falsely claim "known, nothing applied" for a graph that actually has
+    /// unrecorded content; `null` (backfill declined) is the correct, safe report.
+    #[test]
+    fn backfill_entity_survives_episode_deletion_is_not_treated_as_fresh() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal-does-not-exist");
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            conn.raw_query("CREATE (:Entity {uuid: 'orphaned-entity'})")
+                .unwrap();
+        }
+        let conn = db.connect().unwrap();
+
+        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq().unwrap(),
+            None,
+            "an Entity-only DB (no episodes) must not be backfilled to 0 — its position is \
+             genuinely unknown, not known-empty"
+        );
     }
 
     /// SC-005: a populated DB with no persisted applied-seq record backfills to the episode

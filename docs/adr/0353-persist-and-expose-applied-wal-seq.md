@@ -166,14 +166,22 @@ extreme scale — not attempted here, since it touches an explicitly untrusted-o
 `recovery::backfill_applied_seq_if_absent(conn, wal_dir)`:
 
 1. No-op if a position is already recorded (every boot after the first).
-2. If `Episodic` count is `0` → write `0` directly, **without touching the WAL directory at
-   all**. This is what distinguishes "genuinely fresh" from "populated but unknown" — the
-   ambiguity #351's original proposal didn't resolve.
-3. Otherwise, call ADR-0026's `derive_episode_cursor`: `CursorReason::UuidMatch` → write
-   `Some(seq)` (the conservative, `<=`-true-position value ADR-0026 already validated as safe
-   to re-apply — MERGEs are no-ops, create-form statements collide harmlessly);
-   `CursorReason::UuidNotFound` → leave the row absent (`null`). `CursorReason::NoEpisodes` is
-   unreachable here, since step 2's guard already ran.
+2. If `Episodic` count is `0`:
+   - **and** `Entity` count and `RelatesToNode_` edge count are also `0` → write `0` directly,
+     **without touching the WAL directory at all**. This is what distinguishes "genuinely
+     fresh" from "populated but unknown" — the ambiguity #351's original proposal didn't
+     resolve.
+   - but `Entity` or edge content survives → leave the row absent (`null`). Checking `Episodic`
+     count alone is not a sufficient emptiness test: `remove_episode` and its siblings (db.rs)
+     only `DETACH DELETE` the `Episodic` node, never the `Entity`/edge data it created, so a DB
+     that had every episode deleted can still hold real, unrecorded content with zero episodes
+     left to anchor a position derivation on — there is nothing to derive a position *from*,
+     but real content to lose track of, so `null` (not `0`) is the correct report.
+3. Otherwise (at least one `Episodic` node), call ADR-0026's `derive_episode_cursor`:
+   `CursorReason::UuidMatch` → write `Some(seq)` (the conservative, `<=`-true-position value
+   ADR-0026 already validated as safe to re-apply — MERGEs are no-ops, create-form statements
+   collide harmlessly); `CursorReason::UuidNotFound` → leave the row absent (`null`).
+   `CursorReason::NoEpisodes` is unreachable here, since step 2's guard already ran.
 
 Called at every DB-open path that doesn't already know a precise position from a fresh replay:
 `main.rs`'s startup sequence (after schema init and index build, before the socket accepts
@@ -193,10 +201,11 @@ opened.
 
 Three values, three distinct meanings — not points on a single number line:
 
-- **`null`** — unknown position. Reserved for genuine backfill failure only: a populated DB (at
-  least one `Episodic` node) whose last episode's uuid is not found in the WAL. A DB with no
-  episodes at all is not a backfill failure (see step 2 above) — it backfills to `0`. The
-  documented action for `null` is always a full rebuild, the same fallback ADR-0026 already
+- **`null`** — unknown position. Reserved for genuine backfill failure: either a populated DB
+  (at least one `Episodic` node) whose last episode's uuid is not found in the WAL, or a DB
+  with no `Episodic` nodes but surviving `Entity`/edge content (see step 2 above). A DB with
+  *no* episodes **and** no other graph content is not a backfill failure — it backfills to `0`.
+  The documented action for `null` is always a full rebuild, the same fallback ADR-0026 already
   defines for its own recovery path.
 - **`0`** — known position: nothing applied yet.
 - **positive integer** — known, applied WAL position.
@@ -233,3 +242,14 @@ skipping the full rebuild that state actually calls for.
 - **Cross-repo**: the Python-side `service_protocol.py`/`graphiti_service.py` consumer (the
   liminis app) and the orac/zen deployment described in #351 are downstream consumers of this
   response shape — out of scope for this repo's change, but the entire motivation for it.
+- **`knowledge_rebuild_from_wal` trusts its caller-supplied `from_seq` at face value, per FR-004's
+  literal text** — a non-dry-run replay unconditionally advances `applied_seq` to the replay's
+  `last_committed_seq` on completion, with no check that `from_seq` was contiguous with the DB's
+  prior `applied_seq`. An operator (or a buggy consumer) invoking a non-full rebuild with a
+  `from_seq` that skips a gap would advance `applied_seq` to the new tail even though the skipped
+  range was never replayed into this DB, which a client would then read as "caught up." Rejecting
+  such a call was considered and rejected as out of scope — a caller may legitimately skip a
+  known-bad or already-applied-elsewhere range, and FR-004 does not ask for continuity
+  enforcement. Instead, `handlers.rs`'s `warn_on_rebuild_seq_gap` logs a non-fatal, non-blocking
+  warning when `from_seq > applied_seq + 1` at either non-dry-run call site, giving operators
+  visibility without changing behavior.

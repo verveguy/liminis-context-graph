@@ -1473,6 +1473,35 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
     }))
 }
 
+/// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
+/// `knowledge_rebuild_from_wal` call may have skipped a range of WAL content relative to the
+/// DB's `applied_seq` before this rebuild started. `from_seq` is trusted at face value by the
+/// caller of this function (per FR-004, `knowledge_rebuild_from_wal` unconditionally advances
+/// `applied_seq` to the replay's `last_committed_seq` on completion) — this is a diagnostic
+/// aid for operators, not a guard, since a caller may legitimately skip a known-bad or
+/// already-applied-elsewhere range. `from_seq == 0` is always a full rebuild (or a resume from
+/// scratch against an empty DB) and never warrants this warning.
+fn warn_on_rebuild_seq_gap(conn: &crate::db::Conn<'_>, from_seq: u64, context: &str) {
+    if from_seq == 0 {
+        return;
+    }
+    if let Ok(Some(prior)) = conn.get_applied_seq() {
+        if from_seq > prior + 1 {
+            eprintln!(
+                "liminis-context-graph: {context}: knowledge_rebuild_from_wal called with \
+                 from_seq={from_seq}, which skips seq range [{gap_start}, {gap_end}] relative \
+                 to this DB's applied_seq={prior} recorded before the rebuild started — the \
+                 resulting applied_seq will report the DB as caught up even though that range \
+                 was never replayed into it. Expected only if the caller intentionally skipped \
+                 known-bad or already-applied-elsewhere WAL content; otherwise this DB may now \
+                 be missing data.",
+                gap_start = prior + 1,
+                gap_end = from_seq - 1,
+            );
+        }
+    }
+}
+
 async fn handle_rebuild_from_wal(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -1709,6 +1738,7 @@ async fn handle_rebuild_from_wal(
                     // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
                     // doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
+                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload");
                         if let Err(e) = conn.set_applied_seq(seq) {
                             eprintln!(
                                 "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
@@ -2020,6 +2050,7 @@ async fn handle_rebuild_from_wal(
                     // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
                     // doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
+                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload(bg)");
                         if let Err(e) = conn.set_applied_seq(seq) {
                             eprintln!(
                                 "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"

@@ -57,7 +57,7 @@ A consumer node (e.g. an orac/zen deployment) calls `knowledge_status` on startu
 
 1. **Given** a DB whose applied position matches the WAL's current max seq, **When** a client calls `knowledge_status`, **Then** `wal.applied_seq == wal.max_seq` and the client can skip any rebuild.
 2. **Given** a DB behind the WAL's current max seq (a forward extension), **When** a client calls `knowledge_status`, **Then** `wal.applied_seq < wal.max_seq`, correctly signaling an incremental resume is needed.
-3. **Given** a DB whose position cannot be reconciled with the WAL as a forward extension, **When** a client calls `knowledge_status`, **Then** the reported values signal that a full rebuild is needed.
+3. **Given** a DB whose position cannot be reconciled with the WAL as a forward extension — either `wal.applied_seq` is `null` (unknown position), or it is a known integer greater than `wal.max_seq` (the DB has advanced beyond what the currently-visible WAL contains, e.g. a corpus reset or a stale copied-back WAL) — **When** a client calls `knowledge_status`, **Then** the reported values signal that a full rebuild is needed.
 
 ---
 
@@ -67,7 +67,7 @@ An operator upgrades a deployment that already has a populated graph from before
 
 **Why this priority**: Every existing deployment hits this exactly once on upgrade. Reporting `null` for a populated graph is a correctness gap that would cause a client to either skip a needed rebuild or be unable to tell "empty" from "unknown."
 
-**Independent Test**: Open a DB created before this feature (built on 0.12.1 or earlier) and confirm `knowledge_status` reports an integer `wal.applied_seq`, derived via the episode-cursor mechanism, rather than `null`.
+**Independent Test**: Open a DB created before this feature (built on 0.12.1 or earlier) whose last episode's uuid is present in the WAL, and confirm `knowledge_status` reports an integer `wal.applied_seq`, derived via the episode-cursor mechanism, rather than `null`. (The uuid-not-found case is a separate, expected `null` outcome — covered by Acceptance Scenario 2 and SC-007, not this test.)
 
 **Acceptance Scenarios**:
 
@@ -92,8 +92,9 @@ A process is killed (e.g. `kill -9`) between a chunk's graph commit and the appl
 
 ### Edge Cases
 
-- **Fresh or cleared DB, no WAL content**: `applied_seq` reports `0` (a known position: nothing applied) and `max_seq` reports the WAL's state; no rebuild is implied unless the WAL is itself non-empty.
-- **Pre-existing DB with no `Episodic` nodes at all**: `applied_seq` backfills to `0`, the same as a fresh DB — there is no episode to anchor a position derivation on, and no other content to lose track of, so "known, nothing applied" is the correct report, not `null`.
+- **Fresh or cleared DB, no WAL content**: `applied_seq` reports `0` (a known position: nothing applied); `max_seq` reports `null` (`scan_max_seq` returns `0` for an empty WAL dir, and `wal_max_seq` maps that to `null`, not `-1`); no rebuild is implied.
+- **Pre-existing DB with no `Episodic` nodes and no other graph content (`Entity` or relationship data) either**: `applied_seq` backfills to `0`, the same as a fresh DB — there is no episode to anchor a position derivation on, and no other content to lose track of, so "known, nothing applied" is the correct report, not `null`.
+- **Pre-existing DB with no `Episodic` nodes but surviving `Entity`/relationship content** (e.g. every episode was deleted, which only removes the `Episodic` node, not the entities it created): `applied_seq` is `null`, not `0` — there is real, unrecorded content and no episode left to derive a position from, so this is a genuine backfill failure, not an empty graph.
 - **Pre-existing DB, backfill succeeds**: covered by User Story 2, scenario 1 — the common upgrade path.
 - **Pre-existing DB, backfill fails** (populated DB whose last episode's uuid is not found in the WAL): `applied_seq` is `null`; this is the one case where `null` remains the correct report, and the documented action is a full rebuild (same fallback ADR-0026 already defines for its own recovery path).
 - **`null` vs. `0` vs. integer in client languages other than Rust**: `null` must be documented as a distinct state from `0`, because a naive numeric comparison behaves differently across languages — `null` breaks arithmetic in Rust and Python, but JavaScript coerces `null < 5` to `true`, so a JS client can silently fall through a numeric comparison unless the meaning of each value is stated explicitly rather than left to be inferred from type.
@@ -110,7 +111,7 @@ A process is killed (e.g. `kill -9`) between a chunk's graph commit and the appl
 - **FR-005**: `knowledge_clear_all` and fresh DB init MUST reset it.
 - **FR-006**: `knowledge_status` MUST expose `wal.applied_seq` and `wal.max_seq` in the existing nested `wal` object. Additive only — existing fields unchanged.
 - **FR-007**: **Backfill the position on first open rather than reporting it as unknown.** When a DB has content but no persisted applied-seq record, derive one using the episode-cursor mechanism from [ADR-0026](../../docs/adr/0026-episode-cursor-wal-resume.md): read the last `Episodic` node, locate its uuid in the WAL, and take that line's `seq`. ADR-0026 documents this mechanism as explicitly *retroactive* — it works on databases that predate any cursor mechanism, which is exactly the upgrade case. The derived value is conservative (an episode boundary, so `<=` the true position), the same safe direction FR-003 requires.
-- **FR-008**: Reserve `null` for genuine backfill failure only — a populated DB (at least one `Episodic` node) whose last episode's uuid is not found in the WAL. A DB with no `Episodic` nodes at all is not a backfill failure — there is nothing to derive a position from and nothing to lose track of, so it backfills to `0` directly, without a WAL scan. ADR-0026 already defines the `null` action (fall back to a full rebuild). Distinct values, distinct meanings: `null` = unknown, `0` = nothing applied, integer = known position. Document the rule explicitly rather than relying on the type: `null` breaks arithmetic in Rust and Python, but JavaScript coerces `null < 5` to `true`, so a JS consumer can fall through a numeric comparison unless the docs state the branch.
+- **FR-008**: Reserve `null` for genuine backfill failure — either a populated DB (at least one `Episodic` node) whose last episode's uuid is not found in the WAL, or a DB with no `Episodic` nodes but surviving `Entity`/relationship content (episode deletion removes only the `Episodic` node, never the entities it created, so a graph can be non-empty with zero episodes). Only a DB with *no* `Episodic` nodes **and** no `Entity`/relationship content either backfills to `0` directly, without a WAL scan — there is genuinely nothing to derive a position from and nothing to lose track of. ADR-0026 already defines the `null` action (fall back to a full rebuild). Distinct values, distinct meanings: `null` = unknown, `0` = nothing applied, integer = known position. Document the rule explicitly rather than relying on the type: `null` breaks arithmetic in Rust and Python, but JavaScript coerces `null < 5` to `true`, so a JS consumer can fall through a numeric comparison unless the docs state the branch.
 
 ### Key Entities *(if applicable)*
 
@@ -122,7 +123,7 @@ A process is killed (e.g. `kill -9`) between a chunk's graph commit and the appl
 
 - **SC-001**: After `knowledge_process_chunk`, `wal.applied_seq` equals the max seq just written — both immediately and after a service restart (proving persistence, not memoisation).
 - **SC-002**: After `knowledge_rebuild_from_wal {from_seq: 0, force_clear: true}` over a WAL whose max seq is `N`, `wal.applied_seq == N`.
-- **SC-003**: After `knowledge_clear_all`, `wal.applied_seq` resets.
+- **SC-003**: After `knowledge_clear_all`, `wal.applied_seq == 0` (a known, reset position — not `null`, and not a stale pre-clear value).
 - **SC-004**: A `kill -9` between the graph commit and the position update leaves `applied_seq` less than or equal to the seq actually reflected in the DB, never greater.
 - **SC-005**: Opening a DB created before this feature backfills a usable integer position via the episode cursor (FR-007) — not `null`, and not a value that would let a client skip a needed rebuild. Verified against a DB built on 0.12.1 or earlier.
 - **SC-006**: `wal.max_seq` is derived from `scan_max_seq` over the WAL dir — the literal highest `seq` present (`scan_max_seq() - 1`, since `scan_max_seq` itself returns the next-assignable seq, one past the highest seq actually written).

@@ -1167,17 +1167,23 @@ comparison:
 | any | `null` | WAL empty or unconfigured | nothing to resume from; treat like an empty WAL |
 | `N` | `N` (equal) | DB is caught up | none |
 | `N` | `M > N` | DB is behind, as a forward extension | incremental resume from `applied_seq + 1` (not `applied_seq` — replay's `from_seq` filter keeps lines with `seq >= from_seq`, so resuming *at* `applied_seq` would re-replay the last-applied line) |
+| `N` | `M < N` | DB has advanced beyond what the currently-visible WAL contains (e.g. a corpus reset, or a stale copied-back WAL) — not a forward extension | full rebuild |
 
 **`applied_seq` has three distinct values, not two — treat them as different types, not points
 on a number line:**
 
-- **`null`** — unknown position. Only reported when a pre-existing, populated DB has no
-  recorded position and the one-time backfill (below) itself fails to find the last episode's
-  uuid in the WAL. The documented action is always a full rebuild.
+- **`null`** — unknown position. Reported when a pre-existing DB has no recorded position and
+  the one-time backfill (below) fails to derive one: either a populated DB (has `Entity` or
+  `Episodic` content) whose last episode's uuid isn't found in the WAL, or a DB with no
+  `Episodic` nodes but surviving `Entity`/relationship content (episode deletion removes only
+  the `Episodic` node, never the entities it created, so a graph can be non-empty with zero
+  episodes — there is nothing left to derive a position from, but real content to lose track
+  of). The documented action is always a full rebuild.
 - **`0`** (integer) — a known position: nothing has been applied yet. Reported for a
-  fresh/cleared DB (including a pre-existing DB with no `Episodic` nodes at all — the backfill
-  treats "no episodes" as "nothing to derive a position from, but known to be empty" and writes
-  `0` directly, without a WAL scan), or immediately after `knowledge_clear_all`.
+  fresh/cleared DB (including a pre-existing DB with *no* `Episodic` nodes **and** no
+  `Entity`/relationship content either — genuinely nothing to derive a position from and
+  nothing to lose track of, so the backfill writes `0` directly without a WAL scan), or
+  immediately after `knowledge_clear_all`.
 - **A positive integer** — a known, applied WAL position.
 
 Do not treat `null` as if it sorted below `0`. **This distinction is not just a Rust/Python
