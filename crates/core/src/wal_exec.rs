@@ -248,4 +248,63 @@ mod tests {
             "a marked-done guard must not alter global_seq again on drop"
         );
     }
+
+    /// SC-004 (FR-003 crash safety): a crash between a chunk's WAL flush and the
+    /// `set_applied_seq` write that normally follows it (episode.rs, immediately after this
+    /// function returns) must leave `applied_seq` trailing what's actually committed, never
+    /// advancing past it. Simulated deterministically by committing a second chunk's mutation
+    /// and flushing it to WAL — both actually happen — then simply not calling
+    /// `set_applied_seq` for it, mirroring exactly what a `kill -9` between those two steps
+    /// would leave behind.
+    #[test]
+    fn skipped_set_applied_seq_write_leaves_applied_seq_trailing_not_leading() {
+        let db_dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::open(db_dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        let wal_dir = tempfile::tempdir().unwrap();
+        let writer = WalWriter::new(wal_dir.path(), 1000, 0).unwrap();
+        let wal: Arc<Mutex<Option<WalWriter>>> = Arc::new(Mutex::new(Some(writer)));
+        let sink: Arc<dyn TelemetrySink> = Arc::new(crate::telemetry::NoopSink);
+
+        // Chunk 1: commit, flush to WAL, and record applied_seq — the normal, successful path.
+        conn.raw_query(
+            "CREATE (:Episodic {uuid: 'ep-1', name: 'n', group_id: 'g', \
+             created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+             content: 'c', valid_at: timestamp('2026-01-01')})",
+        )
+        .unwrap();
+        let seq1 = wal_flush_chunk(&wal, conn.drain_mutations(), &sink)
+            .expect("chunk 1 must assign a seq");
+        conn.set_applied_seq(seq1).unwrap();
+
+        // Chunk 2: commit and flush — both really happen — but the position write that would
+        // normally follow is deliberately skipped, simulating a crash right after the flush.
+        conn.raw_query(
+            "CREATE (:Episodic {uuid: 'ep-2', name: 'n', group_id: 'g', \
+             created_at: timestamp('2026-01-01'), source: 'text', source_description: '', \
+             content: 'c', valid_at: timestamp('2026-01-01')})",
+        )
+        .unwrap();
+        let seq2 = wal_flush_chunk(&wal, conn.drain_mutations(), &sink)
+            .expect("chunk 2 must assign a seq");
+        assert!(seq2 > seq1, "chunk 2's seq must be strictly higher");
+        // No conn.set_applied_seq(seq2) call here — the simulated crash.
+
+        // Both episodes are actually committed in the graph...
+        assert_eq!(
+            conn.count_nodes("Episodic").unwrap(),
+            2,
+            "both chunks' mutations must be committed, crash or not"
+        );
+        // ...but applied_seq must still report only chunk 1's position — never chunk 2's,
+        // which would wrongly signal chunk 2's mutations are a recorded, skippable position.
+        assert_eq!(
+            conn.get_applied_seq().unwrap(),
+            Some(seq1),
+            "a skipped position write must leave applied_seq trailing the last chunk that \
+             actually recorded it, never advancing to an unrecorded chunk's seq"
+        );
+    }
 }
