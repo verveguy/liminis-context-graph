@@ -109,6 +109,53 @@ degraded (no connected database). A rising `name_index_fallback_scans` count, or
 investigating — see [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the
 mechanism.
 
+**`wal.applied_seq`** and **`wal.max_seq`** (issue #353) — let a caller decide, from a single
+`knowledge_status` call and an integer comparison, whether its local DB is already consistent
+with the WAL, needs an incremental resume, or needs a full rebuild. `wal.max_seq` is the highest
+`seq` actually present across the WAL files (`None`/`null` if the WAL is empty or unconfigured);
+`wal.applied_seq` is the highest `seq` whose mutations are actually committed in the current
+graph. Both are read fresh from persisted state on every call — never cached in memory — so an
+externally-updated WAL (e.g. a distributed, git-published WAL pulled by another process) is
+observed on the very next call, and the value survives a service restart.
+
+The consumer decision, comparing the two fields:
+
+| `applied_seq` vs. `max_seq` | Meaning | Action |
+|---|---|---|
+| `applied_seq == max_seq` | DB is caught up | none |
+| `applied_seq < max_seq` | DB is behind, as a forward extension | incremental resume from `applied_seq` |
+| `applied_seq` is `null` | position unknown | full rebuild |
+
+**`applied_seq` has three distinct values, not two — treat them as different types, not points
+on a number line:**
+
+- **`null`** — unknown position. Only reported when a pre-existing, populated DB has no
+  recorded position and the one-time backfill (below) itself fails — no episodes present, or
+  the last episode's uuid isn't found in the WAL. The documented action is always a full
+  rebuild.
+- **`0`** (integer) — a known position: nothing has been applied yet. Reported for a
+  fresh/cleared DB, or immediately after `knowledge_clear_all`.
+- **A positive integer** — a known, applied WAL position.
+
+Do not treat `null` as if it sorted below `0`. **This distinction is not just a Rust/Python
+concern — it changes behavior across languages.** `null < 5` throws or is a type error in Rust
+and Python (arithmetic on `null`/`None` isn't defined), which tends to surface the bug
+immediately. But in JavaScript, `null < 5` coerces to `true` — a naive port of the "if behind,
+resume" comparison silently takes the *incremental resume* branch on an *unknown* position,
+skipping the full rebuild the `null` state actually calls for. Check for `null` explicitly,
+before doing any numeric comparison, in every client language.
+
+**Upgrading an existing deployment**: a DB populated before this feature existed has content but
+no recorded position on its first boot under the new version. Rather than reporting `null` for
+that (indistinguishable from a genuinely unknown position, and prone to a client either skipping
+a needed rebuild or being unable to tell "empty" from "unknown"), the service backfills a
+conservative position on first open, derived from the last `Episodic` node's location in the WAL
+(the retroactive episode-cursor mechanism from
+[ADR-0026](adr/0026-episode-cursor-wal-resume.md); see [ADR-0353](adr/0353-persist-and-expose-applied-wal-seq.md)
+for why this issue persists a cursor for the fast path in addition to ADR-0026's own recovery-time
+use of the same mechanism). This backfill runs once at startup and is a no-op on every subsequent
+boot once a position is recorded.
+
 ## Streaming progress
 
 Long operations accept a `_progress_token` and stream progress frames before the terminal
