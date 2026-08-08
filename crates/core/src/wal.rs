@@ -316,6 +316,64 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     Ok(if next == 0 { None } else { Some(next - 1) })
 }
 
+/// Returns the lowest WAL `seq` currently present across `wal_dir` (issue #365), or `None` if
+/// the WAL is empty — the symmetric counterpart to `wal_max_seq`, used by the checkpoint
+/// reachability check (FR-009) to bound a checkpoint's seq against the WAL content actually on
+/// disk. Unlike `wal_max_seq`'s tail-read trick (needed because the *last* line of a file sits
+/// at an unknown offset), the *first* line of the earliest file is already at offset 0, so no
+/// analogous windowing is needed — `first_seq_in_file` reads forward only as far as the first
+/// parseable line.
+pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
+    let mut files: Vec<PathBuf> = match fs::read_dir(wal_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect(),
+        Err(_) => return Ok(None),
+    };
+    files.sort();
+
+    for path in &files {
+        if let Some(seq) = first_seq_in_file(path) {
+            return Ok(Some(seq));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads a WAL file and returns the `seq` value of its first line that parses successfully.
+/// Returns `None` only if the file can't be opened, or no line in it parses before EOF.
+///
+/// Reads incrementally via `BufReader::lines()` rather than loading the whole file into memory —
+/// this can run once per `.jsonl` file up front (e.g. `replay_opts`'s file-ordering pass), so a
+/// full-file read would turn a large WAL directory into an apparent startup hang. In the common
+/// case the first line parses immediately and only that one line is read; only a genuinely
+/// corrupt prefix costs more.
+///
+/// Tolerates a corrupt/truncated/non-UTF-8 leading line by skipping it and continuing, mirroring
+/// `read_last_seq`'s tolerance: `io::Lines` reports an `Err` only for the one line that failed
+/// UTF-8 conversion, having already consumed those bytes, so the next line is unaffected and
+/// scanning can continue.
+pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
+    let file = fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in std::io::BufRead::lines(reader) {
+        let raw = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) {
+            return Some(wal_line.seq);
+        }
+    }
+    None
+}
+
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
 /// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
 /// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
@@ -559,6 +617,37 @@ mod tests {
         // `scan_max_seq` (next-assignable) would return 42; `wal_max_seq` must report 41 — the
         // same units as `applied_seq`, so `applied_seq == wal_max_seq` can express "caught up".
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(41));
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert_eq!(wal_min_seq(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_min_seq_reports_the_literal_lowest_seq_across_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 41);
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 10);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
+    }
+
+    #[test]
+    fn wal_min_seq_tolerates_a_corrupt_leading_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("corrupt_0000.jsonl"), "not json\n").unwrap();
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 10);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
     }
 
     /// A single WAL line larger than `TAIL_READ_WINDOW` (e.g. one carrying an unusually large
