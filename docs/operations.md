@@ -32,6 +32,15 @@ diff it, and carry it across machines. The database is a derived index — delet
   rebuild. A successful non-dry-run rebuild automatically rebuilds the entity/relationship
   search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately
   queryable afterward — `knowledge_build_indices` is not normally required.
+- **Bounded rebuild** with `to_seq`: pass an inclusive upper bound (`from_seq <= seq <= to_seq`)
+  to exclude a known-bad mutation and everything after it — e.g. recovering from an operator
+  mistake that is itself recorded in the WAL. `knowledge_rebuild_from_wal {from_seq: 0,
+  to_seq: <seq before the bad mutation>, force_clear: true}` rebuilds the graph as it stood just
+  before the mistake. This is **not durable**: WAL entries beyond `to_seq` are left on disk,
+  unapplied — they are not truncated or archived. A later unbounded rebuild, or a `from_seq`
+  resume that covers the excluded range, reapplies everything that was excluded, including a
+  previously-excluded bad mutation. Durable rollback (truncating/archiving the WAL tail) is not
+  provided by this primitive.
 - **Dump** the database back to a compacted log with `knowledge_dump_wal` — this is also the
   way to take a restore-point snapshot before a large or destructive operation, since WAL replay
   is forward-only.
@@ -128,6 +137,13 @@ comparison:
 | `N` | `N` (equal) | DB is caught up | none |
 | `N` | `M > N` | DB is behind, as a forward extension | incremental resume from `applied_seq + 1` (not `applied_seq` — replay's `from_seq` filter keeps lines with `seq >= from_seq`, so resuming *at* `applied_seq` would re-replay the last-applied line) |
 | `N` | `M < N` | DB has advanced beyond what the currently-visible WAL contains (e.g. a corpus reset, or a stale copied-back WAL) — not a forward extension | full rebuild |
+
+A bounded rebuild (`to_seq` set — see [WAL administration](#wal-administration) above) is one
+deliberate way to land in the "DB is behind, as a forward extension" row: `applied_seq` reports
+the bounded landing point (`<= to_seq`), while `max_seq` still reflects the WAL's true, unbounded
+on-disk maximum. This is expected, not a fault to recover from automatically — an incremental
+resume covering the gap (or a later unbounded rebuild) reapplies everything the bounded rebuild
+excluded, including a previously-excluded bad mutation.
 
 **`applied_seq` has three distinct values, not two — treat them as different types, not points
 on a number line:**
