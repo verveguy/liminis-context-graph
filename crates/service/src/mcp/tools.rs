@@ -5,7 +5,7 @@
 //!
 //! Schemas are plain `serde_json::Value` literals rather than per-tool `schemars`-derived
 //! structs: tool-call arguments pass straight through to `handlers::dispatch` as a raw
-//! `Value` (FR-003), so there is no typed deserialization step that would justify ~34 throwaway
+//! `Value` (FR-003), so there is no typed deserialization step that would justify ~37 throwaway
 //! structs. This is the single source of truth FR-002 requires; there is no second,
 //! hand-maintained schema anywhere else.
 //!
@@ -39,7 +39,7 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (34 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (37 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -540,11 +540,15 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (7) — WAL/lifecycle/recovery/index maintenance ─────────────────────
+        // ── admin (10) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
-                           directory.",
+                           directory. The output directory starts with no checkpoints — any \
+                           `knowledge_wal_mark_*` checkpoints recorded against the source WAL \
+                           directory are NOT carried forward, since dump_wal renumbers \
+                           sequence numbers and a copied checkpoint's seq would be meaningless \
+                           against the new numbering.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -562,9 +566,75 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_prepare_checkpoint",
             description: "Rotate/flush the live WAL writer so all pending mutations are on \
-                           disk before a checkpoint or backup.",
+                           disk before an external filesystem checkpoint or backup. Unrelated \
+                           to knowledge_wal_mark_create/_list/_delete: this is a disk-flush \
+                           operation, not a named WAL position — the two features share the \
+                           word \"checkpoint\" by coincidence, not by relation.",
             scope: Scope::Admin,
             input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_wal_mark_create",
+            description: "Record a new named, retained WAL position — 'this graph was \
+                           known-good here' — at the database's current applied_seq. Distinct \
+                           from knowledge_prepare_checkpoint (a WAL flush/rotate operation, not \
+                           a named position). O(1): does not scan or replay the WAL. Fails if \
+                           the current position is unknown (applied_seq is null — resolve with \
+                           a full knowledge_rebuild_from_wal first) or if `name` already \
+                           identifies an active checkpoint. The recorded `seq` is `null` for a \
+                           genuinely fresh/empty graph, or an integer (WAL line, inclusive) \
+                           otherwise — restore a `null` checkpoint with knowledge_clear_all, or \
+                           an integer checkpoint with knowledge_rebuild_from_wal \
+                           {from_seq: 0, to_seq: <seq>, force_clear: true}.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Checkpoint name (1-200 chars of [A-Za-z0-9_-]). \
+                                             Must not already identify an active checkpoint."
+                        }
+                    },
+                    "required": ["name"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_wal_mark_list",
+            description: "List every active (non-deleted) named WAL checkpoint, each with its \
+                           `seq` and whether it is currently `reachable` — a cheap check that \
+                           the checkpoint's seq falls within the min/max seq of WAL content \
+                           presently on disk. This does NOT detect a gap in the middle of that \
+                           range, so `reachable: true` is a necessary, not sufficient, signal \
+                           that a restore will succeed. Works even when the database is \
+                           degraded or unavailable, since it only reads the WAL-directory \
+                           checkpoint store.",
+            scope: Scope::Admin,
+            input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_wal_mark_delete",
+            description: "Delete an active named WAL checkpoint, freeing its name for reuse by \
+                           a later knowledge_wal_mark_create. Records a tombstone rather than \
+                           rewriting history. Fails if `name` does not currently identify an \
+                           active checkpoint (never created, or already deleted). Works even \
+                           when the database is degraded or unavailable, since it only touches \
+                           the WAL-directory checkpoint store.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the active checkpoint to delete."
+                        }
+                    },
+                    "required": ["name"]
+                })
+            },
         },
         ToolSpec {
             name: "knowledge_rebuild_from_wal",
@@ -701,11 +771,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_34_unique_tools() {
+    fn registry_has_37_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 34);
+        assert_eq!(r.len(), 37);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 34, "tool names must be unique");
+        assert_eq!(names.len(), 37, "tool names must be unique");
     }
 
     #[test]
@@ -715,7 +785,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 14);
         assert_eq!(count(Scope::Write), 12);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 7);
+        assert_eq!(count(Scope::Admin), 10);
     }
 
     #[test]

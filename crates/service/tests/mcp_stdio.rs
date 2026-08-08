@@ -43,8 +43,8 @@ fn standalone_lists_and_calls_read_and_write_tools() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        34,
-        "default --scope=all should advertise all 34 tools"
+        37,
+        "default --scope=all should advertise all 37 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
