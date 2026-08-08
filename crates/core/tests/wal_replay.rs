@@ -1285,6 +1285,142 @@ fn test_replay_opts_from_seq() {
     assert_eq!(count, 2, "only 2 entities in DB (seq 1 and 2)");
 }
 
+/// to_seq: lines with seq > to_seq are skipped, not counted as skipped in stats, and the
+/// excluded lines do not perturb monotonicity tracking (seq_regressions unaffected).
+#[test]
+fn test_replay_opts_to_seq_excludes_later_lines() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    // Write 3 entities with seq 0,1,2 — a "bad" mutation lands at seq 2.
+    let content = [
+        make_entity_line(0, "entity-seq0"),
+        make_entity_line(1, "entity-seq1"),
+        make_entity_line(2, "entity-seq2-bad"),
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_ccc333_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                to_seq: Some(1), // exclude seq=2 (the "bad" mutation)
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts");
+
+    assert_eq!(stats.lines_replayed, 2, "only seq<=1 lines replayed");
+    assert_eq!(stats.seq_regressions, 0, "excluded line must not count as a regression");
+    assert_eq!(
+        stats.last_committed_seq,
+        Some(1),
+        "last_committed_seq must reflect the bounded landing point, not the WAL's true max"
+    );
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 2, "only 2 entities in DB (seq 0 and 1)");
+    assert!(
+        conn.get_entity_by_uuid("entity-seq2-bad")
+            .expect("query ok")
+            .is_none(),
+        "the bad mutation at seq=2 must not have been applied"
+    );
+}
+
+/// to_seq combined with from_seq: replays only the inclusive [from_seq, to_seq] window.
+#[test]
+fn test_replay_opts_to_seq_equal_from_seq_replays_single_line() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let content = [
+        make_entity_line(0, "entity-seq0"),
+        make_entity_line(1, "entity-seq1"),
+        make_entity_line(2, "entity-seq2"),
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_ddd444_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: 1,
+                to_seq: Some(1),
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts");
+
+    assert_eq!(stats.lines_replayed, 1, "only the single seq=1 line replayed");
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 1, "only entity-seq1 in DB");
+    assert!(conn.get_entity_by_uuid("entity-seq1").unwrap().is_some());
+}
+
+/// to_seq at/above the WAL's true max behaves identically to omitting it (unbounded).
+#[test]
+fn test_replay_opts_to_seq_at_max_matches_unbounded() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let content = [
+        make_entity_line(0, "entity-seq0"),
+        make_entity_line(1, "entity-seq1"),
+        make_entity_line(2, "entity-seq2"),
+    ]
+    .join("\n")
+        + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_eee555_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let stats = replayer
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                to_seq: Some(100), // well above the true max of 2
+                ..Default::default()
+            },
+        )
+        .expect("replay_opts");
+
+    assert_eq!(stats.lines_replayed, 3, "all lines replayed, same as unbounded");
+    let count = conn.count_nodes("Entity").unwrap();
+    assert_eq!(count, 3, "all 3 entities in DB");
+}
+
 /// dry_run: mutations are counted but DB is unchanged.
 #[test]
 fn test_replay_opts_dry_run() {
@@ -2939,6 +3075,7 @@ fn throughput_half2_vs_half1_flat() {
             &conn,
             ReplayOptions {
                 from_seq: 0,
+                to_seq: None,
                 dry_run: false,
                 cancel_fn: None,
                 progress_fn: Some(progress_fn),
