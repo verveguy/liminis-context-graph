@@ -1510,6 +1510,15 @@ async fn handle_rebuild_from_wal(
     let p = &req.params;
 
     let from_seq = validate_from_seq(&p["from_seq"])?;
+    let to_seq = validate_to_seq(&p["to_seq"])?;
+    if let Some(to_seq) = to_seq {
+        if to_seq < from_seq {
+            return Err(Error::Ipc(format!(
+                "knowledge_rebuild_from_wal: to_seq ({to_seq}) must not be less than from_seq \
+                 ({from_seq}) — bounded replay requires from_seq <= to_seq."
+            )));
+        }
+    }
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
 
     let wal_dir = state
@@ -1686,6 +1695,7 @@ async fn handle_rebuild_from_wal(
                     &conn,
                     ReplayOptions {
                         from_seq,
+                        to_seq,
                         dry_run,
                         cancel_fn,
                         progress_fn: build_progress_fn(tx),
@@ -1869,6 +1879,7 @@ async fn handle_rebuild_from_wal(
                     &conn,
                     ReplayOptions {
                         from_seq,
+                        to_seq,
                         dry_run: true,
                         progress_fn: None,
                         cancel_fn: None,
@@ -2000,6 +2011,7 @@ async fn handle_rebuild_from_wal(
                     &conn,
                     ReplayOptions {
                         from_seq,
+                        to_seq,
                         dry_run,
                         progress_fn: Some(progress_fn),
                         cancel_fn: None,
@@ -3188,6 +3200,31 @@ fn validate_from_seq(v: &Value) -> Result<u64, Error> {
         }
         _ => Err(Error::Ipc(
             "from_seq must be a non-negative integer".to_string(),
+        )),
+    }
+}
+
+/// Unlike `validate_from_seq`, absence (`Value::Null`) maps to `None` (unbounded), not `Some(0)`
+/// — `to_seq`'s absence is semantically distinct from a bound of `0` (FR-001).
+fn validate_to_seq(v: &Value) -> Result<Option<u64>, Error> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Bool(_) => Err(Error::Ipc(
+            "to_seq must be a non-negative integer, not a boolean".to_string(),
+        )),
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                Ok(Some(u))
+            } else if let Some(i) = n.as_i64() {
+                Err(Error::Ipc(format!("to_seq must be non-negative, got {i}")))
+            } else {
+                Err(Error::Ipc(
+                    "to_seq must be a non-negative integer".to_string(),
+                ))
+            }
+        }
+        _ => Err(Error::Ipc(
+            "to_seq must be a non-negative integer".to_string(),
         )),
     }
 }
