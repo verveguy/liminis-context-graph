@@ -2,7 +2,7 @@
 //! `tools/list` to vary at runtime by `--scope` and by attached-mode `--allow-remote-close`,
 //! but the macro produces a static tool list fixed at compile time. Implementing
 //! `list_tools`/`call_tool` directly against `mcp::tools::registry()` gives full control at
-//! negligible cost, since none of the 34 handlers have typed argument structs anyway
+//! negligible cost, since none of the 37 handlers have typed argument structs anyway
 //! (FR-003: arguments pass straight through to `handlers::dispatch` as a raw `Value`).
 
 use std::sync::Arc;

@@ -13,11 +13,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (35)
+## IPC methods (38)
 
-The socket dispatch handles **35 methods**: 34 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **38 methods**: 37 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (35) and the MCP tool registry (34, below) differ by exactly one — `health_check` is
+surface (38) and the MCP tool registry (37, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -30,7 +30,7 @@ not exposed as an MCP tool.
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
-| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
+| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_checkpoint_create`, `knowledge_checkpoint_list`, `knowledge_checkpoint_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
@@ -105,7 +105,7 @@ union of all active scopes.
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
+| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_checkpoint_create`, `knowledge_checkpoint_list`, `knowledge_checkpoint_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -151,6 +151,12 @@ is read or the database is touched. A bounded rebuild is **not durable**: WAL en
 `from_seq` resume that covers the excluded range, reapplies them, including a previously-excluded
 bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
 forward-only replay noted above.
+
+**Which `seq` do you restore to?** `to_seq` only bounds a rebuild — it doesn't tell you which
+seq was actually known-good. `knowledge_checkpoint_create`/`knowledge_checkpoint_list` (issue
+#363) answer that: create a named checkpoint before a risky change, and its returned `seq` is
+exactly the value to pass as `to_seq` when recovery is needed. See
+[Named WAL checkpoints](operations.md#named-wal-checkpoints) for the full model.
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 

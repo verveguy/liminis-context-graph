@@ -316,6 +316,36 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     Ok(if next == 0 { None } else { Some(next - 1) })
 }
 
+/// Returns the lowest WAL `seq` actually present across `wal_dir` (issue #363), or `None` if the
+/// WAL directory doesn't exist or contains no `.jsonl` files with a parseable first line.
+/// Symmetric to [`wal_max_seq`]: together `[wal_min_seq, wal_max_seq]` bound the range of seqs a
+/// checkpoint reachability check (FR-007) can trust — a seq outside this range is definitely
+/// unreachable. A seq *inside* the range is only probably reachable: this is a bounds check, not
+/// a full existence scan, so a gap caused by a specific file being removed while its neighbors
+/// remain is not detected. Uses [`crate::replay::first_seq_in_file`] per file rather than a tail
+/// read, since the *first* line (not the last) is what determines a file's minimum seq.
+pub(crate) fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
+    if !wal_dir.exists() {
+        return Ok(None);
+    }
+    let files: Vec<PathBuf> = fs::read_dir(wal_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+
+    let mut min_seq: Option<u64> = None;
+    for path in &files {
+        if let Some(seq) = crate::replay::first_seq_in_file(path) {
+            min_seq = Some(match min_seq {
+                None => seq,
+                Some(m) => m.min(seq),
+            });
+        }
+    }
+    Ok(min_seq)
+}
+
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
 /// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
 /// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
@@ -559,6 +589,45 @@ mod tests {
         // `scan_max_seq` (next-assignable) would return 42; `wal_max_seq` must report 41 — the
         // same units as `applied_seq`, so `applied_seq == wal_max_seq` can express "caught up".
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(41));
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_nonexistent_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            wal_min_seq(&tmp.path().join("does_not_exist")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn wal_min_seq_reports_first_seq_of_single_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 41);
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(41));
+    }
+
+    #[test]
+    fn wal_min_seq_folds_to_the_lowest_across_multiple_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 100);
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 5);
+        write_wal_line(tmp.path(), "seeded_0002.jsonl", 250);
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    #[test]
+    fn wal_min_seq_skips_a_file_with_a_corrupt_leading_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("corrupt_0000.jsonl"), "not valid json\n").unwrap();
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 30);
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(30));
     }
 
     /// A single WAL line larger than `TAIL_READ_WINDOW` (e.g. one carrying an unusually large

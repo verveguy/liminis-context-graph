@@ -540,7 +540,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (7) — WAL/lifecycle/recovery/index maintenance ─────────────────────
+        // ── admin (10) — WAL/lifecycle/recovery/index maintenance ─────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -562,9 +562,58 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_prepare_checkpoint",
             description: "Rotate/flush the live WAL writer so all pending mutations are on \
-                           disk before a checkpoint or backup.",
+                           disk before a checkpoint or backup. NOTE: despite the shared name, \
+                           this is unrelated to knowledge_checkpoint_create below — this flushes \
+                           the WAL writer to disk, it does not name a WAL position.",
             scope: Scope::Admin,
             input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_checkpoint_create",
+            description: "Name the database's current applied_seq as a retained, WAL-directory- \
+                           resident recovery position, e.g. before a risky mutation. Fails if \
+                           applied_seq is unknown (null) or if the name already exists — delete \
+                           and recreate to redefine a name. NOTE: unrelated to \
+                           knowledge_prepare_checkpoint above, despite the shared word \
+                           \"checkpoint\" — that flushes the WAL writer to disk; this names a \
+                           WAL sequence position for later bounded-rebuild recovery via \
+                           knowledge_rebuild_from_wal's to_seq.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Unique checkpoint name (required)."},
+                        "note": {"type": "string", "description": "Optional free-text description."}
+                    },
+                    "required": ["name"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_checkpoint_list",
+            description: "List every retained checkpoint (name, seq, created_at, note), each \
+                           annotated with whether its seq is still reachable in the WAL content \
+                           currently available for replay. Available even while the database is \
+                           degraded, since this reads only the WAL directory.",
+            scope: Scope::Admin,
+            input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_checkpoint_delete",
+            description: "Permanently remove a named checkpoint. Fails if the name does not \
+                           exist. Available even while the database is degraded, since this \
+                           touches only the WAL directory.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Checkpoint name to delete (required)."}
+                    },
+                    "required": ["name"]
+                })
+            },
         },
         ToolSpec {
             name: "knowledge_rebuild_from_wal",
@@ -701,11 +750,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_34_unique_tools() {
+    fn registry_has_37_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 34);
+        assert_eq!(r.len(), 37);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 34, "tool names must be unique");
+        assert_eq!(names.len(), 37, "tool names must be unique");
     }
 
     #[test]
@@ -715,7 +764,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 14);
         assert_eq!(count(Scope::Write), 12);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 7);
+        assert_eq!(count(Scope::Admin), 10);
     }
 
     #[test]
