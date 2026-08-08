@@ -1323,7 +1323,10 @@ fn test_replay_opts_to_seq_excludes_later_lines() {
         .expect("replay_opts");
 
     assert_eq!(stats.lines_replayed, 2, "only seq<=1 lines replayed");
-    assert_eq!(stats.seq_regressions, 0, "excluded line must not count as a regression");
+    assert_eq!(
+        stats.seq_regressions, 0,
+        "excluded line must not count as a regression"
+    );
     assert_eq!(
         stats.last_committed_seq,
         Some(1),
@@ -1375,7 +1378,10 @@ fn test_replay_opts_to_seq_equal_from_seq_replays_single_line() {
         )
         .expect("replay_opts");
 
-    assert_eq!(stats.lines_replayed, 1, "only the single seq=1 line replayed");
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "only the single seq=1 line replayed"
+    );
     let count = conn.count_nodes("Entity").unwrap();
     assert_eq!(count, 1, "only entity-seq1 in DB");
     assert!(conn.get_entity_by_uuid("entity-seq1").unwrap().is_some());
@@ -1416,7 +1422,10 @@ fn test_replay_opts_to_seq_at_max_matches_unbounded() {
         )
         .expect("replay_opts");
 
-    assert_eq!(stats.lines_replayed, 3, "all lines replayed, same as unbounded");
+    assert_eq!(
+        stats.lines_replayed, 3,
+        "all lines replayed, same as unbounded"
+    );
     let count = conn.count_nodes("Entity").unwrap();
     assert_eq!(count, 3, "all 3 entities in DB");
 }

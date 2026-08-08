@@ -1981,7 +1981,11 @@ async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
     assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
 
     let conn = db.connect().unwrap();
-    assert_eq!(conn.count_nodes("Entity").unwrap(), 2, "only seq<=1 entities replayed");
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        2,
+        "only seq<=1 entities replayed"
+    );
     assert!(
         conn.get_entity_by_uuid("bad-entity-362").unwrap().is_none(),
         "the bad mutation at seq=2 must not have been applied"
@@ -2058,11 +2062,7 @@ async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoi
     ]
     .join("\n")
         + "\n";
-    std::fs::write(
-        wal_dir.path().join("20260808_000000_bg362.jsonl"),
-        &content,
-    )
-    .unwrap();
+    std::fs::write(wal_dir.path().join("20260808_000000_bg362.jsonl"), &content).unwrap();
 
     // from_seq: 0, force_clear: true — the corrupted-mutation recovery scenario (Edge Cases).
     rebuild_and_wait(
