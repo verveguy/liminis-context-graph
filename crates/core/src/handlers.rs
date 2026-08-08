@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    backfill, canonicalize, corrections,
+    backfill, canonicalize, checkpoint, corrections,
     db::Db,
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
@@ -87,6 +87,8 @@ async fn handle(
             | "knowledge_recover"
             | "knowledge_recover_full"
             | "knowledge_close"
+            | "knowledge_checkpoint_list"
+            | "knowledge_checkpoint_delete"
     );
     if !exempt_in_degraded && state.db.load_full().is_none() {
         let reason = state
@@ -117,6 +119,9 @@ async fn handle(
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
+        "knowledge_checkpoint_create" => handle_checkpoint_create(req, state).await,
+        "knowledge_checkpoint_list" => handle_checkpoint_list(state).await,
+        "knowledge_checkpoint_delete" => handle_checkpoint_delete(req, state).await,
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
         "knowledge_recover" => handle_knowledge_recover(req, state).await,
@@ -1471,6 +1476,79 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
         "files_flushed": files_flushed,
         "files_total": files_total,
     }))
+}
+
+/// `knowledge_checkpoint_create` (issue #363, FR-001/FR-002/FR-008): captures the database's
+/// current `applied_seq` under a caller-chosen `name`. Distinct from `knowledge_prepare_checkpoint`
+/// above, which flushes the live WAL writer to disk ahead of an external filesystem backup —
+/// this method instead names a WAL sequence position for later bounded-rebuild recovery.
+async fn handle_checkpoint_create(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"]
+        .as_str()
+        .ok_or_else(|| Error::Ipc("knowledge_checkpoint_create: 'name' is required".to_string()))?
+        .to_string();
+    let note = p["note"].as_str().map(|s| s.to_string());
+
+    let wal_dir = state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let applied_seq = tokio::task::spawn_blocking(move || -> Result<Option<u64>, Error> {
+        let conn = db.connect()?;
+        conn.get_applied_seq()
+    })
+    .await??;
+    drop(_guard);
+
+    // FR-008: a null applied_seq (e.g. a freshly-upgraded pre-existing database that hasn't
+    // backfilled yet, per ADR-0353) does not represent the operator's actual intent — fail
+    // rather than silently storing a placeholder seq.
+    let seq = applied_seq.ok_or_else(|| {
+        Error::Ipc(
+            "knowledge_checkpoint_create: applied_seq is unknown (null) — cannot create a \
+             checkpoint until at least one mutation has been applied and recorded"
+                .to_string(),
+        )
+    })?;
+
+    let cp = checkpoint::create(&wal_dir, &name, seq, note)?;
+    Ok(json!(cp))
+}
+
+/// `knowledge_checkpoint_list` (issue #363, FR-003/FR-007). Exempt from the degraded-mode
+/// guard: it touches only `wal_dir`, never the DB, so an operator can find the right recovery
+/// seq while the database itself is degraded — the exact scenario this feature exists for.
+async fn handle_checkpoint_list(state: Arc<AppState>) -> Result<Value, Error> {
+    let wal_dir = state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+
+    let entries = checkpoint::list(&wal_dir)?;
+    let count = entries.len();
+    Ok(json!({ "checkpoints": entries, "count": count }))
+}
+
+/// `knowledge_checkpoint_delete` (issue #363, FR-005/FR-006). Exempt from the degraded-mode
+/// guard for the same reason as `knowledge_checkpoint_list` above.
+async fn handle_checkpoint_delete(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"]
+        .as_str()
+        .ok_or_else(|| Error::Ipc("knowledge_checkpoint_delete: 'name' is required".to_string()))?
+        .to_string();
+
+    let wal_dir = state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+
+    checkpoint::delete(&wal_dir, &name)?;
+    Ok(json!({ "deleted": true, "name": name }))
 }
 
 /// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
