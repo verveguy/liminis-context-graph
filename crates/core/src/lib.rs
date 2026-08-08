@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod backfill;
 pub mod canonicalize;
 pub mod cassette;
+pub(crate) mod checkpoint;
 pub mod corrections;
 pub mod db;
 pub mod dedup_adapter;
