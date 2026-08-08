@@ -87,6 +87,12 @@ async fn handle(
             | "knowledge_recover"
             | "knowledge_recover_full"
             | "knowledge_close"
+            // WAL checkpoints (#365, FR-011): list/delete are pure filesystem operations
+            // against `.checkpoints/` and must not additionally fail merely because the DB is
+            // degraded. `knowledge_wal_mark_create` is deliberately excluded — it depends on
+            // applied_seq, which requires an open DB.
+            | "knowledge_wal_mark_list"
+            | "knowledge_wal_mark_delete"
     );
     if !exempt_in_degraded && state.db.load_full().is_none() {
         let reason = state
@@ -117,6 +123,9 @@ async fn handle(
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
+        "knowledge_wal_mark_create" => handle_wal_mark_create(req, state).await,
+        "knowledge_wal_mark_list" => handle_wal_mark_list(state).await,
+        "knowledge_wal_mark_delete" => handle_wal_mark_delete(req, state).await,
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
         "knowledge_recover" => handle_knowledge_recover(req, state).await,
@@ -1471,6 +1480,103 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
         "files_flushed": files_flushed,
         "files_total": files_total,
     }))
+}
+
+// ── WAL checkpoints (issue #365) ────────────────────────────────────────────────
+//
+// Distinct from `knowledge_prepare_checkpoint` above: that flushes/rotates the live WAL writer
+// ahead of an external filesystem backup. These three operations record/list/remove a *named
+// WAL position* — "this graph was known-good here" — for later bounded-replay recovery
+// (FR-014). The two features share the word "checkpoint" by coincidence, not by relation.
+
+/// Resolves `state.wal_dir` or fails with the same clear error `knowledge_rebuild_from_wal`
+/// uses for the same precondition.
+fn require_wal_dir(state: &AppState) -> Result<std::path::PathBuf, Error> {
+    state
+        .wal_dir
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))
+}
+
+/// `knowledge_wal_mark_create` — records a new named checkpoint at the database's current
+/// `applied_seq` (FR-003). O(1) relative to WAL size: no WAL file scan or replay occurs here,
+/// only a DB read (`applied_seq`, and conditionally the FR-005 graph-emptiness check) and a
+/// single exclusive file create under `.checkpoints/`.
+async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let name = req.params["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("name is required and must be a non-empty string".to_string()))?
+        .to_string();
+    // Validate before touching the DB so a malformed name fails fast with a specific error
+    // rather than surfacing only once checkpoint::create is reached.
+    crate::checkpoint::validate_name(&name)?;
+
+    let wal_dir = require_wal_dir(&state)?;
+
+    // Read lock only: this call never mutates the graph, but it must observe a consistent
+    // applied_seq/content snapshot relative to any concurrently in-flight write.
+    let _guard = state.write_lock.read().await;
+    let db = load_db(&state)?;
+
+    let seq = tokio::task::spawn_blocking(move || -> Result<Option<u64>, Error> {
+        let conn = db.connect()?;
+        let applied_seq = conn.get_applied_seq()?.ok_or_else(|| {
+            Error::Ipc(
+                "knowledge_wal_mark_create: applied_seq is unknown (null) — the current \
+                 position cannot be determined, so no checkpoint can be recorded. Resolve the \
+                 unknown position (e.g. a full knowledge_rebuild_from_wal) before checkpointing."
+                    .to_string(),
+            )
+        })?;
+        if applied_seq == 0 {
+            // FR-005: applied_seq == 0 conflates "nothing applied" (a genuinely fresh/cleared
+            // DB) with "WAL line 0 applied" (WalWriter's global_seq starts at 0) — disambiguate
+            // via the same graph-emptiness check backfill_applied_seq_if_absent already uses.
+            if crate::recovery::graph_has_no_content(&conn)? {
+                return Ok(None);
+            }
+            return Ok(Some(0));
+        }
+        Ok(Some(applied_seq))
+    })
+    .await??;
+    drop(_guard);
+
+    crate::checkpoint::create(&wal_dir, &name, seq)?;
+
+    Ok(json!({
+        "success": true,
+        "name": name,
+        "seq": seq,
+    }))
+}
+
+/// `knowledge_wal_mark_list` — lists every active checkpoint with its reachability against WAL
+/// content currently on disk (FR-009). Filesystem-only: does not require the database to be
+/// open (FR-011), so it is exempt from the degraded-mode guard in `handle`.
+async fn handle_wal_mark_list(state: Arc<AppState>) -> Result<Value, Error> {
+    let wal_dir = require_wal_dir(&state)?;
+    let checkpoints =
+        tokio::task::spawn_blocking(move || crate::checkpoint::list(&wal_dir)).await??;
+    Ok(json!({ "checkpoints": checkpoints }))
+}
+
+/// `knowledge_wal_mark_delete` — tombstones an active checkpoint (FR-007/FR-008). Filesystem-
+/// only: does not require the database to be open (FR-011), so it is exempt from the
+/// degraded-mode guard in `handle`.
+async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let name = req.params["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("name is required and must be a non-empty string".to_string()))?
+        .to_string();
+
+    let wal_dir = require_wal_dir(&state)?;
+    let name_c = name.clone();
+    tokio::task::spawn_blocking(move || crate::checkpoint::delete(&wal_dir, &name_c)).await??;
+
+    Ok(json!({ "success": true, "name": name }))
 }
 
 /// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
