@@ -168,7 +168,7 @@ pub fn backfill_applied_seq_if_absent(
         // case when there is truly nothing else either — otherwise leave the row absent
         // (`null`, the documented "unknown, full rebuild" signal) rather than falsely
         // reporting "known, nothing applied" for a populated-but-episode-less graph.
-        if conn.count_nodes("Entity")? == 0 && conn.count_relates_to_edges()? == 0 {
+        if graph_has_no_content(conn)? {
             return conn.set_applied_seq(0);
         }
         return Ok(());
@@ -180,6 +180,18 @@ pub fn backfill_applied_seq_if_absent(
     // UuidNotFound (and the unreachable NoEpisodes): leave the row absent — null is the
     // correct, documented "backfill failed, full rebuild required" report (FR-008).
     Ok(())
+}
+
+/// True if the graph holds zero `Episodic` nodes, zero `Entity` nodes, and zero relationship
+/// edges — the same three-count emptiness check `backfill_applied_seq_if_absent` uses to tell
+/// "genuinely fresh" from "populated but episode-less" (issue #353). Reused by the WAL
+/// checkpoint feature (issue #365, FR-005) to disambiguate `applied_seq == 0`, which is
+/// otherwise ambiguous between "nothing applied" and "WAL line 0 applied". `&&`-short-circuits
+/// so the common non-empty case costs a single query.
+pub(crate) fn graph_has_no_content(conn: &crate::db::Conn<'_>) -> Result<bool, Error> {
+    Ok(conn.count_nodes("Episodic")? == 0
+        && conn.count_nodes("Entity")? == 0
+        && conn.count_relates_to_edges()? == 0)
 }
 
 // ── Full recovery sequence ────────────────────────────────────────────────────
