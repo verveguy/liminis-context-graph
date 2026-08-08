@@ -22,7 +22,7 @@ use arc_swap::ArcSwapOption;
 use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
-    db::Db,
+    db::{Conn, Db},
     dedup_adapter::PassthroughDedupAdapter,
     embedder::{MockEmbedder, OaiEmbedder},
     error::Error as LcgError,
@@ -4168,4 +4168,515 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
         status["result"]["wal"]["applied_seq"], 0,
         "applied_seq must equal the replay's last_committed_seq (the WAL's only line, seq 0): {status}"
     );
+}
+
+// ── knowledge_wal_mark_create / _list / _delete (issue #365: WAL checkpoints) ─────────────
+
+/// Directly inserts a minimal, valid `Entity` row via the normal `insert_entity` Rust API
+/// (a raw `MERGE ... SET` on `name_embedding` conflicts with the HNSW vector index `make_db`
+/// already built). Used to give a DB real content so FR-005's `applied_seq == 0` emptiness
+/// check has something non-empty to detect (`graph_has_no_content` must return `false`).
+fn seed_entity(conn: &Conn<'_>, uuid: &str) {
+    conn.insert_entity(&EntityRow {
+        uuid: uuid.to_string(),
+        name: uuid.to_string(),
+        group_id: "g".to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: "2026-05-22 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: "s".to_string(),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+/// Like `make_degraded_state`, but with `wal_dir` configured — needed for the FR-011 exemption
+/// tests, since `knowledge_wal_mark_list`/`_delete` operate solely on `.checkpoints/` under the
+/// WAL directory and must work even with no open DB.
+fn make_degraded_state_with_wal(reason: &str, wal_dir: PathBuf) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(None),
+        degraded_reason: Arc::new(Mutex::new(Some(reason.to_string()))),
+        embedder: Arc::new(OaiEmbedder::from_env()),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test-degraded.db".to_string(),
+        wal_dir: Some(wal_dir),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writer: Arc::new(Mutex::new(None)),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    })
+}
+
+#[tokio::test]
+async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(42).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    // Give the WAL directory content covering seq 42, so `reachable` reports true below.
+    std::fs::write(
+        wal_dir.path().join("0000.jsonl"),
+        entity_wal_line(42, "e42") + "\n",
+    )
+    .unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "pre-migration"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 1);
+    assert_eq!(v["result"]["seq"], 42, "{v}");
+
+    let list_v = dispatch_val(2, "knowledge_wal_mark_list", json!({}), state).await;
+    assert_ok_resp(&list_v, 2);
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0]["name"], "pre-migration");
+    assert_eq!(checkpoints[0]["seq"], 42);
+    assert_eq!(checkpoints[0]["reachable"], true);
+}
+
+#[tokio::test]
+async fn wal_mark_create_fails_when_applied_seq_is_null() {
+    let (db, _dir) = make_db(4); // applied_seq row never written -> get_applied_seq() == None
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(1, "knowledge_wal_mark_create", json!({"name": "x"}), state).await;
+    assert_err_resp(&v, 1, -32000);
+
+    // No checkpoint record — not even a placeholder — must be written (FR-004).
+    assert!(!wal_dir.path().join(".checkpoints").exists());
+}
+
+#[tokio::test]
+async fn wal_mark_create_rejects_duplicate_active_name() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(1).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v1 = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "dup"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v1, 1);
+
+    let v2 = dispatch_val(
+        2,
+        "knowledge_wal_mark_create",
+        json!({"name": "dup"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&v2, 2, -32000);
+
+    let list_v = dispatch_val(3, "knowledge_wal_mark_list", json!({}), state).await;
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(
+        checkpoints[0]["seq"], 1,
+        "the original record must be unmodified by the rejected duplicate: {list_v}"
+    );
+}
+
+#[tokio::test]
+async fn wal_mark_create_applied_seq_zero_empty_graph_records_seq_none() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(0).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "fresh"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 1);
+    assert!(
+        v["result"]["seq"].is_null(),
+        "a genuinely fresh, empty graph must record seq:null, not seq:0: {v}"
+    );
+
+    let list_v = dispatch_val(2, "knowledge_wal_mark_list", json!({}), state).await;
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert!(checkpoints[0]["seq"].is_null());
+    assert_eq!(
+        checkpoints[0]["reachable"], true,
+        "a seq:null checkpoint is always reachable (restore is knowledge_clear_all): {list_v}"
+    );
+}
+
+#[tokio::test]
+async fn wal_mark_create_applied_seq_zero_nonempty_graph_records_seq_some_zero() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        seed_entity(&conn, "first-chunk-entity");
+        conn.set_applied_seq(0).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "first-chunk"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 1);
+    assert_eq!(
+        v["result"]["seq"], 0,
+        "applied_seq==0 with real graph content must record seq:0, distinct from seq:null: {v}"
+    );
+}
+
+#[tokio::test]
+async fn wal_mark_list_on_empty_store_returns_empty_not_error() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(1, "knowledge_wal_mark_list", json!({}), state).await;
+    assert_ok_resp(&v, 1);
+    assert_eq!(v["result"]["checkpoints"], json!([]));
+}
+
+#[tokio::test]
+async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    // Two WAL files: one covers seq 0, the other covers seq 10.
+    std::fs::write(
+        wal_dir.path().join("a_0000.jsonl"),
+        entity_wal_line(0, "e0") + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wal_dir.path().join("b_0000.jsonl"),
+        entity_wal_line(10, "e10") + "\n",
+    )
+    .unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    {
+        let db = state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        seed_entity(&conn, "low-marker");
+        conn.set_applied_seq(0).unwrap();
+    }
+    let v_low = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "low"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v_low, 1);
+
+    {
+        let db = state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(10).unwrap();
+    }
+    let v_high = dispatch_val(
+        2,
+        "knowledge_wal_mark_create",
+        json!({"name": "high"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v_high, 2);
+
+    let list_before =
+        dispatch_val(3, "knowledge_wal_mark_list", json!({}), Arc::clone(&state)).await;
+    let cps_before = list_before["result"]["checkpoints"].as_array().unwrap();
+    assert!(
+        cps_before.iter().all(|c| c["reachable"] == true),
+        "both checkpoints must be reachable while their WAL content is on disk: {list_before}"
+    );
+
+    // Externally remove the file covering seq 0 — "low" is no longer reachable via the cheap
+    // min/max bound (its seq now falls below the WAL's lowest surviving seq).
+    std::fs::remove_file(wal_dir.path().join("a_0000.jsonl")).unwrap();
+
+    let list_after = dispatch_val(4, "knowledge_wal_mark_list", json!({}), state).await;
+    let cps_after = list_after["result"]["checkpoints"].as_array().unwrap();
+    let low = cps_after.iter().find(|c| c["name"] == "low").unwrap();
+    let high = cps_after.iter().find(|c| c["name"] == "high").unwrap();
+    assert_eq!(low["reachable"], false, "{list_after}");
+    assert_eq!(high["reachable"], true, "{list_after}");
+}
+
+#[tokio::test]
+async fn wal_mark_list_excludes_deleted_checkpoints() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(3).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let created = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "gone"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+    let deleted = dispatch_val(
+        2,
+        "knowledge_wal_mark_delete",
+        json!({"name": "gone"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&deleted, 2);
+
+    let list_v = dispatch_val(3, "knowledge_wal_mark_list", json!({}), state).await;
+    assert_eq!(list_v["result"]["checkpoints"], json!([]), "{list_v}");
+}
+
+#[tokio::test]
+async fn wal_mark_delete_of_nonexistent_name_fails() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_wal_mark_delete",
+        json!({"name": "never-created"}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 1, -32000);
+}
+
+#[tokio::test]
+async fn wal_mark_delete_of_already_deleted_name_fails() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(1).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+    dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "x"}),
+        Arc::clone(&state),
+    )
+    .await;
+    let first_delete = dispatch_val(
+        2,
+        "knowledge_wal_mark_delete",
+        json!({"name": "x"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&first_delete, 2);
+
+    let v = dispatch_val(3, "knowledge_wal_mark_delete", json!({"name": "x"}), state).await;
+    assert_err_resp(&v, 3, -32000);
+}
+
+#[tokio::test]
+async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(1).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let created = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "reuse"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+
+    let name_dir = wal_dir.path().join(".checkpoints").join("reuse");
+    let create_record_before = std::fs::read_to_string(name_dir.join("g1.create.json")).unwrap();
+
+    let deleted = dispatch_val(
+        2,
+        "knowledge_wal_mark_delete",
+        json!({"name": "reuse"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&deleted, 2);
+
+    let create_record_after = std::fs::read_to_string(name_dir.join("g1.create.json")).unwrap();
+    assert_eq!(
+        create_record_before, create_record_after,
+        "delete must never rewrite the create record in place (FR-007)"
+    );
+    assert!(
+        name_dir.join("g1.delete.json").exists(),
+        "delete must add a separate tombstone marker"
+    );
+
+    // Bump applied_seq and re-create under the same, now-inactive name.
+    {
+        let db = state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(77).unwrap();
+    }
+    let recreated = dispatch_val(
+        3,
+        "knowledge_wal_mark_create",
+        json!({"name": "reuse"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&recreated, 3);
+    assert_eq!(recreated["result"]["seq"], 77, "{recreated}");
+    assert!(
+        name_dir.join("g2.create.json").exists(),
+        "reuse after delete must land in a new generation, not overwrite g1"
+    );
+
+    let list_v = dispatch_val(4, "knowledge_wal_mark_list", json!({}), state).await;
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0]["seq"], 77);
+}
+
+#[tokio::test]
+async fn wal_mark_list_and_delete_work_when_db_degraded_but_create_does_not() {
+    let wal_dir = TempDir::new().unwrap();
+
+    // Seed a checkpoint via a healthy state first (create needs an open DB); then simulate the
+    // DB becoming unavailable and confirm list/delete still see the store on disk (FR-011).
+    let (db, _dbdir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(1).unwrap();
+    }
+    let healthy_state =
+        make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+    let created = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "survives-degradation"}),
+        healthy_state,
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+
+    let degraded = make_degraded_state_with_wal("simulated failure", wal_dir.path().to_path_buf());
+
+    let list_v = dispatch_val(
+        2,
+        "knowledge_wal_mark_list",
+        json!({}),
+        Arc::clone(&degraded),
+    )
+    .await;
+    assert_ok_resp(&list_v, 2);
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 1);
+    assert_eq!(checkpoints[0]["name"], "survives-degradation");
+
+    let delete_v = dispatch_val(
+        3,
+        "knowledge_wal_mark_delete",
+        json!({"name": "survives-degradation"}),
+        Arc::clone(&degraded),
+    )
+    .await;
+    assert_ok_resp(&delete_v, 3);
+
+    // create, by contrast, correctly depends on an open DB (applied_seq) and must still fail.
+    let create_v = dispatch_val(
+        4,
+        "knowledge_wal_mark_create",
+        json!({"name": "x"}),
+        degraded,
+    )
+    .await;
+    assert_err_resp(&create_v, 4, -32001);
+}
+
+#[tokio::test]
+async fn wal_mark_create_concurrent_same_name_exactly_one_wins() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq(1).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let handles: Vec<_> = (0..8i64)
+        .map(|i| {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                dispatch_val(
+                    i,
+                    "knowledge_wal_mark_create",
+                    json!({"name": "race"}),
+                    state,
+                )
+                .await
+            })
+        })
+        .collect();
+
+    let mut successes = 0;
+    for h in handles {
+        let v = h.await.unwrap();
+        if v.get("error").is_none() {
+            successes += 1;
+        }
+    }
+    assert_eq!(
+        successes, 1,
+        "exactly one concurrent create must succeed (FR-011/FR-012)"
+    );
+
+    let list_v = dispatch_val(100, "knowledge_wal_mark_list", json!({}), state).await;
+    let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
+    assert_eq!(checkpoints.len(), 1);
 }
