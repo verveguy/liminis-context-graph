@@ -54,6 +54,22 @@ pub enum Error {
     /// rejects this outright instead.
     #[error("cassette duplicate key: {0}")]
     CassetteDuplicateKey(String),
+
+    /// A WAL checkpoint `name` fails the filesystem-safe charset/length check (issue #365,
+    /// `checkpoint::validate_name`). Distinct from `Error::Ipc` so `knowledge_wal_mark_create`
+    /// can surface a specific, actionable message rather than a generic one.
+    #[error("invalid checkpoint name {0:?}: must be 1-200 chars of [A-Za-z0-9_-]")]
+    CheckpointInvalidName(String),
+
+    /// `knowledge_wal_mark_create` was called with a `name` that already identifies an active
+    /// (non-deleted) checkpoint (issue #365, FR-006). The existing record is left unmodified.
+    #[error("checkpoint {0:?} already exists")]
+    CheckpointDuplicateName(String),
+
+    /// `knowledge_wal_mark_delete` was called with a `name` that does not currently identify an
+    /// active checkpoint — never created, or already deleted (issue #365, FR-008).
+    #[error("checkpoint {0:?} not found")]
+    CheckpointNotFound(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
