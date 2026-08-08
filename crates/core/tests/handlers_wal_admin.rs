@@ -343,6 +343,114 @@ async fn test_rebuild_from_wal_rejects_negative_from_seq() {
     assert_eq!(v["error"]["code"], -32000, "{v}");
 }
 
+/// rebuild_from_wal with invalid to_seq (boolean) returns a structured error.
+#[tokio::test]
+async fn test_rebuild_from_wal_rejects_boolean_to_seq() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_eee666_0000.jsonl"),
+        entity_wal_line(0, "bool-to-entity") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+    let v = dispatch(
+        15,
+        "knowledge_rebuild_from_wal",
+        json!({"to_seq": true}),
+        state,
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected error for boolean to_seq: {v}"
+    );
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(msg.contains("boolean"), "error should mention boolean: {v}");
+}
+
+/// rebuild_from_wal with negative to_seq returns a structured error.
+#[tokio::test]
+async fn test_rebuild_from_wal_rejects_negative_to_seq() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_fff777_0000.jsonl"),
+        entity_wal_line(0, "neg-to-entity") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+    let v = dispatch(
+        16,
+        "knowledge_rebuild_from_wal",
+        json!({"to_seq": -1}),
+        state,
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected error for negative to_seq: {v}"
+    );
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+}
+
+/// rebuild_from_wal with to_seq < from_seq is rejected before any WAL line is read or the
+/// database is touched — even when force_clear: true is also set (FR-003).
+#[tokio::test]
+async fn test_rebuild_from_wal_rejects_to_seq_less_than_from_seq() {
+    let (db, _db_dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'pre-existing-362'})")
+            .unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+
+    std::fs::write(
+        wal_dir.path().join("20260522_000000_ggg888_0000.jsonl"),
+        entity_wal_line(0, "order-entity") + "\n" + &entity_wal_line(1, "order-entity-2") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+    let v = dispatch(
+        17,
+        "knowledge_rebuild_from_wal",
+        json!({"from_seq": 5, "to_seq": 4, "force_clear": true}),
+        state,
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected error for to_seq < from_seq: {v}"
+    );
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("to_seq") && msg.contains("from_seq"),
+        "error should mention both to_seq and from_seq: {v}"
+    );
+
+    // The database must be left completely untouched by the rejected request, even though
+    // force_clear: true was set.
+    let count = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+    assert_eq!(
+        count, 1,
+        "pre-existing entity must survive a rejected to_seq < from_seq request"
+    );
+}
+
 // ── rebuild_status ────────────────────────────────────────────────────────────
 
 /// rebuild_status returns not_found for an unknown job_id.
@@ -1831,5 +1939,192 @@ async fn test_dry_run_rebuild_does_not_resync_global_seq() {
         Some(0),
         "a dry run must not have re-derived global_seq — the writer must still start from its \
          pre-dry-run value of 0: {seqs:?}"
+    );
+}
+
+// ── to_seq bounded rebuild (#362) ────────────────────────────────────────────
+
+/// User Story 1 / SC-003: a WAL with a "bad" mutation at seq N, bounded via `to_seq: N-1`,
+/// excludes it from the rebuilt graph. Exercises the streaming (progress-token) call shape.
+#[tokio::test]
+async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    let content = [
+        entity_wal_line(0, "good-entity-a"),
+        entity_wal_line(1, "good-entity-b"),
+        entity_wal_line(2, "bad-entity-362"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260808_000000_stream362.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(500),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({"to_seq": 1}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+    assert_eq!(
+        v["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed back in the result: {v}"
+    );
+    assert_eq!(
+        v["result"]["from_seq"], 0,
+        "the applied from_seq bound must be echoed back in the result: {v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        2,
+        "only seq<=1 entities replayed"
+    );
+    assert!(
+        conn.get_entity_by_uuid("bad-entity-362").unwrap().is_none(),
+        "the bad mutation at seq=2 must not have been applied"
+    );
+}
+
+/// User Story 2 / SC: `dry_run: true` combined with `to_seq` bounds the returned statistics and
+/// leaves the live database untouched. Exercises the non-streaming dry-run call shape.
+#[tokio::test]
+async fn test_rebuild_from_wal_to_seq_dry_run_bounded_and_untouched() {
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+
+    let content = [
+        entity_wal_line(0, "dry-good-a"),
+        entity_wal_line(1, "dry-good-b"),
+        entity_wal_line(2, "dry-excluded"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir.path().join("20260808_000000_dry362.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+    let count_before = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+
+    let v = dispatch(
+        501,
+        "knowledge_rebuild_from_wal",
+        json!({"dry_run": true, "to_seq": 1}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["dry_run"], true, "{v}");
+    assert_eq!(
+        v["result"]["mutations_replayed"], 2,
+        "dry run stats must be bounded by to_seq: {v}"
+    );
+    assert_eq!(
+        v["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed back even for a dry run: {v}"
+    );
+
+    let count_after = {
+        let conn = db.connect().unwrap();
+        conn.count_nodes("Entity").unwrap()
+    };
+    assert_eq!(count_before, count_after, "dry_run must not modify the DB");
+}
+
+/// User Story 1 / FR-005, FR-006, SC-004, SC-005: after a bounded, non-dry-run rebuild via the
+/// non-streaming background-job call shape, `knowledge_status`'s `wal.applied_seq` reflects the
+/// bounded landing point (<= to_seq), and a subsequent write is assigned a seq strictly greater
+/// than the WAL's true on-disk maximum — never colliding with the excluded, unapplied tail.
+#[tokio::test]
+async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoids_collision() {
+    let (db, _db_dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CREATE (:Entity {uuid: 'pre-existing-362-bg'})")
+            .unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    let content = [
+        entity_wal_line(0, "bg-good-a"),
+        entity_wal_line(1, "bg-good-b"),
+        entity_wal_line(2, "bg-excluded"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(wal_dir.path().join("20260808_000000_bg362.jsonl"), &content).unwrap();
+
+    // from_seq: 0, force_clear: true — the corrupted-mutation recovery scenario (Edge Cases).
+    let job_status_v = rebuild_and_wait(
+        502,
+        json!({"from_seq": 0, "to_seq": 1, "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(
+        job_status_v["result"]["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed in the background job's result: {job_status_v}"
+    );
+
+    let status_v = dispatch(504, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    let applied_seq = status_v["result"]["wal"]["applied_seq"]
+        .as_u64()
+        .expect("applied_seq must be present and numeric");
+    assert!(
+        applied_seq <= 1,
+        "applied_seq must be <= to_seq (1), got {applied_seq}: {status_v}"
+    );
+
+    // The bad mutation must not have been applied.
+    let db_guard = state.db.load();
+    let conn = db_guard.as_ref().unwrap().connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid("bg-excluded").unwrap().is_none(),
+        "the excluded mutation at seq=2 must not have been applied"
+    );
+    drop(conn);
+    drop(db_guard);
+
+    // FR-006/SC-005: a subsequent write must not collide with the excluded, unapplied seq=2
+    // WAL entry still on disk.
+    let chunk_v = process_a_chunk(505, Arc::clone(&state)).await;
+    assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
+
+    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let max_seq_after = seqs.iter().copied().max().unwrap();
+    assert!(
+        max_seq_after > 2,
+        "seq written after a bounded rebuild must exceed the WAL's true on-disk max of 2, \
+         got {max_seq_after} (all seqs: {seqs:?})"
+    );
+    let mut sorted = seqs.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        seqs.len(),
+        "no seq value may repeat across the WAL directory after a bounded rebuild: {seqs:?}"
     );
 }

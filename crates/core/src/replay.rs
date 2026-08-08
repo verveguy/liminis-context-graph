@@ -180,6 +180,10 @@ pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
 pub struct ReplayOptions {
     /// Skip WAL lines with `seq < from_seq`. Default: 0 (replay all).
     pub from_seq: u64,
+    /// Skip WAL lines with `seq > to_seq`. Default: `None` (unbounded — replay to the end of
+    /// the WAL). `None` is semantically distinct from `Some(0)`: absence means unbounded, not
+    /// "bounded to seq 0".
+    pub to_seq: Option<u64>,
     /// Count mutations without applying them. Default: false.
     pub dry_run: bool,
     /// Called once per file and once per 1000 mutations.
@@ -233,13 +237,30 @@ impl WalReplayer {
         self.replay_opts(conn, ReplayOptions::default())
     }
 
-    /// Like `replay` but with `from_seq` filtering, dry-run mode, and optional progress callback.
+    /// Like `replay` but with `from_seq`/`to_seq` filtering, dry-run mode, and optional progress
+    /// callback.
     ///
-    /// - Lines with `seq < opts.from_seq` are skipped without counting against `lines_skipped`.
+    /// - Lines with `seq < opts.from_seq` or `seq > opts.to_seq` (when `Some`) are skipped
+    ///   without counting against `lines_skipped`.
     /// - When `opts.dry_run`, mutations are counted but not executed against the DB.
     /// - `opts.progress_fn` is called once per file and once per 1000 mutations within a file;
     ///   returning `false` aborts the replay cleanly.
     pub fn replay_opts(&self, conn: &Conn<'_>, opts: ReplayOptions) -> Result<ReplayStats, Error> {
+        // Reject an invalid bound pair before touching any WAL files. `handle_rebuild_from_wal`
+        // already validates this for MCP callers (FR-003), but `replay_opts` is a public API
+        // reachable directly (recovery.rs, tests, future callers) — without this check, a
+        // caller-side bug (to_seq < from_seq) would silently filter out every line and return a
+        // "successful" zero-line replay instead of surfacing the mistake.
+        if let Some(to_seq) = opts.to_seq {
+            if to_seq < opts.from_seq {
+                return Err(Error::Config(format!(
+                    "invalid ReplayOptions: to_seq ({to_seq}) must not be less than from_seq \
+                     ({from_seq})",
+                    from_seq = opts.from_seq
+                )));
+            }
+        }
+
         // Validate batch size before touching any WAL files (FR-005).
         let batch_size = resolve_batch_size(&opts)?;
 
@@ -430,6 +451,13 @@ impl WalReplayer {
                 // from_seq filter — skip without counting as skipped
                 if wal_line.seq < opts.from_seq {
                     continue;
+                }
+
+                // to_seq filter — skip without counting as skipped, symmetric to from_seq
+                if let Some(to_seq) = opts.to_seq {
+                    if wal_line.seq > to_seq {
+                        continue;
+                    }
                 }
 
                 // Monotonicity check (FR-004): a regression here means the file-ordering

@@ -142,6 +142,16 @@ run must never mutate the database — this lets a preview surface the problem b
 a real rebuild. None of this applies to an incremental `from_seq > 0` resume, which intentionally
 targets a database that already has state.
 
+**`to_seq` bounds replay from the other end: `from_seq <= seq <= to_seq`.** Pass an inclusive
+upper bound to exclude a mutation (and everything after it) from a rebuild — e.g. a WAL-recorded
+mutation that corrupted the graph. Omit `to_seq` for today's unbounded behavior (replay to the
+end of the WAL); it must not be less than `from_seq`, or the call is rejected before any WAL line
+is read or the database is touched. A bounded rebuild is **not durable**: WAL entries past
+`to_seq` stay on disk, unapplied, not truncated or archived — a later unbounded rebuild, or a
+`from_seq` resume that covers the excluded range, reapplies them, including a previously-excluded
+bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
+forward-only replay noted above.
+
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
 Three tools populate an edge's `relation_type`, with different tradeoffs:
