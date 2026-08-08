@@ -1823,6 +1823,8 @@ async fn handle_rebuild_from_wal(
 
         let mut result = json!({
             "success": true,
+            "from_seq": from_seq,
+            "to_seq": to_seq,
             "mutations_replayed": stats.lines_replayed,
             "match_prefixed_replayed": stats.match_prefixed_replayed,
             "wal_files_processed": stats.files_read,
@@ -1902,6 +1904,8 @@ async fn handle_rebuild_from_wal(
         });
         return Ok(json!({
             "success": true,
+            "from_seq": from_seq,
+            "to_seq": to_seq,
             "mutations_replayed": stats.lines_replayed,
             "match_prefixed_replayed": stats.match_prefixed_replayed,
             "wal_files_processed": stats.files_read,
@@ -2103,6 +2107,8 @@ async fn handle_rebuild_from_wal(
                             duration_ms: replay_started_at.elapsed().as_millis() as u64,
                         });
                         let mut job_result = json!({
+                            "from_seq": from_seq,
+                            "to_seq": to_seq,
                             "mutations_replayed": stats.lines_replayed,
                             "match_prefixed_replayed": stats.match_prefixed_replayed,
                             "wal_files_processed": stats.files_read,

@@ -1979,6 +1979,14 @@ async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
 
     assert_eq!(v["result"]["success"], true, "{v}");
     assert_eq!(v["result"]["mutations_replayed"], 2, "{v}");
+    assert_eq!(
+        v["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed back in the result: {v}"
+    );
+    assert_eq!(
+        v["result"]["from_seq"], 0,
+        "the applied from_seq bound must be echoed back in the result: {v}"
+    );
 
     let conn = db.connect().unwrap();
     assert_eq!(
@@ -2032,6 +2040,10 @@ async fn test_rebuild_from_wal_to_seq_dry_run_bounded_and_untouched() {
         v["result"]["mutations_replayed"], 2,
         "dry run stats must be bounded by to_seq: {v}"
     );
+    assert_eq!(
+        v["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed back even for a dry run: {v}"
+    );
 
     let count_after = {
         let conn = db.connect().unwrap();
@@ -2065,12 +2077,16 @@ async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoi
     std::fs::write(wal_dir.path().join("20260808_000000_bg362.jsonl"), &content).unwrap();
 
     // from_seq: 0, force_clear: true — the corrupted-mutation recovery scenario (Edge Cases).
-    rebuild_and_wait(
+    let job_status_v = rebuild_and_wait(
         502,
         json!({"from_seq": 0, "to_seq": 1, "force_clear": true}),
         Arc::clone(&state),
     )
     .await;
+    assert_eq!(
+        job_status_v["result"]["result"]["to_seq"], 1,
+        "the applied to_seq bound must be echoed in the background job's result: {job_status_v}"
+    );
 
     let status_v = dispatch(504, "knowledge_status", json!({}), Arc::clone(&state)).await;
     let applied_seq = status_v["result"]["wal"]["applied_seq"]

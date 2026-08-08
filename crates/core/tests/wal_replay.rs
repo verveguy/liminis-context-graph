@@ -1430,6 +1430,51 @@ fn test_replay_opts_to_seq_at_max_matches_unbounded() {
     assert_eq!(count, 3, "all 3 entities in DB");
 }
 
+/// `replay_opts` itself rejects an invalid bound pair (to_seq < from_seq) before reading any WAL
+/// file — a defense-in-depth check for direct callers of the public API that aren't covered by
+/// `handle_rebuild_from_wal`'s own request-level validation.
+#[test]
+fn test_replay_opts_rejects_to_seq_less_than_from_seq() {
+    let wal_dir = TempDir::new().unwrap();
+    let db_dir = TempDir::new().unwrap();
+
+    let content = make_entity_line(0, "entity-seq0") + "\n";
+    fs::write(
+        wal_dir.path().join("20260522_000000_fff666_0000.jsonl"),
+        &content,
+    )
+    .unwrap();
+
+    let db_path = db_dir.path().join("test.db");
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    let replayer = WalReplayer::new(wal_dir.path());
+    let result = replayer.replay_opts(
+        &conn,
+        ReplayOptions {
+            from_seq: 5,
+            to_seq: Some(4),
+            ..Default::default()
+        },
+    );
+    let Err(err) = result else {
+        panic!("to_seq < from_seq must be rejected, not silently replay zero lines");
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("to_seq") && msg.contains("from_seq"),
+        "error should mention both bounds: {msg}"
+    );
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        0,
+        "no line may be read or applied for a rejected bound pair"
+    );
+}
+
 /// dry_run: mutations are counted but DB is unchanged.
 #[test]
 fn test_replay_opts_dry_run() {

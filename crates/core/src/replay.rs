@@ -246,6 +246,21 @@ impl WalReplayer {
     /// - `opts.progress_fn` is called once per file and once per 1000 mutations within a file;
     ///   returning `false` aborts the replay cleanly.
     pub fn replay_opts(&self, conn: &Conn<'_>, opts: ReplayOptions) -> Result<ReplayStats, Error> {
+        // Reject an invalid bound pair before touching any WAL files. `handle_rebuild_from_wal`
+        // already validates this for MCP callers (FR-003), but `replay_opts` is a public API
+        // reachable directly (recovery.rs, tests, future callers) — without this check, a
+        // caller-side bug (to_seq < from_seq) would silently filter out every line and return a
+        // "successful" zero-line replay instead of surfacing the mistake.
+        if let Some(to_seq) = opts.to_seq {
+            if to_seq < opts.from_seq {
+                return Err(Error::Config(format!(
+                    "invalid ReplayOptions: to_seq ({to_seq}) must not be less than from_seq \
+                     ({from_seq})",
+                    from_seq = opts.from_seq
+                )));
+            }
+        }
+
         // Validate batch size before touching any WAL files (FR-005).
         let batch_size = resolve_batch_size(&opts)?;
 
