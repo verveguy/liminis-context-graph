@@ -569,14 +569,18 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_rebuild_from_wal",
             description: "Rebuild the graph by replaying application WAL files, optionally \
-                           from a given sequence number. Supports MCP progress notifications \
-                           when called with a progress token. A `from_seq: 0` (default) full \
-                           rebuild fails fast with an explicit error if the database already \
-                           contains data, rather than silently producing a duplicate-primary-key \
-                           failure per node — pass `force_clear: true` to clear the database \
-                           automatically before replaying, or clear it first with \
-                           `knowledge_clear_all`. This check does not apply to `from_seq > 0` \
-                           (incremental resume against an intentionally non-empty database).",
+                           from a given sequence number and/or up to a given sequence number. \
+                           Supports MCP progress notifications when called with a progress \
+                           token. A `from_seq: 0` (default) full rebuild fails fast with an \
+                           explicit error if the database already contains data, rather than \
+                           silently producing a duplicate-primary-key failure per node — pass \
+                           `force_clear: true` to clear the database automatically before \
+                           replaying, or clear it first with `knowledge_clear_all`. This check \
+                           does not apply to `from_seq > 0` (incremental resume against an \
+                           intentionally non-empty database). A bounded rebuild (`to_seq` set) \
+                           is NOT durable: WAL entries beyond `to_seq` remain on disk, unapplied \
+                           — a later unbounded rebuild, or a `from_seq` resume that covers the \
+                           excluded range, will reapply everything that was excluded.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -585,6 +589,16 @@ pub fn registry() -> Vec<ToolSpec> {
                         "from_seq": {
                             "type": "integer", "minimum": 0, "default": 0,
                             "description": "Replay starting from this WAL sequence number."
+                        },
+                        "to_seq": {
+                            "type": "integer", "minimum": 0,
+                            "description": "Inclusive upper bound: replay only lines with \
+                                             seq <= to_seq. Omit for unbounded replay to the end \
+                                             of the WAL (today's default behavior). Must not be \
+                                             less than from_seq. Not durable: WAL entries beyond \
+                                             to_seq remain on disk and will be reapplied by a \
+                                             later unbounded replay or an overlapping from_seq \
+                                             resume."
                         },
                         "dry_run": {
                             "type": "boolean", "default": false,
