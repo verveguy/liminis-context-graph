@@ -838,7 +838,7 @@ struct PreparedCache {
 /// and scanning can continue — an early bail on just the first line would relegate a file with
 /// thousands of good lines to the back of the replay order over a single crash-truncated line,
 /// exactly the kind of WAL corruption the main replay loop already tolerates line-by-line.
-fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
     for line in reader.lines() {
