@@ -57,6 +57,75 @@ See [Configuration](configuration.md) for the full set of `LCG_WAL_*`/`LCG_REPLA
 variables, and [IPC & MCP Reference](ipc-mcp-reference.md#mcp-over-stdio-transport) for the
 `knowledge_rebuild_from_wal` non-empty-database refusal behavior in detail.
 
+## Named WAL checkpoints
+
+A [bounded rebuild](#wal-administration) needs a `to_seq` to restore to — but `applied_seq`
+alone doesn't tell you *which* seq was known-good, only where the database currently is. A
+checkpoint (issue #363) closes that gap: it is an operator-chosen label on a WAL position,
+meaning "this graph was known-good here," so recovery from a bad mutation doesn't require
+correlating timestamps, reading WAL lines by hand, or bisecting with repeated rebuilds.
+
+- **`knowledge_checkpoint_create { name, note? }`** captures the database's *current*
+  `applied_seq` under `name` — it does not scan or replay the WAL, so creation is O(1)
+  regardless of WAL size. Fails if `name` already exists (delete and recreate to redefine it),
+  or if `applied_seq` is unknown (`null`) — e.g. a freshly-upgraded pre-existing database that
+  hasn't backfilled a position yet (see the `applied_seq` discussion above).
+- **`knowledge_checkpoint_list`** returns every retained checkpoint —
+  `{"checkpoints": [{name, seq, created_at, note, reachable}, ...], "count": N}` — including a
+  `reachable` flag (see below). Available even while the database is degraded, since it reads
+  only the WAL directory, not the database.
+- **`knowledge_checkpoint_delete { name }`** permanently removes a checkpoint. Fails if `name`
+  does not exist. Also available in degraded mode, for the same reason as `list`.
+
+**Recovering to a checkpoint** is a bounded rebuild using the checkpoint's `seq` as `to_seq`:
+
+```
+knowledge_rebuild_from_wal { from_seq: 0, to_seq: <checkpoint.seq>, force_clear: true }
+```
+
+This is the same primitive documented under [WAL administration](#wal-administration) above —
+a checkpoint only supplies the number to restore to; it does not add new replay logic, and
+restoring to it still costs a full bounded replay (ADR-0026 measures ~7h for a full production
+replay). Making that replay fast is a distinct, not-yet-addressed concern; this feature only
+makes recovery *correct* (naming a good position, and being honest about whether it's still
+usable), not fast.
+
+**Storage.** Checkpoints are **not** stored in the database — each is a JSON file under
+`<wal_dir>/.checkpoints/<name>.json`. This is deliberate: a checkpoint stored in the database
+would be destroyed by exactly the event it exists to recover from (a database wipe or
+corruption). The `.checkpoints/` subdirectory is invisible to the WAL scans that discover
+`.jsonl` files, so it never gets replayed as mutations or folded into sequence allocation. See
+[ADR-0363](adr/0363-wal-checkpoints-outside-the-database.md) for the full rationale.
+
+**Reachability (`reachable` in `knowledge_checkpoint_list`)** tells you whether a checkpoint's
+`seq` still falls within the WAL content currently available for replay, so unreachability
+surfaces as an explicit signal rather than a failed restore attempt. It is a bounds check
+(`wal_min_seq <= seq <= wal_max_seq`), not a full existence scan — the same O(files) cost
+discipline as `wal.max_seq` above. This means a checkpoint's `seq` can be reported reachable
+even if the *specific* WAL file containing it was individually removed while its neighbors
+remain (an internal gap inside an otherwise-covering range); a checkpoint that is genuinely
+outside the WAL's current `[min, max]` range — e.g. after a partial or manual WAL directory
+swap — is always correctly reported unreachable.
+
+**Distinct from `knowledge_prepare_checkpoint`.** Despite the shared word "checkpoint", these
+are unrelated features:
+
+| | `knowledge_prepare_checkpoint` | `knowledge_checkpoint_create`/`list`/`delete` |
+|---|---|---|
+| What it is | Rotates/flushes the live WAL writer to disk | Names a retained WAL sequence position |
+| Purpose | Ensure pending mutations are on disk before an *external* filesystem backup | Give recovery a precise, named target |
+| State | Stateless — no record kept | Persisted under `.checkpoints/`, survives a restart |
+
+They compose: run `knowledge_prepare_checkpoint` before a filesystem backup, then
+`knowledge_checkpoint_create` to label the WAL position that backup corresponds to.
+
+**`knowledge_dump_wal` interaction.** Dump/compaction ([above](#wal-administration)) writes to a
+*separate* target directory and never touches the live `wal_dir`, so running it does not itself
+invalidate a checkpoint. However, a checkpoint's `seq` is only meaningful against the WAL
+directory it was created against — if you later adopt a dumped (renumbered) WAL as your live
+directory, checkpoints created against the old numbering no longer correspond to the same
+positions in the new one.
+
 ## Self-healing and degraded mode
 
 The service binds its socket **before** opening the database, so a corrupted store leaves it
@@ -192,6 +261,7 @@ bridge and the list of operations that support it.
 
 ## Recovery and export tools
 
-`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_rebuild_from_wal`,
+`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_checkpoint_create`,
+`knowledge_checkpoint_list`, `knowledge_checkpoint_delete`, `knowledge_rebuild_from_wal`,
 `knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
 [Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.
