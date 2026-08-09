@@ -319,12 +319,16 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
 /// Returns the lowest WAL `seq` currently present across `wal_dir` (issue #365), or `None` if
 /// the WAL is empty — the symmetric counterpart to `wal_max_seq`, used by the checkpoint
 /// reachability check (FR-009) to bound a checkpoint's seq against the WAL content actually on
-/// disk. Unlike `wal_max_seq`'s tail-read trick (needed because the *last* line of a file sits
-/// at an unknown offset), the *first* line of the earliest file is already at offset 0, so no
-/// analogous windowing is needed — `first_seq_in_file` reads forward only as far as the first
-/// parseable line.
+/// disk. Like `scan_max_seq`, this scans every `.jsonl` file rather than trusting filename sort
+/// order to reflect seq order — a checkpoint reachability check that trusted sort order could
+/// misreport a checkpoint as unreachable if a file sorting later on disk happens to hold a lower
+/// seq (e.g. clock skew across concurrent writers sharing a WAL directory, per FR-012). Unlike
+/// `wal_max_seq`'s tail-read trick (needed because the *last* line of a file sits at an unknown
+/// offset), each file's *first* line is already at offset 0, so `first_seq_in_file` reads forward
+/// only as far as the first parseable line — the same bounded-per-file cost class `scan_max_seq`
+/// already pays at the ADR-0026 ~43,820-file scale.
 pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
-    let mut files: Vec<PathBuf> = match fs::read_dir(wal_dir) {
+    let files: Vec<PathBuf> = match fs::read_dir(wal_dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -332,14 +336,17 @@ pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
             .collect(),
         Err(_) => return Ok(None),
     };
-    files.sort();
 
+    let mut min_seq: Option<u64> = None;
     for path in &files {
         if let Some(seq) = first_seq_in_file(path) {
-            return Ok(Some(seq));
+            min_seq = Some(match min_seq {
+                None => seq,
+                Some(m) => m.min(seq),
+            });
         }
     }
-    Ok(None)
+    Ok(min_seq)
 }
 
 /// Reads a WAL file and returns the `seq` value of its first line that parses successfully.
@@ -639,6 +646,19 @@ mod tests {
         write_wal_line(tmp.path(), "seeded_0000.jsonl", 10);
 
         assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
+    }
+
+    /// Guards against trusting filename sort order for correctness: the lexicographically-first
+    /// file here holds the *higher* seq, mirroring the clock-skew/multi-writer scenario the
+    /// checkpoint reachability check (FR-009, issue #365) must not misreport. `wal_min_seq` must
+    /// scan every file for the true minimum, the same way `scan_max_seq` does for the maximum.
+    #[test]
+    fn wal_min_seq_finds_the_true_minimum_even_when_the_first_sorted_file_is_not_lowest() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_first_sorted.jsonl", 100);
+        write_wal_line(tmp.path(), "b_second_sorted.jsonl", 5);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
     }
 
     #[test]
