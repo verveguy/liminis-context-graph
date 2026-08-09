@@ -151,6 +151,7 @@ pub fn create(wal_dir: &Path, name: &str, seq: Option<u64>) -> Result<(), Error>
         Ok(mut file) => {
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
+            sync_dir(&dir);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -190,6 +191,7 @@ pub fn delete(wal_dir: &Path, name: &str) -> Result<(), Error> {
         Ok(mut file) => {
             file.write_all(json.as_bytes())?;
             file.sync_all()?;
+            sync_dir(&dir);
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -197,6 +199,19 @@ pub fn delete(wal_dir: &Path, name: &str) -> Result<(), Error> {
             Err(Error::CheckpointNotFound(name.to_string()))
         }
         Err(e) => Err(Error::WalIo(e)),
+    }
+}
+
+/// Flushes the containing directory's own entry so a newly linked `gN.*.json` file survives a
+/// crash immediately after creation — `File::sync_all` on the file itself flushes its contents
+/// and inode, but not the directory entry that links it in, which on some POSIX filesystems can
+/// still be lost on a crash between the two. Best-effort: the checkpoint store already tolerates
+/// unreadable/missing generation files elsewhere (see `list`'s corrupt-file handling), and a
+/// platform where opening a directory for sync fails shouldn't turn a successful create/delete
+/// into a hard error over this extra durability margin.
+fn sync_dir(dir: &Path) {
+    if let Ok(handle) = fs::File::open(dir) {
+        let _ = handle.sync_all();
     }
 }
 
@@ -234,12 +249,25 @@ pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
         let Some(record) = read_create_record(&name_dir, g) else {
             continue;
         };
+        // Identity is the directory name, not the record's own `name` field: `create`/`delete`
+        // both resolve a checkpoint by directory name (`name_dir`), so that's the value that
+        // must match for a later `delete` to find what `list` just reported. The two could
+        // otherwise diverge — e.g. an operator manually copying a checkpoint's directory to a
+        // new name inside a git-tracked WAL directory (Story 5) — leaving the record's internal
+        // `name` field stale.
+        let Some(name) = name_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
         let reachable = match record.seq {
             None => true,
             Some(n) => matches!((min, max), (Some(lo), Some(hi)) if lo <= n && n <= hi),
         };
         results.push(CheckpointInfo {
-            name: record.name,
+            name,
             seq: record.seq,
             reachable,
         });

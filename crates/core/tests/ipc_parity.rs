@@ -4193,32 +4193,13 @@ fn seed_entity(conn: &Conn<'_>, uuid: &str) {
 
 /// Like `make_degraded_state`, but with `wal_dir` configured — needed for the FR-011 exemption
 /// tests, since `knowledge_wal_mark_list`/`_delete` operate solely on `.checkpoints/` under the
-/// WAL directory and must work even with no open DB.
+/// WAL directory and must work even with no open DB. Built on top of `make_degraded_state`
+/// rather than duplicating its ~20-field `AppState` literal a third time in this file.
 fn make_degraded_state_with_wal(reason: &str, wal_dir: PathBuf) -> Arc<AppState> {
-    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    Arc::new(AppState {
-        db: ArcSwapOption::from(None),
-        degraded_reason: Arc::new(Mutex::new(Some(reason.to_string()))),
-        embedder: Arc::new(OaiEmbedder::from_env()),
-        extractor: Arc::new(MockExtractor),
-        dedup: Arc::new(PassthroughDedupAdapter),
-        write_lock: Arc::new(RwLock::new(())),
-        sink,
-        db_path: "test-degraded.db".to_string(),
-        wal_dir: Some(wal_dir),
-        wal_max_events_per_file: 10_000,
-        wal_max_bytes_per_file: 5 * 1024 * 1024,
-        embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(None)),
-        active_writes: Arc::new(AtomicUsize::new(0)),
-        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
-        workspace_root: None,
-        indices_built: Arc::new(AtomicBool::new(false)),
-        cancel_token: CancellationToken::new(),
-        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
-        ontology: None,
-        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
-    })
+    let base = make_degraded_state(reason);
+    let mut state = Arc::try_unwrap(base).unwrap_or_else(|_| unreachable!("sole owner"));
+    state.wal_dir = Some(wal_dir);
+    Arc::new(state)
 }
 
 #[tokio::test]

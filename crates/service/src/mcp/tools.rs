@@ -581,11 +581,16 @@ pub fn registry() -> Vec<ToolSpec> {
                            a named position). O(1): does not scan or replay the WAL. Fails if \
                            the current position is unknown (applied_seq is null — resolve with \
                            a full knowledge_rebuild_from_wal first) or if `name` already \
-                           identifies an active checkpoint. The recorded `seq` is `null` for a \
-                           genuinely fresh/empty graph, or an integer (WAL line, inclusive) \
-                           otherwise — restore a `null` checkpoint with knowledge_clear_all, or \
-                           an integer checkpoint with knowledge_rebuild_from_wal \
-                           {from_seq: 0, to_seq: <seq>, force_clear: true}.",
+                           identifies an active checkpoint. `name` must be 1-200 characters of \
+                           [A-Za-z0-9_-], since it becomes a single directory name under \
+                           .checkpoints/. The recorded `seq` is `null` for a genuinely \
+                           fresh/empty graph, or an integer (WAL line, inclusive) otherwise — \
+                           restore a `null` checkpoint with knowledge_clear_all, or an integer \
+                           checkpoint with knowledge_rebuild_from_wal \
+                           {from_seq: 0, to_seq: <seq>, force_clear: true}. Exactly-one-wins \
+                           under concurrent create for the same name relies on exclusive file \
+                           creation, which is a local-filesystem guarantee — not reliable on an \
+                           NFS-mounted WAL directory.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({

@@ -48,20 +48,23 @@ diff it, and carry it across machines. The database is a derived index — delet
   sequence numbers and a copied mark's `seq` would be meaningless against the new numbering.
 - **Name a known-good position** with `knowledge_wal_mark_create {name}` — a lightweight
   alternative to a full `knowledge_dump_wal` snapshot when all you need is a durable pointer back
-  to "this graph was good here," not a materialized copy. It records the database's current
-  `applied_seq` under `<wal_dir>/.checkpoints/`, is O(1) (no WAL scan or replay), and fails if
-  the position is unknown (`applied_seq` is `null`) or the name is already in use by an active
-  mark. `knowledge_wal_mark_list` lists every active mark with its `seq` and whether it is
-  currently `reachable` (a cheap min/max check against the WAL content on disk — it does not
-  detect a gap in the middle of that range). `knowledge_wal_mark_delete {name}` removes a mark
-  (recording a tombstone, never rewriting the original record) and frees the name for reuse. To
-  restore: `knowledge_rebuild_from_wal {from_seq: 0, to_seq: <seq>, force_clear: true}` for a
+  to "this graph was good here," not a materialized copy. A `name` must be 1-200 characters of
+  `[A-Za-z0-9_-]`, because it becomes a single directory name under `.checkpoints/`. It records
+  the database's current `applied_seq` under `<wal_dir>/.checkpoints/`, is O(1) (no WAL scan or
+  replay), and fails if the position is unknown (`applied_seq` is `null`) or the name is already
+  in use by an active mark. `knowledge_wal_mark_list` lists every active mark with its `seq` and
+  whether it is currently `reachable` (a cheap min/max check against the WAL content on disk — it
+  does not detect a gap in the middle of that range). `knowledge_wal_mark_delete {name}` removes a
+  mark (recording a tombstone, never rewriting the original record) and frees the name for reuse.
+  To restore: `knowledge_rebuild_from_wal {from_seq: 0, to_seq: <seq>, force_clear: true}` for a
   mark with an integer `seq`, or `knowledge_clear_all` for a mark with `seq: null` (a genuinely
   empty graph). These tools are unrelated to `knowledge_prepare_checkpoint` below — they name a
   WAL position, not flush a writer — and their `.checkpoints/` store lives in its own
   subdirectory precisely so it is invisible to the WAL file scans that discover `.jsonl` mutation
   files (`knowledge_dump_wal` and the replayer among them), and so it travels with the WAL
-  directory itself when checked into git.
+  directory itself when checked into git. Exactly-one-wins under concurrent `create` for the same
+  name relies on exclusive file creation (`O_EXCL`), a local-filesystem guarantee — not reliable
+  on an NFS-mounted WAL directory (see [ADR-0365](adr/0365-wal-checkpoints-directory-per-name-store.md)).
 - **Checkpoint** before backups with `knowledge_prepare_checkpoint` — this rotates and flushes
   the live WAL writer so pending mutations are on disk before an external filesystem backup. It
   shares the word "checkpoint" with `knowledge_wal_mark_*` above by coincidence, not by relation.

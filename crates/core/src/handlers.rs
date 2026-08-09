@@ -1543,7 +1543,9 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
     .await??;
     drop(_guard);
 
-    crate::checkpoint::create(&wal_dir, &name, seq)?;
+    let name_c = name.clone();
+    tokio::task::spawn_blocking(move || crate::checkpoint::create(&wal_dir, &name_c, seq))
+        .await??;
 
     Ok(json!({
         "success": true,
