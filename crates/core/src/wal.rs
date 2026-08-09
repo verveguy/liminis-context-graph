@@ -670,6 +670,33 @@ mod tests {
         assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
     }
 
+    /// SC-009 (issue #365): the `.checkpoints/` subdirectory a WAL directory may contain must be
+    /// invisible to every non-recursive `.jsonl`-extension-filtered scan in this file — it is
+    /// neither counted by `count_jsonl_files` (`knowledge_status`'s `wal.file_count`) nor folded
+    /// into `scan_max_seq`/`wal_max_seq`/`wal_min_seq` (`global_seq` allocation and checkpoint
+    /// reachability), even though it holds JSON files of its own one level down.
+    #[test]
+    fn checkpoints_subdirectory_is_invisible_to_jsonl_scans() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 10);
+
+        let checkpoint_dir = tmp.path().join(".checkpoints").join("pre-migration");
+        fs::create_dir_all(&checkpoint_dir).unwrap();
+        fs::write(
+            checkpoint_dir.join("g1.create.json"),
+            r#"{"name":"pre-migration","seq":10,"created_at_ms":0}"#,
+        )
+        .unwrap();
+        // Also drop a same-named `.jsonl` sibling one level down, to prove non-recursion (not
+        // just extension filtering) is what keeps it out of scope.
+        fs::write(checkpoint_dir.join("decoy.jsonl"), "not a real WAL line\n").unwrap();
+
+        assert_eq!(count_jsonl_files(tmp.path()), 1);
+        assert_eq!(scan_max_seq(tmp.path()).unwrap(), 11);
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(10));
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
+    }
+
     /// A single WAL line larger than `TAIL_READ_WINDOW` (e.g. one carrying an unusually large
     /// embedding) must still be found via the full-read fallback.
     #[test]
