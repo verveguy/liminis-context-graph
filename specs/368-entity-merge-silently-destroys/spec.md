@@ -177,8 +177,10 @@ happened to group `L`'s edge as a side effect of the rewrite.
 - **Merge operation**: Collapses one or more alias entities into a canonical entity within a single
   `group_id` (the "merging group"), rewriting or deduplicating each alias's edges in the process.
 - **Merging group**: The `group_id` under which a merge operation is invoked — used to resolve the
-  canonical and alias entities by name, and used as the scope boundary for duplicate-edge detection
-  and result counts under this fix.
+  canonical and alias entities by name, and used to classify each edge as same-group or foreign for
+  result-count reporting under this fix. It is NOT the scope used for duplicate-edge detection —
+  that scope is always the candidate edge's own `group_id` (see FR-001 and the Assumptions
+  section).
 
 ## Success Criteria *(mandatory)*
 
