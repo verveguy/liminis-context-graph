@@ -188,7 +188,10 @@ mod tests {
         let parsed = read_pointers(&attrs);
 
         assert_eq!(parsed.get(EndpointSide::Src), None);
-        assert_eq!(parsed.get(EndpointSide::Dst), Some(&sample_pointer("alice")));
+        assert_eq!(
+            parsed.get(EndpointSide::Dst),
+            Some(&sample_pointer("alice"))
+        );
     }
 
     #[test]
@@ -200,7 +203,10 @@ mod tests {
         let attrs = write_pointers("{}", &pointers);
         let parsed = read_pointers(&attrs);
 
-        assert_eq!(parsed.get(EndpointSide::Src), Some(&sample_pointer("alice")));
+        assert_eq!(
+            parsed.get(EndpointSide::Src),
+            Some(&sample_pointer("alice"))
+        );
         assert_eq!(parsed.get(EndpointSide::Dst), Some(&sample_pointer("bob")));
     }
 

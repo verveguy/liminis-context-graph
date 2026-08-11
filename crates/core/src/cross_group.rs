@@ -68,7 +68,8 @@ pub fn resolve_endpoint(
     source_group_id: &str,
     endpoint_name: &str,
 ) -> Result<(BindingState, Option<String>), Error> {
-    let Some(winner) = conn.get_entity_by_name_ci_with_scan_fallback(endpoint_name, source_group_id)?
+    let Some(winner) =
+        conn.get_entity_by_name_ci_with_scan_fallback(endpoint_name, source_group_id)?
     else {
         return Ok((BindingState::Unbound, None));
     };
@@ -90,9 +91,9 @@ fn resolve_side(
 ) -> Result<(Option<String>, Option<CrossGroupPointer>), Error> {
     match spec {
         EndpointSpec::Uuid(uuid) => {
-            let entity = conn
-                .get_entity_by_uuid(uuid)?
-                .ok_or_else(|| Error::Ipc(format!("cross-group edge endpoint {uuid} does not exist")))?;
+            let entity = conn.get_entity_by_uuid(uuid)?.ok_or_else(|| {
+                Error::Ipc(format!("cross-group edge endpoint {uuid} does not exist"))
+            })?;
             if entity.group_id != edge_group_id {
                 return Err(Error::Ipc(format!(
                     "endpoint {uuid} belongs to group '{}', foreign to this edge's own group \
@@ -141,8 +142,10 @@ pub fn create_cross_group_edge(
 ) -> Result<RelatesToEdge, Error> {
     let applied_seq = conn.get_applied_seq()?;
 
-    let (source_uuid, src_pointer) = resolve_side(conn, &params.source, &params.group_id, applied_seq)?;
-    let (target_uuid, dst_pointer) = resolve_side(conn, &params.target, &params.group_id, applied_seq)?;
+    let (source_uuid, src_pointer) =
+        resolve_side(conn, &params.source, &params.group_id, applied_seq)?;
+    let (target_uuid, dst_pointer) =
+        resolve_side(conn, &params.target, &params.group_id, applied_seq)?;
 
     let mut pointers = CrossGroupPointers::default();
     if let Some(p) = src_pointer {
@@ -207,7 +210,11 @@ pub struct RebindCounts {
 ///
 /// Safe to call against a partially-hydrated source: an endpoint that hasn't arrived yet simply
 /// resolves `Unbound` again and is left with no hop (FR-009's mid-hydration safety).
-pub fn rebind_pointers(conn: &Conn, source_group_id: &str, ts: &str) -> Result<RebindCounts, Error> {
+pub fn rebind_pointers(
+    conn: &Conn,
+    source_group_id: &str,
+    ts: &str,
+) -> Result<RebindCounts, Error> {
     let current_seq = conn.get_applied_seq()?;
     let mut counts = RebindCounts::default();
 
@@ -230,7 +237,8 @@ pub fn rebind_pointers(conn: &Conn, source_group_id: &str, ts: &str) -> Result<R
             }
 
             counts.checked += 1;
-            let (new_state, new_uuid) = resolve_endpoint(conn, source_group_id, &existing.endpoint_name)?;
+            let (new_state, new_uuid) =
+                resolve_endpoint(conn, source_group_id, &existing.endpoint_name)?;
 
             if new_uuid != existing.resolved_uuid {
                 let current_hop = conn
@@ -254,7 +262,12 @@ pub fn rebind_pointers(conn: &Conn, source_group_id: &str, ts: &str) -> Result<R
                         break;
                     }
                     if both_resolved
-                        && conn.has_directed_edge(&prospective_src, &prospective_dst, &rn_name, &rn_group_id)?
+                        && conn.has_directed_edge(
+                            &prospective_src,
+                            &prospective_dst,
+                            &rn_name,
+                            &rn_group_id,
+                        )?
                     {
                         conn.invalidate_edge(&rn_uuid, ts)?;
                         counts.invalidated_duplicate += 1;

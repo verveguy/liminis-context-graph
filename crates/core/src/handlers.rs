@@ -2432,10 +2432,7 @@ fn parse_endpoint_spec(v: &Value) -> Result<EndpointSpec, Error> {
     if let Some(uuid) = v["uuid"].as_str() {
         return Ok(EndpointSpec::Uuid(uuid.to_string()));
     }
-    match (
-        v["source_group_id"].as_str(),
-        v["endpoint_name"].as_str(),
-    ) {
+    match (v["source_group_id"].as_str(), v["endpoint_name"].as_str()) {
         (Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
             source_group_id: source_group_id.to_string(),
             endpoint_name: endpoint_name.to_string(),
@@ -2451,7 +2448,10 @@ fn pointer_to_json(p: &pointer::CrossGroupPointer) -> Value {
     serde_json::to_value(p).unwrap_or(Value::Null)
 }
 
-async fn handle_add_cross_group_edge(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+async fn handle_add_cross_group_edge(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
     let p = &req.params;
     let name = p["name"].as_str().unwrap_or("").to_string();
     let group_id = p["group_id"]

@@ -128,7 +128,10 @@ fn cross_group_edge_persists_pointer_fields_for_foreign_endpoint() {
         .unwrap();
     let refetched_pointers = pointer::read_pointers(&refetched.attributes);
     assert_eq!(
-        refetched_pointers.get(EndpointSide::Dst).unwrap().resolved_uuid,
+        refetched_pointers
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .resolved_uuid,
         Some(bob.uuid.clone())
     );
     assert_eq!(refetched.source_node_uuid, alice.uuid);
@@ -213,7 +216,10 @@ fn bare_uuid_endpoint_foreign_to_edge_group_is_rejected_with_no_partial_write() 
 
     assert!(result.is_err());
     let after = conn.count_nodes("RelatesToNode_").unwrap();
-    assert_eq!(before, after, "no partial edge should be written on rejection");
+    assert_eq!(
+        before, after,
+        "no partial edge should be written on rejection"
+    );
 }
 
 // ── User Story 2: pointer resolution agrees with the name index, including on ambiguity ───────
@@ -290,7 +296,8 @@ fn resolve_endpoint_resolves_through_merged_tombstone_to_canonical() {
     // Simulate corrections::merge_entities tombstoning the alias in place (corrections.rs:1068):
     // label added, row left in place, name unchanged.
     alias.labels.push("Merged".to_string());
-    conn.update_entity_labels(&alias.uuid, &alias.labels).unwrap();
+    conn.update_entity_labels(&alias.uuid, &alias.labels)
+        .unwrap();
 
     let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "erin").unwrap();
     assert_eq!(state, BindingState::Bound);
@@ -357,7 +364,10 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
         .next()
         .unwrap();
     assert_eq!(mid.source_node_uuid, alice.uuid);
-    assert_eq!(mid.target_node_uuid, "", "stale hop should be gone after purge");
+    assert_eq!(
+        mid.target_node_uuid, "",
+        "stale hop should be gone after purge"
+    );
     assert_eq!(
         pointer::read_pointers(&mid.attributes)
             .get(EndpointSide::Dst)
@@ -528,8 +538,14 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
     )
     .unwrap();
     let pointers = pointer::read_pointers(&edge.attributes);
-    assert_eq!(pointers.get(EndpointSide::Src).unwrap().binding_state, BindingState::Unbound);
-    assert_eq!(pointers.get(EndpointSide::Dst).unwrap().binding_state, BindingState::Unbound);
+    assert_eq!(
+        pointers.get(EndpointSide::Src).unwrap().binding_state,
+        BindingState::Unbound
+    );
+    assert_eq!(
+        pointers.get(EndpointSide::Dst).unwrap().binding_state,
+        BindingState::Unbound
+    );
 
     // Now "Bob" arrives — both pointers resolve to the same entity within one rebind pass,
     // which is exactly the self-loop shape User Story 3 AC 5 says must reuse
@@ -674,7 +690,10 @@ fn unbound_edge_excluded_from_two_hop_read_paths_without_erroring() {
 
     // Every two-hop read path must not error and must not surface the unbound edge.
     assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
-    assert!(conn.get_full_edges_for_entity(&alice.uuid).unwrap().is_empty());
+    assert!(conn
+        .get_full_edges_for_entity(&alice.uuid)
+        .unwrap()
+        .is_empty());
     assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
     assert!(!conn
         .has_directed_edge(&alice.uuid, "irrelevant-uuid", "KNOWS", GROUP_LAYER)
@@ -721,7 +740,10 @@ fn ambiguous_edge_excluded_from_two_hop_read_paths_without_erroring() {
     );
 
     assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
-    assert!(conn.get_full_edges_for_entity(&alice.uuid).unwrap().is_empty());
+    assert!(conn
+        .get_full_edges_for_entity(&alice.uuid)
+        .unwrap()
+        .is_empty());
     assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
 }
 

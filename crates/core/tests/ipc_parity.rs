@@ -2441,7 +2441,10 @@ async fn parity_add_cross_group_edge_intra_group_has_no_pointers() {
     .await;
     assert_ok_resp(&v, 201);
     let r = &v["result"];
-    assert_eq!(r["source_node_uuid"], "alice-201", "unexpected response: {v}");
+    assert_eq!(
+        r["source_node_uuid"], "alice-201",
+        "unexpected response: {v}"
+    );
     assert_eq!(r["target_node_uuid"], "bob-201", "unexpected response: {v}");
     assert!(
         r["cross_group_pointers"]["src"].is_null(),
@@ -2502,7 +2505,10 @@ async fn parity_add_cross_group_edge_foreign_endpoint_bound() {
     let r = &v["result"];
     assert_eq!(r["target_node_uuid"], "bob-202", "unexpected response: {v}");
     let dst = &r["cross_group_pointers"]["dst"];
-    assert_eq!(dst["source_group_id"], "source-a", "unexpected response: {v}");
+    assert_eq!(
+        dst["source_group_id"], "source-a",
+        "unexpected response: {v}"
+    );
     assert_eq!(dst["endpoint_name"], "bob", "unexpected response: {v}");
     assert_eq!(dst["resolved_uuid"], "bob-202", "unexpected response: {v}");
     assert_eq!(dst["binding_state"], "bound", "unexpected response: {v}");
@@ -2601,8 +2607,7 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
     .await;
     assert_ok_resp(&created, 205);
     assert_eq!(
-        created["result"]["cross_group_pointers"]["dst"]["binding_state"],
-        "unbound",
+        created["result"]["cross_group_pointers"]["dst"]["binding_state"], "unbound",
         "expected unbound before Bob exists: {created}"
     );
 
@@ -2633,9 +2638,18 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
     assert_ok_resp(&rebind, 206);
     let r = &rebind["result"];
     assert_eq!(r["bound"], 1, "expected one pointer newly bound: {rebind}");
-    assert!(r["checked"].is_number(), "checked must be numeric: {rebind}");
-    assert!(r["unbound"].is_number(), "unbound must be numeric: {rebind}");
-    assert!(r["ambiguous"].is_number(), "ambiguous must be numeric: {rebind}");
+    assert!(
+        r["checked"].is_number(),
+        "checked must be numeric: {rebind}"
+    );
+    assert!(
+        r["unbound"].is_number(),
+        "unbound must be numeric: {rebind}"
+    );
+    assert!(
+        r["ambiguous"].is_number(),
+        "ambiguous must be numeric: {rebind}"
+    );
     assert!(
         r["invalidated_self_loop"].is_number(),
         "invalidated_self_loop must be numeric: {rebind}"
