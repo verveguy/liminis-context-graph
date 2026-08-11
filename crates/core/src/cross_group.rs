@@ -206,7 +206,12 @@ pub struct RebindCounts {
 /// - A transition into `Bound` creates the missing hop (`Db::create_relates_to_hop`); a
 ///   transition out of `Bound` (rename, purge, now-ambiguous) drops the stale hop
 ///   (`Db::delete_relates_to_hop`) — matching the two-hop model's "unbound = missing hop"
-///   representation (FR-004/FR-005), so read paths need no change (User Story 4 AC 1).
+///   representation (FR-004/FR-005), so read paths need no change (User Story 4 AC 1). The
+///   direct `Entity→Entity` compat rel (`Db::create_relates_to_direct`/`delete_relates_to_direct`)
+///   is kept in sync the same way — present iff both sides are currently resolved — so a pointer
+///   bound after creation (rather than at creation, like `insert_cross_group_edge`'s case) isn't
+///   permanently missing the direct rel that raw-Cypher consumers of `knowledge_query_cypher`
+///   may query.
 ///
 /// Safe to call against a partially-hydrated source: an endpoint that hasn't arrived yet simply
 /// resolves `Unbound` again and is left with no hop (FR-009's mid-hydration safety).
@@ -221,6 +226,7 @@ pub fn rebind_pointers(
     for (rn_uuid, rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
         let mut pointers = pointer::read_pointers(&attrs);
         let mut changed = false;
+        let mut hop_changed = false;
         let mut invalidated = false;
 
         for side in [EndpointSide::Src, EndpointSide::Dst] {
@@ -281,6 +287,7 @@ pub fn rebind_pointers(
                 } else if existing.resolved_uuid.is_some() {
                     conn.delete_relates_to_hop(&rn_uuid, side)?;
                 }
+                hop_changed = true;
             }
 
             match new_state {
@@ -308,6 +315,23 @@ pub fn rebind_pointers(
         if changed {
             let new_attrs = pointer::write_pointers(&attrs, &pointers);
             conn.update_relates_to_attributes(&rn_uuid, &new_attrs)?;
+        }
+        if hop_changed {
+            // Re-sync the direct compat rel to the two-hop model's final state. Delete first
+            // (not just MERGE) because a stale rel from before this pass may point at a
+            // different src/dst than the now-current resolution.
+            conn.delete_relates_to_direct(&rn_uuid)?;
+            if let Some(final_edge) = conn
+                .get_relates_to_by_uuids(std::slice::from_ref(&rn_uuid))?
+                .into_iter()
+                .next()
+            {
+                if !final_edge.source_node_uuid.is_empty()
+                    && !final_edge.target_node_uuid.is_empty()
+                {
+                    conn.create_relates_to_direct(&final_edge)?;
+                }
+            }
         }
     }
 

@@ -845,6 +845,49 @@ fn count_cross_group_pointers_reports_correct_state_counts() {
     assert_eq!(counts.ambiguous, 1);
 }
 
+/// An invalidated cross-group edge (e.g. one `rebind_pointers` invalidated as a self-loop or
+/// duplicate — User Story 3 AC 5) is no longer a live assertion and must not inflate
+/// `knowledge_status`'s counts, matching `list_cross_group_pointer_candidates`'s own
+/// `invalid_at IS NULL` filter.
+#[test]
+fn count_cross_group_pointers_excludes_invalidated_edges() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(conn.count_cross_group_pointers().unwrap().bound, 1);
+
+    conn.invalidate_edge(&edge.uuid, TS).unwrap();
+
+    let counts = conn.count_cross_group_pointers().unwrap();
+    assert_eq!(counts.bound, 0, "invalidated edge must not count as bound");
+    assert_eq!(counts.unbound, 0);
+    assert_eq!(counts.ambiguous, 0);
+}
+
 #[test]
 fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
     let dir = TempDir::new().unwrap();
@@ -887,4 +930,64 @@ fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
     let edges = conn.get_edges_for_entity(&alice.uuid).unwrap();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].uuid, edge.uuid);
+}
+
+/// `insert_cross_group_edge` creates the direct `Entity→Entity` compat rel only when both
+/// endpoints already resolve at creation time. A pointer that starts unbound and is later bound
+/// via `rebind_pointers` must not be permanently missing that rel — raw-Cypher consumers of
+/// `knowledge_query_cypher` querying the direct pattern (rather than the two-hop shadow-node
+/// pattern every internal read path uses) would otherwise silently miss it.
+#[test]
+fn rebind_from_unbound_to_bound_creates_direct_compat_rel() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    let direct_rel_count = |conn: &lcg_core::db::Conn, uuid: &str| -> usize {
+        conn.query_cypher_raw(&format!(
+            "MATCH (src:Entity)-[r:RELATES_TO {{uuid: '{uuid}'}}]->(dst:Entity) RETURN r.uuid"
+        ))
+        .unwrap()
+        .count()
+    };
+    assert_eq!(
+        direct_rel_count(&conn, &edge.uuid),
+        0,
+        "no direct compat rel yet: target is still unbound"
+    );
+
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.set_applied_seq(2).unwrap();
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.bound, 1);
+
+    assert_eq!(
+        direct_rel_count(&conn, &edge.uuid),
+        1,
+        "rebind must create the direct compat rel once both endpoints resolve"
+    );
 }
