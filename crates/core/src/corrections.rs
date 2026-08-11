@@ -137,7 +137,6 @@ struct MergeEdgeCounts {
     foreign_rewritten: usize,
     deduped: usize,
     foreign_deduped: usize,
-    self_loops: usize,
 }
 
 // ── File location ─────────────────────────────────────────────────────────────
@@ -862,7 +861,6 @@ fn merge_entities_inner(
             if !dry_run {
                 conn.invalidate_edge(&old_edge.uuid, ts)?;
             }
-            counts.self_loops += 1;
             continue;
         }
 
