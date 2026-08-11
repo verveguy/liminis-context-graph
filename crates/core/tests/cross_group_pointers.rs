@@ -19,7 +19,6 @@ const DIM: usize = 4;
 const TS: &str = "2026-01-01T00:00:00Z";
 const GROUP_LAYER: &str = "layer";
 const GROUP_A: &str = "source-a";
-const GROUP_B: &str = "source-b";
 
 fn open_db(dir: &TempDir) -> Db {
     let db = Db::open(dir.path().join("test.db").to_str().unwrap()).unwrap();
@@ -122,7 +121,7 @@ fn cross_group_edge_persists_pointer_fields_for_foreign_endpoint() {
 
     // Persisted, not just returned: re-fetch from the DB.
     let refetched = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -172,7 +171,7 @@ fn cross_group_edge_via_foreign_but_no_match_is_unbound_not_dropped() {
     // Edge is retained (RelatesToNode_ + src hop exist), but the foreign hop is absent —
     // excluded from normal traversal (US4 AC1), not dropped (FR-004).
     let refetched = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -352,7 +351,7 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
 
     // RelatesToNode_(layer) and its pointer attributes must have survived the purge untouched.
     let mid = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -373,7 +372,7 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
     assert_eq!(counts.bound, 1);
 
     let after = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -482,7 +481,7 @@ fn rebind_pointers_leaves_not_yet_hydrated_target_unbound() {
     assert_eq!(counts.unbound, 1);
 
     let after = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -544,7 +543,7 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
 
     assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
     let raw = conn
-        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -625,7 +624,7 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
     // The duplicate is invalidated, not left dangling with a wrong resolution.
     assert!(conn.get_edge_by_uuid(&dup_edge.uuid).unwrap().is_none());
     let raw = conn
-        .get_relates_to_by_uuids(&[dup_edge.uuid.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&dup_edge.uuid))
         .unwrap()
         .into_iter()
         .next()
@@ -634,4 +633,236 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
 
     // The stable edge is untouched and still resolves.
     assert!(conn.get_edge_by_uuid(&stable_edge.uuid).unwrap().is_some());
+}
+
+// ── User Story 4: unbound/ambiguous edges are observable and don't break read paths ───────────
+
+#[test]
+fn unbound_edge_excluded_from_two_hop_read_paths_without_erroring() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Ghost".to_string(), // never resolves
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Ghost".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Unbound
+    );
+
+    // Every two-hop read path must not error and must not surface the unbound edge.
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
+    assert!(conn.get_full_edges_for_entity(&alice.uuid).unwrap().is_empty());
+    assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
+    assert!(!conn
+        .has_directed_edge(&alice.uuid, "irrelevant-uuid", "KNOWS", GROUP_LAYER)
+        .unwrap());
+}
+
+#[test]
+fn ambiguous_edge_excluded_from_two_hop_read_paths_without_erroring() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    let dup1 = make_entity("Dup", GROUP_A, "2026-01-01 00:00:00");
+    let dup2 = make_entity("Dup", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&dup1).unwrap();
+    conn.insert_entity(&dup2).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Dup".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Dup".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Ambiguous
+    );
+
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
+    assert!(conn.get_full_edges_for_entity(&alice.uuid).unwrap().is_empty());
+    assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
+}
+
+#[test]
+fn count_cross_group_pointers_reports_correct_state_counts() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS);
+    let dup1 = make_entity("Dup", GROUP_A, "2026-01-01 00:00:00");
+    let dup2 = make_entity("Dup", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+    conn.insert_entity(&dup1).unwrap();
+    conn.insert_entity(&dup2).unwrap();
+
+    // An intra-group edge contributes no pointer counts at all.
+    cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Uuid(alice.uuid.clone()),
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Alice".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    // One bound pointer.
+    cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    // One unbound pointer.
+    cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Ghost".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Ghost".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    // One ambiguous pointer.
+    cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Dup".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Dup".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    let counts = conn.count_cross_group_pointers().unwrap();
+    assert_eq!(counts.bound, 1);
+    assert_eq!(counts.unbound, 1);
+    assert_eq!(counts.ambiguous, 1);
+}
+
+#[test]
+fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    // Not yet visible: Bob doesn't exist yet.
+    assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
+
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.set_applied_seq(2).unwrap();
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.bound, 1);
+
+    // Now visible via the same repeated traversal query.
+    let edges = conn.get_edges_for_entity(&alice.uuid).unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].uuid, edge.uuid);
 }
