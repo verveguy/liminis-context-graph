@@ -768,7 +768,7 @@ mod tests {
         let r = registry();
         assert_eq!(r.len(), 36);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 34, "tool names must be unique");
+        assert_eq!(names.len(), 36, "tool names must be unique");
     }
 
     #[test]
