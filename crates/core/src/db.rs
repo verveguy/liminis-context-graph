@@ -1633,19 +1633,22 @@ impl<'db> Conn<'db> {
     }
 
     /// Checks whether a directed RELATES_TO edge with the given `name` already exists from
-    /// `source_uuid` to `target_uuid`. The name filter prevents over-deduplication when the
-    /// canonical entity has semantically different relationships to the same target.
+    /// `source_uuid` to `target_uuid`, scoped to `group_id`. The name filter prevents
+    /// over-deduplication when the canonical entity has semantically different relationships
+    /// to the same target. The `group_id` filter prevents a different group's edge from being
+    /// mistaken for a duplicate of the caller's own (see issue #368).
     pub fn has_directed_edge(
         &self,
         source_uuid: &str,
         target_uuid: &str,
         name: &str,
+        group_id: &str,
     ) -> Result<bool, Error> {
         let rows = self.query_params(
             "MATCH (src:Entity {uuid: $src})-[:RELATES_TO]->(rn:RelatesToNode_ {name: $name})-[:RELATES_TO]->(dst:Entity {uuid: $dst}) \
-             WHERE rn.invalid_at IS NULL \
+             WHERE rn.invalid_at IS NULL AND rn.group_id = $group_id \
              RETURN count(rn)",
-            serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid }),
+            serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid, "group_id": group_id }),
         )?;
         if let Some(row) = rows.into_iter().next() {
             Ok(value_as_usize(&row[0]) > 0)

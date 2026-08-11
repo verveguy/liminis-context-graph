@@ -2373,6 +2373,8 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
         "skipped": result.skipped,
         "edges_rewritten": result.edges_rewritten,
         "edges_deduplicated": result.edges_deduplicated,
+        "foreign_edges_rewritten": result.foreign_edges_rewritten,
+        "foreign_edges_deduplicated": result.foreign_edges_deduplicated,
         "errors": result.errors,
     });
 
@@ -2386,6 +2388,8 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
                     "name": a.name,
                     "active_edges": a.active_edges,
                     "duplicate_edges": a.duplicate_edges,
+                    "foreign_active_edges": a.foreign_active_edges,
+                    "foreign_duplicate_edges": a.foreign_duplicate_edges,
                 })
             })
             .collect();
@@ -2393,6 +2397,8 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             "aliases": aliases,
             "total_edges_rewritten": plan.total_edges_rewritten,
             "total_edges_collapsed": plan.total_edges_collapsed,
+            "total_foreign_edges_rewritten": plan.total_foreign_edges_rewritten,
+            "total_foreign_edges_collapsed": plan.total_foreign_edges_collapsed,
         });
     }
 

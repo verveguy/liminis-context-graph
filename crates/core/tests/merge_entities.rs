@@ -37,12 +37,22 @@ fn make_entity(uuid: &str, name: &str, created_at: &str) -> EntityRow {
 }
 
 fn make_edge(src: &str, dst: &str, name: &str, created_at: &str) -> RelatesToEdge {
+    make_edge_in_group(src, dst, name, created_at, "liminis")
+}
+
+fn make_edge_in_group(
+    src: &str,
+    dst: &str,
+    name: &str,
+    created_at: &str,
+    group_id: &str,
+) -> RelatesToEdge {
     RelatesToEdge {
         uuid: Uuid::new_v4().to_string(),
         name: name.to_string(),
         source_node_uuid: src.to_string(),
         target_node_uuid: dst.to_string(),
-        group_id: "liminis".to_string(),
+        group_id: group_id.to_string(),
         fact: format!("{src} {name} {dst}"),
         fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
         created_at: created_at.to_string(),
@@ -531,6 +541,174 @@ fn test_single_entity_no_aliases_noop() {
     assert_eq!(result.merged_count, 0, "no aliases to merge");
     assert_eq!(result.skipped, 0);
     assert_eq!(count_active_entities_named(&db, "Brett"), 1);
+}
+
+// ── Test 10: cross-group edge survives merge (issue #368, SC-003) ────────────
+
+/// SC-003 / User Story 1: a foreign group's edge must never be silently dropped as a
+/// "duplicate" of an unrelated edge sharing only the relation name and endpoints.
+///
+/// Setup: entities X1, X2, Y (group "liminis" — stands in for the spec's group A). Edge
+/// X2 --[rel]--> Y in group "liminis". Edge X1 --[rel]--> Y in a different group,
+/// "group-L". Merging X1 into X2 (merge invoked under group "liminis") must rewrite the
+/// group-L edge onto the canonical, retaining group_id "group-L" — never invalidate it as a
+/// duplicate of X2's unrelated group-"liminis" edge.
+#[test]
+fn test_cross_group_edge_survives_merge() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let x1_uuid = "x1-001";
+    let x2_uuid = "x2-001";
+    let y_uuid = "y-001";
+
+    conn.insert_entity(&make_entity(x2_uuid, "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(x1_uuid, "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "Y", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Group A's own edge: X2 --[rel]--> Y
+    conn.insert_relates_to_edge(&make_edge_in_group(
+        x2_uuid,
+        y_uuid,
+        "rel",
+        "2026-01-01 00:00:00",
+        "liminis",
+    ))
+    .unwrap();
+    // Group L's edge, same relation name/endpoints-after-merge, different group: X1 --[rel]--> Y
+    conn.insert_relates_to_edge(&make_edge_in_group(
+        x1_uuid,
+        y_uuid,
+        "rel",
+        "2026-01-01 00:00:00",
+        "group-L",
+    ))
+    .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(x2_uuid.to_string()),
+        alias_uuids: vec![x1_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(result.merged_count, 1);
+    assert_eq!(
+        result.edges_deduplicated, 0,
+        "group L's edge must not be counted as a same-group duplicate"
+    );
+    assert_eq!(
+        result.foreign_edges_rewritten, 1,
+        "group L's edge should be rewritten (re-pointed) as foreign activity"
+    );
+
+    // Group L's edge must survive: exactly one active "rel" edge in group "group-L" remains,
+    // now pointing from the canonical (X2) to Y, retaining group_id "group-L".
+    let canonical_edges = conn.get_full_edges_for_entity(x2_uuid).unwrap();
+    let group_l_edges: Vec<_> = canonical_edges
+        .iter()
+        .filter(|e| e.group_id == "group-L" && e.invalid_at.is_none())
+        .collect();
+    assert_eq!(
+        group_l_edges.len(),
+        1,
+        "group L's edge must survive the merge, either re-pointed or left as-is"
+    );
+    assert_eq!(group_l_edges[0].name, "rel");
+    assert_eq!(group_l_edges[0].target_node_uuid, y_uuid);
+    assert_eq!(
+        group_l_edges[0].source_node_uuid, x2_uuid,
+        "group L's edge should be re-pointed to the canonical"
+    );
+
+    // No new edge silently conflates group L's assertion into group "liminis".
+    let liminis_edges: Vec<_> = canonical_edges
+        .iter()
+        .filter(|e| e.group_id == "liminis" && e.invalid_at.is_none())
+        .collect();
+    assert_eq!(
+        liminis_edges.len(),
+        1,
+        "group liminis's own edge count must be unaffected by group L's edge"
+    );
+}
+
+// ── Test 11: same-group dedup unaffected (issue #368, SC-004) ────────────────
+
+/// SC-004 / User Story 2: fixing the cross-group leak must not change same-group dedup
+/// behavior (FR-009): when two edges with the same name/endpoints share the merging alias's
+/// own group, one is retained and the other invalidated as a duplicate — same as before.
+#[test]
+fn test_same_group_dedup_still_collapses() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let x1_uuid = "x1-001";
+    let x2_uuid = "x2-001";
+    let y_uuid = "y-001";
+
+    conn.insert_entity(&make_entity(x2_uuid, "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(x1_uuid, "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "Y", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Both edges in the same group ("liminis")
+    conn.insert_relates_to_edge(&make_edge(x2_uuid, y_uuid, "rel", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_relates_to_edge(&make_edge(x1_uuid, y_uuid, "rel", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(x2_uuid.to_string()),
+        alias_uuids: vec![x1_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(result.merged_count, 1);
+    assert_eq!(
+        result.edges_deduplicated, 1,
+        "same-group duplicate must still collapse"
+    );
+    assert_eq!(
+        result.foreign_edges_deduplicated, 0,
+        "no foreign-group activity in this scenario"
+    );
+
+    // Exactly one active "rel" edge from canonical to Y remains
+    let canonical_edges = conn.get_full_edges_for_entity(x2_uuid).unwrap();
+    let active_rel: Vec<_> = canonical_edges
+        .iter()
+        .filter(|e| e.name == "rel" && e.invalid_at.is_none())
+        .collect();
+    assert_eq!(
+        active_rel.len(),
+        1,
+        "exactly one active rel edge should remain after dedup"
+    );
+
+    // X1's original copy is invalidated (not duplicated)
+    let x1_edges = conn.get_full_edges_for_entity(x1_uuid).unwrap();
+    for edge in &x1_edges {
+        if edge.source_node_uuid == x1_uuid || edge.target_node_uuid == x1_uuid {
+            assert!(
+                edge.invalid_at.is_some(),
+                "X1's original edge copy must be invalidated: {:?}",
+                edge
+            );
+        }
+    }
 }
 
 // ── Test 9: TIMESTAMP-valued edges survive merge round-trip (regression #169) ─
