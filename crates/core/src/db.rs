@@ -2342,6 +2342,10 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// | `corrections::apply_retract`            | via invalidate   | ✓ exec_params gate          |
 /// | `corrections::apply_entity_type_labels` | via update_labels| ✓ no timestamp fields       |
 /// | `merge_entities`                        | via insert/inval | ✓ exec_params gate          |
+/// | `insert_cross_group_edge` (#369)        | `exec_params`    | ✓ exec_params gate          |
+/// | `create_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
+/// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
+/// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
 /// | `knowledge_query_cypher`                | `cypher_query`   | safe — raw Cypher, no param |
