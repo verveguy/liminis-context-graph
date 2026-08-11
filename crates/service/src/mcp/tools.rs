@@ -5,7 +5,7 @@
 //!
 //! Schemas are plain `serde_json::Value` literals rather than per-tool `schemars`-derived
 //! structs: tool-call arguments pass straight through to `handlers::dispatch` as a raw
-//! `Value` (FR-003), so there is no typed deserialization step that would justify ~34 throwaway
+//! `Value` (FR-003), so there is no typed deserialization step that would justify ~36 throwaway
 //! structs. This is the single source of truth FR-002 requires; there is no second,
 //! hand-maintained schema anywhere else.
 //!
@@ -39,7 +39,7 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (34 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (36 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -278,7 +278,7 @@ pub fn registry() -> Vec<ToolSpec> {
             scope: Scope::Read,
             input_schema: empty_schema,
         },
-        // ── write (12) ────────────────────────────────────────────────────────────
+        // ── write (13) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -523,6 +523,44 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_add_cross_group_edge",
+            description: "Create an edge whose endpoint(s) may live in a group other than the \
+                           edge's own `group_id` (issue #369 hub/layer-graph topology). Each \
+                           endpoint is either `{\"uuid\": \"...\"}` for one already known to \
+                           live in the edge's own group, or `{\"source_group_id\": \"...\", \
+                           \"endpoint_name\": \"...\"}` for a foreign endpoint, which is \
+                           resolved by name against that group and given resolvable pointer \
+                           fields (`source_group_id`, `endpoint_name`, `resolved_uuid`, \
+                           `bound_at_seq`, `binding_state`) instead of a bare UUID FK. A foreign \
+                           endpoint that doesn't currently resolve is retained as `unbound` \
+                           rather than dropped — the edge is still created, just missing that \
+                           hop until a `knowledge_rebind_pointers` pass resolves it. A bare \
+                           `uuid` endpoint that turns out to belong to a different group than \
+                           the edge is rejected before any write.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Relation name, e.g. RELATES_TO subtype label."},
+                        "source": {
+                            "type": "object",
+                            "description": "Source endpoint: {\"uuid\": \"...\"} or {\"source_group_id\": \"...\", \"endpoint_name\": \"...\"}."
+                        },
+                        "target": {
+                            "type": "object",
+                            "description": "Target endpoint: {\"uuid\": \"...\"} or {\"source_group_id\": \"...\", \"endpoint_name\": \"...\"}."
+                        },
+                        "group_id": {"type": "string", "default": "liminis", "description": "The edge's own (layer) group_id."},
+                        "fact": {"type": "string", "description": "Natural-language fact text for the edge."},
+                        "valid_at": {"type": "string", "description": "Optional ISO-8601 timestamp this fact became true."},
+                        "relation_type": {"type": "string", "description": "Optional ontology relation type."}
+                    },
+                    "required": ["name", "source", "target", "fact"]
+                })
+            },
+        },
         // ── cypher (1) — arbitrary query/mutation power scope ────────────────────────
         ToolSpec {
             name: "knowledge_query_cypher",
@@ -540,7 +578,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (7) — WAL/lifecycle/recovery/index maintenance ─────────────────────
+        // ── admin (8) — WAL/lifecycle/recovery/index maintenance ─────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -661,6 +699,31 @@ pub fn registry() -> Vec<ToolSpec> {
             scope: Scope::Admin,
             input_schema: empty_schema,
         },
+        ToolSpec {
+            name: "knowledge_rebind_pointers",
+            description: "Re-resolve every cross-group pointer whose `source_group_id` matches \
+                           the given group (issue #369) — run after that source group's \
+                           purge/rehydrate refresh cycle so layer edges follow re-extracted \
+                           entities, merges, and renames. Uses the same name-index resolution \
+                           authority as pointer creation (ADR-0283), so results always agree \
+                           with what a fresh lookup would find. Skips any pointer whose \
+                           `bound_at_seq` is already at or past the current applied WAL \
+                           position, which is what makes a second call with no intervening \
+                           source change a no-op. A resolution that would create a self-loop or \
+                           duplicate an existing directed edge invalidates the edge instead of \
+                           writing a broken/redundant one, reusing the same handling \
+                           `knowledge_merge_entities` uses.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "source_group_id": {"type": "string", "description": "The source group whose pointers should be re-resolved (required)."}
+                    },
+                    "required": ["source_group_id"]
+                })
+            },
+        },
     ]
 }
 
@@ -701,9 +764,9 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_34_unique_tools() {
+    fn registry_has_36_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 34);
+        assert_eq!(r.len(), 36);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
         assert_eq!(names.len(), 34, "tool names must be unique");
     }
@@ -713,9 +776,9 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 14);
-        assert_eq!(count(Scope::Write), 12);
+        assert_eq!(count(Scope::Write), 13);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 7);
+        assert_eq!(count(Scope::Admin), 8);
     }
 
     #[test]

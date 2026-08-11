@@ -1,0 +1,637 @@
+//! Integration tests for resolvable cross-group pointers (issue #369).
+//!
+//! Covers the spec's four user stories:
+//!   US1 — cross-group edges carry pointer fields; intra-group edges don't.
+//!   US2 — pointer resolution agrees with the name index, including on ambiguity.
+//!   US3 — refresh cycle: purge, rehydrate, re-bind.
+//!   US4 — unbound/ambiguous edges are observable and don't break read paths.
+
+use lcg_core::{
+    cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
+    db::Db,
+    pointer::{self, BindingState, EndpointSide},
+    types::EntityRow,
+};
+use tempfile::TempDir;
+use uuid::Uuid;
+
+const DIM: usize = 4;
+const TS: &str = "2026-01-01T00:00:00Z";
+const GROUP_LAYER: &str = "layer";
+const GROUP_A: &str = "source-a";
+const GROUP_B: &str = "source-b";
+
+fn open_db(dir: &TempDir) -> Db {
+    let db = Db::open(dir.path().join("test.db").to_str().unwrap()).unwrap();
+    {
+        let conn = db.connect().unwrap();
+        conn.init_schema(DIM).unwrap();
+    }
+    db
+}
+
+fn make_entity(name: &str, group_id: &str, created_at: &str) -> EntityRow {
+    EntityRow {
+        uuid: Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        group_id: group_id.to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: created_at.to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: format!("summary of {name}"),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    }
+}
+
+// ── User Story 1: cross-group edges carry pointer fields; intra-group edges don't ─────────────
+
+#[test]
+fn intra_group_edge_has_no_pointer_fields() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Uuid(bob.uuid.clone()),
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    assert_eq!(edge.attributes, "{}");
+    assert!(pointer::read_pointers(&edge.attributes).is_empty());
+
+    // Both hops exist immediately — no resolution needed for an already-intra-group edge.
+    let fetched = conn.get_edge_by_uuid(&edge.uuid).unwrap().unwrap();
+    assert_eq!(fetched.source_node_uuid, alice.uuid);
+    assert_eq!(fetched.target_node_uuid, bob.uuid);
+}
+
+#[test]
+fn cross_group_edge_persists_pointer_fields_for_foreign_endpoint() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    let pointers = pointer::read_pointers(&edge.attributes);
+    assert!(pointers.get(EndpointSide::Src).is_none());
+    let dst_ptr = pointers.get(EndpointSide::Dst).unwrap();
+    assert_eq!(dst_ptr.source_group_id, GROUP_A);
+    assert_eq!(dst_ptr.endpoint_name, "bob");
+    assert_eq!(dst_ptr.resolved_uuid, Some(bob.uuid.clone()));
+    assert_eq!(dst_ptr.binding_state, BindingState::Bound);
+
+    // Persisted, not just returned: re-fetch from the DB.
+    let refetched = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let refetched_pointers = pointer::read_pointers(&refetched.attributes);
+    assert_eq!(
+        refetched_pointers.get(EndpointSide::Dst).unwrap().resolved_uuid,
+        Some(bob.uuid.clone())
+    );
+    assert_eq!(refetched.source_node_uuid, alice.uuid);
+    assert_eq!(refetched.target_node_uuid, bob.uuid);
+}
+
+#[test]
+fn cross_group_edge_via_foreign_but_no_match_is_unbound_not_dropped() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Nobody".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Nobody".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    let pointers = pointer::read_pointers(&edge.attributes);
+    let dst_ptr = pointers.get(EndpointSide::Dst).unwrap();
+    assert_eq!(dst_ptr.binding_state, BindingState::Unbound);
+    assert_eq!(dst_ptr.resolved_uuid, None);
+
+    // Edge is retained (RelatesToNode_ + src hop exist), but the foreign hop is absent —
+    // excluded from normal traversal (US4 AC1), not dropped (FR-004).
+    let refetched = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(refetched.source_node_uuid, alice.uuid);
+    assert_eq!(refetched.target_node_uuid, "");
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
+}
+
+#[test]
+fn bare_uuid_endpoint_foreign_to_edge_group_is_rejected_with_no_partial_write() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS); // lives in a different group than the edge
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+
+    let before = conn.count_nodes("RelatesToNode_").unwrap();
+
+    let result = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            // Bug: caller passed a bare UUID for an endpoint that is actually foreign —
+            // no pointer fields would be recorded. Must be rejected (FR-002/SC-005).
+            target: EndpointSpec::Uuid(bob.uuid.clone()),
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    );
+
+    assert!(result.is_err());
+    let after = conn.count_nodes("RelatesToNode_").unwrap();
+    assert_eq!(before, after, "no partial edge should be written on rejection");
+}
+
+// ── User Story 2: pointer resolution agrees with the name index, including on ambiguity ───────
+
+#[test]
+fn resolve_endpoint_unbound_when_zero_matches() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "nobody").unwrap();
+    assert_eq!(state, BindingState::Unbound);
+    assert_eq!(uuid, None);
+    assert!(conn
+        .get_entity_by_name_ci_with_scan_fallback("nobody", GROUP_A)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn resolve_endpoint_bound_when_exactly_one_match() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let carol = make_entity("Carol", GROUP_A, TS);
+    conn.insert_entity(&carol).unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "carol").unwrap();
+    assert_eq!(state, BindingState::Bound);
+    assert_eq!(uuid, Some(carol.uuid.clone()));
+    assert_eq!(
+        conn.get_entity_by_name_ci_with_scan_fallback("carol", GROUP_A)
+            .unwrap()
+            .unwrap()
+            .uuid,
+        carol.uuid
+    );
+}
+
+#[test]
+fn resolve_endpoint_ambiguous_when_two_active_matches() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let dave1 = make_entity("Dave", GROUP_A, "2026-01-01 00:00:00");
+    let dave2 = make_entity("Dave", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&dave1).unwrap();
+    conn.insert_entity(&dave2).unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "dave").unwrap();
+    assert_eq!(state, BindingState::Ambiguous);
+    assert_eq!(uuid, None);
+    // The name index itself would have picked a winner here — that's exactly the silent
+    // behavior FR-006 says the pointer resolver must not reproduce.
+    assert!(conn
+        .get_entity_by_name_ci_with_scan_fallback("dave", GROUP_A)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn resolve_endpoint_resolves_through_merged_tombstone_to_canonical() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = make_entity("Erin", GROUP_A, "2026-01-01 00:00:00");
+    let mut alias = make_entity("Erin", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&canonical).unwrap();
+    conn.insert_entity(&alias).unwrap();
+
+    // Simulate corrections::merge_entities tombstoning the alias in place (corrections.rs:1068):
+    // label added, row left in place, name unchanged.
+    alias.labels.push("Merged".to_string());
+    conn.update_entity_labels(&alias.uuid, &alias.labels).unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "erin").unwrap();
+    assert_eq!(state, BindingState::Bound);
+    assert_eq!(uuid, Some(canonical.uuid));
+}
+
+// ── User Story 3: refresh cycle — purge, rehydrate, re-bind ────────────────────────────────────
+
+#[test]
+fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob_v1 = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob_v1).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .resolved_uuid,
+        Some(bob_v1.uuid.clone())
+    );
+
+    // Simulate a group-scoped purge-and-rehydrate: delete the old generation's Entity (which
+    // DETACH DELETEs its hop to the layer's RelatesToNode_, but never the RelatesToNode_
+    // itself — FR-011), then insert a re-extracted "Bob" under a brand-new UUID.
+    conn.run_cypher(&format!(
+        "MATCH (e:Entity {{uuid: '{}'}}) DETACH DELETE e",
+        bob_v1.uuid
+    ))
+    .unwrap();
+    let bob_v2 = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob_v2).unwrap();
+    conn.set_applied_seq(2).unwrap();
+
+    // RelatesToNode_(layer) and its pointer attributes must have survived the purge untouched.
+    let mid = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(mid.source_node_uuid, alice.uuid);
+    assert_eq!(mid.target_node_uuid, "", "stale hop should be gone after purge");
+    assert_eq!(
+        pointer::read_pointers(&mid.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .resolved_uuid,
+        Some(bob_v1.uuid.clone()),
+        "pointer's cached uuid is still stale until rebind runs"
+    );
+
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.checked, 1);
+    assert_eq!(counts.bound, 1);
+
+    let after = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(after.target_node_uuid, bob_v2.uuid);
+    let after_ptr = pointer::read_pointers(&after.attributes);
+    assert_eq!(
+        after_ptr.get(EndpointSide::Dst).unwrap().resolved_uuid,
+        Some(bob_v2.uuid)
+    );
+    assert_eq!(
+        after_ptr.get(EndpointSide::Dst).unwrap().binding_state,
+        BindingState::Bound
+    );
+
+    // Now visible through the normal two-hop read path again (US4 AC3).
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_some());
+}
+
+#[test]
+fn rebind_pointers_is_idempotent_with_no_intervening_change() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+    // Created with no applied_seq recorded yet (bound_at_seq = None), so the first rebind
+    // below is guaranteed to actually process it regardless of the staleness gate.
+    cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    conn.set_applied_seq(1).unwrap();
+    let first = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(first.checked, 1);
+    assert_eq!(first.bound, 1);
+
+    // No intervening WAL activity — applied_seq unchanged — so the staleness gate should
+    // make this a true no-op.
+    let second = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(second.checked, 0);
+    assert_eq!(second.bound, 0);
+    assert_eq!(second.unbound, 0);
+    assert_eq!(second.ambiguous, 0);
+}
+
+#[test]
+fn rebind_pointers_leaves_not_yet_hydrated_target_unbound() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Unbound
+    );
+
+    // Source is only partially rehydrated (Bob hasn't landed yet) — bump the position and
+    // rebind anyway; must not corrupt state, must stay Unbound.
+    conn.set_applied_seq(2).unwrap();
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.checked, 1);
+    assert_eq!(counts.unbound, 1);
+
+    let after = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(after.target_node_uuid, "");
+    assert_eq!(
+        pointer::read_pointers(&after.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Unbound
+    );
+}
+
+#[test]
+fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    // Both endpoints are foreign pointers into the *same* group, under the *same* name — that
+    // name doesn't exist yet, so the edge starts fully Unbound on both sides (no self-loop is
+    // possible while both hops are absent).
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Self loop candidate".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    let pointers = pointer::read_pointers(&edge.attributes);
+    assert_eq!(pointers.get(EndpointSide::Src).unwrap().binding_state, BindingState::Unbound);
+    assert_eq!(pointers.get(EndpointSide::Dst).unwrap().binding_state, BindingState::Unbound);
+
+    // Now "Bob" arrives — both pointers resolve to the same entity within one rebind pass,
+    // which is exactly the self-loop shape User Story 3 AC 5 says must reuse
+    // `merge_entities_inner`'s handling rather than a new policy.
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.set_applied_seq(2).unwrap();
+
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.invalidated_self_loop, 1);
+
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
+    let raw = conn
+        .get_relates_to_by_uuids(&[edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(raw.invalid_at.is_some());
+}
+
+#[test]
+fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    // A second, currently-unbound edge (Bob doesn't exist yet) whose pointer will end up
+    // resolving to the exact same entity a *stable* edge already connects to.
+    let dup_edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob (duplicate candidate)".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+
+    // Now Bob shows up, and a *second* create call at the new position binds immediately —
+    // this is the "stable" edge, pinned in place by the staleness gate below (bound_at_seq
+    // will equal the position rebind runs at, so it's skipped regardless of row-scan order).
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.set_applied_seq(2).unwrap();
+    let stable_edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&stable_edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Bound
+    );
+
+    // applied_seq is still 2 (unchanged since stable_edge's creation), so stable_edge's
+    // bound_at_seq(2) >= current(2) skips it entirely — it cannot be touched by this pass,
+    // regardless of candidate-scan order. dup_edge's bound_at_seq(1) < current(2) is
+    // reprocessed and finds Bob now resolves, colliding with the still-intact stable_edge.
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.invalidated_duplicate, 1);
+
+    // The duplicate is invalidated, not left dangling with a wrong resolution.
+    assert!(conn.get_edge_by_uuid(&dup_edge.uuid).unwrap().is_none());
+    let raw = conn
+        .get_relates_to_by_uuids(&[dup_edge.uuid.clone()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(raw.invalid_at.is_some());
+
+    // The stable edge is untouched and still resolves.
+    assert!(conn.get_edge_by_uuid(&stable_edge.uuid).unwrap().is_some());
+}
