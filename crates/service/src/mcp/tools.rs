@@ -596,8 +596,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            updates the canonical instead. `summary` and `attributes` are always \
                            fully replaced on update, like `labels` — a re-assert that omits \
                            `summary` clears any previously-set value, not a partial merge. If the \
-                           configured embedder is unavailable, the call still succeeds with an \
-                           empty name_embedding and a non-null `embedding_warning` in the \
+                           configured embedder is unavailable, the call still succeeds with a \
+                           zero-vector name_embedding and a non-null `embedding_warning` in the \
                            response.",
             scope: Scope::Write,
             input_schema: || {
@@ -637,8 +637,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            <target_name>\" when omitted. `valid_at` accepts RFC-3339 or lbug's \
                            space-delimited read-back format and is rejected cleanly (not passed \
                            through to a Binder exception) if it matches neither. If the \
-                           configured embedder is unavailable, the call still succeeds with an \
-                           empty fact_embedding and a non-null `embedding_warning` in the \
+                           configured embedder is unavailable, the call still succeeds with a \
+                           zero-vector fact_embedding and a non-null `embedding_warning` in the \
                            response.",
             scope: Scope::Write,
             input_schema: || {
