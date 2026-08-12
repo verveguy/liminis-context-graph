@@ -1106,9 +1106,13 @@ diff it, and carry it across machines. The database is a derived index — delet
   `[A-Za-z0-9_-]`, because it becomes a single directory name under `.checkpoints/`. It records
   the database's current `applied_seq` under `<wal_dir>/.checkpoints/`, is O(1) (no WAL scan or
   replay), and fails if the position is unknown (`applied_seq` is `null`) or the name is already
-  in use by an active mark. `knowledge_wal_mark_list` lists every active mark with its `seq` and
-  whether it is currently `reachable` (a cheap min/max check against the WAL content on disk — it
-  does not detect a gap in the middle of that range). `knowledge_wal_mark_delete {name}` removes a
+  in use by an active mark. `knowledge_wal_mark_list` lists every active mark with its `seq`, its
+  `wal_min_seq`/`wal_max_seq` (the bounds of WAL content currently on disk), and whether it is
+  currently `reachable`: this requires both `wal_min_seq == 0` (the WAL's own prefix has not been
+  externally truncated, e.g. by routine retention deleting old WAL files) and `seq <=
+  wal_max_seq` — a mark whose `seq` merely falls inside `[wal_min_seq, wal_max_seq]` is still
+  reported unreachable if `wal_min_seq > 0`, since a restore would silently omit everything before
+  it. This does not detect a gap in the *middle* of that range. `knowledge_wal_mark_delete {name}` removes a
   mark (recording a tombstone, never rewriting the original record) and frees the name for reuse.
   To restore: `knowledge_rebuild_from_wal {from_seq: 0, to_seq: <seq>, force_clear: true}` for a
   mark with an integer `seq`, or `knowledge_clear_all` for a mark with `seq: null` (a genuinely

@@ -38,13 +38,21 @@ pub const CHECKPOINTS_DIR_NAME: &str = ".checkpoints";
 
 /// A named, retained WAL position, as reported by [`list`]. `seq: None` means "nothing has been
 /// applied"; `seq: Some(n)` means "through WAL line `n`, inclusive" (FR-005). `reachable` is a
-/// cheap min/max bounds check against the WAL content currently on disk (FR-009) — it does not
-/// detect a gap in the middle of that range.
+/// cheap bounds check against the WAL content currently on disk (FR-009): a `Some(n)` checkpoint
+/// requires both that `wal_min_seq == Some(0)` (the WAL's true prefix, starting at the seq `0`
+/// every `WalWriter` begins counting from, has not been externally truncated — e.g. by routine
+/// retention removing old WAL files) and that `n` falls at or below `wal_max_seq`. This still does
+/// not detect a gap in the *middle* of `[wal_min_seq, wal_max_seq]` — a deliberate, documented
+/// limitation, not a defect. `wal_min_seq`/`wal_max_seq` are included so an operator can diagnose
+/// *why* a checkpoint is unreachable (in particular, distinguish a missing prefix from simply
+/// being past the WAL's current tip).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointInfo {
     pub name: String,
     pub seq: Option<u64>,
     pub reachable: bool,
+    pub wal_min_seq: Option<u64>,
+    pub wal_max_seq: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,9 +226,16 @@ fn sync_dir(dir: &Path) {
 /// Lists every active (non-deleted) checkpoint, each annotated with whether its `seq` is
 /// currently reachable given the WAL content on disk (FR-009): a `seq: None` checkpoint is
 /// always reachable (its restore path, `knowledge_clear_all`, never touches the WAL); a
-/// `seq: Some(n)` checkpoint is reachable iff `n` falls within `[wal_min_seq, wal_max_seq]` —
-/// a cheap bounds check that does not detect a gap in the middle of that range. Returns an empty
-/// list, not an error, if the store doesn't exist yet (no checkpoints ever created).
+/// `seq: Some(n)` checkpoint is reachable iff `wal_min_seq == Some(0)` (no WAL prefix has been
+/// externally removed) and `n <= wal_max_seq`. Requiring `wal_min_seq == Some(0)` specifically
+/// (rather than just `n >= wal_min_seq`) matters: a checkpoint whose seq sits comfortably inside
+/// `[wal_min_seq, wal_max_seq]` is still not safely restorable if the WAL's own prefix is gone,
+/// since `knowledge_rebuild_from_wal {from_seq: 0, to_seq: n}` (FR-014) silently skips everything
+/// before `wal_min_seq` rather than erroring — a `reachable: true` that ignored this would report
+/// a restore as sound when it would actually produce a graph missing its earliest content. This
+/// still does not detect a gap in the *middle* of `[wal_min_seq, wal_max_seq]` (accepted,
+/// documented FR-009 limitation). Returns an empty list, not an error, if the store doesn't exist
+/// yet (no checkpoints ever created).
 pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
     let dir = checkpoints_dir(wal_dir);
     let entries = match fs::read_dir(&dir) {
@@ -264,12 +279,14 @@ pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
         };
         let reachable = match record.seq {
             None => true,
-            Some(n) => matches!((min, max), (Some(lo), Some(hi)) if lo <= n && n <= hi),
+            Some(n) => matches!((min, max), (Some(0), Some(hi)) if n <= hi),
         };
         results.push(CheckpointInfo {
             name,
             seq: record.seq,
             reachable,
+            wal_min_seq: min,
+            wal_max_seq: max,
         });
     }
     results.sort_by(|a, b| a.name.cmp(&b.name));
@@ -428,24 +445,29 @@ mod tests {
         assert_eq!(list(tmp.path()).unwrap(), Vec::new());
     }
 
-    #[test]
-    fn list_reports_reachability_against_wal_content_on_disk() {
+    fn write_wal_line(wal_dir: &Path, file_name: &str, seq: u64) {
         use crate::wal::WalLine;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let wal_dir = tmp.path();
         let line = WalLine {
-            seq: 5,
+            seq,
             ts: "2026-08-08T00:00:00.000000+00:00".to_string(),
             db: "default".to_string(),
             cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
             params: serde_json::json!({ "uuid": "x" }),
         };
         fs::write(
-            wal_dir.join("0000.jsonl"),
+            wal_dir.join(file_name),
             format!("{}\n", serde_json::to_string(&line).unwrap()),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn list_reports_reachability_against_wal_content_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal_dir = tmp.path();
+        // The WAL's true prefix (seq 0) is present, so a checkpoint within [0, max] is reachable.
+        write_wal_line(wal_dir, "0000.jsonl", 0);
+        write_wal_line(wal_dir, "0001.jsonl", 5);
 
         create(wal_dir, "covered", Some(5)).unwrap();
         create(wal_dir, "uncovered", Some(999)).unwrap();
@@ -455,6 +477,37 @@ mod tests {
         let uncovered = checkpoints.iter().find(|c| c.name == "uncovered").unwrap();
         assert!(covered.reachable);
         assert!(!uncovered.reachable);
+        assert_eq!(covered.wal_min_seq, Some(0));
+        assert_eq!(covered.wal_max_seq, Some(5));
+    }
+
+    /// Regression test for issue #365 review finding: a checkpoint whose seq falls inside
+    /// `[wal_min_seq, wal_max_seq]` must NOT be reported reachable if `wal_min_seq > 0`, since
+    /// that means the WAL's true prefix (seq `0..wal_min_seq`) has been externally removed (e.g.
+    /// routine retention deleting old WAL files — the exact scenario Story 2 names). Restoring
+    /// via `knowledge_rebuild_from_wal {from_seq: 0, to_seq: n}` (FR-014) silently skips
+    /// everything before `wal_min_seq` rather than erroring, so the prior `lo <= n && n <= hi`
+    /// check reported this case as a safe, reachable restore when it was not.
+    #[test]
+    fn list_reports_unreachable_when_wal_prefix_has_been_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal_dir = tmp.path();
+        // The prefix covering seq 0..499 has been removed; only 500..=1000 survive on disk.
+        write_wal_line(wal_dir, "0000.jsonl", 500);
+        write_wal_line(wal_dir, "0001.jsonl", 1000);
+
+        create(wal_dir, "mid-range", Some(700)).unwrap();
+
+        let checkpoints = list(wal_dir).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        let checkpoint = &checkpoints[0];
+        assert!(
+            !checkpoint.reachable,
+            "a checkpoint inside [min, max] but behind a missing WAL prefix must be unreachable: \
+             {checkpoint:?}"
+        );
+        assert_eq!(checkpoint.wal_min_seq, Some(500));
+        assert_eq!(checkpoint.wal_max_seq, Some(1000));
     }
 
     #[test]

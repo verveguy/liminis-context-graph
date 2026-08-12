@@ -112,9 +112,20 @@ only thing a racing `create` call ever targets.
 - **Reachability (FR-009)** is a cheap `wal_min_seq`/`wal_max_seq` bounds check, not full coverage
   detection — `wal_min_seq` was added to `wal.rs` as the structural mirror of the pre-existing
   `wal_max_seq` (same sorted-file-list-and-read-one-line cost profile, already accepted at the
-  ADR-0026 ~43,820-file production scale). A checkpoint whose seq falls inside `[min, max]` but
-  behind a mid-range gap in on-disk WAL files reports `reachable: true` and can still fail at
-  restore time — this is a deliberate, documented cost/precision tradeoff, not an oversight; the
+  ADR-0026 ~43,820-file production scale). `reachable` requires *both* `wal_min_seq == Some(0)`
+  (the WAL's own prefix, starting at the seq `0` every `WalWriter` begins counting from, has not
+  been externally truncated — e.g. by routine retention deleting old WAL files) *and* the
+  checkpoint's seq falling at or below `wal_max_seq`. The `wal_min_seq == 0` condition was added
+  after a post-merge review finding (2026-08-12): the original check was `lo <= n && n <= hi`,
+  which reported `reachable: true` for a checkpoint whose seq merely fell inside the *surviving*
+  `[min, max]` range even when `min > 0` — i.e. even when the WAL's actual prefix was gone.
+  Since `knowledge_rebuild_from_wal {from_seq: 0, to_seq: n}` (FR-014) is a pure per-line filter
+  with no contiguity check (`replay.rs`), restoring such a checkpoint silently produced a graph
+  missing everything before `min`, while `list` had reported the restore as safe. `list` now also
+  surfaces `wal_min_seq`/`wal_max_seq` per checkpoint so an operator can diagnose *why* one is
+  unreachable (missing prefix vs. simply past the WAL's tip) rather than only seeing a boolean.
+  A gap in the *middle* of `[wal_min_seq, wal_max_seq]` remains undetected — this narrower
+  limitation is a deliberate, documented cost/precision tradeoff, not an oversight; the
   `ToolSpec` description for `knowledge_wal_mark_list` states it explicitly.
 - **`#360`** (multi-source hydration with per-source applied positions) can reuse this exact
   `{name, seq}` record shape and store layout for its per-source variant, rather than inventing a

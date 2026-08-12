@@ -609,12 +609,18 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_wal_mark_list",
             description: "List every active (non-deleted) named WAL checkpoint, each with its \
-                           `seq` and whether it is currently `reachable` — a cheap check that \
-                           the checkpoint's seq falls within the min/max seq of WAL content \
-                           presently on disk. This does NOT detect a gap in the middle of that \
-                           range, so `reachable: true` is a necessary, not sufficient, signal \
-                           that a restore will succeed. Works even when the database is \
-                           degraded or unavailable, since it only reads the WAL-directory \
+                           `seq`, whether it is currently `reachable`, and the `wal_min_seq`/ \
+                           `wal_max_seq` bounds of WAL content presently on disk. `reachable` \
+                           requires BOTH `wal_min_seq == 0` (the WAL's own prefix has not been \
+                           externally truncated, e.g. by routine retention deleting old WAL \
+                           files) AND `seq <= wal_max_seq` — a checkpoint whose seq merely falls \
+                           inside `[wal_min_seq, wal_max_seq]` is still reported unreachable if \
+                           `wal_min_seq > 0`, since restoring it would silently omit everything \
+                           before `wal_min_seq`. This does NOT detect a gap in the middle of \
+                           that range, so `reachable: true` is a necessary, not sufficient, \
+                           signal that a restore will succeed; use `wal_min_seq`/`wal_max_seq` \
+                           to diagnose an unreachable checkpoint. Works even when the database \
+                           is degraded or unavailable, since it only reads the WAL-directory \
                            checkpoint store.",
             scope: Scope::Admin,
             input_schema: empty_schema,

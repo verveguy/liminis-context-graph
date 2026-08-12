@@ -4210,9 +4210,16 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
         conn.set_applied_seq(42).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
-    // Give the WAL directory content covering seq 42, so `reachable` reports true below.
+    // Give the WAL directory content covering seq 0..42 (including the true prefix, seq 0), so
+    // `reachable` reports true below — a WAL missing its prefix is unreachable regardless of
+    // whether the checkpoint's own seq is covered (see the prefix-truncation regression test).
     std::fs::write(
         wal_dir.path().join("0000.jsonl"),
+        entity_wal_line(0, "e0") + "\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wal_dir.path().join("0001.jsonl"),
         entity_wal_line(42, "e42") + "\n",
     )
     .unwrap();
@@ -4235,6 +4242,8 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
     assert_eq!(checkpoints[0]["name"], "pre-migration");
     assert_eq!(checkpoints[0]["seq"], 42);
     assert_eq!(checkpoints[0]["reachable"], true);
+    assert_eq!(checkpoints[0]["wal_min_seq"], 0, "{list_v}");
+    assert_eq!(checkpoints[0]["wal_max_seq"], 42, "{list_v}");
 }
 
 #[tokio::test]
@@ -4410,7 +4419,12 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     );
 
     // Externally remove the file covering seq 0 — "low" is no longer reachable via the cheap
-    // min/max bound (its seq now falls below the WAL's lowest surviving seq).
+    // min/max bound (its seq now falls below the WAL's lowest surviving seq). "high" (seq 10)
+    // also becomes unreachable even though its own seq is still covered by on-disk content:
+    // the WAL's true prefix (seq 0) is gone, so `wal_min_seq` is now `10`, not `0`, and
+    // `knowledge_rebuild_from_wal {from_seq: 0, to_seq: 10}` would silently skip everything
+    // before seq 10 rather than error — a restore to "high" would produce an incomplete graph
+    // despite looking reachable by seq range alone (issue #365 review finding).
     std::fs::remove_file(wal_dir.path().join("a_0000.jsonl")).unwrap();
 
     let list_after = dispatch_val(4, "knowledge_wal_mark_list", json!({}), state).await;
@@ -4418,7 +4432,13 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     let low = cps_after.iter().find(|c| c["name"] == "low").unwrap();
     let high = cps_after.iter().find(|c| c["name"] == "high").unwrap();
     assert_eq!(low["reachable"], false, "{list_after}");
-    assert_eq!(high["reachable"], true, "{list_after}");
+    assert_eq!(
+        high["reachable"], false,
+        "a checkpoint behind a missing WAL prefix must be unreachable even if its own seq is \
+         still covered: {list_after}"
+    );
+    assert_eq!(high["wal_min_seq"], 10, "{list_after}");
+    assert_eq!(high["wal_max_seq"], 10, "{list_after}");
 }
 
 #[tokio::test]
