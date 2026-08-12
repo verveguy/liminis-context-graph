@@ -1,8 +1,17 @@
 # ADR-0368: Duplicate-Edge Detection During Merge Scopes by the Edge's Own `group_id`, Not the Merge's
 
-**Status**: Accepted
+**Status**: Accepted (rewrite branch superseded by [ADR-0371](0371-merge-never-writes-foreign-group-data.md))
 **Date**: 2026-08-11
 **Issue**: #368
+
+> **Update (ADR-0371, #371)**: The Context/Decision text below states the rewrite branch "was
+> already correct and preserved a foreign edge's group ownership." That is no longer the decision.
+> Under the settled multi-stream WAL model, rewriting a foreign edge writes a mutation into another
+> group's WAL stream — not free, and not permitted. ADR-0371 supersedes the rewrite half of this
+> decision: a merge now skips every foreign-group edge entirely (self-loop, duplicate, and rewrite
+> alike) rather than rewriting it. This ADR's duplicate-check group-scoping fix (`has_directed_edge`'s
+> `group_id` parameter) is unaffected and stays correct — it simply becomes structurally
+> unreachable for foreign edges, since they're skipped before that check runs.
 
 ## Context
 
