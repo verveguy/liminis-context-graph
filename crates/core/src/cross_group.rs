@@ -271,15 +271,24 @@ pub fn rebind_pointers(
             continue; // nothing on this candidate needs re-checking this pass
         }
 
-        // The fully-prospective (src, dst) pair: each resolved side's new value applied on top
-        // of the current hop state, with any side *not* re-checked this pass left as-is.
+        // The actual current hop state, straight from the graph — `get_relates_to_by_uuids`
+        // derives `source_node_uuid`/`target_node_uuid` via `OPTIONAL MATCH` against the real
+        // `Entity<->RelatesToNode_` hops, not from the pointer's cached `resolved_uuid`. Phase 3
+        // below diffs against *this*, not against `existing.resolved_uuid`, so a hop that was
+        // externally detached while the cached `resolved_uuid` still matches what re-resolution
+        // produces (e.g. a source entity deleted and recreated under the same UUID) is still
+        // restored rather than silently left missing.
         let current_hop = conn
             .get_relates_to_by_uuids(std::slice::from_ref(&rn_uuid))?
             .into_iter()
             .next();
-        let (mut prospective_src, mut prospective_dst) = current_hop
+        let (actual_src, actual_dst) = current_hop
             .map(|e| (e.source_node_uuid, e.target_node_uuid))
             .unwrap_or_default();
+
+        // The fully-prospective (src, dst) pair: each resolved side's new value applied on top
+        // of the actual current hop state, with any side *not* re-checked this pass left as-is.
+        let (mut prospective_src, mut prospective_dst) = (actual_src.clone(), actual_dst.clone());
         for r in &resolutions {
             let val = r.new_uuid.clone().unwrap_or_default();
             match r.side {
@@ -317,16 +326,29 @@ pub fn rebind_pointers(
         }
 
         // Phase 3: the edge survives — apply each resolved side's hop change (if any) and
-        // record its new state.
+        // record its new state. Whether a hop needs (re)writing is decided against the *actual*
+        // graph state (`actual_src`/`actual_dst`, from Phase 1's `OPTIONAL MATCH`), not against
+        // `existing.resolved_uuid` — the two can diverge (e.g. the hop was detached without the
+        // cached pointer ever being told), and only comparing against the actual state catches
+        // that case rather than trusting a resolved-but-possibly-stale cache entry.
         let mut hop_changed = false;
         for r in &resolutions {
-            if r.new_uuid != r.existing.resolved_uuid {
+            let actual_uuid = match r.side {
+                EndpointSide::Src => &actual_src,
+                EndpointSide::Dst => &actual_dst,
+            };
+            let hop_present = !actual_uuid.is_empty();
+            let hop_matches_desired = match &r.new_uuid {
+                Some(u) => hop_present && actual_uuid == u,
+                None => !hop_present,
+            };
+            if !hop_matches_desired {
                 if r.new_state == BindingState::Bound {
-                    if r.existing.resolved_uuid.is_some() {
+                    if hop_present {
                         conn.delete_relates_to_hop(&rn_uuid, r.side)?;
                     }
                     conn.create_relates_to_hop(&rn_uuid, r.side, r.new_uuid.as_ref().unwrap())?;
-                } else if r.existing.resolved_uuid.is_some() {
+                } else if hop_present {
                     conn.delete_relates_to_hop(&rn_uuid, r.side)?;
                 }
                 hop_changed = true;

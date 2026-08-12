@@ -403,6 +403,89 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
 }
 
 #[test]
+fn rebind_pointers_restores_hop_detached_without_uuid_change() {
+    // A hop can go missing (e.g. externally detached, or a source entity deleted and
+    // recreated under the *same* UUID during a purge/rehydrate cycle) without the cached
+    // `resolved_uuid` ever changing — re-resolution finds the exact same winner it found
+    // last time. Gating hop (re)creation purely on "did resolved_uuid change" would miss
+    // this: the pointer keeps reporting `Bound` while the edge stays invisible to every
+    // normal two-hop read. `rebind_pointers` must diff against the hop's actual presence
+    // in the graph, not against the cached pointer value.
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&alice).unwrap();
+    conn.insert_entity(&bob).unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_some());
+
+    // Simulate the hop going missing without touching the Entity or the pointer's cached
+    // resolved_uuid at all — e.g. a bug elsewhere, or a purge/rehydrate that happened to
+    // reuse the same UUID for the recreated entity.
+    conn.delete_relates_to_hop(&edge.uuid, EndpointSide::Dst)
+        .unwrap();
+    assert!(
+        conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none(),
+        "edge should be invisible to the two-hop read path once its hop is detached"
+    );
+
+    // New WAL activity on the source so the staleness gate lets rebind re-check this pointer.
+    conn.set_applied_seq(2).unwrap();
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.checked, 1);
+    assert_eq!(
+        counts.bound, 1,
+        "re-resolution finds the same Bob, unchanged"
+    );
+
+    let after_ptr = pointer::read_pointers(
+        &conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .attributes,
+    );
+    assert_eq!(
+        after_ptr.get(EndpointSide::Dst).unwrap().resolved_uuid,
+        Some(bob.uuid.clone()),
+        "resolved_uuid is unchanged by this rebind — this is exactly the case that must \
+         not be mistaken for 'nothing to do'"
+    );
+
+    // The hop — and therefore the edge's visibility to normal reads — must be restored.
+    let restored = conn.get_edge_by_uuid(&edge.uuid).unwrap();
+    assert!(
+        restored.is_some(),
+        "rebind_pointers must restore a detached hop even when the resolved uuid didn't change"
+    );
+    assert_eq!(restored.unwrap().target_node_uuid, bob.uuid);
+}
+
+#[test]
 fn rebind_pointers_is_idempotent_with_no_intervening_change() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
