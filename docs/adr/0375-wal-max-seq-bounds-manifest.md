@@ -38,12 +38,13 @@ struct WalBoundsManifest {
     max_seq_file_size: u64,    // that file's byte size at manifest-write time
     max_seq: Option<u64>,      // the literal highest seq present
     min_seq_file: Option<String>,  // file name (not path) holding min_seq
+    min_seq_file_size: u64,    // that file's byte size at manifest-write time
     min_seq: Option<u64>,      // the literal lowest seq present
 }
 ```
 
-(`min_seq_file`/`min_seq` were added same-day, once #367 merged — see "Extension" below. No
-companion `min_seq_file_size` field is needed; see that section for why.)
+(`min_seq_file`/`min_seq`/`min_seq_file_size` were added same-day, once #367 merged — see
+"Extension" below.)
 
 Rejected an `AppState`-resident in-memory cache instead: it would reintroduce exactly the
 divergence ADR-0353 rejected for a live, long-running process (nothing invalidates it when another
@@ -72,7 +73,11 @@ A fast-path read is trusted only if:
    byte size. Every other `.jsonl` file in the directory is immutable once rotated away; the *only*
    file that can grow without changing the file name set is the one a live writer still has open.
    An unchanged size means nothing relevant changed; a changed size means that file grew, and its
-   tail alone (not the whole directory) needs re-reading.
+   tail alone (not the whole directory) needs re-reading. The recorded size is captured
+   immediately after the read that produced the cached seq — inside the scan loop, not after it
+   finishes visiting every file — so a live writer appending to that same file later in a large
+   scan can't inflate the recorded size beyond what the cached seq actually reflects; capturing it
+   post-loop would have silently poisoned this very invariant.
 
 Directory `mtime` was considered and rejected: writing the manifest *into* `wal_dir` bumps the
 directory's own mtime, so an mtime comparison captured before that write would make the cache
@@ -93,9 +98,14 @@ single fixed name, unlike `ontology_sidecar.rs`'s startup-time writer), because 
 be called concurrently by multiple async tasks in one process — a fixed tmp name would let
 concurrent writers stomp each other's in-flight write. Because a UUID-suffixed name is never
 reused, a crash between `fs::write` and `fs::rename` would otherwise orphan that tmp file forever;
-`write_wal_bounds_manifest` cleans up its own tmp file on a failed write or rename, and also sweeps
-any `.wal-bounds.*.tmp` sibling older than five minutes on every call, bounding accumulation from
-past crashes without needing a fixed name.
+`write_wal_bounds_manifest` cleans up its own tmp file on a failed write or rename, and sweeps any
+`.wal-bounds.*.tmp` sibling older than five minutes — but only from the full-scan fallback path,
+not from the growth-reconciliation write inside `wal_max_seq_fast_path`. The sweep itself is a
+`read_dir` pass; the full-scan path is already paying a whole-directory cost, so the sweep is free
+there, but the reconciliation write runs on every call during active ingestion and must not double
+the directory-listing cost this issue exists to bound. Crash debris accumulates at most one file
+per crash, so skipping the sweep on the far more frequent reconciliation write doesn't let it grow
+unbounded — the next full-scan fallback (e.g. after any rotation) sweeps it.
 
 ### Treating the manifest itself as untrusted input
 
@@ -103,9 +113,13 @@ Since the manifest tolerates being hand-edited, corrupted, or produced by a fore
 what "any parse failure falls back" means in practice), the fast path validates it defensively
 before acting on it, rather than trusting its shape:
 
-- **`max_seq_file` is validated as a single path component with a `.jsonl` extension** (no `/`,
-  `\`, or literal `..`) before being joined onto `wal_dir`. An unvalidated join would let a
-  corrupted or crafted manifest value escape the WAL directory (e.g. `../../etc/passwd`).
+- **`max_seq_file`/`min_seq_file` are validated as exactly one `Component::Normal` with a
+  `.jsonl` extension** before being joined onto `wal_dir`: the value's `components()` must yield a
+  single `Normal` component that round-trips to the original string. This rejects separators,
+  `..`/`.`, roots, and — critically — a Windows drive prefix without a root (`C:evil.jsonl`),
+  which contains no separator yet makes `Path::join` replace the base path outright. A
+  separator-and-`..` check alone would accept it. An unvalidated join would let a corrupted or
+  crafted manifest value escape the WAL directory (e.g. `../../etc/passwd`).
 - **A `read_dir` failure while computing the current file-set fingerprint is treated as "can't
   confirm freshness," not as an empty directory.** Coercing the error into an empty result could
   spuriously match an empty-WAL manifest's fingerprint and serve a stale cached value straight
@@ -113,10 +127,11 @@ before acting on it, rather than trusting its shape:
 - **A re-read of the tracked max-seq file that reports a seq *lower* than the cached value is
   rejected**, falling back to a full scan instead. The tracked file only grows via ordinary
   append, so a decrease means something other than routine growth happened (e.g. truncation) and
-  the manifest can no longer be trusted at face value.
+  the manifest can no longer be trusted at face value. The min-seq side carries the equivalent
+  defense via a size check, not a re-read — see "Extension" below.
 
-Any miss, mismatch, or parse failure falls back to the pre-existing full scan
-(`scan_max_seq_detailed`), which both computes the correct answer and produces a fresh manifest to
+Any miss, mismatch, or parse failure falls back to a full scan (`scan_wal_bounds_detailed` — see
+the Extension section), which both computes the correct answer and produces a fresh manifest to
 serve subsequent calls — so a corrupt or absent manifest self-heals on the very next call rather
 than degrading permanently to full-scan-every-time (the corrupt-manifest edge case in the spec).
 
@@ -191,15 +206,23 @@ needed `min_seq` and shouldn't pay `first_seq_in_file`'s extra per-file read to 
 manifest-fallback path (`wal_max_seq`/`wal_min_seq`) pays the doubled per-file I/O of computing
 both bounds together, and only on a fallback — not on every call.
 
-**No companion `min_seq_file_size` field, unlike `max_seq_file`'s size check.** A WAL file's first
-line is fixed the moment it's written; a file only ever grows by *appending* to its end, which
-cannot change its own first line. So once a file has contributed a cached `min_seq`, no amount of
-further growth — to that file or any other — can invalidate it. The only thing that can invalidate
-a cached `min_seq` is a change to the `.jsonl` *name* set (a file added, removed, or renamed),
-which the existing `file_set_fingerprint` check already detects on its own. This makes
-`wal_min_seq_fast_path` cheaper than `wal_max_seq_fast_path`: no per-call `stat` at all once the
-fingerprint matches, versus `wal_max_seq`'s one `stat` (and occasional single-file re-read) to
-detect growth in the file a live writer still has open.
+**`min_seq_file_size` exists for shrink detection only, not growth detection like `max_seq_file`'s
+size check.** A WAL file's first line is fixed the moment it's written, and ordinary growth (the
+only thing that can legitimately happen to an already-scanned, already-rotated file) only ever
+*appends* to its end, which cannot change its own first line — so growth in `min_seq_file` never
+needs a re-read, unlike `max_seq_file`. A same-or-larger current size is trusted without a stat
+even mattering beyond the comparison itself: `wal_min_seq_fast_path` still pays one `stat` per
+call (cheaper than `wal_max_seq`'s occasional single-file *re-read*, but not free), specifically to
+catch the one case ordinary growth can't produce — a *smaller* current size than recorded, meaning
+the file was truncated or replaced since it was scanned, which can change its first line and must
+force a full-scan fallback rather than keep trusting the cached `min_seq`. An earlier version of
+this design omitted this stat entirely, reasoning that "only append growth can happen" — but that
+is exactly the assumption `wal_max_seq_fast_path` already treats as untrustworthy enough to
+actively defend against (via its own monotonicity check) for the max-seq file, and a single WAL
+file can be the tracked file for both bounds, so the same file the max-seq path already defends
+against silent corruption of was, until this fix, left undefended on the min-seq side. Reviewer
+finding on PR #376 (`handarbeit-pruefer`) traced this asymmetry precisely; the fix closes it while
+still avoiding a re-read for the common case.
 
 **Reconciliation writes preserve the other bound's fields unchanged, never recompute them.** When
 `wal_max_seq_fast_path` re-derives `max_seq` after detecting growth in the tracked file, it writes

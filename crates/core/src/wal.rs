@@ -355,9 +355,9 @@ fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
 /// re-establishing — the manifest for either bound always leaves *both* bounds cached: a call to
 /// the other function afterward gets the fast path "for free," without a second full scan.
 ///
-/// Deliberately separate from [`ScanMaxSeqDetail`]/`scan_max_seq_detailed`, which stays max-only
-/// and unchanged: that one also backs `WalWriter::new`/`resync_global_seq`, hot paths that have
-/// never needed `min_seq` and shouldn't pay `first_seq_in_file`'s extra per-file read to get it.
+/// Deliberately separate from `scan_max_seq_detailed`, which stays max-only and unchanged: that
+/// one also backs `WalWriter::new`/`resync_global_seq`, hot paths that have never needed
+/// `min_seq` and shouldn't pay `first_seq_in_file`'s extra per-file read to get it.
 struct ScanWalBoundsDetail {
     max_seq: Option<u64>,
     max_seq_file: Option<String>,
@@ -366,6 +366,10 @@ struct ScanWalBoundsDetail {
     min_seq: Option<u64>,
     /// File name of the file that held `min_seq`, so the manifest can cache it too.
     min_seq_file: Option<String>,
+    /// Byte size of `min_seq_file` at the moment its first line was read (see the race-window
+    /// note on the loop below) — used only to detect a later shrink/truncation of that file, not
+    /// to detect growth (see [`WalBoundsManifest::min_seq_file_size`]).
+    min_seq_file_size: u64,
     file_set_fingerprint: u64,
 }
 
@@ -381,32 +385,34 @@ fn scan_wal_bounds_detailed(wal_dir: &Path) -> Result<ScanWalBoundsDetail, Error
     let file_set_fingerprint = jsonl_file_set_fingerprint(&files);
 
     let mut max_seq: Option<u64> = None;
-    let mut max_seq_path: Option<PathBuf> = None;
+    let mut max_seq_file: Option<String> = None;
+    let mut max_seq_file_size: u64 = 0;
     let mut min_seq: Option<u64> = None;
-    let mut min_seq_path: Option<PathBuf> = None;
+    let mut min_seq_file: Option<String> = None;
+    let mut min_seq_file_size: u64 = 0;
     for path in &files {
         if let Some(seq) = read_last_seq(path)? {
             if max_seq.is_none_or(|m| seq > m) {
+                // Stat immediately after the read that produced this seq, not after the loop
+                // finishes visiting every file: at directory scale, a full scan can take long
+                // enough for a live writer to append further to this same file before the loop
+                // ends, which would make a post-loop stat describe more bytes than the seq value
+                // actually reflects — silently poisoning the fast path's later "unchanged size
+                // means unchanged seq" assumption with a size that was already stale relative to
+                // `seq` the moment it was recorded.
                 max_seq = Some(seq);
-                max_seq_path = Some(path.clone());
+                max_seq_file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                max_seq_file = path.file_name().map(|n| n.to_string_lossy().into_owned());
             }
         }
         if let Some(seq) = first_seq_in_file(path) {
             if min_seq.is_none_or(|m| seq < m) {
                 min_seq = Some(seq);
-                min_seq_path = Some(path.clone());
+                min_seq_file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                min_seq_file = path.file_name().map(|n| n.to_string_lossy().into_owned());
             }
         }
     }
-
-    let max_seq_file_size = match &max_seq_path {
-        Some(p) => fs::metadata(p).map(|m| m.len()).unwrap_or(0),
-        None => 0,
-    };
-    let max_seq_file =
-        max_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-    let min_seq_file =
-        min_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
 
     Ok(ScanWalBoundsDetail {
         max_seq,
@@ -414,6 +420,7 @@ fn scan_wal_bounds_detailed(wal_dir: &Path) -> Result<ScanWalBoundsDetail, Error
         max_seq_file_size,
         min_seq,
         min_seq_file,
+        min_seq_file_size,
         file_set_fingerprint,
     })
 }
@@ -455,14 +462,17 @@ struct WalBoundsManifest {
     /// File name of the `.jsonl` file that held `min_seq` at manifest-write time. `None` iff
     /// `min_seq` is `None`.
     ///
-    /// Unlike `max_seq_file`, no companion size field is needed: a WAL file's first line is
-    /// fixed the moment it's written, and a file only ever grows by appending to its *end* — so
-    /// once a file has contributed a cached `min_seq`, no amount of further growth (to this file
-    /// or any other) can change that value. The only thing that invalidates a cached `min_seq` is
-    /// a change to the `.jsonl` name set itself (a file added, removed, or renamed), which
-    /// `file_set_fingerprint` above already detects — so the fingerprint check alone is
-    /// sufficient staleness detection for this field, cheaper than `max_seq`'s path.
+    /// A WAL file's first line is fixed the moment it's written, and a file only ever *grows* by
+    /// appending to its end — ordinary growth can never change that first line. So unlike
+    /// `max_seq_file`, growth in `min_seq_file` never needs a re-read: `wal_min_seq_fast_path`
+    /// trusts the cached `min_seq` on an unchanged-or-larger size without reopening the file.
     min_seq_file: Option<String>,
+    /// Byte size of `min_seq_file` at manifest-write time. Ordinary growth (the only thing that
+    /// can legitimately happen to an already-scanned file) only ever increases this, so the fast
+    /// path never re-reads on growth — but a *smaller* current size than recorded here means the
+    /// file was truncated or replaced since, which can change its first line, so that case must
+    /// force a full-scan fallback rather than keep trusting the cached `min_seq`.
+    min_seq_file_size: u64,
     /// The literal lowest seq present as of manifest-write time.
     min_seq: Option<u64>,
 }
@@ -485,10 +495,21 @@ fn read_wal_bounds_manifest(wal_dir: &Path) -> Option<WalBoundsManifest> {
 /// multiple async tasks in one process; a fixed tmp name would let concurrent writers corrupt
 /// each other's in-flight write. Because each write picks a fresh UUID, a crash between
 /// `fs::write` and `fs::rename` orphans that one tmp file forever — no future write ever reuses
-/// its name to overwrite it. `sweep_stale_manifest_tmp_files` bounds that: every write
-/// opportunistically clears out any `.tmp` sibling old enough to only be crash debris.
-fn write_wal_bounds_manifest(wal_dir: &Path, manifest: &WalBoundsManifest) {
-    sweep_stale_manifest_tmp_files(wal_dir);
+/// its name to overwrite it. `sweep_stale_manifest_tmp_files` bounds that: a full-scan-fallback
+/// write opportunistically clears out any `.tmp` sibling old enough to only be crash debris.
+///
+/// `sweep` is `true` only from the full-scan fallback path (`wal_max_seq`/`wal_min_seq`), which
+/// is already paying a whole-directory `read_dir` cost. The growth-reconciliation write inside
+/// `wal_max_seq_fast_path` runs on every call during active ingestion and passes `false` — that
+/// path must not add a second `read_dir` per call on top of the one already paid for the
+/// fingerprint check, or it would double the steady-state directory-listing cost this issue
+/// exists to bound. Crash debris doesn't accumulate faster than one file per crash, so skipping
+/// the sweep on the far more frequent growth-reconciliation write doesn't let it grow unbounded —
+/// the next full-scan fallback (e.g. after any rotation) sweeps it.
+fn write_wal_bounds_manifest(wal_dir: &Path, manifest: &WalBoundsManifest, sweep: bool) {
+    if sweep {
+        sweep_stale_manifest_tmp_files(wal_dir);
+    }
 
     let Ok(json) = serde_json::to_string(manifest) else {
         return;
@@ -567,8 +588,10 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
             max_seq_file_size: detailed.max_seq_file_size,
             max_seq: detailed.max_seq,
             min_seq_file: detailed.min_seq_file.clone(),
+            min_seq_file_size: detailed.min_seq_file_size,
             min_seq: detailed.min_seq,
         },
+        true,
     );
     Ok(detailed.max_seq)
 }
@@ -648,8 +671,10 @@ fn wal_max_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
                     // min-seq one) never changes that file's *first* line, so the cached min bound
                     // is still valid regardless of what happened to the max bound here.
                     min_seq_file: manifest.min_seq_file.clone(),
+                    min_seq_file_size: manifest.min_seq_file_size,
                     min_seq: manifest.min_seq,
                 },
+                false,
             );
             Some(Some(new_seq))
         }
@@ -696,8 +721,10 @@ pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
             max_seq_file_size: detailed.max_seq_file_size,
             max_seq: detailed.max_seq,
             min_seq_file: detailed.min_seq_file.clone(),
+            min_seq_file_size: detailed.min_seq_file_size,
             min_seq: detailed.min_seq,
         },
+        true,
     );
     Ok(detailed.min_seq)
 }
@@ -707,10 +734,12 @@ pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
 /// `Some(None)`/`Some(Some(seq))` on a fast-path hit.
 ///
 /// Unlike `wal_max_seq_fast_path`, no re-read-on-growth step is needed for the `(Some, Some)`
-/// case: as [`WalBoundsManifest::min_seq_file`]'s doc comment explains, a cached min-seq file's
-/// first line can't change via ordinary append growth, so the file-set fingerprint check above is
-/// sufficient staleness detection on its own — no per-call stat needed at all, cheaper than
-/// `wal_max_seq`'s path.
+/// case: as [`WalBoundsManifest::min_seq_file`]'s doc comment explains, ordinary append growth
+/// can never change a file's first line, so growth alone never invalidates the cached `min_seq`.
+/// A *shrink* below the recorded [`WalBoundsManifest::min_seq_file_size`] is different — the file
+/// was truncated or replaced since, which can change its first line — so that one case still
+/// needs a stat (cheap: one syscall, not a re-read) and forces a fallback rather than trusting a
+/// cached value the on-disk file may no longer match.
 ///
 /// The `(None, None)` case inherits the same accepted limitation `wal_max_seq_fast_path`'s
 /// carries: a file with no parseable line at manifest-write time that later gains one via append,
@@ -728,6 +757,14 @@ fn wal_min_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
         (None, None) => Some(None),
         (Some(file_name), Some(cached_seq)) => {
             if !is_safe_wal_file_name(file_name) {
+                return None;
+            }
+            let file_path = wal_dir.join(file_name);
+            let current_size = fs::metadata(&file_path).ok()?.len();
+            if current_size < manifest.min_seq_file_size {
+                // The file is smaller than it was when its first line produced `cached_seq` —
+                // truncation or an in-place rewrite, not ordinary append growth. The first line
+                // may no longer be what was cached, so this can't be trusted without a full scan.
                 return None;
             }
             Some(Some(cached_seq))
@@ -1224,10 +1261,10 @@ mod tests {
     }
 
     /// FR-008: a new file appearing between calls (rotation, or an external writer) changes the
-    /// `.jsonl` file count, which must force a reconciling full scan rather than serve a stale
-    /// cached value.
+    /// `.jsonl` file *name set*, which must force a reconciling full scan rather than serve a
+    /// stale cached value.
     #[test]
-    fn wal_max_seq_detects_new_file_via_count_mismatch() {
+    fn wal_max_seq_detects_new_file_via_fingerprint_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         write_wal_line(tmp.path(), "a_0000.jsonl", 5);
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5)); // establishes the manifest
@@ -1238,9 +1275,9 @@ mod tests {
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(9));
     }
 
-    /// FR-008: the file count alone doesn't change when a live writer keeps appending to the
-    /// file it already has open (no rotation yet) — that's detected via the tracked file's byte
-    /// size instead, and reconciled with exactly one re-read of that file, not a full rescan.
+    /// FR-008: the file *name set* doesn't change when a live writer keeps appending to the file
+    /// it already has open (no rotation yet) — that's detected via the tracked file's byte size
+    /// instead, and reconciled with exactly one re-read of that file, not a full rescan.
     #[test]
     fn wal_max_seq_detects_growth_in_tracked_file_with_single_reread() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1361,6 +1398,7 @@ mod tests {
             max_seq_file_size: 0,
             max_seq: Some(999_999),
             min_seq_file: None,
+            min_seq_file_size: 0,
             min_seq: None,
         };
         fs::write(
@@ -1577,6 +1615,7 @@ mod tests {
             max_seq_file_size: fs::metadata(tmp.path().join("a_0000.jsonl")).unwrap().len(),
             max_seq: Some(5),
             min_seq_file: Some("../evil.jsonl".to_string()),
+            min_seq_file_size: 0,
             min_seq: Some(0),
         };
         fs::write(
@@ -1586,5 +1625,78 @@ mod tests {
         .unwrap();
 
         assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    /// A cached `min_seq` must not be trusted once its file has shrunk below the size recorded
+    /// when that seq was derived: ordinary append growth can never change a file's first line,
+    /// but a smaller size means the file was truncated or replaced, which can. This mirrors
+    /// `wal_max_seq_falls_back_when_tracked_file_reread_seq_decreases`'s defense for the max-seq
+    /// side, closing the analogous gap on the min-seq side (the fast path previously had no size
+    /// check at all for `min_seq_file`).
+    #[test]
+    fn wal_min_seq_falls_back_when_tracked_file_shrinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a_path = tmp.path().join("a_0000.jsonl");
+        // Two lines so the file can shrink (losing the second) while still being non-empty.
+        let first_line = WalLine {
+            seq: 1,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "x" }),
+        };
+        let second_line = WalLine {
+            seq: 2,
+            ts: "2026-08-05T00:00:01.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "y" }),
+        };
+        let first_line_text = format!("{}\n", serde_json::to_string(&first_line).unwrap());
+        fs::write(
+            &a_path,
+            format!(
+                "{}{}\n",
+                first_line_text,
+                serde_json::to_string(&second_line).unwrap()
+            ),
+        )
+        .unwrap();
+        write_wal_line(tmp.path(), "b_0000.jsonl", 9); // higher seq, never the tracked min file
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(1)); // establishes manifest, tracked = a_0000
+
+        // Truncate a_0000.jsonl to nothing, then rewrite it with a different first line — data
+        // loss/replacement, not ordinary append growth. Net size ends up smaller than recorded.
+        let replacement = WalLine {
+            seq: 42,
+            ts: "2026-08-05T00:00:02.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "z" }),
+        };
+        fs::write(
+            &a_path,
+            format!("{}\n", serde_json::to_string(&replacement).unwrap()),
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(&a_path).unwrap().len() < first_line_text.len() as u64 * 2,
+            "test setup invariant: the replacement file must be smaller than the original \
+             two-line file for this to exercise the shrink-detection path"
+        );
+
+        reset_first_seq_in_file_call_count();
+        let result = wal_min_seq(tmp.path()).unwrap();
+        assert_eq!(
+            result,
+            Some(9),
+            "true min after replacement is b_0000's seq=9"
+        );
+        assert!(
+            first_seq_in_file_call_count() >= 2,
+            "a shrink on the tracked min-seq file must trigger a full-scan fallback (visiting \
+             every file), not silently keep serving the stale cached min"
+        );
     }
 }
