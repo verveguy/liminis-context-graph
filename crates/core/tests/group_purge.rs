@@ -648,6 +648,36 @@ async fn purge_rejects_empty_group_ids_array() {
     assert_err(&v, 1);
 }
 
+/// A malformed element (non-string, e.g. from an upstream template bug) must reject the whole
+/// request rather than silently dropping it and purging only the well-formed elements — for a
+/// destructive, confirm-gated admin op, a partially-understood argument list must fail loudly.
+#[tokio::test]
+async fn purge_rejects_group_ids_array_with_non_string_element() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&make_entity("Real", GROUP_A, TS))
+            .unwrap();
+    }
+    let state = make_state(Arc::clone(&db), None);
+
+    let v = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A, 123], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err(&v, 1);
+
+    let (a_ent, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(
+        a_ent, 1,
+        "a malformed group_ids element must reject the whole call, not purge a subset"
+    );
+}
+
 // ── FR-002: multiple group_ids are purged atomically in one call ────────────────────────────
 
 #[tokio::test]

@@ -40,6 +40,13 @@ own WAL directory from B's own cursor **is** isolated per-stream reset, leaving 
 streams untouched. That replaces a full-rebuild-on-any-change workaround downstream (orac
 `--wal-merged`) — that benefit falls out of the model rather than needing separate engineering.
 
+> **Implementation note (Review stage, PR #381)**: #360 was closed as superseded (`NOT_PLANNED`)
+> and replaced by #378, which is still open and unimplemented. There is today exactly one WAL
+> directory and one DB-wide `applied_seq` per instance, not one per group, so the per-stream
+> reset described above is not yet buildable. See FR-005/SC-004/SC-006 below and
+> [ADR-0361](../../docs/adr/0361-group-scoped-purge.md) for how the implementation handles this
+> gap.
+
 **Why the existing workaround is not acceptable**: The only way to clear a group today is
 `knowledge_query_cypher` with `DELETE … WHERE group_id = $g`, which **bypasses the WAL and
 embedding invariants** the structured write tools maintain. A control plane cannot depend on that.
@@ -87,7 +94,9 @@ count that group A's entities, episodes, and edges are gone and group B's are un
    left in the `unbound` state defined by #369.
 3. **Given** a purged group A, **When** its own WAL directory is replayed from its own cursor,
    **Then** the pre-purge state is restored exactly (same counts; UUIDs are stable because they
-   come from the WAL).
+   come from the WAL). _(Deferred to #378 — see the implementation note under Background. Tested
+   today via the closest available proxy: purge group A, then replay the one existing DB-wide WAL
+   from before the purge and confirm A is restored while B is unaffected.)_
 4. **Given** a `group_id` that does not exist in the DB, **When** purge is called with it,
    **Then** the call succeeds as a no-op and nothing changes.
 
@@ -153,7 +162,10 @@ a subsequent real (non-dry-run) purge actually removes/unbinds.
 - **FR-005**: The applied position for the purged source MUST be reset, so the next hydration
   replays it from the beginning rather than believing it is current. This is the coupling to the
   multi-source issue — a purge that leaves `applied_seq` intact produces a source that reports
-  up-to-date while holding no data.
+  up-to-date while holding no data. _(Deferred to #378 — `applied_seq` is a DB-wide singleton
+  today, not per-group, so resetting it after purging one group would misrepresent every
+  co-resident group's position; a worse bug than the one FR-005 exists to prevent. The purge
+  leaves it untouched and returns `applied_seq_reset: false` explicitly. See ADR-0361.)_
 - **FR-006**: Purging a `group_id` that does not exist MUST be a no-op success, not an error —
   it is the natural idempotent shape for a refresh loop.
 - **FR-007**: Available under the `admin` MCP scope, not `write`. A read-only replica needs to
@@ -219,9 +231,11 @@ a subsequent real (non-dry-run) purge actually removes/unbinds.
 - **SC-003**: A search that previously returned group A results returns none afterwards, and still
   returns group B's.
 - **SC-004**: Purge-then-replay of group A restores it to exactly the pre-purge state (same counts;
-  uuids come from the WAL so they are stable).
+  uuids come from the WAL so they are stable). _(Deferred to #378 — see the implementation note
+  under Background; tested today via the DB-wide-WAL proxy described there.)_
 - **SC-005**: Purging an absent group_id succeeds and changes nothing.
-- **SC-006**: The purged source's applied position is reset (FR-005).
+- **SC-006**: The purged source's applied position is reset (FR-005). _(Deferred to #378 — see
+  FR-005.)_
 - **SC-007**: After purging group A, every `RelatesToNode_` belonging to any group other than A
   remains present in the database, even where a hop relationship into group A was destroyed.
 - **SC-008**: `knowledge_status` reports a non-zero unbound-pointer count immediately after a
@@ -237,7 +251,9 @@ a subsequent real (non-dry-run) purge actually removes/unbinds.
 
 - One logical WAL stream corresponds to one `group_id` and one WAL directory (per #360). Purging
   a group and then replaying that group's own WAL directory from its own cursor is equivalent to
-  isolated per-stream reset, leaving co-resident streams untouched.
+  isolated per-stream reset, leaving co-resident streams untouched. _(Implementation note, Review
+  stage: this assumption does not hold yet — #360 was closed as superseded by #378, which is
+  still open. See the Background implementation note and ADR-0361.)_
 - Corrections (#327/#329) and `same_as` assertions do not exist today. Cascading purge to them is
   out of scope until they exist; when they do, their handling should follow the same principle
   established here for cross-group edges (survive in a defined non-deleted state rather than
@@ -263,7 +279,8 @@ a subsequent real (non-dry-run) purge actually removes/unbinds.
   invariant. This issue is blocked by #369.
 - #374 — closed as a duplicate of this issue; contributed the `knowledge_delete_by_group` tool
   surface, the WAL-bypass argument against raw cypher delete, and the per-stream-reset framing.
-- #360 — multi-stream WAL model; one `group_id` equals one WAL stream.
+- #360 — multi-stream WAL model; one `group_id` equals one WAL stream. Superseded
+  (`NOT_PLANNED`) by #378, which is still open — see the Background implementation note.
 - `knowledge_merge_entities` / `MergePlan` — the existing precedent for a `dry_run` mode returning
   a structured plan when the blast radius is not computable from the call's own parameters.
 

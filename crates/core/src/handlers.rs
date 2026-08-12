@@ -1194,16 +1194,28 @@ async fn handle_delete_chunk_episode(
 /// `write` still needs to purge as part of a per-source refresh.
 async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
+    // Every element must be a non-empty string, or the request is rejected outright — for a
+    // destructive, confirm-gated admin op, silently dropping a malformed element (e.g. a stray
+    // number from an upstream template bug) and proceeding with the rest would purge less than
+    // the caller specified without any indication that anything was ignored.
     let group_ids: Vec<String> = p["group_ids"]
         .as_array()
+        .filter(|arr| {
+            !arr.is_empty()
+                && arr
+                    .iter()
+                    .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+        })
         .map(|arr| {
             arr.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
+                .map(|v| v.as_str().unwrap_or_default().to_string())
                 .collect::<Vec<_>>()
         })
-        .filter(|v| !v.is_empty())
         .ok_or_else(|| {
-            Error::Ipc("group_ids is required and must be a non-empty array of strings".to_string())
+            Error::Ipc(
+                "group_ids is required and must be a non-empty array of non-empty strings"
+                    .to_string(),
+            )
         })?;
 
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
