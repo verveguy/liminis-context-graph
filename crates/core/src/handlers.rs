@@ -1207,8 +1207,13 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
                     .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
         })
         .map(|arr| {
+            // Dedup while preserving first-seen order: a repeated group_id would otherwise
+            // produce duplicate per-group entries in the response and redundant (harmless but
+            // misleading) rebind passes in `group_purge::purge_groups`.
+            let mut seen = std::collections::HashSet::new();
             arr.iter()
                 .map(|v| v.as_str().unwrap_or_default().to_string())
+                .filter(|s| seen.insert(s.clone()))
                 .collect::<Vec<_>>()
         })
         .ok_or_else(|| {

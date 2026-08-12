@@ -678,6 +678,41 @@ async fn purge_rejects_group_ids_array_with_non_string_element() {
     );
 }
 
+/// A repeated `group_id` in the request must be deduped before use: it must not produce a
+/// duplicate `GroupPurgeCounts` entry in the response's `groups` array (which would misreport
+/// the purge as having touched the group twice), and each group's counts must reflect that
+/// group's actual data exactly once.
+#[tokio::test]
+async fn purge_dedupes_repeated_group_ids() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&make_entity("A", GROUP_A, TS)).unwrap();
+    }
+    let state = make_state(Arc::clone(&db), None);
+
+    let v = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A, GROUP_A], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 1);
+    let groups = v["result"]["groups"].as_array().unwrap();
+    assert_eq!(
+        groups.len(),
+        1,
+        "a repeated group_id must not produce a duplicate entry: {v}"
+    );
+    assert_eq!(groups[0]["group_id"], GROUP_A, "{v}");
+    assert_eq!(groups[0]["entities"], 1, "{v}");
+
+    let (a_ent, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(a_ent, 0);
+}
+
 // ── FR-002: multiple group_ids are purged atomically in one call ────────────────────────────
 
 #[tokio::test]
