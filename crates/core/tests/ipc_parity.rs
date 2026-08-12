@@ -2562,6 +2562,48 @@ async fn parity_add_cross_group_edge_rejects_bare_uuid_foreign_endpoint() {
     assert_err_resp(&v, 203, -32000);
 }
 
+/// An endpoint carrying both `uuid` and `source_group_id`/`endpoint_name` is rejected rather
+/// than silently preferring `uuid` and discarding the foreign pointer fields — an ambiguous
+/// request must not be downgraded to a clean intra-group one (FR-002/SC-005).
+#[tokio::test]
+async fn parity_add_cross_group_edge_rejects_mixed_endpoint_fields() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-208".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        208,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-208"},
+            "target": {
+                "uuid": "alice-208",
+                "source_group_id": "source-a",
+                "endpoint_name": "Bob"
+            },
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 208, -32000);
+}
+
 /// `source_group_id` is a required param for `knowledge_rebind_pointers`.
 #[tokio::test]
 async fn parity_rebind_pointers_requires_source_group_id() {
