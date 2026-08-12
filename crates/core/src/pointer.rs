@@ -132,6 +132,36 @@ pub fn write_pointers(attributes: &str, pointers: &CrossGroupPointers) -> String
     serde_json::Value::Object(map).to_string()
 }
 
+const MERGED_INTO_KEY: &str = "merged_into";
+
+/// Reads the `merged_into` forwarding reference recorded on a tombstoned (`Merged`-labelled)
+/// entity's `attributes` JSON, if any (issue #371, FR-005/FR-007). Absent key, non-object
+/// `attributes`, or a non-string value all yield `None` — a missing forwarding reference is the
+/// expected, permanent shape for every alias tombstoned before this feature shipped, not an
+/// error.
+pub fn read_merged_into(attributes: &str) -> Option<String> {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(attributes)
+    else {
+        return None;
+    };
+    map.get(MERGED_INTO_KEY)?.as_str().map(|s| s.to_string())
+}
+
+/// Records `canonical_uuid` under the `merged_into` key of `attributes`, preserving every other
+/// existing key untouched (mirrors [`write_pointers`]'s additive-attributes idiom). Non-object or
+/// malformed `attributes` is treated as an empty object rather than propagating an error.
+pub fn write_merged_into(attributes: &str, canonical_uuid: &str) -> String {
+    let mut map = match serde_json::from_str::<serde_json::Value>(attributes) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    map.insert(
+        MERGED_INTO_KEY.to_string(),
+        serde_json::Value::String(canonical_uuid.to_string()),
+    );
+    serde_json::Value::Object(map).to_string()
+}
+
 /// Counts of cross-group pointers by [`BindingState`], for `knowledge_status` (FR-012).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PointerStateCounts {
@@ -248,6 +278,28 @@ mod tests {
         let attrs = write_pointers("{}", &pointers);
         let parsed = read_pointers(&attrs);
         assert_eq!(parsed.get(EndpointSide::Src), Some(&ptr));
+    }
+
+    #[test]
+    fn merged_into_absent_by_default() {
+        assert_eq!(read_merged_into("{}"), None);
+        assert_eq!(read_merged_into(""), None);
+        assert_eq!(read_merged_into("not json"), None);
+        assert_eq!(read_merged_into("[]"), None);
+    }
+
+    #[test]
+    fn merged_into_round_trips() {
+        let attrs = write_merged_into("{}", "canonical-uuid-1");
+        assert_eq!(read_merged_into(&attrs), Some("canonical-uuid-1".to_string()));
+    }
+
+    #[test]
+    fn merged_into_preserves_unrelated_existing_keys() {
+        let attrs = write_merged_into(r#"{"custom_field": "value"}"#, "canonical-uuid-1");
+        let value: serde_json::Value = serde_json::from_str(&attrs).unwrap();
+        assert_eq!(value["custom_field"], "value");
+        assert_eq!(value["merged_into"], "canonical-uuid-1");
     }
 
     #[test]
