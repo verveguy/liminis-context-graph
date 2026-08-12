@@ -540,18 +540,35 @@ pub fn registry() -> Vec<ToolSpec> {
                            the edge is rejected before any write.",
             scope: Scope::Write,
             input_schema: || {
+                let endpoint_schema = || {
+                    json!({
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "description": "An endpoint already known to live in the edge's own group_id.",
+                                "properties": {"uuid": {"type": "string"}},
+                                "required": ["uuid"],
+                                "additionalProperties": false
+                            },
+                            {
+                                "type": "object",
+                                "description": "A foreign endpoint, resolved by name against source_group_id.",
+                                "properties": {
+                                    "source_group_id": {"type": "string"},
+                                    "endpoint_name": {"type": "string"}
+                                },
+                                "required": ["source_group_id", "endpoint_name"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    })
+                };
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Relation name, e.g. RELATES_TO subtype label."},
-                        "source": {
-                            "type": "object",
-                            "description": "Source endpoint: {\"uuid\": \"...\"} or {\"source_group_id\": \"...\", \"endpoint_name\": \"...\"}."
-                        },
-                        "target": {
-                            "type": "object",
-                            "description": "Target endpoint: {\"uuid\": \"...\"} or {\"source_group_id\": \"...\", \"endpoint_name\": \"...\"}."
-                        },
+                        "source": endpoint_schema(),
+                        "target": endpoint_schema(),
                         "group_id": {"type": "string", "default": "liminis", "description": "The edge's own (layer) group_id."},
                         "fact": {"type": "string", "description": "Natural-language fact text for the edge."},
                         "valid_at": {"type": "string", "description": "Optional ISO-8601 timestamp this fact became true."},
