@@ -130,8 +130,16 @@ pub fn purge_groups(
 /// group — FR-012's "broken out by the group_id that owns each affected pointer"), how many
 /// live cross-group pointers have a `source_group_id` in `purged_group_ids`.
 ///
-/// Every one of these is guaranteed to resolve `Unbound` once the purge runs, regardless of its
-/// binding_state right now (even an already-`Unbound` pointer is re-checked and stays
+/// Excludes any `RelatesToNode_` whose own owning group (`rn_group_id`) is itself among
+/// `purged_group_ids`: FR-002 allows purging several `group_ids` in one atomic call, and a
+/// `RelatesToNode_` owned by one of *those* groups is `DETACH DELETE`d outright by
+/// `delete_relates_to_by_group_ids` — it never reaches the `unbound` state, so counting it here
+/// would misreport a deletion as a survival. Only a `RelatesToNode_` owned by a group *outside*
+/// the call can be left `unbound` (FR-008/FR-009); its own count is already covered by that
+/// group's `edges` count in `GroupPurgeCounts`.
+///
+/// Every remaining candidate is guaranteed to resolve `Unbound` once the purge runs, regardless
+/// of its binding_state right now (even an already-`Unbound` pointer is re-checked and stays
 /// `Unbound`) — because the purge empties the entire source group before any rebind pass runs,
 /// so there is nothing left for `resolve_endpoint` to bind to. That's what makes this
 /// pre-mutation query usable, unmodified, as both the dry-run prediction and the actual
@@ -143,6 +151,9 @@ fn compute_unbound_impacts(
     let purged: HashSet<&str> = purged_group_ids.iter().copied().collect();
     let mut tally: BTreeMap<String, u64> = BTreeMap::new();
     for (_, _, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
+        if purged.contains(rn_group_id.as_str()) {
+            continue;
+        }
         for (_, ptr) in pointer::read_pointers(&attrs).iter() {
             if purged.contains(ptr.source_group_id.as_str()) {
                 *tally.entry(rn_group_id.clone()).or_insert(0) += 1;

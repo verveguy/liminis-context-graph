@@ -137,6 +137,17 @@ data this is." Because every one of those pointers is guaranteed to resolve `Unb
 it the same way, then goes on to mutate, and returns the identical value. SC-009's "counts match
 exactly" therefore holds by construction, not by keeping two code paths in sync by hand.
 
+### FR-012 (multi-group edge case): a `RelatesToNode_` owned by a purged group is excluded from `unbound_impacts`
+
+A multi-group call can name both the layer group that owns a `RelatesToNode_` and the foreign
+group its pointer targets — e.g. purging a source and its associated layer group together.
+`delete_relates_to_by_group_ids` deletes that node outright, since its own `group_id` is in the
+call; it never reaches the `unbound` state at all. `compute_unbound_impacts` therefore skips any
+candidate whose owning `rn_group_id` is itself among `purged_group_ids`, so `unbound_impacts`
+only ever reports `RelatesToNode_` rows owned by a group *outside* the call — the only ones that
+can actually be left `unbound`. Regression-tested by
+`purge_excludes_unbound_impact_when_owning_group_is_itself_purged`.
+
 ### Atomicity across multiple `group_ids` (FR-002)
 
 The delete-relates-to → delete-entities → delete-episodics → per-group forced-rebind sequence

@@ -678,6 +678,86 @@ async fn purge_multiple_groups_in_one_call() {
     assert_eq!(b_ent, 0);
 }
 
+/// FR-002/FR-008/FR-012 interaction: when a multi-group purge call includes both the layer
+/// group that owns a `RelatesToNode_` *and* the foreign group its pointer targets, that
+/// `RelatesToNode_` is `DETACH DELETE`d outright (it's owned by one of the purged groups) — it
+/// never survives to reach the `unbound` state. `unbound_impacts` must not report it, since
+/// "left unbound" only describes a `RelatesToNode_` owned by a group *outside* the call.
+#[tokio::test]
+async fn purge_excludes_unbound_impact_when_owning_group_is_itself_purged() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    let edge_uuid = {
+        let conn = db.connect().unwrap();
+        let layer_entity = make_entity("LayerEntity", GROUP_A, TS);
+        let bob = make_entity("Bob", GROUP_B, TS);
+        conn.insert_entity(&layer_entity).unwrap();
+        conn.insert_entity(&bob).unwrap();
+
+        // Layer group_id = GROUP_A (about to be purged), pointing at a foreign entity in
+        // GROUP_B (also about to be purged in the same call).
+        let edge = cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(layer_entity.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_B.to_string(),
+                    endpoint_name: "Bob".to_string(),
+                },
+                group_id: GROUP_A.to_string(),
+                fact: "LayerEntity knows Bob".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+        edge.uuid
+    };
+
+    let state = make_state(Arc::clone(&db), None);
+
+    let dry = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A, GROUP_B], "dry_run": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&dry, 1);
+    assert_eq!(
+        dry["result"]["unbound_impacts"].as_array().unwrap().len(),
+        0,
+        "dry_run must not report an unbound impact for a RelatesToNode_ owned by a group \
+         that is itself being purged (it's deleted, not left unbound): {dry}"
+    );
+
+    let real = dispatch_val(
+        2,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A, GROUP_B], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&real, 2);
+    assert_eq!(
+        real["result"]["unbound_impacts"].as_array().unwrap().len(),
+        0,
+        "{real}"
+    );
+
+    let conn = db.connect().unwrap();
+    let survived = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge_uuid))
+        .unwrap();
+    assert!(
+        survived.is_empty(),
+        "the RelatesToNode_ owned by a purged group must be deleted outright, not survive as unbound"
+    );
+}
+
 // ── NameIndex staleness: a purged entity's name must no longer resolve ──────────────────────
 
 #[test]
