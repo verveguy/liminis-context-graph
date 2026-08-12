@@ -525,11 +525,25 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
 /// `read_wal_bounds_manifest`) — so a crafted or corrupted `max_seq_file` value (e.g. containing
 /// `../`) must not be allowed to make `wal_dir.join(file_name)` resolve outside `wal_dir`.
 fn is_safe_wal_file_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
+    if name.is_empty() {
+        return false;
+    }
+    let path = Path::new(name);
+    // Require the entire path to be exactly one `Normal` component. A plain separator/`..`
+    // check is not enough on Windows: a value like `C:evil.jsonl` contains no `/` or `\` and
+    // has a `.jsonl` extension, but carries a drive prefix with no root — `PathBuf::join`
+    // treats a prefix-without-root component as replacing the base path outright rather than
+    // appending to it, which would let a crafted/corrupted manifest escape `wal_dir` entirely.
+    // Walking `components()` and requiring exactly one `Normal` rejects prefixes, roots, and
+    // `..`/`.` uniformly on every platform.
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(only)) = components.next() else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false;
+    }
+    only.to_str().is_some_and(|s| s == name)
         && Path::new(name).extension().and_then(|e| e.to_str()) == Some("jsonl")
 }
 
@@ -1227,6 +1241,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    /// `is_safe_wal_file_name` must reject any value whose `components()` yield more than a
+    /// single `Normal` component — separators, `..`/`.`, and (platform-dependently) prefixes/
+    /// roots all fail this uniformly. Cross-platform subset: valid on every host OS this crate
+    /// builds for.
+    #[test]
+    fn is_safe_wal_file_name_rejects_traversal_and_separators() {
+        assert!(!is_safe_wal_file_name("../evil.jsonl"));
+        assert!(!is_safe_wal_file_name("a/b.jsonl"));
+        assert!(!is_safe_wal_file_name(".."));
+        assert!(!is_safe_wal_file_name("."));
+        assert!(!is_safe_wal_file_name(""));
+        assert!(is_safe_wal_file_name("a_0000.jsonl"));
+    }
+
+    /// On Windows specifically, a drive-prefix-without-root value like `C:evil.jsonl` contains
+    /// no `/` or `\` and ends in `.jsonl`, so a check that only scans for separator characters
+    /// would wrongly accept it — but `Path::join` treats a prefix-without-root component as
+    /// replacing the base path outright, an escape from `wal_dir`. This is a no-op string
+    /// (`"C:evil.jsonl"` is just an ordinary, safe filename) on Unix, so the assertion is
+    /// meaningful only under `cfg(windows)`.
+    #[cfg(windows)]
+    #[test]
+    fn is_safe_wal_file_name_rejects_windows_drive_prefix() {
+        assert!(!is_safe_wal_file_name("C:evil.jsonl"));
+        assert!(!is_safe_wal_file_name(r"C:\evil.jsonl"));
     }
 
     /// A live writer only ever appends, so a re-read of the tracked max-seq file reporting a
