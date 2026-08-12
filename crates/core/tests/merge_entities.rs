@@ -2,7 +2,7 @@
 ///
 /// Covers SC-001 through SC-006 and the user stories in the spec.
 use lcg_core::{
-    corrections::{merge_entities, MergeEntitiesParams},
+    corrections::{apply_corrections_file, merge_entities, MergeEntitiesParams},
     pointer::read_merged_into,
     Db, EntityRow, RelatesToEdge, WalReplayer, WalWriter,
 };
@@ -1010,4 +1010,85 @@ fn test_merge_produces_no_mutation_for_foreign_edge() {
             "no mutation may reference the foreign edge's uuid: {cypher} {params_str}"
         );
     }
+}
+
+// ── Test: apply_same_as leaves a foreign-group edge untouched (issue #371, FR-006) ──
+
+/// FR-006: `apply_same_as` (the YAML-corrections-driven merge path) must receive the same
+/// foreign-edge-skip treatment as `merge_entities_inner` (FR-001) — a risk the spec calls out
+/// explicitly, since `apply_same_as` had zero foreign-edge awareness before this issue. Unlike
+/// `test_merge_entities_records_merged_into`/`test_same_as_correction_timestamp_type` (which
+/// only check `merged_into` recording), this test exercises the actual skip behavior end to end
+/// via `apply_corrections_file`, mirroring `test_cross_group_edge_survives_merge`'s assertions
+/// for the `merge_entities` path.
+#[test]
+fn test_apply_same_as_leaves_foreign_edge_untouched() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical_uuid = "sasl-canonical-001";
+    let alias_uuid = "sasl-alias-001";
+    let y_uuid = "sasl-y-001";
+
+    conn.insert_entity(&make_entity(
+        canonical_uuid,
+        "SaslCanonical",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias_uuid, "SaslAlias", "2026-01-01 00:00:01"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "SaslY", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Group L's edge, referencing the alias — must survive apply_same_as untouched.
+    let group_l_edge =
+        make_edge_in_group(alias_uuid, y_uuid, "rel", "2026-01-01 00:00:00", "group-L");
+    let group_l_edge_uuid = group_l_edge.uuid.clone();
+    conn.insert_relates_to_edge(&group_l_edge).unwrap();
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical_uuid}\"\n    aliases: [\"SaslAlias\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(
+        result.success,
+        "apply_corrections should succeed: {:?}",
+        result.errors
+    );
+    assert_eq!(result.applied, 1);
+
+    // Group L's edge must be completely untouched: same uuid, same group_id, same endpoints
+    // (still referencing the alias, NOT re-pointed to the canonical), invalid_at unset.
+    let untouched = conn.get_edge_by_uuid(&group_l_edge_uuid).unwrap().unwrap();
+    assert_eq!(untouched.group_id, "group-L");
+    assert_eq!(
+        untouched.source_node_uuid, alias_uuid,
+        "group L's edge must still reference the alias — apply_same_as must never rewrite it"
+    );
+    assert_eq!(untouched.target_node_uuid, y_uuid);
+    assert!(
+        untouched.invalid_at.is_none(),
+        "group L's edge must not be invalidated by apply_same_as"
+    );
+
+    // No replacement group-L edge should have been written onto the canonical.
+    let canonical_edges = conn.get_full_edges_for_entity(canonical_uuid).unwrap();
+    let group_l_edges_on_canonical: Vec<_> = canonical_edges
+        .iter()
+        .filter(|e| e.group_id == "group-L" && e.invalid_at.is_none())
+        .collect();
+    assert_eq!(
+        group_l_edges_on_canonical.len(),
+        0,
+        "no replacement group-L edge should be written onto the canonical by apply_same_as"
+    );
 }
