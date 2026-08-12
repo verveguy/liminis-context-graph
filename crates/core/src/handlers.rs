@@ -2429,16 +2429,22 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
 /// already known to live in the edge's own `group_id`, or `{"source_group_id": "...",
 /// "endpoint_name": "..."}` for a foreign endpoint to be resolved (issue #369 FR-002).
 fn parse_endpoint_spec(v: &Value) -> Result<EndpointSpec, Error> {
-    if let Some(uuid) = v["uuid"].as_str() {
-        return Ok(EndpointSpec::Uuid(uuid.to_string()));
-    }
-    match (v["source_group_id"].as_str(), v["endpoint_name"].as_str()) {
-        (Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
+    let uuid = v["uuid"].as_str();
+    let source_group_id = v["source_group_id"].as_str();
+    let endpoint_name = v["endpoint_name"].as_str();
+    match (uuid, source_group_id, endpoint_name) {
+        (Some(uuid), None, None) => Ok(EndpointSpec::Uuid(uuid.to_string())),
+        (None, Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
             source_group_id: source_group_id.to_string(),
             endpoint_name: endpoint_name.to_string(),
         }),
+        // A request mixing 'uuid' with 'source_group_id'/'endpoint_name' is rejected rather
+        // than silently preferring 'uuid' and discarding the foreign pointer fields — an
+        // ambiguous request must not be interpreted as if it were a clean intra-group one
+        // (FR-002/SC-005: "rejected loudly", not silently downgraded).
         _ => Err(Error::Ipc(
-            "endpoint must have either 'uuid' or both 'source_group_id' and 'endpoint_name'"
+            "endpoint must have either 'uuid' alone, or both 'source_group_id' and \
+             'endpoint_name' alone — not a mix, and not a partial foreign pair"
                 .to_string(),
         )),
     }

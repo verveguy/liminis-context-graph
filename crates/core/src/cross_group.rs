@@ -197,12 +197,21 @@ pub struct RebindCounts {
 ///   gate; per-database singleton until #360 adds per-source positions). This is also what
 ///   makes a second call with no intervening WAL activity a true no-op (FR-009): every pointer
 ///   this call touches has its `bound_at_seq` bumped to the current applied position, so the
-///   next call's gate skips it.
-/// - Otherwise re-resolved via [`resolve_endpoint`] (the same ADR-0283 authority, FR-003).
-///   A resolution that would create a self-loop or a duplicate directed edge reuses
-///   `merge_entities_inner`'s exact handling (`has_directed_edge` scoped to the edge's own
-///   `group_id` per ADR-0368, then `invalidate_edge`) rather than a new policy (User Story 3
-///   AC 5), and the whole edge is invalidated rather than partially rebound.
+///   next call's gate skips it. The gate only engages when *both* the pointer's `bound_at_seq`
+///   and the current applied position are known (`Some`): if no `WalPosition` has been recorded
+///   yet, `bound_at_seq` is written as `None` too, so every pointer is re-resolved on every pass
+///   until a position exists to compare against — always-recheck, not always-skip, is the safe
+///   default for "we don't yet know if this is stale."
+/// - Otherwise re-resolved via [`resolve_endpoint`] (the same ADR-0283 authority, FR-003). Both
+///   sides are fully resolved *before* either hop is written, and the self-loop/duplicate check
+///   runs once against the fully-prospective `(src, dst)` pair — not per side — so a pass that
+///   resolves both a `src` and a `dst` pointer at once can never commit one side's hop and then
+///   discover the *other* side's resolution collapses the edge into a self-loop or duplicate,
+///   which would otherwise leave the first side's hop orphaned on an invalidated node. A
+///   resolution that does collapse reuses `merge_entities_inner`'s exact handling
+///   (`has_directed_edge` scoped to the edge's own `group_id` per ADR-0368, then
+///   `invalidate_edge`) rather than a new policy (User Story 3 AC 5): the whole edge is
+///   invalidated with neither hop touched, rather than partially rebound.
 /// - A transition into `Bound` creates the missing hop (`Db::create_relates_to_hop`); a
 ///   transition out of `Bound` (rename, purge, now-ambiguous) drops the stale hop
 ///   (`Db::delete_relates_to_hop`) — matching the two-hop model's "unbound = missing hop"
@@ -225,10 +234,17 @@ pub fn rebind_pointers(
 
     for (rn_uuid, rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
         let mut pointers = pointer::read_pointers(&attrs);
-        let mut changed = false;
-        let mut hop_changed = false;
-        let mut invalidated = false;
 
+        // Phase 1: resolve every side that needs re-checking, without writing anything yet —
+        // so the self-loop/duplicate check below always sees a fully-resolved prospective pair,
+        // never a state where one side's hop has already been committed this pass.
+        struct SideResolution {
+            side: EndpointSide,
+            existing: CrossGroupPointer,
+            new_state: BindingState,
+            new_uuid: Option<String>,
+        }
+        let mut resolutions = Vec::new();
         for side in [EndpointSide::Src, EndpointSide::Dst] {
             let Some(existing) = pointers.get(side).cloned() else {
                 continue;
@@ -241,81 +257,102 @@ pub fn rebind_pointers(
                     continue; // already checked as of this source position (FR-009)
                 }
             }
-
             counts.checked += 1;
             let (new_state, new_uuid) =
                 resolve_endpoint(conn, source_group_id, &existing.endpoint_name)?;
+            resolutions.push(SideResolution {
+                side,
+                existing,
+                new_state,
+                new_uuid,
+            });
+        }
+        if resolutions.is_empty() {
+            continue; // nothing on this candidate needs re-checking this pass
+        }
 
-            if new_uuid != existing.resolved_uuid {
-                let current_hop = conn
-                    .get_relates_to_by_uuids(std::slice::from_ref(&rn_uuid))?
-                    .into_iter()
-                    .next();
-                let (cur_src, cur_dst) = current_hop
-                    .map(|e| (e.source_node_uuid, e.target_node_uuid))
-                    .unwrap_or_default();
-                let (prospective_src, prospective_dst) = match side {
-                    EndpointSide::Src => (new_uuid.clone().unwrap_or_default(), cur_dst),
-                    EndpointSide::Dst => (cur_src, new_uuid.clone().unwrap_or_default()),
-                };
+        // The fully-prospective (src, dst) pair: each resolved side's new value applied on top
+        // of the current hop state, with any side *not* re-checked this pass left as-is.
+        let current_hop = conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&rn_uuid))?
+            .into_iter()
+            .next();
+        let (mut prospective_src, mut prospective_dst) = current_hop
+            .map(|e| (e.source_node_uuid, e.target_node_uuid))
+            .unwrap_or_default();
+        for r in &resolutions {
+            let val = r.new_uuid.clone().unwrap_or_default();
+            match r.side {
+                EndpointSide::Src => prospective_src = val,
+                EndpointSide::Dst => prospective_dst = val,
+            }
+        }
 
-                if new_state == BindingState::Bound {
-                    let both_resolved = !prospective_src.is_empty() && !prospective_dst.is_empty();
-                    if both_resolved && prospective_src == prospective_dst {
-                        conn.invalidate_edge(&rn_uuid, ts)?;
-                        counts.invalidated_self_loop += 1;
-                        invalidated = true;
-                        break;
+        // Phase 2: self-loop/duplicate check against the fully-prospective pair, before either
+        // hop is touched — reuses merge_entities_inner's exact handling (`has_directed_edge`
+        // scoped to the edge's own group_id per ADR-0368, then `invalidate_edge`), applied once
+        // per candidate so a two-sided resolution can never partially commit one side's hop and
+        // then discover the other side's resolution collapses the edge (User Story 3 AC 5).
+        //
+        // Gated on `any_changed`: if every resolved side reconfirms its existing resolved_uuid
+        // unchanged, the prospective pair is identical to the edge's own current hops, and
+        // `has_directed_edge` (which does not exclude `rn_uuid` from its match) would otherwise
+        // report the edge as a "duplicate" of itself on every idempotent re-check.
+        let any_changed = resolutions
+            .iter()
+            .any(|r| r.new_uuid != r.existing.resolved_uuid);
+        let both_resolved = !prospective_src.is_empty() && !prospective_dst.is_empty();
+        if any_changed && both_resolved && prospective_src == prospective_dst {
+            conn.invalidate_edge(&rn_uuid, ts)?;
+            counts.invalidated_self_loop += 1;
+            continue;
+        }
+        if any_changed
+            && both_resolved
+            && conn.has_directed_edge(&prospective_src, &prospective_dst, &rn_name, &rn_group_id)?
+        {
+            conn.invalidate_edge(&rn_uuid, ts)?;
+            counts.invalidated_duplicate += 1;
+            continue;
+        }
+
+        // Phase 3: the edge survives — apply each resolved side's hop change (if any) and
+        // record its new state.
+        let mut hop_changed = false;
+        for r in &resolutions {
+            if r.new_uuid != r.existing.resolved_uuid {
+                if r.new_state == BindingState::Bound {
+                    if r.existing.resolved_uuid.is_some() {
+                        conn.delete_relates_to_hop(&rn_uuid, r.side)?;
                     }
-                    if both_resolved
-                        && conn.has_directed_edge(
-                            &prospective_src,
-                            &prospective_dst,
-                            &rn_name,
-                            &rn_group_id,
-                        )?
-                    {
-                        conn.invalidate_edge(&rn_uuid, ts)?;
-                        counts.invalidated_duplicate += 1;
-                        invalidated = true;
-                        break;
-                    }
-                    if existing.resolved_uuid.is_some() {
-                        conn.delete_relates_to_hop(&rn_uuid, side)?;
-                    }
-                    conn.create_relates_to_hop(&rn_uuid, side, new_uuid.as_ref().unwrap())?;
-                } else if existing.resolved_uuid.is_some() {
-                    conn.delete_relates_to_hop(&rn_uuid, side)?;
+                    conn.create_relates_to_hop(&rn_uuid, r.side, r.new_uuid.as_ref().unwrap())?;
+                } else if r.existing.resolved_uuid.is_some() {
+                    conn.delete_relates_to_hop(&rn_uuid, r.side)?;
                 }
                 hop_changed = true;
             }
 
-            match new_state {
+            match r.new_state {
                 BindingState::Bound => counts.bound += 1,
                 BindingState::Unbound => counts.unbound += 1,
                 BindingState::Ambiguous => counts.ambiguous += 1,
             }
 
             pointers.set(
-                side,
+                r.side,
                 CrossGroupPointer {
-                    source_group_id: existing.source_group_id,
-                    endpoint_name: existing.endpoint_name,
-                    resolved_uuid: new_uuid,
+                    source_group_id: r.existing.source_group_id.clone(),
+                    endpoint_name: r.existing.endpoint_name.clone(),
+                    resolved_uuid: r.new_uuid.clone(),
                     bound_at_seq: current_seq,
-                    binding_state: new_state,
+                    binding_state: r.new_state,
                 },
             );
-            changed = true;
         }
 
-        if invalidated {
-            continue;
-        }
-        if changed {
-            let new_attrs = pointer::write_pointers(&attrs, &pointers);
-            conn.update_relates_to_attributes(&rn_uuid, &new_attrs)?;
-        }
+        let new_attrs = pointer::write_pointers(&attrs, &pointers);
+        conn.update_relates_to_attributes(&rn_uuid, &new_attrs)?;
+
         if hop_changed {
             // Re-sync the direct compat rel to the two-hop model's final state. Delete first
             // (not just MERGE) because a stale rel from before this pass may point at a

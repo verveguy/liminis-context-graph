@@ -531,10 +531,12 @@ impl<'db> Conn<'db> {
         )
     }
 
-    /// Removes the direct `Entity→Entity` compat rel for the given edge uuid, if present in
-    /// either direction. Used by `cross_group::rebind_pointers` before re-syncing the compat rel
-    /// (a stale rel may point at a since-changed src/dst) and when a previously-`Bound` pointer
-    /// loses resolution (the compat rel, like the two-hop model, should not survive that).
+    /// Removes the direct `Entity→Entity` compat rel for the given edge uuid, if present. The
+    /// rel is always created `src→dst` (never the reverse), so this matches that one direction
+    /// only — consistent with [`Self::create_relates_to_direct`]. Used by
+    /// `cross_group::rebind_pointers` before re-syncing the compat rel (a stale rel may point at
+    /// a since-changed src/dst) and when a previously-`Bound` pointer loses resolution (the
+    /// compat rel, like the two-hop model, should not survive that).
     pub fn delete_relates_to_direct(&self, rn_uuid: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) DELETE r",
@@ -2371,6 +2373,8 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// | `create_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
 /// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
 /// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
+/// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
+/// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
 /// | `knowledge_query_cypher`                | `cypher_query`   | safe — raw Cypher, no param |

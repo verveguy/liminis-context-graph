@@ -565,6 +565,18 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
         .next()
         .unwrap();
     assert!(raw.invalid_at.is_some());
+    // Both sides resolve to the same entity in this single pass (Src then Dst, in iteration
+    // order). Neither hop must be left dangling: resolving both sides before writing either
+    // hop (rather than committing Src's hop, then discovering Dst's resolution collapses the
+    // edge) means the self-loop is caught before any hop write happens at all.
+    assert_eq!(
+        raw.source_node_uuid, "",
+        "Src hop must not be left dangling on the invalidated node"
+    );
+    assert_eq!(
+        raw.target_node_uuid, "",
+        "Dst hop must not be left dangling on the invalidated node"
+    );
 }
 
 #[test]
@@ -646,6 +658,115 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
         .next()
         .unwrap();
     assert!(raw.invalid_at.is_some());
+
+    // The stable edge is untouched and still resolves.
+    assert!(conn.get_edge_by_uuid(&stable_edge.uuid).unwrap().is_some());
+}
+
+/// Both `src` and `dst` are foreign pointers that resolve *in the same rebind pass* (unlike
+/// `rebind_pointers_invalidates_duplicate_reusing_has_directed_edge`, where only one side is a
+/// pointer) — the exact shape that previously let the `Src` iteration commit its hop before the
+/// `Dst` iteration discovered the pair duplicates an existing edge, leaving `Src`'s hop
+/// permanently orphaned on the now-invalidated node. Resolving both sides before writing either
+/// hop closes that gap.
+#[test]
+fn rebind_pointers_invalidates_duplicate_from_two_sided_resolve_with_no_orphaned_hop() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    // dup_edge is created before Bob/Carol exist, so both sides start Unbound (no hop for
+    // either) and its bound_at_seq is None (no applied position recorded yet) — guaranteeing
+    // it is re-checked on the next rebind regardless of the staleness gate.
+    let dup_edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Carol".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Bob knows Carol (duplicate candidate)".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&dup_edge.attributes)
+            .get(EndpointSide::Src)
+            .unwrap()
+            .binding_state,
+        BindingState::Unbound
+    );
+
+    // Now Bob and Carol arrive, and a *stable* edge binds to them immediately at the current
+    // applied position — pinning stable_edge's bound_at_seq so the rebind call below (at the
+    // same position) skips it entirely, leaving only dup_edge to be reprocessed.
+    let bob = make_entity("Bob", GROUP_A, TS);
+    let carol = make_entity("Carol", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.insert_entity(&carol).unwrap();
+    conn.set_applied_seq(1).unwrap();
+    let stable_edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Carol".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Bob knows Carol".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&stable_edge.attributes)
+            .get(EndpointSide::Src)
+            .unwrap()
+            .binding_state,
+        BindingState::Bound
+    );
+
+    // applied_seq is still 1 (unchanged since stable_edge's creation), so stable_edge's
+    // bound_at_seq(1) >= current(1) skips it entirely. dup_edge's bound_at_seq is None, so it is
+    // always reprocessed: both its Src and Dst pointers resolve to Bound (Bob, Carol) within
+    // this single pass, colliding with stable_edge's already-real hops.
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.invalidated_duplicate, 1);
+
+    assert!(conn.get_edge_by_uuid(&dup_edge.uuid).unwrap().is_none());
+    let raw = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&dup_edge.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(raw.invalid_at.is_some());
+    assert_eq!(
+        raw.source_node_uuid, "",
+        "Src hop must not be left dangling on the invalidated node"
+    );
+    assert_eq!(
+        raw.target_node_uuid, "",
+        "Dst hop must not be left dangling on the invalidated node"
+    );
 
     // The stable edge is untouched and still resolves.
     assert!(conn.get_edge_by_uuid(&stable_edge.uuid).unwrap().is_some());

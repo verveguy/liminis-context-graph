@@ -2626,6 +2626,13 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
             ..Default::default()
         })
         .unwrap();
+        // Set an applied position so the resulting pointer's bound_at_seq is Some(_), not
+        // None — the staleness gate only engages when both the pointer's bound_at_seq and the
+        // current applied position are Some (see cross_group::rebind_pointers's doc comment on
+        // an absent position: every pointer is re-resolved on every pass rather than gated,
+        // since there is no position to compare a cached bound_at_seq against). Without this,
+        // the second dispatch below could never observe a gated no-op.
+        conn.set_applied_seq(1).unwrap();
     }
 
     let rebind = dispatch_val(
@@ -2657,6 +2664,23 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
     assert!(
         r["invalidated_duplicate"].is_number(),
         "invalidated_duplicate must be numeric: {rebind}"
+    );
+
+    // A second call with no intervening source-side change (applied position unchanged since
+    // the first call) must be a true no-op at the IPC layer too — FR-009's idempotency gate,
+    // covered so far only by cross_group_pointers.rs's unit-level test.
+    let second = dispatch_val(
+        207,
+        "knowledge_rebind_pointers",
+        json!({"source_group_id": "source-a"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&second, 207);
+    assert_eq!(
+        second["result"]["checked"], 0,
+        "expected the staleness gate to skip an already-bound pointer with no intervening \
+         source change: {second}"
     );
 }
 
