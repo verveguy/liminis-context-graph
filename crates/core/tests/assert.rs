@@ -56,8 +56,8 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     )
 }
 
-/// A deliberately-unreachable embedder (`OaiEmbedder::from_env()`'s default URL, with no server
-/// listening in the test environment) — for exercising FR-012/FR-021's embedder-unavailable
+/// A deliberately-unreachable embedder (an explicit `OaiEmbedder::new_http` endpoint with no
+/// server listening in the test environment) — for exercising FR-012/FR-021's embedder-unavailable
 /// fallback (a zero-vector embedding + a populated `embedding_warning`). Configured with
 /// `dim: DIM` (matching the test DB's schema dimension) so the fallback's zero vector is the
 /// right length for `make_db`'s `FLOAT[DIM]` columns — `from_env()`'s default dim (768) would
@@ -268,6 +268,152 @@ async fn assert_entity_dead_end_merged_chain_errors_without_writing() {
     );
 }
 
+// ── FR-011: entity_uuid rename must not collide with another entity's name ─────
+
+/// Regression guard: the rename-collision check must not mistake reusing a `Merged` tombstone's
+/// own name for a collision. Asserting by the tombstone's name forwards `existing` to the
+/// canonical (FR-008), whose current name differs from the caller-supplied name — an implicit
+/// rename onto a name that *is* already in the group, but only via an inactive tombstone, which
+/// must not block the assertion.
+#[tokio::test]
+async fn assert_entity_by_name_merged_forward_rename_is_not_a_self_collision() {
+    let (db, _dir) = make_db(DIM);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&make_entity(
+            "canonical-selfcollision",
+            "Acme Corp",
+            "liminis",
+            vec!["Entity".to_string()],
+            "{}",
+        ))
+        .unwrap();
+        conn.insert_entity(&make_entity(
+            "tombstone-selfcollision",
+            "Acme",
+            "liminis",
+            vec!["Entity".to_string(), "Merged".to_string()],
+            &pointer::write_merged_into("{}", "canonical-selfcollision"),
+        ))
+        .unwrap();
+    }
+    let state = make_state(db);
+    // Assert by the tombstone's own name "Acme" — forwards to the canonical
+    // ("Acme Corp"), an implicit rename onto the tombstone's inactive name.
+    let v = dispatch_val(
+        19,
+        "knowledge_assert_entity",
+        json!({"name": "Acme", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 19);
+    assert_eq!(v["result"]["entity_uuid"], "canonical-selfcollision");
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    let canonical = conn
+        .get_entity_by_uuid("canonical-selfcollision")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        canonical.name, "Acme",
+        "the assertion's name must be applied to the canonical entity"
+    );
+}
+
+/// The `entity_uuid` path can be asked to rename the resolved entity (the caller-supplied
+/// `name` need not match the entity's current name). Renaming it onto a name already held by a
+/// *different* active entity in the same group must be rejected, not silently applied — an
+/// unguarded rename would leave two active entities sharing one normalized `(name, group_id)`
+/// key, breaking FR-011's idempotency invariant (one of the two becomes unreachable by future
+/// by-name resolution, including `knowledge_assert_relationship`'s endpoint resolution).
+#[tokio::test]
+async fn assert_entity_by_uuid_rejects_rename_that_collides_with_another_entity() {
+    let (db, _dir) = make_db(DIM);
+    let state = make_state(db);
+
+    let alice = dispatch_val(
+        14,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&alice, 14);
+    let alice_uuid = alice["result"]["entity_uuid"].as_str().unwrap().to_string();
+
+    let bob = dispatch_val(
+        15,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&bob, 15);
+
+    // Attempt to rename Alice (by entity_uuid) onto Bob's name.
+    let renamed = dispatch_val(
+        16,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "entity_uuid": alice_uuid, "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&renamed, 16);
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    assert_eq!(
+        conn.get_entity_by_uuid(&alice_uuid).unwrap().unwrap().name,
+        "Alice",
+        "the rejected rename must leave Alice's name untouched"
+    );
+    assert_eq!(
+        conn.count_entities_by_name_ci("Bob", "liminis").unwrap(),
+        1,
+        "must not end up with two active entities named Bob"
+    );
+}
+
+/// A rename via `entity_uuid` onto a genuinely unused name in the group is not a collision and
+/// must succeed, updating the entity's name in place.
+#[tokio::test]
+async fn assert_entity_by_uuid_rename_to_unused_name_succeeds() {
+    let (db, _dir) = make_db(DIM);
+    let state = make_state(db);
+
+    let created = dispatch_val(
+        17,
+        "knowledge_assert_entity",
+        json!({"name": "Old Name", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 17);
+    let uuid = created["result"]["entity_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let renamed = dispatch_val(
+        18,
+        "knowledge_assert_entity",
+        json!({"name": "New Name", "entity_uuid": uuid, "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&renamed, 18);
+    assert_eq!(renamed["result"]["entity_uuid"], uuid);
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    assert_eq!(
+        conn.get_entity_by_uuid(&uuid).unwrap().unwrap().name,
+        "New Name"
+    );
+}
+
 // ── FR-016/FR-017: group-scoped edge upsert (ADR-0368/ADR-0371) ────────────────
 
 /// Asserting an edge in one `group_id` must never match, update, or overwrite an edge with the
@@ -362,7 +508,7 @@ async fn assert_relationship_edge_upsert_never_crosses_groups() {
 // ── FR-012/FR-021: embedder-unavailable fallback ────────────────────────────────
 
 /// If the configured embedder is unavailable, `knowledge_assert_entity` still succeeds, storing
-/// an empty `name_embedding` and surfacing a non-null `embedding_warning`.
+/// a zero-vector `name_embedding` and surfacing a non-null `embedding_warning`.
 #[tokio::test]
 async fn assert_entity_embedder_unavailable_still_succeeds_with_warning() {
     let (db, _dir) = make_db(DIM);

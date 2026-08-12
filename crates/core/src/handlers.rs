@@ -2665,7 +2665,7 @@ fn attributes_param_to_string(p: &Value) -> String {
 /// `name` (or, if `entity_uuid` is supplied, by that strict group-scoped UUID lookup — FR-007)
 /// within `group_id`. Resolution (including forward-through-`Merged` per FR-008/FR-009) is
 /// delegated to `assert::resolve_entity_by_name`/`resolve_entity_by_uuid`; this handler owns
-/// only param parsing, the embed-with-fallback step (FR-012/FR-012a), and the create-vs-update
+/// only param parsing, the embed-with-fallback step (FR-012/FR-026), and the create-vs-update
 /// branch (FR-010/FR-011). `summary` always fully replaces the prior value — a re-assert that
 /// omits it clears it, matching `attributes`/`labels`.
 async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -2692,19 +2692,16 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
 
-    let (name_embedding, embedding_warning) = match state.embedder.embed(&name).await {
+    let (name_embedding, embed_err) = match state.embedder.embed(&name).await {
         Ok(v) => (v, None),
-        Err(e) => (
-            // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
-            // variable-length LIST) — a literal zero-length vector fails to bind with a
-            // Conversion exception ("Unsupported casting LIST with incorrect list entry to
-            // ARRAY"). A same-dimension zero vector is the only physically valid stand-in for
-            // "no embedding" this schema can store.
-            vec![0.0f32; state.embedder.dim()],
-            Some(format!(
-                "embedder unavailable; stored a zero-vector name_embedding: {e}"
-            )),
-        ),
+        // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
+        // variable-length LIST) — a literal zero-length vector fails to bind with a
+        // Conversion exception ("Unsupported casting LIST with incorrect list entry to
+        // ARRAY"). A same-dimension zero vector is the only physically valid stand-in for
+        // "no embedding" this schema can store on create; an update leaves the existing
+        // stored embedding untouched instead (see `update_entity_core`), so the warning text
+        // is finalized below once we know which branch ran.
+        Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
     };
 
     let db = load_db(&state)?;
@@ -2725,6 +2722,29 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
 
         let (uuid, created) = match resolved {
             Some(existing) => {
+                // Resolution (by uuid, or by name forwarded through a Merged tombstone) can
+                // land `existing` on an entity whose current name differs from the
+                // caller-supplied `name` — an implicit rename. Guard against that rename
+                // silently colliding with a *different active* entity already holding the
+                // target name in this group: `get_entity_by_name_ci`/`_with_scan_fallback`
+                // return one deterministic winner regardless of `Merged` status, so an
+                // unguarded rename could make one of two same-named active entities
+                // unreachable by future by-name resolution (including
+                // `knowledge_assert_relationship`'s endpoint resolution), undermining FR-011's
+                // "(name, group_id)" idempotency key. `count_active_entities_by_name_ci`
+                // excludes `Merged` tombstones (matching `cross_group::resolve_endpoint`'s own
+                // ambiguity-detection convention), so reusing a still-Merged tombstone's old
+                // name — as the by-name Merged-forwarding path routinely does — is correctly
+                // not treated as a collision.
+                if existing.name.trim().to_lowercase() != name.trim().to_lowercase()
+                    && conn.count_active_entities_by_name_ci(&name, &group_id)? > 0
+                {
+                    return Err(Error::Ipc(format!(
+                        "cannot rename entity '{}' to '{name}': an active entity in group \
+                         '{group_id}' already uses that name",
+                        existing.uuid
+                    )));
+                }
                 conn.update_entity_core(&existing, &name, &labels, &summary, &attributes)?;
                 (existing.uuid, false)
             }
@@ -2752,6 +2772,14 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     })
     .await??;
     drop(_guard);
+
+    let embedding_warning = embed_err.map(|e| {
+        if created {
+            format!("embedder unavailable; stored a zero-vector name_embedding: {e}")
+        } else {
+            format!("embedder unavailable; existing name_embedding left unchanged: {e}")
+        }
+    });
 
     Ok(json!({
         "entity_uuid": entity_uuid_out,
@@ -2805,17 +2833,15 @@ async fn handle_assert_relationship(
         None => None,
     };
 
-    let (fact_embedding, embedding_warning) = match state.embedder.embed(&fact).await {
+    let (fact_embedding, embed_err) = match state.embedder.embed(&fact).await {
         Ok(v) => (v, None),
-        Err(e) => (
-            // See the matching comment in handle_assert_entity: RelatesToNode_.fact_embedding
-            // is a fixed-size FLOAT[N] column, so a same-dimension zero vector — not a
-            // literal empty Vec — is the only physically valid "no embedding" stand-in.
-            vec![0.0f32; state.embedder.dim()],
-            Some(format!(
-                "embedder unavailable; stored a zero-vector fact_embedding: {e}"
-            )),
-        ),
+        // See the matching comment in handle_assert_entity: RelatesToNode_.fact_embedding
+        // is a fixed-size FLOAT[N] column, so a same-dimension zero vector — not a
+        // literal empty Vec — is the only physically valid "no embedding" stand-in on create;
+        // an update leaves the existing stored embedding untouched (see
+        // `update_relates_to_core`), so the warning text is finalized below once we know
+        // which branch ran.
+        Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
     };
 
     let db = load_db(&state)?;
@@ -2881,6 +2907,14 @@ async fn handle_assert_relationship(
     })
     .await??;
     drop(_guard);
+
+    let embedding_warning = embed_err.map(|e| {
+        if created {
+            format!("embedder unavailable; stored a zero-vector fact_embedding: {e}")
+        } else {
+            format!("embedder unavailable; existing fact_embedding left unchanged: {e}")
+        }
+    });
 
     Ok(json!({
         "edge_uuid": edge_uuid,
