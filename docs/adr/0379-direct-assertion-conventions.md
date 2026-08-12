@@ -49,7 +49,7 @@ doesn't parse one.
 
 ### 3. `entity_uuid` is a strict group-scoped lookup — never a caller-chosen mint path
 
-#179's FR-009 specified `entity_uuid` as *"if provided, used as the UUID"* — a caller could mint a
+Issue #179's FR-009 specified `entity_uuid` as *"if provided, used as the UUID"* — a caller could mint a
 new entity at a UUID of their choosing. This issue's FR-007 deliberately narrows that: `entity_uuid`
 is looked up within `group_id` and the call fails if absent, with **no create fallback under that
 UUID**. This closes a path for writing an entity into a group at an attacker- or caller-chosen
@@ -92,7 +92,7 @@ group_id)` creates a fresh edge rather than resurrecting the invalidated one.
 has run (the normal state of a live service — see ADR-0025/ADR-0036). lbug's binder rejects a
 plain `SET` on an indexed column outright:
 
-```
+```text
 Cannot set property name_embedding in table Entity because it is used in one or more indexes.
 Try delete and then insert.
 ```
@@ -120,8 +120,9 @@ over the row) ever writes it.
 `RelatesToNode_.fact_embedding FLOAT[N]` are lbug's fixed-size `ARRAY` type, not a variable-length
 `LIST` — `N` is fixed at schema-creation time. A literal zero-length `Vec<f32>` fails to bind with
 a `Conversion exception: Unsupported casting LIST with incorrect list entry to ARRAY. Expected: N,
-Actual: 0`. The spec's Edge Cases text ("an empty embedding is stored") cannot be satisfied
-literally against this schema. Both handlers instead store `vec![0.0f32; state.embedder.dim()]` —
+Actual: 0`. The spec's Edge Cases text originally said "an empty embedding is stored," which
+cannot be satisfied literally against this schema; the spec was corrected in Review to describe
+the zero-vector behavior below. Both handlers store `vec![0.0f32; state.embedder.dim()]` —
 a zero vector of the embedder's configured dimension — as the only physically valid stand-in for
 "no real embedding," alongside the same `embedding_warning` response field from Decision 4. A zero
 vector is functionally inert against cosine-similarity search paths (uniformly dissimilar to

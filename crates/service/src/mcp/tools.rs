@@ -634,7 +634,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            group_id. Repeated calls with the same source/predicate/target/ \
                            group_id are idempotent: the same edge is updated in place, never \
                            duplicated. `fact` defaults to \"<source_name> <predicate> \
-                           <target_name>\" when omitted. `valid_at` accepts RFC-3339 or lbug's \
+                           <target_name>\" when omitted. `attributes`, `valid_at`, and \
+                           `relation_type` are always fully replaced on update — a re-assert \
+                           that omits one of them clears any previously-set value, not a \
+                           partial merge. `valid_at` accepts RFC-3339 or lbug's \
                            space-delimited read-back format and is rejected cleanly (not passed \
                            through to a Binder exception) if it matches neither. If the \
                            configured embedder is unavailable, the call still succeeds with a \
@@ -651,8 +654,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "group_id": {"type": "string", "default": "liminis"},
                         "fact": {"type": "string", "description": "Natural-language fact text. Defaults to \"<source_name> <predicate> <target_name>\" when omitted."},
                         "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized. Fully replaces the prior value on update."},
-                        "valid_at": {"type": "string", "description": "Optional timestamp this fact became true — RFC-3339 or lbug's space-delimited read-back format."},
-                        "relation_type": {"type": "string", "description": "Optional ontology relation type."}
+                        "valid_at": {"type": "string", "description": "Optional timestamp this fact became true — RFC-3339 or lbug's space-delimited read-back format. Fully replaces the prior value on update; omitting it on a re-assert clears any previously-set value, like attributes."},
+                        "relation_type": {"type": "string", "description": "Optional ontology relation type. Fully replaces the prior value on update; omitting it on a re-assert clears any previously-set value, like attributes."}
                     },
                     "required": ["source_name", "target_name", "predicate"]
                 })
