@@ -291,7 +291,10 @@ mod tests {
     #[test]
     fn merged_into_round_trips() {
         let attrs = write_merged_into("{}", "canonical-uuid-1");
-        assert_eq!(read_merged_into(&attrs), Some("canonical-uuid-1".to_string()));
+        assert_eq!(
+            read_merged_into(&attrs),
+            Some("canonical-uuid-1".to_string())
+        );
     }
 
     #[test]

@@ -661,7 +661,8 @@ fn test_foreign_self_loop_edge_untouched() {
 
     // Group L's edge: X1 --[rel]--> X2. After X1 merges into X2, this would become a
     // self-loop (X2 --[rel]--> X2) under same-group handling — but it belongs to group-L.
-    let group_l_edge = make_edge_in_group(x1_uuid, x2_uuid, "rel", "2026-01-01 00:00:00", "group-L");
+    let group_l_edge =
+        make_edge_in_group(x1_uuid, x2_uuid, "rel", "2026-01-01 00:00:00", "group-L");
     let group_l_edge_uuid = group_l_edge.uuid.clone();
     conn.insert_relates_to_edge(&group_l_edge).unwrap();
 
