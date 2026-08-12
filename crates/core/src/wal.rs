@@ -316,6 +316,71 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     Ok(if next == 0 { None } else { Some(next - 1) })
 }
 
+/// Returns the lowest WAL `seq` currently present across `wal_dir` (issue #365), or `None` if
+/// the WAL is empty — the symmetric counterpart to `wal_max_seq`, used by the checkpoint
+/// reachability check (FR-009) to bound a checkpoint's seq against the WAL content actually on
+/// disk. Like `scan_max_seq`, this scans every `.jsonl` file rather than trusting filename sort
+/// order to reflect seq order — a checkpoint reachability check that trusted sort order could
+/// misreport a checkpoint as unreachable if a file sorting later on disk happens to hold a lower
+/// seq (e.g. clock skew across concurrent writers sharing a WAL directory, per FR-012). Unlike
+/// `wal_max_seq`'s tail-read trick (needed because the *last* line of a file sits at an unknown
+/// offset), each file's *first* line is already at offset 0, so `first_seq_in_file` reads forward
+/// only as far as the first parseable line — the same bounded-per-file cost class `scan_max_seq`
+/// already pays at the ADR-0026 ~43,820-file scale.
+pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
+    let files: Vec<PathBuf> = match fs::read_dir(wal_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect(),
+        Err(_) => return Ok(None),
+    };
+
+    let mut min_seq: Option<u64> = None;
+    for path in &files {
+        if let Some(seq) = first_seq_in_file(path) {
+            min_seq = Some(match min_seq {
+                None => seq,
+                Some(m) => m.min(seq),
+            });
+        }
+    }
+    Ok(min_seq)
+}
+
+/// Reads a WAL file and returns the `seq` value of its first line that parses successfully.
+/// Returns `None` only if the file can't be opened, or no line in it parses before EOF.
+///
+/// Reads incrementally via `BufReader::lines()` rather than loading the whole file into memory —
+/// this can run once per `.jsonl` file up front (e.g. `replay_opts`'s file-ordering pass), so a
+/// full-file read would turn a large WAL directory into an apparent startup hang. In the common
+/// case the first line parses immediately and only that one line is read; only a genuinely
+/// corrupt prefix costs more.
+///
+/// Tolerates a corrupt/truncated/non-UTF-8 leading line by skipping it and continuing, mirroring
+/// `read_last_seq`'s tolerance: `io::Lines` reports an `Err` only for the one line that failed
+/// UTF-8 conversion, having already consumed those bytes, so the next line is unaffected and
+/// scanning can continue.
+pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
+    let file = fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in std::io::BufRead::lines(reader) {
+        let raw = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) {
+            return Some(wal_line.seq);
+        }
+    }
+    None
+}
+
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
 /// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
 /// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
@@ -559,6 +624,77 @@ mod tests {
         // `scan_max_seq` (next-assignable) would return 42; `wal_max_seq` must report 41 — the
         // same units as `applied_seq`, so `applied_seq == wal_max_seq` can express "caught up".
         assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(41));
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_min_seq_is_none_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert_eq!(wal_min_seq(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn wal_min_seq_reports_the_literal_lowest_seq_across_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 41);
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 10);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
+    }
+
+    /// Guards against trusting filename sort order for correctness: the lexicographically-first
+    /// file here holds the *higher* seq, mirroring the clock-skew/multi-writer scenario the
+    /// checkpoint reachability check (FR-009, issue #365) must not misreport. `wal_min_seq` must
+    /// scan every file for the true minimum, the same way `scan_max_seq` does for the maximum.
+    #[test]
+    fn wal_min_seq_finds_the_true_minimum_even_when_the_first_sorted_file_is_not_lowest() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_first_sorted.jsonl", 100);
+        write_wal_line(tmp.path(), "b_second_sorted.jsonl", 5);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    #[test]
+    fn wal_min_seq_tolerates_a_corrupt_leading_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("corrupt_0000.jsonl"), "not json\n").unwrap();
+        write_wal_line(tmp.path(), "seeded_0001.jsonl", 10);
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
+    }
+
+    /// SC-009 (issue #365): the `.checkpoints/` subdirectory a WAL directory may contain must be
+    /// invisible to every non-recursive `.jsonl`-extension-filtered scan in this file — it is
+    /// neither counted by `count_jsonl_files` (`knowledge_status`'s `wal.file_count`) nor folded
+    /// into `scan_max_seq`/`wal_max_seq`/`wal_min_seq` (`global_seq` allocation and checkpoint
+    /// reachability), even though it holds JSON files of its own one level down.
+    #[test]
+    fn checkpoints_subdirectory_is_invisible_to_jsonl_scans() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "seeded_0000.jsonl", 10);
+
+        let checkpoint_dir = tmp.path().join(".checkpoints").join("pre-migration");
+        fs::create_dir_all(&checkpoint_dir).unwrap();
+        fs::write(
+            checkpoint_dir.join("g1.create.json"),
+            r#"{"name":"pre-migration","seq":10,"created_at_ms":0}"#,
+        )
+        .unwrap();
+        // Also drop a same-named `.jsonl` sibling one level down, to prove non-recursion (not
+        // just extension filtering) is what keeps it out of scope.
+        fs::write(checkpoint_dir.join("decoy.jsonl"), "not a real WAL line\n").unwrap();
+
+        assert_eq!(count_jsonl_files(tmp.path()), 1);
+        assert_eq!(scan_max_seq(tmp.path()).unwrap(), 11);
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(10));
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(10));
     }
 
     /// A single WAL line larger than `TAIL_READ_WINDOW` (e.g. one carrying an unusually large

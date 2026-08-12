@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::db::Conn;
 use crate::error::Error;
 use crate::legacy_wal::{expand_bulk_property_set, strip_vecf32};
-use crate::wal::{strip_quoted_literals, WalLine};
+use crate::wal::{first_seq_in_file, strip_quoted_literals, WalLine};
 
 /// lbug error-message substrings (lowercase) that classify a replay failure as a known legacy
 /// graphiti/FalkorDB-era construct — counted in `ReplayStats::legacy_skipped_lines` rather than
@@ -817,44 +817,6 @@ struct PreparedCache {
     /// so a cache hit doesn't need to re-derive it.
     use_probe: bool,
     statement: lbug::PreparedStatement,
-}
-
-/// Reads a WAL file and returns the `seq` value of its first line that parses successfully —
-/// the ordering key used to sort files in `replay_opts` (FR-003). Returns `None` only if the
-/// file can't be opened, or no line in it parses before EOF; callers fall back to filename order
-/// for such files (a rare, honestly-approximate placement — any resulting misordering is caught
-/// by the seq-monotonicity check in `replay_opts`, not silently accepted as correct).
-///
-/// Reads incrementally via `BufReader::lines()` rather than loading the whole file into memory —
-/// this runs once per `.jsonl` file up front, before the first progress event, so a full-file
-/// read (as an earlier version of this function did, contradicting this fix's own ADR-0043 claim
-/// of "one line, not a full-file scan") turns a large WAL directory into an apparent startup hang.
-/// In the common case the first line parses immediately and only that one line is read; only a
-/// genuinely corrupt prefix costs more.
-///
-/// Tolerates a corrupt/truncated/non-UTF-8 leading line by skipping it and continuing, mirroring
-/// `wal::read_last_seq`'s tolerance: `io::Lines` reports an `Err` only for the one line that
-/// failed UTF-8 conversion, having already consumed those bytes, so the next line is unaffected
-/// and scanning can continue — an early bail on just the first line would relegate a file with
-/// thousands of good lines to the back of the replay order over a single crash-truncated line,
-/// exactly the kind of WAL corruption the main replay loop already tolerates line-by-line.
-fn first_seq_in_file(path: &std::path::Path) -> Option<u64> {
-    let file = fs::File::open(path).ok()?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let raw = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) {
-            return Some(wal_line.seq);
-        }
-    }
-    None
 }
 
 /// Appends `RETURN count(*)` to a `MATCH`-prefixed template so its execution result reveals

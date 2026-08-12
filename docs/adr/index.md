@@ -89,6 +89,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0341](0341-build-release-artifacts-once.md) | Build Release Artifacts Once and Share Across the Test and E2E Jobs | 2026-08-04 |
 | [0342](0342-salvage-malformed-extraction-items.md) | Per-Item Salvage of Malformed Extraction Items | 2026-08-04 |
 | [0353](0353-persist-and-expose-applied-wal-seq.md) | Persist and Expose an Applied WAL Sequence in `knowledge_status` | 2026-08-05 |
+| [0365](0365-wal-checkpoints-directory-per-name-store.md) | WAL Checkpoints — Directory-Per-Name, Generation-Numbered Exclusive-Create Store | 2026-08-09 |
 | [0368](0368-group-scoped-edge-dedup-in-merge.md) | Duplicate-Edge Detection During Merge Scopes by the Edge's Own `group_id`, Not the Merge's | 2026-08-11 |
 | [0369](0369-resolvable-cross-group-pointers.md) | Resolvable Semantic Pointers for Cross-Group Edges | 2026-08-11 |
 
