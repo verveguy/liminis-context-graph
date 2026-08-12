@@ -2695,9 +2695,14 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let (name_embedding, embedding_warning) = match state.embedder.embed(&name).await {
         Ok(v) => (v, None),
         Err(e) => (
-            Vec::new(),
+            // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
+            // variable-length LIST) — a literal zero-length vector fails to bind with a
+            // Conversion exception ("Unsupported casting LIST with incorrect list entry to
+            // ARRAY"). A same-dimension zero vector is the only physically valid stand-in for
+            // "no embedding" this schema can store.
+            vec![0.0f32; state.embedder.dim()],
             Some(format!(
-                "embedder unavailable; stored an empty name_embedding: {e}"
+                "embedder unavailable; stored a zero-vector name_embedding: {e}"
             )),
         ),
     };
@@ -2803,9 +2808,12 @@ async fn handle_assert_relationship(
     let (fact_embedding, embedding_warning) = match state.embedder.embed(&fact).await {
         Ok(v) => (v, None),
         Err(e) => (
-            Vec::new(),
+            // See the matching comment in handle_assert_entity: RelatesToNode_.fact_embedding
+            // is a fixed-size FLOAT[N] column, so a same-dimension zero vector — not a
+            // literal empty Vec — is the only physically valid "no embedding" stand-in.
+            vec![0.0f32; state.embedder.dim()],
             Some(format!(
-                "embedder unavailable; stored an empty fact_embedding: {e}"
+                "embedder unavailable; stored a zero-vector fact_embedding: {e}"
             )),
         ),
     };
