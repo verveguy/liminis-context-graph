@@ -7,6 +7,7 @@
 //!   US4 — unbound/ambiguous edges are observable and don't break read paths.
 
 use lcg_core::{
+    corrections::{merge_entities, MergeEntitiesParams},
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::Db,
     pointer::{self, BindingState, EndpointSide},
@@ -302,6 +303,217 @@ fn resolve_endpoint_resolves_through_merged_tombstone_to_canonical() {
     let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "erin").unwrap();
     assert_eq!(state, BindingState::Bound);
     assert_eq!(uuid, Some(canonical.uuid));
+}
+
+// ── merged_into forwarding (issue #371, User Story 3) ──────────────────────────────────────────
+
+#[test]
+fn resolve_endpoint_forwards_through_merged_into_when_name_changes() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = make_entity(
+        "International Business Machines",
+        GROUP_A,
+        "2026-01-01 00:00:00",
+    );
+    let mut alias = make_entity("IBM", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&canonical).unwrap();
+    conn.insert_entity(&alias).unwrap();
+
+    // Simulate corrections::merge_entities tombstoning the alias with forwarding recorded
+    // (corrections.rs's merged_into write, FR-005).
+    alias.labels.push("Merged".to_string());
+    conn.update_entity_labels(&alias.uuid, &alias.labels)
+        .unwrap();
+    let new_attrs = pointer::write_merged_into(&alias.attributes, &canonical.uuid);
+    conn.update_entity_attributes(&alias.uuid, &new_attrs)
+        .unwrap();
+
+    // Re-resolving "ibm" would, without forwarding, land back on the tombstoned alias (its own
+    // name is unchanged) — the exact silent-stale-binding bug this issue closes.
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "ibm").unwrap();
+    assert_eq!(state, BindingState::Bound);
+    assert_eq!(uuid, Some(canonical.uuid));
+}
+
+#[test]
+fn resolve_endpoint_follows_two_hop_merged_into_chain() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let a = make_entity("Alpha", GROUP_A, "2026-01-01 00:00:00");
+    let b = make_entity("Beta", GROUP_A, "2026-01-02 00:00:00");
+    let c = make_entity("Gamma", GROUP_A, "2026-01-03 00:00:00");
+    conn.insert_entity(&a).unwrap();
+    conn.insert_entity(&b).unwrap();
+    conn.insert_entity(&c).unwrap();
+
+    // A -> B -> C in merged_into terms: A was merged into B, B was later merged into C.
+    conn.update_entity_labels(&a.uuid, &["Entity".to_string(), "Merged".to_string()])
+        .unwrap();
+    conn.update_entity_attributes(&a.uuid, &pointer::write_merged_into("{}", &b.uuid))
+        .unwrap();
+    conn.update_entity_labels(&b.uuid, &["Entity".to_string(), "Merged".to_string()])
+        .unwrap();
+    conn.update_entity_attributes(&b.uuid, &pointer::write_merged_into("{}", &c.uuid))
+        .unwrap();
+
+    // A pointer that had resolved to A must land on C, not on B or A itself (SC-003).
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "alpha").unwrap();
+    assert_eq!(state, BindingState::Bound);
+    assert_eq!(uuid, Some(c.uuid));
+}
+
+#[test]
+fn resolve_endpoint_unbound_when_merged_into_missing() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    // A pre-existing tombstone with no merged_into recorded — every alias tombstoned before
+    // this feature shipped has no forwarding data (User Story 3 AC2 / SC-004).
+    let mut orphan = make_entity("Orphan", GROUP_A, TS);
+    conn.insert_entity(&orphan).unwrap();
+    orphan.labels.push("Merged".to_string());
+    conn.update_entity_labels(&orphan.uuid, &orphan.labels)
+        .unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "orphan").unwrap();
+    assert_eq!(
+        state,
+        BindingState::Unbound,
+        "a dead-end tombstone must never be reported Bound"
+    );
+    assert_eq!(uuid, None);
+}
+
+#[test]
+fn resolve_endpoint_unbound_on_merged_into_cycle() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let a = make_entity("Alpha", GROUP_A, "2026-01-01 00:00:00");
+    let b = make_entity("Beta", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&a).unwrap();
+    conn.insert_entity(&b).unwrap();
+
+    // A merged_into B, B merged_into A — a cycle that must never be traversed indefinitely.
+    conn.update_entity_labels(&a.uuid, &["Entity".to_string(), "Merged".to_string()])
+        .unwrap();
+    conn.update_entity_attributes(&a.uuid, &pointer::write_merged_into("{}", &b.uuid))
+        .unwrap();
+    conn.update_entity_labels(&b.uuid, &["Entity".to_string(), "Merged".to_string()])
+        .unwrap();
+    conn.update_entity_attributes(&b.uuid, &pointer::write_merged_into("{}", &a.uuid))
+        .unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "alpha").unwrap();
+    assert_eq!(
+        state,
+        BindingState::Unbound,
+        "the cycle guard must stop the traversal, not hang or panic, and record unbound"
+    );
+    assert_eq!(uuid, None);
+}
+
+// ── Original case regression (issue #371, SC-006) ───────────────────────────────────────────────
+
+/// The scenario that originally motivated this issue: source group A holds X1 and Y; layer
+/// group L asserts a cross-group edge X1 --[rel]--> Y. Group A merges X1 into Y — a legitimate
+/// consolidation, which from L's perspective would collapse the edge into a self-loop. A's
+/// merge must leave L's edge completely untouched; the edge recovers (here, correctly
+/// invalidated as a genuine self-loop) only when L's own re-bind pass runs.
+#[test]
+fn original_self_loop_layer_scenario_recovers_via_rebind_not_via_merge() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    conn.set_applied_seq(1).unwrap();
+
+    let x1 = make_entity("X1", GROUP_A, "2026-01-01 00:00:00");
+    let y = make_entity("Y", GROUP_A, "2026-01-01 00:00:01");
+    conn.insert_entity(&x1).unwrap();
+    conn.insert_entity(&y).unwrap();
+
+    // Layer group L asserts X1 --[rel]--> Y, both endpoints foreign to L's own group.
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "rel".to_string(),
+            source: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "X1".to_string(),
+            },
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Y".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "X1 rel Y".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    let pointers = pointer::read_pointers(&edge.attributes);
+    assert_eq!(
+        pointers.get(EndpointSide::Src).unwrap().binding_state,
+        BindingState::Bound
+    );
+    assert_eq!(
+        pointers.get(EndpointSide::Dst).unwrap().binding_state,
+        BindingState::Bound
+    );
+
+    // Group A merges X1 into Y.
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(y.uuid.clone()),
+        alias_uuids: vec![x1.uuid.clone()],
+        group_id: GROUP_A.to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(
+        result.foreign_edges_skipped, 1,
+        "the direct Entity<->Entity compat rel created alongside L's pointer edge carries L's \
+         own group_id — it is a foreign edge that merge_entities_inner must skip, not rewrite"
+    );
+
+    // L's edge survives A's merge completely untouched: still present, not invalidated.
+    assert!(
+        conn.get_edge_by_uuid(&edge.uuid).unwrap().is_some(),
+        "A's merge must never touch L's edge"
+    );
+
+    // L's own re-bind pass now discovers the staleness: X1's name still resolves (to the
+    // tombstoned row, since X1's own name is unchanged), and merged_into forwarding routes it
+    // to Y — producing a genuine self-loop, invalidated by rebind_pointers's own derived logic,
+    // not by anything A's merge did.
+    conn.set_applied_seq(2).unwrap();
+    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.invalidated_self_loop, 1);
+
+    // rebind_pointers's self-loop branch invalidates the row without touching its
+    // already-existing hops (unlike the fresh-Unbound-both-sides case, this edge's hops were
+    // created at edge-creation time) — `get_edge_by_uuid`'s strict two-hop MATCH would still
+    // find it, so check `invalid_at` directly via `get_relates_to_by_uuids` instead.
+    let raw = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(
+        raw.invalid_at.is_some(),
+        "L's edge must be invalidated by L's own rebind pass, as a genuine self-loop"
+    );
 }
 
 // ── User Story 3: refresh cycle — purge, rehydrate, re-bind ────────────────────────────────────
