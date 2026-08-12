@@ -150,7 +150,7 @@ fn group_counts(db: &Db, group_id: &str) -> (u64, u64, u64) {
 // Empirically verifies whether lbug's HNSW vector index and FTS index self-maintain on
 // DETACH DELETE of an Entity node — never exercised before this issue since nothing in this
 // codebase deleted Entity/RelatesToNode_ nodes previously. Finding recorded in
-// docs/adr/0380-group-scoped-purge.md.
+// docs/adr/0361-group-scoped-purge.md.
 
 #[test]
 fn hnsw_and_fts_self_maintain_on_entity_delete() {

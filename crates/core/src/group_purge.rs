@@ -2,7 +2,7 @@
 //! `RelatesToNode_` (RELATES_TO edge) data in one atomic operation, without orphaning another
 //! group's cross-group pointers (issue #361).
 //!
-//! See `docs/adr/0380-group-scoped-purge.md` for the design rationale — in particular why
+//! See `docs/adr/0361-group-scoped-purge.md` for the design rationale — in particular why
 //! `applied_seq` (FR-005) is left untouched pending #378, and why the same pre-mutation
 //! counting query can serve as both the `dry_run` prediction and the real result (SC-009).
 
