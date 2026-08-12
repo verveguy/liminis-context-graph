@@ -1938,7 +1938,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (src:Entity {uuid: $src})-[:RELATES_TO]->(rn:RelatesToNode_ {name: $name})-[:RELATES_TO]->(dst:Entity {uuid: $dst}) \
              WHERE rn.invalid_at IS NULL AND rn.group_id = $group_id \
-             RETURN rn.uuid LIMIT 1",
+             RETURN rn.uuid ORDER BY rn.created_at ASC, rn.uuid ASC LIMIT 1",
             serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid, "group_id": group_id }),
         )?;
         Ok(rows.into_iter().next().map(|row| value_as_string(&row[0])))
