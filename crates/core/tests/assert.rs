@@ -48,7 +48,12 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 /// A working embedder (`MockEmbedder`) — the default for tests not specifically exercising the
 /// embedder-unavailable fallback.
 fn make_state(db: Arc<Db>) -> Arc<AppState> {
-    make_state_with(db, Arc::new(MockEmbedder::new(DIM)), None, "test.db".to_string())
+    make_state_with(
+        db,
+        Arc::new(MockEmbedder::new(DIM)),
+        None,
+        "test.db".to_string(),
+    )
 }
 
 /// A deliberately-unreachable embedder (`OaiEmbedder::from_env()`'s default URL, with no server
@@ -118,7 +123,13 @@ fn make_state_with(
     })
 }
 
-fn make_entity(uuid: &str, name: &str, group_id: &str, labels: Vec<String>, attrs: &str) -> EntityRow {
+fn make_entity(
+    uuid: &str,
+    name: &str,
+    group_id: &str,
+    labels: Vec<String>,
+    attrs: &str,
+) -> EntityRow {
     EntityRow {
         uuid: uuid.to_string(),
         name: name.to_string(),
@@ -206,9 +217,15 @@ async fn assert_entity_by_uuid_forwards_through_merged_tombstone_to_canonical() 
 
     let db2 = state.db.load_full().unwrap();
     let conn = db2.connect().unwrap();
-    let canonical = conn.get_entity_by_uuid("canonical-uuid-1").unwrap().unwrap();
+    let canonical = conn
+        .get_entity_by_uuid("canonical-uuid-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(canonical.summary, "reasserted via uuid");
-    let tombstone = conn.get_entity_by_uuid("tombstone-uuid-1").unwrap().unwrap();
+    let tombstone = conn
+        .get_entity_by_uuid("tombstone-uuid-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         tombstone.summary, "seed",
         "the tombstone itself must be left untouched"
@@ -244,7 +261,8 @@ async fn assert_entity_dead_end_merged_chain_errors_without_writing() {
     let db2 = state.db.load_full().unwrap();
     let conn = db2.connect().unwrap();
     assert_eq!(
-        conn.count_entities_by_name_ci("Ghost Co", "liminis").unwrap(),
+        conn.count_entities_by_name_ci("Ghost Co", "liminis")
+            .unwrap(),
         1,
         "must not create a duplicate or new entity on a dead-end Merged chain"
     );
@@ -419,7 +437,15 @@ async fn assert_relationship_embedder_unavailable_still_succeeds_with_warning() 
 
     let db2 = state.db.load_full().unwrap();
     let conn = db2.connect().unwrap();
-    let edge = conn.get_edge_by_uuid(edge_uuid).unwrap().unwrap();
+    // get_edge_by_uuid's query doesn't select fact_embedding at all (it's not needed by that
+    // call site); get_full_edges_for_entity does, so use that to actually observe the stored
+    // vector.
+    let edge = conn
+        .get_full_edges_for_entity("alice-fr021")
+        .unwrap()
+        .into_iter()
+        .find(|e| e.uuid == edge_uuid)
+        .expect("expected the asserted edge to be found via get_full_edges_for_entity");
     assert_eq!(
         edge.fact_embedding,
         vec![0.0f32; DIM],
@@ -445,7 +471,10 @@ async fn assert_entity_summary_round_trips_and_clears_on_omit() {
     )
     .await;
     assert_ok_resp(&created, 6);
-    let uuid = created["result"]["entity_uuid"].as_str().unwrap().to_string();
+    let uuid = created["result"]["entity_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     {
         let db2 = state.db.load_full().unwrap();
@@ -584,7 +613,10 @@ async fn assert_entity_and_relationship_survive_wal_replay() {
         let conn2 = db2.connect().unwrap();
         conn2.init_schema(DIM).unwrap();
         let stats = WalReplayer::new(wal_dir.path()).replay(&conn2).unwrap();
-        assert!(stats.lines_replayed > 0, "WAL replay must process some lines");
+        assert!(
+            stats.lines_replayed > 0,
+            "WAL replay must process some lines"
+        );
     }
 
     let conn2 = db2.connect().unwrap();
@@ -648,7 +680,10 @@ async fn structural_determinism_across_independent_instances() {
         let edge_row = conn.get_edge_by_uuid(&edge_uuid).unwrap().unwrap();
         // Topology captured as "source_name -> predicate -> target_name" — deliberately
         // UUID-free, since UUIDs are per-instance and never compared (SC-008).
-        let topology = format!("{} -> {} -> {}", alice_row.name, edge_row.name, bob_row.name);
+        let topology = format!(
+            "{} -> {} -> {}",
+            alice_row.name, edge_row.name, bob_row.name
+        );
         (
             topology,
             json!({"name": alice_row.name, "attributes": alice_row.attributes}),
@@ -664,7 +699,16 @@ async fn structural_determinism_across_independent_instances() {
     let (topology1, alice1, bob1) = build_fixture(state1).await;
     let (topology2, alice2, bob2) = build_fixture(state2).await;
 
-    assert_eq!(topology1, topology2, "graph topology must be identical across instances");
-    assert_eq!(alice1, alice2, "Alice's name/attributes must be identical across instances");
-    assert_eq!(bob1, bob2, "Bob's name/attributes must be identical across instances");
+    assert_eq!(
+        topology1, topology2,
+        "graph topology must be identical across instances"
+    );
+    assert_eq!(
+        alice1, alice2,
+        "Alice's name/attributes must be identical across instances"
+    );
+    assert_eq!(
+        bob1, bob2,
+        "Bob's name/attributes must be identical across instances"
+    );
 }
