@@ -2720,14 +2720,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
 
         let (uuid, created) = match resolved {
             Some(existing) => {
-                conn.update_entity_core(
-                    &existing,
-                    &name,
-                    &labels,
-                    &name_embedding,
-                    &summary,
-                    &attributes,
-                )?;
+                conn.update_entity_core(&existing, &name, &labels, &summary, &attributes)?;
                 (existing.uuid, false)
             }
             None => {
@@ -2846,7 +2839,6 @@ async fn handle_assert_relationship(
                 conn.update_relates_to_core(
                     &uuid,
                     &fact,
-                    &fact_embedding,
                     valid_at.as_deref(),
                     relation_type.as_deref(),
                     &attributes,

@@ -595,31 +595,36 @@ impl<'db> Conn<'db> {
         )
     }
 
-    /// Updates an existing `RelatesToNode_` shadow node's `fact`, `fact_embedding`, `valid_at`,
-    /// `relation_type`, and `attributes` in a single `SET` statement, then best-effort syncs the
-    /// same `fact`/`valid_at`/`attributes` onto the direct `Entity→Entity` compat rel — reusing
+    /// Updates an existing `RelatesToNode_` shadow node's `fact`, `valid_at`, `relation_type`,
+    /// and `attributes` in a single `SET` statement, then best-effort syncs the same
+    /// `fact`/`valid_at`/`attributes` onto the direct `Entity→Entity` compat rel — reusing
     /// `invalidate_edge`'s non-fatal `SET`-on-rel pattern, since lbug 0.17.0 may not support
     /// `SET` on rel properties and a failure here must not fail the whole update. Used by
     /// `knowledge_assert_relationship`'s update-in-place path (issue #379 FR-017): no existing
-    /// setter covers `fact`/`fact_embedding`/`valid_at`/`relation_type` in one shot.
+    /// setter covers `fact`/`valid_at`/`relation_type` in one shot.
     /// `relation_type`/`valid_at` bind as JSON null when `None`, matching `insert_relates_to_edge`.
+    ///
+    /// Deliberately does **not** touch `fact_embedding`, for the same reason
+    /// [`Self::update_entity_core`] doesn't touch `name_embedding`: lbug's HNSW vector index
+    /// (built over `RelatesToNode_.fact_embedding`) rejects a plain `SET` on an indexed column —
+    /// "Try delete and then insert." The caller still generates a fresh fact embedding on every
+    /// call for the `embedding_warning` fallback to stay observable, but only the create path
+    /// (`insert_relates_to_edge`, before any index exists over the row) persists it.
     pub fn update_relates_to_core(
         &self,
         uuid: &str,
         fact: &str,
-        fact_embedding: &[f32],
         valid_at: Option<&str>,
         relation_type: Option<&str>,
         attributes: &str,
     ) -> Result<(), Error> {
         self.exec_params(
             "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.fact = $fact, \
-             rn.fact_embedding = $fact_embedding, rn.valid_at = $valid_at, \
-             rn.relation_type = $relation_type, rn.attributes = $attributes",
+             rn.valid_at = $valid_at, rn.relation_type = $relation_type, \
+             rn.attributes = $attributes",
             serde_json::json!({
                 "uuid": uuid,
                 "fact": fact,
-                "fact_embedding": fact_embedding,
                 "valid_at": valid_at,
                 "relation_type": relation_type,
                 "attributes": attributes,
@@ -1988,29 +1993,40 @@ impl<'db> Conn<'db> {
 
     /// Updates an existing Entity's mutable fields — `name`, `labels` (through
     /// `enforce_entity_first`, since this path doesn't go through `insert_entity`'s own
-    /// invariant enforcement), `name_embedding`, `summary`, and `attributes` — in a single `SET`
-    /// statement, then refreshes the `NameIndex` entry for `existing.uuid` under the (possibly
-    /// changed) `new_name`. Used by `knowledge_assert_entity`'s update-in-place path (issue #379
+    /// invariant enforcement), `summary`, and `attributes` — in a single `SET` statement, then
+    /// refreshes the `NameIndex` entry for `existing.uuid` under the (possibly changed)
+    /// `new_name`. Used by `knowledge_assert_entity`'s update-in-place path (issue #379
     /// FR-011): no existing narrow setter (`update_entity_labels`/`update_entity_attributes`)
-    /// covers `name`/`name_embedding`/`summary` in one shot.
+    /// covers `name`/`summary` in one shot.
+    ///
+    /// Deliberately does **not** touch `name_embedding`, even though FR-012 asks for a fresh
+    /// name embedding on every assert call. lbug's HNSW vector index (built over `Entity.
+    /// name_embedding` by `create_vector_indexes`) rejects a plain `SET` on an indexed column
+    /// outright: `Cannot set property name_embedding in table Entity because it is used in one
+    /// or more indexes. Try delete and then insert.` This is the same reason
+    /// `episode.rs`'s dedup `DedupDecision::Merge` path (`SET e.summary = $summary`) never
+    /// rewrites `name_embedding` on a re-matched entity either — it is this codebase's existing
+    /// precedent, not a new decision invented for this feature. The caller still generates the
+    /// embedding on every call (so the embedder-unavailable `embedding_warning` fallback stays
+    /// observable and consistent between create and update), but only the create path
+    /// (`insert_entity`, before any index exists over the row) actually persists it; an update
+    /// leaves the entity's previously-stored embedding untouched.
     pub fn update_entity_core(
         &self,
         existing: &EntityRow,
         new_name: &str,
         labels: &[String],
-        name_embedding: &[f32],
         summary: &str,
         attributes: &str,
     ) -> Result<(), Error> {
         let labels = enforce_entity_first(labels);
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.name = $name, e.labels = $labels, \
-             e.name_embedding = $name_embedding, e.summary = $summary, e.attributes = $attributes",
+             e.summary = $summary, e.attributes = $attributes",
             serde_json::json!({
                 "uuid": existing.uuid,
                 "name": new_name,
                 "labels": labels,
-                "name_embedding": name_embedding,
                 "summary": summary,
                 "attributes": attributes,
             }),
