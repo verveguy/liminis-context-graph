@@ -13,11 +13,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (38)
+## IPC methods (40)
 
-The socket dispatch handles **38 methods**: 37 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **40 methods**: 39 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (38) and the MCP tool registry (37, below) differ by exactly one — `health_check` is
+surface (40) and the MCP tool registry (39, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -30,6 +30,7 @@ not exposed as an MCP tool.
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
+| Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
 | WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
@@ -103,9 +104,9 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices` |
+| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -221,6 +222,46 @@ genuine fact-based classification instead of lexical matching or pseudo-typing:
   without a separate dry-run call. `plan` and `would_reclassify_count` remain dry-run-only, since
   they describe a proposed mutation rather than one that already happened; `breakdown` is always
   present on a successful apply response, as `{}` when there were zero in-scope candidates.
+
+### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
+
+`knowledge_add_cross_group_edge` creates an edge whose endpoint(s) may live in a `group_id`
+other than the edge's own — the hub/layer-graph topology introduced by issue #369 (see
+[ADR-0369](adr/0369-resolvable-cross-group-pointers.md)). Every intra-group edge write
+(`knowledge_add_episode`, `knowledge_process_chunk`, and every other existing write path) is
+completely unaffected: pointers only ever exist on edges created through this tool.
+
+- **Each endpoint is either a bare UUID or a name to resolve.** `{"uuid": "..."}` names an
+  entity already known to live in the edge's own `group_id` — no resolution, no pointer. `
+  {"source_group_id": "...", "endpoint_name": "..."}` names a *foreign* endpoint: it is resolved
+  by case-insensitive name lookup against that group (the same authority
+  `get_entity_by_name_ci_with_scan_fallback` uses for extraction-time endpoint resolution, per
+  [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md)), and the edge carries
+  a `cross_group_pointers.{src,dst}` object recording the assertion (`source_group_id`,
+  `endpoint_name`) and the resolution cache (`resolved_uuid`, `bound_at_seq`, `binding_state`).
+- **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
+  ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
+  [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;
+  only the hop to that side is missing until a later `knowledge_rebind_pointers` call resolves
+  it. A `binding_state` of `ambiguous` means more than one entity currently matches the name —
+  also retained, also missing that hop, never a silently-guessed winner.
+- **A bare-UUID endpoint that turns out to belong to a different group than the edge is
+  rejected** before any write happens — this is what keeps a cross-group edge from silently
+  losing its pointer fields the first time a caller passes a UUID instead of a name.
+- **`knowledge_rebind_pointers`** (`{"source_group_id": "..."}`, required) re-resolves every
+  pointer whose `source_group_id` matches, after that source group's own hydration or refresh
+  cycle. It skips any pointer whose `bound_at_seq` is already at or past the current applied WAL
+  position — this is both the staleness gate and what makes a second call with no intervening
+  source-side change a true no-op. A resolution that would create a self-loop or duplicate an
+  existing directed edge invalidates the edge instead of writing a broken or redundant one,
+  reusing `knowledge_merge_entities`'s own self-loop/dedup handling rather than a new policy.
+  Returns `{checked, bound, unbound, ambiguous, invalidated_self_loop, invalidated_duplicate}`.
+- **Unbound and ambiguous edges are excluded from normal reads.** Every existing two-hop
+  traversal, search, and MCP read path requires both hops to exist — a pointer that hasn't
+  resolved is invisible the same way any other incomplete edge would be, no special-casing
+  needed. Aggregate counts are visible via `knowledge_status`'s `cross_group_pointers: {bound,
+  unbound, ambiguous}` field, so a refresh in progress is observable without a dedicated
+  inspection endpoint.
 
 ### Progress notifications
 

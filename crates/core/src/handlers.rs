@@ -10,11 +10,13 @@ use uuid::Uuid;
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
     backfill, canonicalize, corrections,
+    cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::Db,
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
     ipc::{IpcRequest, IpcResponse},
     ontology_sidecar,
+    pointer::{self, EndpointSide, PointerStateCounts},
     rebuild_job::{JobStatus, RebuildJob},
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     reprocess_relations, search,
@@ -139,6 +141,8 @@ async fn handle(
         "knowledge_validate_corrections" => handle_validate_corrections(state).await,
         "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
         "knowledge_merge_entities" => handle_merge_entities(req, state).await,
+        "knowledge_add_cross_group_edge" => handle_add_cross_group_edge(req, state).await,
+        "knowledge_rebind_pointers" => handle_rebind_pointers(req, state).await,
         "knowledge_reprocess_entity_types" => {
             handle_reprocess_entity_types(req, state, progress_tx).await
         }
@@ -224,6 +228,7 @@ struct StatusFields {
     index_created_at: Option<String>,
     name_index_trusted: bool,
     name_index_fallback_scans: u64,
+    cross_group_pointers: PointerStateCounts,
 }
 
 /// Outcome of the status-gathering blocking task: either the graph is open and every
@@ -302,6 +307,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
+            "cross_group_pointers": null,
         }));
     }
     let db = db_opt.unwrap();
@@ -335,12 +341,14 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 let edge_count = conn.count_relates_to_edges()?;
                 let last_index_time = conn.get_latest_episode_time()?;
                 let index_created_at = conn.get_earliest_episode_time()?;
+                let cross_group_pointers = conn.count_cross_group_pointers()?;
                 Ok((
                     entity_count,
                     episode_count,
                     edge_count,
                     last_index_time,
                     index_created_at,
+                    cross_group_pointers,
                 ))
             })();
 
@@ -351,6 +359,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     edge_count,
                     last_index_time,
                     index_created_at,
+                    cross_group_pointers,
                 )) => Ok(StatusOutcome::Queryable(StatusFields {
                     entity_count,
                     episode_count,
@@ -364,6 +373,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     index_created_at,
                     name_index_trusted,
                     name_index_fallback_scans,
+                    cross_group_pointers,
                 })),
                 // A missing core table means the graph is open but not queryable — degrade to a
                 // status response (FR-001) rather than propagating (see ADR-0325). Any other error
@@ -415,6 +425,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
+                "cross_group_pointers": {
+                    "bound": fields.cross_group_pointers.bound,
+                    "unbound": fields.cross_group_pointers.unbound,
+                    "ambiguous": fields.cross_group_pointers.ambiguous,
+                },
             });
             if let Some(t) = fields.index_created_at {
                 result["index_created_at"] = json!(t);
@@ -468,6 +483,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "indices_built": false,
             "name_index_trusted": name_index_trusted,
             "name_index_fallback_scans": name_index_fallback_scans,
+            "cross_group_pointers": {
+                "bound": null,
+                "unbound": null,
+                "ambiguous": null,
+            },
         }),
     };
     result["ontology"] = ontology_summary;
@@ -2511,6 +2531,125 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
     }
 
     Ok(resp)
+}
+
+/// Parses one `EndpointSpec` from its JSON wire shape: `{"uuid": "..."}` for an endpoint
+/// already known to live in the edge's own `group_id`, or `{"source_group_id": "...",
+/// "endpoint_name": "..."}` for a foreign endpoint to be resolved (issue #369 FR-002).
+fn parse_endpoint_spec(v: &Value) -> Result<EndpointSpec, Error> {
+    let uuid = v["uuid"].as_str();
+    let source_group_id = v["source_group_id"].as_str();
+    let endpoint_name = v["endpoint_name"].as_str();
+    match (uuid, source_group_id, endpoint_name) {
+        (Some(uuid), None, None) => Ok(EndpointSpec::Uuid(uuid.to_string())),
+        (None, Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
+            source_group_id: source_group_id.to_string(),
+            endpoint_name: endpoint_name.to_string(),
+        }),
+        // A request mixing 'uuid' with 'source_group_id'/'endpoint_name' is rejected rather
+        // than silently preferring 'uuid' and discarding the foreign pointer fields — an
+        // ambiguous request must not be interpreted as if it were a clean intra-group one
+        // (FR-002/SC-005: "rejected loudly", not silently downgraded).
+        _ => Err(Error::Ipc(
+            "endpoint must have either 'uuid' alone, or both 'source_group_id' and \
+             'endpoint_name' alone — not a mix, and not a partial foreign pair"
+                .to_string(),
+        )),
+    }
+}
+
+fn pointer_to_json(p: &pointer::CrossGroupPointer) -> Value {
+    serde_json::to_value(p).unwrap_or(Value::Null)
+}
+
+async fn handle_add_cross_group_edge(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"].as_str().unwrap_or("").to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let fact = p["fact"].as_str().unwrap_or("").to_string();
+    let valid_at = p["valid_at"].as_str().map(|s| s.to_string());
+    let relation_type = p["relation_type"].as_str().map(|s| s.to_string());
+    let source = parse_endpoint_spec(&p["source"])?;
+    let target = parse_endpoint_spec(&p["target"])?;
+
+    let fact_embedding = state.embedder.embed(&fact).await?;
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let edge = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        let ts = chrono::Utc::now().to_rfc3339();
+        let edge = cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name,
+                source,
+                target,
+                group_id,
+                fact,
+                fact_embedding,
+                valid_at,
+                relation_type,
+            },
+            &ts,
+        )?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        Ok::<_, Error>(edge)
+    })
+    .await??;
+    drop(_guard);
+
+    let pointers = pointer::read_pointers(&edge.attributes);
+    Ok(json!({
+        "uuid": edge.uuid,
+        "name": edge.name,
+        "group_id": edge.group_id,
+        "source_node_uuid": edge.source_node_uuid,
+        "target_node_uuid": edge.target_node_uuid,
+        "fact": edge.fact,
+        "cross_group_pointers": {
+            "src": pointers.get(EndpointSide::Src).map(pointer_to_json),
+            "dst": pointers.get(EndpointSide::Dst).map(pointer_to_json),
+        }
+    }))
+}
+
+async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let source_group_id = req.params["source_group_id"]
+        .as_str()
+        .ok_or_else(|| Error::Ipc("source_group_id is required".to_string()))?
+        .to_string();
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let counts = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        let ts = chrono::Utc::now().to_rfc3339();
+        let counts = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        Ok::<_, Error>(counts)
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "checked": counts.checked,
+        "bound": counts.bound,
+        "unbound": counts.unbound,
+        "ambiguous": counts.ambiguous,
+        "invalidated_self_loop": counts.invalidated_self_loop,
+        "invalidated_duplicate": counts.invalidated_duplicate,
+    }))
 }
 
 async fn handle_reprocess_entity_types(

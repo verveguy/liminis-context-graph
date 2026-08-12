@@ -735,6 +735,13 @@ async fn test_knowledge_status_empty_db() {
         r.get("index_created_at").is_none(),
         "expected index_created_at to be absent from empty-DB response: {v}"
     );
+    // issue #369 FR-012: present-and-zero on an empty DB, not absent/null (a genuinely empty
+    // graph is queryable, so this follows the same "0, not null" rule as entity_count above).
+    assert_eq!(
+        r["cross_group_pointers"],
+        json!({"bound": 0, "unbound": 0, "ambiguous": 0}),
+        "expected zeroed cross_group_pointers on an empty db: {v}"
+    );
 }
 
 #[tokio::test]
@@ -837,6 +844,13 @@ async fn test_knowledge_status_missing_entity_table_reports_not_queryable() {
     assert_eq!(
         r["indices_built"], false,
         "expected indices_built:false: {v}"
+    );
+    // issue #369: degrades sanely alongside the existing missing-table state — null, not 0,
+    // for the same "can't be mistaken for empty" reason as entity_count.
+    assert_eq!(
+        r["cross_group_pointers"],
+        json!({"bound": null, "unbound": null, "ambiguous": null}),
+        "expected null cross_group_pointers while a core table is missing: {v}"
     );
 }
 
@@ -2376,6 +2390,414 @@ async fn parity_merge_entities_noop_single_entity() {
         "edges_deduplicated must be numeric: {v}"
     );
     assert!(r["errors"].is_array(), "errors must be an array: {v}");
+}
+
+// ── knowledge_add_cross_group_edge / knowledge_rebind_pointers (issue #369) ────────────────────
+
+/// Both endpoints already known to live in the edge's own group_id → no pointer fields.
+#[tokio::test]
+async fn parity_add_cross_group_edge_intra_group_has_no_pointers() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-201".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bob-201".to_string(),
+            name: "Bob".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        201,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-201"},
+            "target": {"uuid": "bob-201"},
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 201);
+    let r = &v["result"];
+    assert_eq!(
+        r["source_node_uuid"], "alice-201",
+        "unexpected response: {v}"
+    );
+    assert_eq!(r["target_node_uuid"], "bob-201", "unexpected response: {v}");
+    assert!(
+        r["cross_group_pointers"]["src"].is_null(),
+        "intra-group edge must carry no src pointer: {v}"
+    );
+    assert!(
+        r["cross_group_pointers"]["dst"].is_null(),
+        "intra-group edge must carry no dst pointer: {v}"
+    );
+}
+
+/// A foreign endpoint that resolves at creation time → bound pointer, real hop.
+#[tokio::test]
+async fn parity_add_cross_group_edge_foreign_endpoint_bound() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-202".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bob-202".to_string(),
+            name: "Bob".to_string(),
+            group_id: "source-a".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        202,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-202"},
+            "target": {"source_group_id": "source-a", "endpoint_name": "Bob"},
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 202);
+    let r = &v["result"];
+    assert_eq!(r["target_node_uuid"], "bob-202", "unexpected response: {v}");
+    let dst = &r["cross_group_pointers"]["dst"];
+    assert_eq!(
+        dst["source_group_id"], "source-a",
+        "unexpected response: {v}"
+    );
+    assert_eq!(dst["endpoint_name"], "bob", "unexpected response: {v}");
+    assert_eq!(dst["resolved_uuid"], "bob-202", "unexpected response: {v}");
+    assert_eq!(dst["binding_state"], "bound", "unexpected response: {v}");
+}
+
+/// A bare-UUID endpoint that actually belongs to a foreign group must be rejected (FR-002).
+#[tokio::test]
+async fn parity_add_cross_group_edge_rejects_bare_uuid_foreign_endpoint() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-203".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bob-203".to_string(),
+            name: "Bob".to_string(),
+            group_id: "source-a".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        203,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-203"},
+            "target": {"uuid": "bob-203"},
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 203, -32000);
+}
+
+/// An endpoint carrying both `uuid` and `source_group_id`/`endpoint_name` is rejected rather
+/// than silently preferring `uuid` and discarding the foreign pointer fields — an ambiguous
+/// request must not be downgraded to a clean intra-group one (FR-002/SC-005).
+#[tokio::test]
+async fn parity_add_cross_group_edge_rejects_mixed_endpoint_fields() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-208".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        208,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-208"},
+            "target": {
+                "uuid": "alice-208",
+                "source_group_id": "source-a",
+                "endpoint_name": "Bob"
+            },
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 208, -32000);
+}
+
+/// `source_group_id` is a required param for `knowledge_rebind_pointers`.
+#[tokio::test]
+async fn parity_rebind_pointers_requires_source_group_id() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(204, "knowledge_rebind_pointers", json!({}), state).await;
+    assert_err_resp(&v, 204, -32000);
+}
+
+/// End-to-end: an unbound pointer becomes bound once its target exists, via the wire protocol.
+#[tokio::test]
+async fn parity_rebind_pointers_flips_unbound_to_bound() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-205".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+
+    let created = dispatch_val(
+        205,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-205"},
+            "target": {"source_group_id": "source-a", "endpoint_name": "Bob"},
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 205);
+    assert_eq!(
+        created["result"]["cross_group_pointers"]["dst"]["binding_state"], "unbound",
+        "expected unbound before Bob exists: {created}"
+    );
+
+    {
+        let db = state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bob-205".to_string(),
+            name: "Bob".to_string(),
+            group_id: "source-a".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        // Set an applied position so the resulting pointer's bound_at_seq is Some(_), not
+        // None — the staleness gate only engages when both the pointer's bound_at_seq and the
+        // current applied position are Some (see cross_group::rebind_pointers's doc comment on
+        // an absent position: every pointer is re-resolved on every pass rather than gated,
+        // since there is no position to compare a cached bound_at_seq against). Without this,
+        // the second dispatch below could never observe a gated no-op.
+        conn.set_applied_seq(1).unwrap();
+    }
+
+    let rebind = dispatch_val(
+        206,
+        "knowledge_rebind_pointers",
+        json!({"source_group_id": "source-a"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rebind, 206);
+    let r = &rebind["result"];
+    assert_eq!(r["bound"], 1, "expected one pointer newly bound: {rebind}");
+    assert!(
+        r["checked"].is_number(),
+        "checked must be numeric: {rebind}"
+    );
+    assert!(
+        r["unbound"].is_number(),
+        "unbound must be numeric: {rebind}"
+    );
+    assert!(
+        r["ambiguous"].is_number(),
+        "ambiguous must be numeric: {rebind}"
+    );
+    assert!(
+        r["invalidated_self_loop"].is_number(),
+        "invalidated_self_loop must be numeric: {rebind}"
+    );
+    assert!(
+        r["invalidated_duplicate"].is_number(),
+        "invalidated_duplicate must be numeric: {rebind}"
+    );
+
+    // A second call with no intervening source-side change (applied position unchanged since
+    // the first call) must be a true no-op at the IPC layer too — FR-009's idempotency gate,
+    // covered so far only by cross_group_pointers.rs's unit-level test.
+    let second = dispatch_val(
+        207,
+        "knowledge_rebind_pointers",
+        json!({"source_group_id": "source-a"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&second, 207);
+    assert_eq!(
+        second["result"]["checked"], 0,
+        "expected the staleness gate to skip an already-bound pointer with no intervening \
+         source change: {second}"
+    );
+}
+
+/// `knowledge_status`'s cross_group_pointers counts reflect the actual mix of binding states.
+#[tokio::test]
+async fn parity_knowledge_status_reports_cross_group_pointer_counts() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "alice-207".to_string(),
+            name: "Alice".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bob-207".to_string(),
+            name: "Bob".to_string(),
+            group_id: "source-a".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "parity test entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+
+    // One bound pointer (Bob resolves immediately).
+    let bound = dispatch_val(
+        207,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-207"},
+            "target": {"source_group_id": "source-a", "endpoint_name": "Bob"},
+            "group_id": "liminis",
+            "fact": "Alice knows Bob",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&bound, 207);
+
+    // One unbound pointer (Ghost never exists).
+    let unbound = dispatch_val(
+        208,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "KNOWS",
+            "source": {"uuid": "alice-207"},
+            "target": {"source_group_id": "source-a", "endpoint_name": "Ghost"},
+            "group_id": "liminis",
+            "fact": "Alice knows Ghost",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&unbound, 208);
+
+    let v = dispatch_val(209, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&v, 209);
+    assert_eq!(
+        v["result"]["cross_group_pointers"],
+        json!({"bound": 1, "unbound": 1, "ambiguous": 0}),
+        "unexpected cross_group_pointers counts: {v}"
+    );
 }
 
 // ── FR-011, SC-004: RELATES_TO / MENTIONS edge type correctness ───────────────
