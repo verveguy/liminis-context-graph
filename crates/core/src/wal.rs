@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -291,8 +293,10 @@ struct ScanMaxSeqDetail {
     max_seq_file: Option<String>,
     /// Byte size of `max_seq_file` at scan time, used to detect further growth.
     max_seq_file_size: u64,
-    /// Count of `.jsonl` files seen, used to detect files added/removed since this scan.
-    file_count: u32,
+    /// Fingerprint of the `.jsonl` file *name set* seen during this scan (see
+    /// [`jsonl_file_set_fingerprint`]), used to detect any file added/removed/renamed since —
+    /// not just a net change in count, which a same-count swap would miss.
+    file_set_fingerprint: u64,
 }
 
 /// Reads all `.jsonl` files in `wal_dir` and returns the literal highest seq present, along with
@@ -307,7 +311,7 @@ fn scan_max_seq_detailed(wal_dir: &Path) -> Result<ScanMaxSeqDetail, Error> {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .collect();
-    let file_count = files.len() as u32;
+    let file_set_fingerprint = jsonl_file_set_fingerprint(&files);
 
     let mut max_seq: Option<u64> = None;
     let mut max_seq_path: Option<PathBuf> = None;
@@ -331,8 +335,44 @@ fn scan_max_seq_detailed(wal_dir: &Path) -> Result<ScanMaxSeqDetail, Error> {
         max_seq,
         max_seq_file,
         max_seq_file_size,
-        file_count,
+        file_set_fingerprint,
     })
+}
+
+/// Fingerprint of a `.jsonl` file *name set* (order-independent — the input is sorted before
+/// hashing), used as a cheap (no file opens, just names already in hand from one `read_dir`)
+/// staleness signal that changes on ANY membership change: a file added, removed, or renamed.
+///
+/// A plain file *count* is not sufficient here: a same-count swap (one file removed, a
+/// different one added — e.g. an external prune paired with a new rotation) leaves the count
+/// unchanged even though the true max-seq-holding file may have changed, which a count-only
+/// check would silently miss (see FR-008 in issue #375 — the fast path MUST still return the
+/// true max after any out-of-band directory modification, not just after a size change).
+fn jsonl_file_set_fingerprint<P: AsRef<Path>>(paths: &[P]) -> u64 {
+    let mut names: Vec<_> = paths
+        .iter()
+        .filter_map(|p| p.as_ref().file_name().map(|n| n.to_owned()))
+        .collect();
+    names.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    names.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Same as [`jsonl_file_set_fingerprint`] but reads the current file name set from disk with a
+/// single non-recursive `read_dir` pass (no file opens) — the fast-path staleness check doesn't
+/// have an already-collected file list to reuse the way `scan_max_seq_detailed` does. Returns
+/// `None` if the directory can't be listed at all — that must be treated as "can't confirm
+/// freshness," not silently coerced into an empty file set, or an unreadable directory could
+/// spuriously "match" an empty-WAL manifest and serve a cached value past a real error.
+fn current_jsonl_file_set_fingerprint(wal_dir: &Path) -> Option<u64> {
+    let names: Vec<PathBuf> = fs::read_dir(wal_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    Some(jsonl_file_set_fingerprint(&names))
 }
 
 /// Reads all `.jsonl` files in `wal_dir` and returns `max_seq + 1`, or 0 if no lines are found.
@@ -354,22 +394,26 @@ const WAL_BOUNDS_MANIFEST_FILE: &str = ".wal-bounds.json";
 /// exact extension `"jsonl"`.
 ///
 /// This is a read-side optimization layered over `scan_max_seq_detailed`, never a new source of
-/// truth (FR-004): it is rebuilt from a full scan whenever it is absent, its `file_count` no
-/// longer matches the directory, or the file it names has been removed or is unparseable.
+/// truth (FR-004): it is rebuilt from a full scan whenever it is absent, its
+/// `file_set_fingerprint` no longer matches the directory, or the file it names has been removed
+/// or is unparseable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WalBoundsManifest {
-    /// Count of `.jsonl` files present at manifest-write time. A live-writer file mid-append
-    /// doesn't change this; only rotation, or an external process adding/removing a file, does —
-    /// so this is the cheap (one `read_dir`, no file opens) signal that something in the
-    /// directory may have changed since the manifest was written.
-    file_count: u32,
+    /// Fingerprint of the `.jsonl` file *name set* present at manifest-write time (see
+    /// [`jsonl_file_set_fingerprint`]). A live-writer file mid-append doesn't change this; any
+    /// file being added, removed, or renamed does — so this is the cheap (one `read_dir`, no
+    /// file opens) signal that directory membership may have changed since the manifest was
+    /// written. A plain file *count* is deliberately not used here: it would miss a same-count
+    /// swap (e.g. an external prune paired with a new rotation) that changes which file holds
+    /// the true max seq without changing how many files are present.
+    file_set_fingerprint: u64,
     /// File name of the `.jsonl` file that held `max_seq`. `None` iff `max_seq` is `None` (empty
     /// WAL directory).
     max_seq_file: Option<String>,
     /// Byte size of `max_seq_file` at manifest-write time. The only file in a WAL directory that
-    /// can grow without changing `file_count` is the one a live writer still has open — so an
-    /// unchanged size, combined with an unchanged `file_count`, is sufficient to trust the cached
-    /// `max_seq` without reopening anything.
+    /// can grow without changing the file name set is the one a live writer still has open — so
+    /// an unchanged size, combined with an unchanged `file_set_fingerprint`, is sufficient to
+    /// trust the cached `max_seq` without reopening anything.
     max_seq_file_size: u64,
     /// The literal highest seq present as of manifest-write time.
     max_seq: Option<u64>,
@@ -391,16 +435,58 @@ fn read_wal_bounds_manifest(wal_dir: &Path) -> Option<WalBoundsManifest> {
 /// the full-scan cost again. The tmp file uses a UUID suffix (not a single fixed name, unlike
 /// `ontology_sidecar`'s startup-time writer) because `wal_max_seq` can be called concurrently by
 /// multiple async tasks in one process; a fixed tmp name would let concurrent writers corrupt
-/// each other's in-flight write.
+/// each other's in-flight write. Because each write picks a fresh UUID, a crash between
+/// `fs::write` and `fs::rename` orphans that one tmp file forever — no future write ever reuses
+/// its name to overwrite it. `sweep_stale_manifest_tmp_files` bounds that: every write
+/// opportunistically clears out any `.tmp` sibling old enough to only be crash debris.
 fn write_wal_bounds_manifest(wal_dir: &Path, manifest: &WalBoundsManifest) {
+    sweep_stale_manifest_tmp_files(wal_dir);
+
     let Ok(json) = serde_json::to_string(manifest) else {
         return;
     };
     let tmp_path = wal_dir.join(format!(".wal-bounds.{}.tmp", Uuid::new_v4().as_simple()));
     if fs::write(&tmp_path, json).is_err() {
+        let _ = fs::remove_file(&tmp_path);
         return;
     }
-    let _ = fs::rename(&tmp_path, wal_bounds_manifest_path(wal_dir));
+    if fs::rename(&tmp_path, wal_bounds_manifest_path(wal_dir)).is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+}
+
+/// Age beyond which a leftover `.wal-bounds.*.tmp` file is assumed to be crash debris rather than
+/// an in-flight concurrent write — writing and renaming a few-hundred-byte JSON file never
+/// legitimately takes this long.
+const STALE_MANIFEST_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Removes `.wal-bounds.*.tmp` files older than [`STALE_MANIFEST_TMP_AGE`] — debris from a prior
+/// `write_wal_bounds_manifest` call that crashed between `fs::write` and `fs::rename`, which a
+/// UUID-suffixed tmp name (needed for concurrency safety, see above) means no later write will
+/// ever land on and clean up by overwriting. Best-effort: any I/O error here is silently ignored,
+/// same as the write it's paired with (FR-004 — never fatal to the read this caches).
+fn sweep_stale_manifest_tmp_files(wal_dir: &Path) {
+    let Ok(entries) = fs::read_dir(wal_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(".wal-bounds.") || !name.ends_with(".tmp") {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| {
+                modified
+                    .elapsed()
+                    .is_ok_and(|age| age > STALE_MANIFEST_TMP_AGE)
+            });
+        if is_stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Returns the highest WAL `seq` actually present across `wal_dir` (issue #353), or `None` if
@@ -424,7 +510,7 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     write_wal_bounds_manifest(
         wal_dir,
         &WalBoundsManifest {
-            file_count: detailed.file_count,
+            file_set_fingerprint: detailed.file_set_fingerprint,
             max_seq_file: detailed.max_seq_file.clone(),
             max_seq_file_size: detailed.max_seq_file_size,
             max_seq: detailed.max_seq,
@@ -433,36 +519,58 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     Ok(detailed.max_seq)
 }
 
+/// Whether `name` is safe to join directly onto `wal_dir` as `manifest.max_seq_file`: a single
+/// path component with a `.jsonl` extension, no separators or `..`. The manifest is untrusted —
+/// it tolerates being hand-edited, corrupted, or produced by a foreign writer (see
+/// `read_wal_bounds_manifest`) — so a crafted or corrupted `max_seq_file` value (e.g. containing
+/// `../`) must not be allowed to make `wal_dir.join(file_name)` resolve outside `wal_dir`.
+fn is_safe_wal_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && Path::new(name).extension().and_then(|e| e.to_str()) == Some("jsonl")
+}
+
 /// Attempts to answer `wal_max_seq` from the manifest alone. Returns `None` (not `Some(None)`)
 /// on any miss, mismatch, or corruption — that's the "give up, caller should fall back to a full
 /// scan" signal, distinct from `Some(None)`, which means "the fast path succeeded and the true
 /// answer is an empty WAL directory."
 fn wal_max_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
     let manifest = read_wal_bounds_manifest(wal_dir)?;
-    let current_file_count = count_jsonl_files(wal_dir);
-    if current_file_count != manifest.file_count {
+    // A directory that can't even be listed must fall back, not be treated as empty — otherwise
+    // a `read_dir` error could spuriously "match" an empty-WAL manifest's fingerprint.
+    let current_fingerprint = current_jsonl_file_set_fingerprint(wal_dir)?;
+    if current_fingerprint != manifest.file_set_fingerprint {
         return None;
     }
 
     match (&manifest.max_seq_file, manifest.max_seq) {
         (None, None) => Some(None),
         (Some(file_name), Some(cached_seq)) => {
+            if !is_safe_wal_file_name(file_name) {
+                return None;
+            }
             let file_path = wal_dir.join(file_name);
             let current_size = fs::metadata(&file_path).ok()?.len();
             if current_size == manifest.max_seq_file_size {
                 return Some(Some(cached_seq));
             }
-            // Same file count, different size: the only file that can grow without a rotation
-            // is the one a live writer still has open, so re-read just that file's tail rather
-            // than rescanning the whole directory.
+            // Same file name set, different size: the only file that can grow without changing
+            // the name set is the one a live writer still has open, so re-read just that file's
+            // tail rather than rescanning the whole directory. A live writer only ever appends,
+            // so a re-read reporting a seq *lower* than what's cached means something other than
+            // ordinary growth happened (e.g. truncation) — safer to fall back to a full scan than
+            // to trust either value.
             let new_seq = match read_last_seq(&file_path) {
-                Ok(Some(seq)) => seq,
+                Ok(Some(seq)) if seq >= cached_seq => seq,
                 _ => return None,
             };
             write_wal_bounds_manifest(
                 wal_dir,
                 &WalBoundsManifest {
-                    file_count: current_file_count,
+                    file_set_fingerprint: current_fingerprint,
                     max_seq_file: Some(file_name.clone()),
                     max_seq_file_size: current_size,
                     max_seq: Some(new_seq),
@@ -1075,5 +1183,98 @@ mod tests {
         assert!(tmp.path().join(".wal-bounds.json").exists());
 
         assert_eq!(count_jsonl_files(tmp.path()), 1);
+    }
+
+    /// FR-008: a same-count swap — one file removed, a different one added, leaving the total
+    /// `.jsonl` count unchanged and never touching the tracked max-seq file — must still be
+    /// detected and reconciled. A staleness check based on file *count* alone would miss this
+    /// (2 files before, 2 files after) and silently serve the stale cached max.
+    #[test]
+    fn wal_max_seq_detects_same_count_file_swap() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5); // tracked max
+        write_wal_line(tmp.path(), "b_0000.jsonl", 3);
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5)); // establishes manifest, count=2
+
+        // Remove the non-tracked file, add a different one with a HIGHER seq than tracked max.
+        // Net file count stays at 2, and the tracked file "a_0000.jsonl" is untouched.
+        fs::remove_file(tmp.path().join("b_0000.jsonl")).unwrap();
+        write_wal_line(tmp.path(), "c_0000.jsonl", 10);
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(10));
+    }
+
+    /// The manifest is untrusted input (it tolerates hand-editing/corruption/foreign writers) —
+    /// a crafted `max_seq_file` value must not be allowed to make `wal_dir.join(file_name)`
+    /// escape the WAL directory. A traversal value must be rejected, forcing a fallback to a
+    /// full scan that returns the true (unrelated) on-disk value instead.
+    #[test]
+    fn wal_max_seq_rejects_path_traversal_in_manifest_max_seq_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5);
+
+        let real_files = vec![tmp.path().join("a_0000.jsonl")];
+        let malicious = WalBoundsManifest {
+            file_set_fingerprint: jsonl_file_set_fingerprint(&real_files),
+            max_seq_file: Some("../evil.jsonl".to_string()),
+            max_seq_file_size: 0,
+            max_seq: Some(999_999),
+        };
+        fs::write(
+            tmp.path().join(".wal-bounds.json"),
+            serde_json::to_string(&malicious).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    /// A live writer only ever appends, so a re-read of the tracked max-seq file reporting a
+    /// *lower* seq than cached (simulating truncation/corruption, not ordinary growth) must not
+    /// be trusted directly — it must force a full-scan fallback rather than serve the suspect
+    /// re-read value from the single-file fast path.
+    #[test]
+    fn wal_max_seq_falls_back_when_tracked_file_reread_seq_decreases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a_path = tmp.path().join("a_0000.jsonl");
+        write_wal_line(tmp.path(), "a_0000.jsonl", 1);
+        let first_line = fs::read_to_string(&a_path).unwrap();
+
+        let second_line = WalLine {
+            seq: 5,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "y" }),
+        };
+        fs::write(
+            &a_path,
+            format!(
+                "{}{}\n",
+                first_line,
+                serde_json::to_string(&second_line).unwrap()
+            ),
+        )
+        .unwrap();
+        write_wal_line(tmp.path(), "b_0000.jsonl", 2);
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5)); // establishes manifest, tracked = a_0000
+
+        // Truncate a_0000.jsonl back to just its first line — data loss, not ordinary append
+        // growth. The tracked file's re-read would report seq=1, lower than the cached seq=5.
+        fs::write(&a_path, &first_line).unwrap();
+
+        reset_read_last_seq_call_count();
+        let result = wal_max_seq(tmp.path()).unwrap();
+        assert_eq!(
+            result,
+            Some(2),
+            "true max after truncation is b_0000's seq=2"
+        );
+        assert!(
+            read_last_seq_call_count() >= 2,
+            "a seq decrease on the tracked file must trigger a full-scan fallback (visiting every \
+             file), not be trusted directly from a single re-read"
+        );
     }
 }

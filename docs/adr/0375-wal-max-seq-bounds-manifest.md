@@ -33,7 +33,7 @@ Add `<wal_dir>/.wal-bounds.json`, a small JSON file recording:
 
 ```rust
 struct WalBoundsManifest {
-    file_count: u32,           // .jsonl files seen at manifest-write time
+    file_set_fingerprint: u64,     // hash of the sorted .jsonl file *name set* at write time
     max_seq_file: Option<String>,  // file name (not path) holding max_seq
     max_seq_file_size: u64,    // that file's byte size at manifest-write time
     max_seq: Option<u64>,      // the literal highest seq present
@@ -51,18 +51,22 @@ The `.json` extension (not `.jsonl`) keeps it invisible to every existing non-re
 (FR-003): `replay.rs`'s file lister, `count_jsonl_files`, and the full-scan helper all filter on
 exact extension `"jsonl"`.
 
-### Staleness detection: file count + one file's size, not directory mtime
+### Staleness detection: a file-name-set fingerprint + one file's size, not directory mtime
 
 A fast-path read is trusted only if:
 
-1. **The current `.jsonl` file count matches the manifest's `file_count`** (one `read_dir` pass,
-   no file opens). A mismatch means a file was added or removed since the manifest was written —
-   rotation, an external writer, or a foreign/older process touching the directory — and any
-   cached bound can no longer be trusted.
-2. **If the count matches**, stat the one file the manifest says held `max_seq` and compare byte
-   size. Every other `.jsonl` file in the directory is immutable once rotated away; the *only*
-   file that can grow without changing `file_count` is the one a live writer still has open. An
-   unchanged size means nothing relevant changed; a changed size means that file grew, and its
+1. **The current `.jsonl` file *name set* still hashes to the manifest's `file_set_fingerprint`**
+   (one `read_dir` pass — the same cost as a plain count — no file opens). A mismatch means a file
+   was added, removed, or renamed since the manifest was written — rotation, an external writer, or
+   a foreign/older process touching the directory — and any cached bound can no longer be trusted.
+   A plain file *count* was considered and rejected here: it cannot distinguish "nothing changed"
+   from a same-count swap (one file removed, a different one added), which would leave a stale
+   `max_seq` cached even though the true max may have moved to the newly added file. Hashing the
+   sorted name set costs the same one `read_dir` pass and closes that gap entirely.
+2. **If the fingerprint matches**, stat the one file the manifest says held `max_seq` and compare
+   byte size. Every other `.jsonl` file in the directory is immutable once rotated away; the *only*
+   file that can grow without changing the file name set is the one a live writer still has open.
+   An unchanged size means nothing relevant changed; a changed size means that file grew, and its
    tail alone (not the whole directory) needs re-reading.
 
 Directory `mtime` was considered and rejected: writing the manifest *into* `wal_dir` bumps the
@@ -82,7 +86,29 @@ A write is best-effort and non-fatal: `write_wal_bounds_manifest` swallows I/O e
 serialization succeeds. The tmp file used for the atomic rename is UUID-suffixed per write (not a
 single fixed name, unlike `ontology_sidecar.rs`'s startup-time writer), because `wal_max_seq` can
 be called concurrently by multiple async tasks in one process — a fixed tmp name would let
-concurrent writers stomp each other's in-flight write.
+concurrent writers stomp each other's in-flight write. Because a UUID-suffixed name is never
+reused, a crash between `fs::write` and `fs::rename` would otherwise orphan that tmp file forever;
+`write_wal_bounds_manifest` cleans up its own tmp file on a failed write or rename, and also sweeps
+any `.wal-bounds.*.tmp` sibling older than five minutes on every call, bounding accumulation from
+past crashes without needing a fixed name.
+
+### Treating the manifest itself as untrusted input
+
+Since the manifest tolerates being hand-edited, corrupted, or produced by a foreign writer (that's
+what "any parse failure falls back" means in practice), the fast path validates it defensively
+before acting on it, rather than trusting its shape:
+
+- **`max_seq_file` is validated as a single path component with a `.jsonl` extension** (no `/`,
+  `\`, or literal `..`) before being joined onto `wal_dir`. An unvalidated join would let a
+  corrupted or crafted manifest value escape the WAL directory (e.g. `../../etc/passwd`).
+- **A `read_dir` failure while computing the current file-set fingerprint is treated as "can't
+  confirm freshness," not as an empty directory.** Coercing the error into an empty result could
+  spuriously match an empty-WAL manifest's fingerprint and serve a stale cached value straight
+  past a real I/O error.
+- **A re-read of the tracked max-seq file that reports a seq *lower* than the cached value is
+  rejected**, falling back to a full scan instead. The tracked file only grows via ordinary
+  append, so a decrease means something other than routine growth happened (e.g. truncation) and
+  the manifest can no longer be trusted at face value.
 
 Any miss, mismatch, or parse failure falls back to the pre-existing full scan
 (`scan_max_seq_detailed`), which both computes the correct answer and produces a fresh manifest to
@@ -111,15 +137,15 @@ doesn't match the deployment topology ADR-0353's own Context describes: orac/zen
 live, concurrent, byte-level writes into one shared directory from multiple processes. It is also
 consistent with this issue's own scope note: no requirement to coordinate bounds across multiple
 WAL directories, and FR-008 explicitly accepts "one full-scan reconciliation" per out-of-band
-change as the correctness mechanism, which this design still provides for every case that *does*
-change `file_count` (which any rotation or externally-added file does).
+change as the correctness mechanism, which this design provides for every case that changes the
+`.jsonl` file name set (which any rotation, addition, or removal does).
 
-A similarly narrow gap: a file count that happens to net unchanged across a simultaneous
-add-and-remove (e.g. an external process replacing one file with another of the same total count)
-would not be detected by the file-count check alone. No code path in this codebase deletes
-`.jsonl` files from a live WAL directory today, so this is a theoretical gap against an
-out-of-band actor this design does not otherwise try to defend against (a foreign process actively
-rewriting WAL history), not an expected operational scenario.
+An earlier draft of this design used a plain file *count* rather than a name-set fingerprint for
+staleness detection, which left a gap: a same-count swap (one file removed, a different one added,
+net count unchanged) would not have been detected, silently serving a stale `max_seq` if the
+removed/added pair didn't touch the tracked max-seq file. Hashing the sorted file name set instead
+(see Staleness detection, above) closes this at no extra cost — same single `read_dir` pass — so
+this is not a residual limitation.
 
 ## Consequences
 
