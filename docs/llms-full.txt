@@ -356,11 +356,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (38)
+## IPC methods (40)
 
-The socket dispatch handles **38 methods**: 37 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **40 methods**: 39 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (38) and the MCP tool registry (37, below) differ by exactly one — `health_check` is
+surface (40) and the MCP tool registry (39, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
