@@ -13,11 +13,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (40)
+## IPC methods (42)
 
-The socket dispatch handles **40 methods**: 39 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **42 methods**: 41 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (40) and the MCP tool registry (39, below) differ by exactly one — `health_check` is
+surface (42) and the MCP tool registry (41, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -25,6 +25,7 @@ not exposed as an MCP tool.
 | Health | `health_check` |
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
+| Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | Search | `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all` |
@@ -104,7 +105,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers` |
 | `all` | every scope above (default) |

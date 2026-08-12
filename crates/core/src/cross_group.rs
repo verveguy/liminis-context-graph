@@ -14,7 +14,7 @@ use crate::{
     error::Error,
     pointer::{self, BindingState, CrossGroupPointer, CrossGroupPointers, EndpointSide},
     prompts::normalize_name,
-    types::RelatesToEdge,
+    types::{EntityRow, RelatesToEdge},
 };
 
 /// Empty-string sentinel for `RelatesToEdge.source_node_uuid`/`target_node_uuid` marking a
@@ -93,24 +93,45 @@ pub fn resolve_endpoint(
         return Ok((BindingState::Bound, Some(winner.uuid)));
     }
 
+    match follow_merged_into_chain(conn, source_group_id, winner)? {
+        Some(canonical) => Ok((BindingState::Bound, Some(canonical.uuid))),
+        None => Ok((BindingState::Unbound, None)),
+    }
+}
+
+/// Follows `merged_into` forward from `start` to a fixpoint, entirely within `group_id`.
+/// Returns the canonical (non-`Merged`) entity if the chain resolves cleanly, or `None` if it
+/// dead-ends: no forwarding reference recorded, a cycle (visited-UUID guard), a dangling target,
+/// or a target that escaped `group_id`.
+///
+/// Shared by [`resolve_endpoint`] (which treats a dead-end as `Unbound` — safe to retry later
+/// via `rebind_pointers`) and `crate::assert`'s entity resolution (issue #379's FR-008/FR-009 —
+/// which treats a dead-end as a hard error, since an assert call has no later retry). The two
+/// callers differ only in how they react to `None`, not in how the walk itself works — there is
+/// exactly one implementation of the cycle-guarded forward walk.
+pub fn follow_merged_into_chain(
+    conn: &Conn,
+    group_id: &str,
+    start: EntityRow,
+) -> Result<Option<EntityRow>, Error> {
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-    visited.insert(winner.uuid.clone());
-    let mut current = winner;
+    visited.insert(start.uuid.clone());
+    let mut current = start;
     loop {
         let Some(target_uuid) = pointer::read_merged_into(&current.attributes) else {
-            return Ok((BindingState::Unbound, None)); // no forwarding reference recorded
+            return Ok(None); // no forwarding reference recorded
         };
         if !visited.insert(target_uuid.clone()) {
-            return Ok((BindingState::Unbound, None)); // cycle guard (FR-008)
+            return Ok(None); // cycle guard
         }
         let Some(next) = conn.get_entity_by_uuid(&target_uuid)? else {
-            return Ok((BindingState::Unbound, None)); // dangling merged_into target
+            return Ok(None); // dangling merged_into target
         };
-        if next.group_id != source_group_id {
-            return Ok((BindingState::Unbound, None)); // merged_into escaped the source group
+        if next.group_id != group_id {
+            return Ok(None); // merged_into escaped the group
         }
         if !next.labels.contains(&"Merged".to_string()) {
-            return Ok((BindingState::Bound, Some(next.uuid)));
+            return Ok(Some(next));
         }
         current = next;
     }

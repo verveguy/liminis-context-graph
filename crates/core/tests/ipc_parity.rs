@@ -30,7 +30,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
-    pointer::read_merged_into,
+    pointer::{self, read_merged_into},
     telemetry::{NoopSink, TelemetrySink},
     types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
     EntityRow, Ontology, RelatesToEdge, WalWriter,
@@ -5133,4 +5133,362 @@ async fn wal_mark_create_concurrent_same_name_exactly_one_wins() {
     let list_v = dispatch_val(100, "knowledge_wal_mark_list", json!({}), state).await;
     let checkpoints = list_v["result"]["checkpoints"].as_array().unwrap();
     assert_eq!(checkpoints.len(), 1);
+}
+
+// ── knowledge_assert_entity / knowledge_assert_relationship (issue #379) ───────────────────────
+
+/// FR-001/FR-010: no `entity_uuid` and no existing name match → a new entity is created.
+#[tokio::test]
+async fn parity_assert_entity_creates_new() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        300,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 300);
+    let r = &v["result"];
+    assert!(r["entity_uuid"].is_string(), "expected entity_uuid: {v}");
+    assert_eq!(r["created"], true, "expected created=true: {v}");
+    assert!(
+        r["embedding_warning"].is_null(),
+        "MockEmbedder should not fail: {v}"
+    );
+}
+
+/// FR-011/SC-002: repeated calls with the same name/group_id are idempotent — same
+/// `entity_uuid` returned, fields updated in place, never a duplicate.
+#[tokio::test]
+async fn parity_assert_entity_idempotent_reassert_by_name() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let first = dispatch_val(
+        301,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis", "summary": "first"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&first, 301);
+    let uuid1 = first["result"]["entity_uuid"].as_str().unwrap().to_string();
+    assert_eq!(first["result"]["created"], true);
+
+    let second = dispatch_val(
+        302,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis", "summary": "second"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&second, 302);
+    assert_eq!(
+        second["result"]["entity_uuid"], uuid1,
+        "re-assert by name must return the same entity_uuid: {second}"
+    );
+    assert_eq!(
+        second["result"]["created"], false,
+        "re-assert must update in place, not create: {second}"
+    );
+
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_entities_by_name_ci("Alice", "liminis").unwrap(),
+        1,
+        "must never duplicate the entity (SC-002)"
+    );
+    let row = conn.get_entity_by_uuid(&uuid1).unwrap().unwrap();
+    assert_eq!(row.summary, "second", "summary must be updated in place");
+}
+
+/// FR-007: `entity_uuid` is a strict group-scoped lookup — updates the matched entity, and a
+/// UUID absent from `group_id` fails rather than creating one under that UUID.
+#[tokio::test]
+async fn parity_assert_entity_by_uuid_updates_and_rejects_missing() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let created = dispatch_val(
+        303,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 303);
+    let uuid = created["result"]["entity_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let updated = dispatch_val(
+        304,
+        "knowledge_assert_entity",
+        json!({
+            "name": "Bob",
+            "entity_uuid": uuid,
+            "group_id": "liminis",
+            "summary": "updated via uuid",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&updated, 304);
+    assert_eq!(
+        updated["result"]["entity_uuid"], uuid,
+        "unexpected: {updated}"
+    );
+    assert_eq!(updated["result"]["created"], false);
+
+    let missing = dispatch_val(
+        305,
+        "knowledge_assert_entity",
+        json!({
+            "name": "Ghost",
+            "entity_uuid": "00000000-0000-0000-0000-000000000099",
+            "group_id": "liminis",
+        }),
+        state,
+    )
+    .await;
+    assert_err_resp(&missing, 305, -32000);
+}
+
+/// FR-008: an entity resolved (by name) to a `Merged` tombstone forwards to the canonical and
+/// updates it, rather than erroring or writing a new entity under the stale name.
+#[tokio::test]
+async fn parity_assert_entity_forwards_through_merged_tombstone() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "canonical-306".to_string(),
+            name: "Acme Corp".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "canonical".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "tombstone-306".to_string(),
+            name: "Acme".to_string(),
+            group_id: "liminis".to_string(),
+            labels: vec!["Entity".to_string(), "Merged".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "tombstone".to_string(),
+            attributes: pointer::write_merged_into("{}", "canonical-306"),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        306,
+        "knowledge_assert_entity",
+        json!({"name": "Acme", "group_id": "liminis", "summary": "reasserted"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 306);
+    assert_eq!(
+        v["result"]["entity_uuid"], "canonical-306",
+        "must forward through the Merged tombstone to the canonical: {v}"
+    );
+
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    let canonical = conn.get_entity_by_uuid("canonical-306").unwrap().unwrap();
+    assert_eq!(canonical.summary, "reasserted");
+    let tombstone = conn.get_entity_by_uuid("tombstone-306").unwrap().unwrap();
+    assert_eq!(
+        tombstone.summary, "tombstone",
+        "the tombstone itself must be left untouched"
+    );
+}
+
+/// FR-002/SC-001: two asserted entities connected by a single directed edge, no episode/LLM
+/// extraction involved.
+#[tokio::test]
+async fn parity_assert_relationship_creates_edge_between_asserted_entities() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let alice = dispatch_val(
+        307,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    let bob = dispatch_val(
+        308,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    let alice_uuid = alice["result"]["entity_uuid"].as_str().unwrap();
+    let bob_uuid = bob["result"]["entity_uuid"].as_str().unwrap();
+
+    let v = dispatch_val(
+        309,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice",
+            "target_name": "Bob",
+            "predicate": "KNOWS",
+            "group_id": "liminis",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 309);
+    assert!(
+        v["result"]["edge_uuid"].is_string(),
+        "expected edge_uuid: {v}"
+    );
+    assert_eq!(v["result"]["created"], true);
+
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.has_directed_edge(alice_uuid, bob_uuid, "KNOWS", "liminis")
+            .unwrap(),
+        "expected a single KNOWS edge from Alice to Bob"
+    );
+    let edge = conn
+        .get_edge_by_uuid(v["result"]["edge_uuid"].as_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        edge.fact, "Alice KNOWS Bob",
+        "fact must default to '<source> <predicate> <target>': {v}"
+    );
+}
+
+/// FR-017/SC-003: repeated calls with the same source/predicate/target/group_id update the
+/// same edge in place, never duplicating it.
+#[tokio::test]
+async fn parity_assert_relationship_idempotent_reassert() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    dispatch_val(
+        310,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    dispatch_val(
+        311,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let first = dispatch_val(
+        312,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice",
+            "target_name": "Bob",
+            "predicate": "KNOWS",
+            "group_id": "liminis",
+            "fact": "Alice has known Bob for years",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&first, 312);
+    let edge_uuid = first["result"]["edge_uuid"].as_str().unwrap().to_string();
+    assert_eq!(first["result"]["created"], true);
+
+    let second = dispatch_val(
+        313,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice",
+            "target_name": "Bob",
+            "predicate": "KNOWS",
+            "group_id": "liminis",
+            "fact": "Alice and Bob are colleagues",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&second, 313);
+    assert_eq!(
+        second["result"]["edge_uuid"], edge_uuid,
+        "re-assert must update the same edge, not create a new one: {second}"
+    );
+    assert_eq!(second["result"]["created"], false);
+
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_relates_to_edges().unwrap(),
+        1,
+        "must never duplicate the edge (SC-003)"
+    );
+    let edge = conn.get_edge_by_uuid(&edge_uuid).unwrap().unwrap();
+    assert_eq!(edge.fact, "Alice and Bob are colleagues");
+}
+
+/// FR-013/FR-014/FR-015/SC-004: `knowledge_assert_relationship` resolves endpoints strictly
+/// within its own `group_id` and never falls back to a cross-group search — the error names
+/// `knowledge_add_cross_group_edge` as the tool to use instead, and no edge is created.
+#[tokio::test]
+async fn parity_assert_relationship_refuses_cross_group_name() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    // "IBM" only exists in group "liminis".
+    dispatch_val(
+        314,
+        "knowledge_assert_entity",
+        json!({"name": "IBM", "group_id": "liminis"}),
+        Arc::clone(&state),
+    )
+    .await;
+    // "Acme" exists in group "layer-x", the group the relationship call itself targets.
+    dispatch_val(
+        315,
+        "knowledge_assert_entity",
+        json!({"name": "Acme", "group_id": "layer-x"}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let v = dispatch_val(
+        316,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Acme",
+            "target_name": "IBM",
+            "predicate": "PARTNERS_WITH",
+            "group_id": "layer-x",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&v, 316, -32000);
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("knowledge_add_cross_group_edge"),
+        "error must name knowledge_add_cross_group_edge (FR-015): {v}"
+    );
+
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_relates_to_edges().unwrap(),
+        0,
+        "no edge must be created on a resolution failure (SC-004)"
+    );
 }

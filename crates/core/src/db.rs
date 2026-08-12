@@ -595,6 +595,58 @@ impl<'db> Conn<'db> {
         )
     }
 
+    /// Updates an existing `RelatesToNode_` shadow node's `fact`, `valid_at`, `relation_type`,
+    /// and `attributes` in a single `SET` statement, then best-effort syncs the same
+    /// `fact`/`valid_at`/`attributes` onto the direct `Entity→Entity` compat rel — reusing
+    /// `invalidate_edge`'s non-fatal `SET`-on-rel pattern, since lbug 0.17.0 may not support
+    /// `SET` on rel properties and a failure here must not fail the whole update. Used by
+    /// `knowledge_assert_relationship`'s update-in-place path (issue #379 FR-017): no existing
+    /// setter covers `fact`/`valid_at`/`relation_type` in one shot.
+    /// `relation_type`/`valid_at` bind as JSON null when `None`, matching `insert_relates_to_edge`.
+    ///
+    /// Deliberately does **not** touch `fact_embedding`, for the same reason
+    /// [`Self::update_entity_core`] doesn't touch `name_embedding`: lbug's HNSW vector index
+    /// (built over `RelatesToNode_.fact_embedding`) rejects a plain `SET` on an indexed column —
+    /// "Try delete and then insert." The caller still generates a fresh fact embedding on every
+    /// call for the `embedding_warning` fallback to stay observable, but only the create path
+    /// (`insert_relates_to_edge`, before any index exists over the row) persists it.
+    pub fn update_relates_to_core(
+        &self,
+        uuid: &str,
+        fact: &str,
+        valid_at: Option<&str>,
+        relation_type: Option<&str>,
+        attributes: &str,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.fact = $fact, \
+             rn.valid_at = $valid_at, rn.relation_type = $relation_type, \
+             rn.attributes = $attributes",
+            serde_json::json!({
+                "uuid": uuid,
+                "fact": fact,
+                "valid_at": valid_at,
+                "relation_type": relation_type,
+                "attributes": attributes,
+            }),
+        )?;
+        if let Err(e) = self.exec_params(
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) \
+             SET r.fact = $fact, r.valid_at = $valid_at, r.attributes = $attributes",
+            serde_json::json!({
+                "uuid": uuid,
+                "fact": fact,
+                "valid_at": valid_at,
+                "attributes": attributes,
+            }),
+        ) {
+            eprintln!(
+                "liminis-context-graph: SET fact/valid_at/attributes on RELATES_TO rel unsupported or failed (non-fatal): {e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Lists `(uuid, name, group_id, attributes)` for every non-invalidated `RelatesToNode_`
     /// row carrying at least one cross-group pointer, regardless of which source group it
     /// points into — `cross_group::rebind_pointers` filters this candidate set down to
@@ -1865,17 +1917,31 @@ impl<'db> Conn<'db> {
         name: &str,
         group_id: &str,
     ) -> Result<bool, Error> {
+        Ok(self
+            .find_active_relates_to_uuid(source_uuid, target_uuid, name, group_id)?
+            .is_some())
+    }
+
+    /// Returns the `RelatesToNode_.uuid` of the active (non-invalidated) directed `RELATES_TO`
+    /// edge with the given `name` from `source_uuid` to `target_uuid`, scoped to `group_id` —
+    /// the same match `has_directed_edge` checks for existence, but returning the matched edge's
+    /// UUID rather than a boolean, so a caller can update that edge in place (issue #379
+    /// FR-016/FR-017's edge-upsert path). `has_directed_edge` is defined in terms of this
+    /// function so there is exactly one implementation of the group-scoped match (ADR-0368).
+    pub fn find_active_relates_to_uuid(
+        &self,
+        source_uuid: &str,
+        target_uuid: &str,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<String>, Error> {
         let rows = self.query_params(
             "MATCH (src:Entity {uuid: $src})-[:RELATES_TO]->(rn:RelatesToNode_ {name: $name})-[:RELATES_TO]->(dst:Entity {uuid: $dst}) \
              WHERE rn.invalid_at IS NULL AND rn.group_id = $group_id \
-             RETURN count(rn)",
+             RETURN rn.uuid ORDER BY rn.created_at ASC, rn.uuid ASC LIMIT 1",
             serde_json::json!({ "src": source_uuid, "name": name, "dst": target_uuid, "group_id": group_id }),
         )?;
-        if let Some(row) = rows.into_iter().next() {
-            Ok(value_as_usize(&row[0]) > 0)
-        } else {
-            Ok(false)
-        }
+        Ok(rows.into_iter().next().map(|row| value_as_string(&row[0])))
     }
 
     /// Returns a full RelatesToEdge by UUID, joining via the RelatesToNode_ shadow node.
@@ -1923,6 +1989,55 @@ impl<'db> Conn<'db> {
             "MATCH (e:Entity {uuid: $uuid}) SET e.attributes = $attributes",
             serde_json::json!({ "uuid": uuid, "attributes": attributes }),
         )
+    }
+
+    /// Updates an existing Entity's mutable fields — `name`, `labels` (through
+    /// `enforce_entity_first`, since this path doesn't go through `insert_entity`'s own
+    /// invariant enforcement), `summary`, and `attributes` — in a single `SET` statement, then
+    /// refreshes the `NameIndex` entry for `existing.uuid` under the (possibly changed)
+    /// `new_name`. Used by `knowledge_assert_entity`'s update-in-place path (issue #379
+    /// FR-011): no existing narrow setter (`update_entity_labels`/`update_entity_attributes`)
+    /// covers `name`/`summary` in one shot.
+    ///
+    /// Deliberately does **not** touch `name_embedding`, even though FR-012 asks for a fresh
+    /// name embedding on every assert call. lbug's HNSW vector index (built over `Entity.
+    /// name_embedding` by `create_vector_indexes`) rejects a plain `SET` on an indexed column
+    /// outright: `Cannot set property name_embedding in table Entity because it is used in one
+    /// or more indexes. Try delete and then insert.` This is the same reason
+    /// `episode.rs`'s dedup `DedupDecision::Merge` path (`SET e.summary = $summary`) never
+    /// rewrites `name_embedding` on a re-matched entity either — it is this codebase's existing
+    /// precedent, not a new decision invented for this feature. The caller still generates the
+    /// embedding on every call (so the embedder-unavailable `embedding_warning` fallback stays
+    /// observable and consistent between create and update), but only the create path
+    /// (`insert_entity`, before any index exists over the row) actually persists it; an update
+    /// leaves the entity's previously-stored embedding untouched.
+    pub fn update_entity_core(
+        &self,
+        existing: &EntityRow,
+        new_name: &str,
+        labels: &[String],
+        summary: &str,
+        attributes: &str,
+    ) -> Result<(), Error> {
+        let labels = enforce_entity_first(labels);
+        self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid}) SET e.name = $name, e.labels = $labels, \
+             e.summary = $summary, e.attributes = $attributes",
+            serde_json::json!({
+                "uuid": existing.uuid,
+                "name": new_name,
+                "labels": labels,
+                "summary": summary,
+                "attributes": attributes,
+            }),
+        )?;
+        self.name_index.insert(
+            &existing.uuid,
+            new_name,
+            &existing.group_id,
+            &existing.created_at,
+        );
+        Ok(())
     }
 
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
@@ -2408,20 +2523,48 @@ const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at",
 fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
     if TIMESTAMP_PARAM_NAMES.contains(&key) {
         if let serde_json::Value::String(s) = v {
-            if let Ok(odt) =
-                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-            {
+            if let Some(odt) = parse_timestamp_str(s) {
                 return Value::Timestamp(odt);
-            }
-            // Space-format "YYYY-MM-DD HH:MM:SS" — DB read-back format. Assumed UTC.
-            const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
-                time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-            if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
-                return Value::Timestamp(pdt.assume_utc());
             }
         }
     }
     json_to_value(v)
+}
+
+/// Parses a timestamp string in either format this codebase accepts on a `TIMESTAMP` column:
+/// RFC-3339 (the WAL write-path format) or lbug's space-delimited `"YYYY-MM-DD HH:MM:SS"`
+/// read-back format (assumed UTC). Shared by `json_value_for_param`'s column-write coercion and
+/// [`validate_and_normalize_valid_at`]'s upfront call-time validation, so there is exactly one
+/// definition of "which formats we accept" rather than a second copy that could drift.
+fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
+    if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+    {
+        return Some(odt);
+    }
+    const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
+        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
+        return Some(pdt.assume_utc());
+    }
+    None
+}
+
+/// Validates and normalizes a caller-supplied `valid_at` timestamp (RFC-3339 or lbug's
+/// space-delimited read-back format) to canonical RFC-3339 *before* any `exec_params` call —
+/// closing a real lbug `Binder exception` hazard on unparseable input at the point the caller's
+/// value is first seen, rather than inside a write closure after other statements in the same
+/// handler may already have executed (issue #379 FR-022).
+pub fn validate_and_normalize_valid_at(raw: &str) -> Result<String, Error> {
+    parse_timestamp_str(raw)
+        .map(|odt| {
+            odt.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_else(|_| raw.to_string())
+        })
+        .ok_or_else(|| {
+            Error::Ipc(format!(
+                "valid_at '{raw}' is not a valid RFC-3339 or 'YYYY-MM-DD HH:MM:SS' timestamp"
+            ))
+        })
 }
 
 /// Converts a single JSON value to an lbug `Value`. Numeric arrays are forced to `Double`
@@ -2980,6 +3123,37 @@ mod exec_transaction_control_tests {
             1,
             "the one statement executed between BEGIN and COMMIT must still be recorded"
         );
+    }
+}
+
+#[cfg(test)]
+mod validate_and_normalize_valid_at_tests {
+    use super::*;
+
+    /// RFC-3339 input round-trips to RFC-3339 (issue #379 FR-022).
+    #[test]
+    fn accepts_rfc3339() {
+        let out = validate_and_normalize_valid_at("2026-06-24T10:00:00Z").unwrap();
+        assert!(out.starts_with("2026-06-24T10:00:00"));
+    }
+
+    /// lbug's space-delimited read-back format is also accepted and normalized to RFC-3339.
+    #[test]
+    fn accepts_space_format() {
+        let out = validate_and_normalize_valid_at("2026-06-24 10:00:00").unwrap();
+        assert!(
+            out.starts_with("2026-06-24T10:00:00"),
+            "expected RFC-3339 output, got {out}"
+        );
+    }
+
+    /// An unparseable value must fail cleanly (issue #379 FR-022's Binder-exception hazard),
+    /// not be passed through to `exec_params` unvalidated.
+    #[test]
+    fn rejects_unparseable_value() {
+        let err = validate_and_normalize_valid_at("not-a-timestamp")
+            .expect_err("must reject an unparseable valid_at");
+        assert!(matches!(err, Error::Ipc(_)));
     }
 }
 

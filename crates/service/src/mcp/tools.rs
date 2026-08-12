@@ -39,7 +39,7 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (39 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (41 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -278,7 +278,7 @@ pub fn registry() -> Vec<ToolSpec> {
             scope: Scope::Read,
             input_schema: empty_schema,
         },
-        // ── write (13) ────────────────────────────────────────────────────────────
+        // ── write (15) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -578,6 +578,89 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_assert_entity",
+            description: "Directly create or update a single entity by name (or by explicit \
+                           entity_uuid) within group_id (issue #379) — for an agent that already \
+                           knows the fact and wants to record it without a prose round-trip \
+                           through episode extraction. Without entity_uuid, resolves by exact \
+                           (case-insensitive, whitespace-normalized) name match within group_id \
+                           — no embedding-similarity fuzzy matching — and updates that entity in \
+                           place if found, or creates a new one if not; repeated calls with the \
+                           same name/group_id are idempotent and always return the same \
+                           entity_uuid. With entity_uuid, performs a strict group-scoped lookup \
+                           only — never a fallback that mints a new entity under a caller-chosen \
+                           UUID, and the call fails if that UUID doesn't exist in group_id. If \
+                           resolution (by either path) lands on a Merged tombstone, the \
+                           assertion forwards through merged_into to the canonical entity and \
+                           updates the canonical instead. `summary` and `attributes` are always \
+                           fully replaced on update, like `labels` — a re-assert that omits \
+                           `summary` clears any previously-set value, not a partial merge. If the \
+                           configured embedder is unavailable, the call still succeeds with a \
+                           zero-vector name_embedding and a non-null `embedding_warning` in the \
+                           response.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The entity's name (required)."},
+                        "entity_uuid": {"type": "string", "description": "Optional: update this exact entity by UUID (strict group-scoped lookup, no create fallback) instead of resolving by name."},
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "labels": {"type": "array", "items": {"type": "string"}, "default": ["Entity"], "description": "Defaults to [\"Entity\"] when omitted or empty."},
+                        "summary": {"type": "string", "default": "", "description": "Fully replaces any prior summary on update; defaults to \"\" when omitted."},
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized. Fully replaces the prior value on update."}
+                    },
+                    "required": ["name"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_assert_relationship",
+            description: "Directly create or update a single directed edge between two entities \
+                           resolved by name, both strictly within this call's own group_id \
+                           (issue #379) — for an agent that already knows the relationship and \
+                           wants to record it without a prose round-trip through episode \
+                           extraction. source_name/target_name are resolved by exact \
+                           (case-insensitive, whitespace-normalized) match within group_id only \
+                           — including forwarding through a Merged tombstone to its canonical, \
+                           same as knowledge_assert_entity — and NEVER fall back to searching \
+                           another group; if either name doesn't resolve in group_id, the call \
+                           fails naming knowledge_add_cross_group_edge as the tool to use for \
+                           cross-group connections instead. The upsert match is \
+                           (source, predicate, target, group_id) — all four components, so \
+                           asserting an edge in one group_id can never match, update, or \
+                           overwrite a same-named edge between the same endpoints in a different \
+                           group_id. Repeated calls with the same source/predicate/target/ \
+                           group_id are idempotent: the same edge is updated in place, never \
+                           duplicated. `fact` defaults to \"<source_name> <predicate> \
+                           <target_name>\" when omitted. `attributes`, `valid_at`, and \
+                           `relation_type` are always fully replaced on update — a re-assert \
+                           that omits one of them clears any previously-set value, not a \
+                           partial merge. `valid_at` accepts RFC-3339 or lbug's \
+                           space-delimited read-back format and is rejected cleanly (not passed \
+                           through to a Binder exception) if it matches neither. If the \
+                           configured embedder is unavailable, the call still succeeds with a \
+                           zero-vector fact_embedding and a non-null `embedding_warning` in the \
+                           response.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "source_name": {"type": "string", "description": "Source entity name, resolved within group_id (required)."},
+                        "target_name": {"type": "string", "description": "Target entity name, resolved within group_id (required)."},
+                        "predicate": {"type": "string", "description": "The edge's identity label — participates in the (source, predicate, target, group_id) upsert match (required)."},
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "fact": {"type": "string", "description": "Natural-language fact text. Defaults to \"<source_name> <predicate> <target_name>\" when omitted."},
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized. Fully replaces the prior value on update."},
+                        "valid_at": {"type": "string", "description": "Optional timestamp this fact became true — RFC-3339 or lbug's space-delimited read-back format. Fully replaces the prior value on update; omitting it on a re-assert clears any previously-set value, like attributes."},
+                        "relation_type": {"type": "string", "description": "Optional ontology relation type. Fully replaces the prior value on update; omitting it on a re-assert clears any previously-set value, like attributes."}
+                    },
+                    "required": ["source_name", "target_name", "predicate"]
+                })
+            },
+        },
         // ── cypher (1) — arbitrary query/mutation power scope ────────────────────────
         ToolSpec {
             name: "knowledge_query_cypher",
@@ -862,11 +945,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_39_unique_tools() {
+    fn registry_has_41_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 39);
+        assert_eq!(r.len(), 41);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 39, "tool names must be unique");
+        assert_eq!(names.len(), 41, "tool names must be unique");
     }
 
     #[test]
@@ -874,7 +957,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 14);
-        assert_eq!(count(Scope::Write), 13);
+        assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 11);
     }

@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod assert;
 pub mod backfill;
 pub mod canonicalize;
 pub mod cassette;
