@@ -287,6 +287,36 @@ pub fn rebind_pointers(
     source_group_id: &str,
     ts: &str,
 ) -> Result<RebindCounts, Error> {
+    rebind_pointers_impl(conn, source_group_id, ts, false)
+}
+
+/// Like [`rebind_pointers`], but bypasses the `bound_at_seq` staleness gate entirely — every
+/// pointer whose `source_group_id` matches is unconditionally re-resolved, regardless of the
+/// DB-wide `WalPosition.applied_seq` cursor.
+///
+/// Used by `crate::group_purge` (issue #361), for a reason specific to that caller: a
+/// group-scoped purge's deletes go through `wal_exec::wal_flush_ungrouped`, which never
+/// advances `applied_seq` — so in the common case (purge immediately after pointer creation,
+/// no intervening episode writes elsewhere), the normal gate would see `bound_at_seq >=
+/// current` and silently skip every pointer, leaving them falsely `Bound` at UUIDs that were
+/// just deleted. The purge already guarantees every entity in `source_group_id` is gone before
+/// this runs, so every checked pointer is guaranteed to resolve `Unbound` (never `Bound`) —
+/// forcing the recheck here is safe and is what makes FR-009 (pointers into a purged group are
+/// left `unbound`, not stale) hold.
+pub fn rebind_pointers_forced(
+    conn: &Conn,
+    source_group_id: &str,
+    ts: &str,
+) -> Result<RebindCounts, Error> {
+    rebind_pointers_impl(conn, source_group_id, ts, true)
+}
+
+fn rebind_pointers_impl(
+    conn: &Conn,
+    source_group_id: &str,
+    ts: &str,
+    force: bool,
+) -> Result<RebindCounts, Error> {
     let current_seq = conn.get_applied_seq()?;
     let mut counts = RebindCounts::default();
 
@@ -310,9 +340,11 @@ pub fn rebind_pointers(
             if existing.source_group_id != source_group_id {
                 continue;
             }
-            if let (Some(bound_at), Some(current)) = (existing.bound_at_seq, current_seq) {
-                if bound_at >= current {
-                    continue; // already checked as of this source position (FR-009)
+            if !force {
+                if let (Some(bound_at), Some(current)) = (existing.bound_at_seq, current_seq) {
+                    if bound_at >= current {
+                        continue; // already checked as of this source position (FR-009)
+                    }
                 }
             }
             counts.checked += 1;

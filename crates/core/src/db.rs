@@ -763,7 +763,8 @@ impl<'db> Conn<'db> {
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
     /// invalidates the `NameIndex` (issue #219, ADR-0038). If a future change makes this
     /// (or any path) delete `Entity` nodes, it must also invalidate the corresponding
-    /// `NameIndex` entries.
+    /// `NameIndex` entries. `crate::group_purge` (issue #361) is the deliberate, sole
+    /// exception to this rule — see `delete_entities_by_group_ids` below.
     pub fn remove_episode(&self, episode_uuid: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
@@ -852,6 +853,77 @@ impl<'db> Conn<'db> {
             )?;
         }
         Ok(uuids)
+    }
+
+    // ── Group-scoped purge (issue #361) ─────────────────────────────────────────
+    //
+    // These are the only other places, besides `crate::group_purge`, that delete `Entity` or
+    // `RelatesToNode_` nodes — see the warning on `remove_episode` above. Every query here is
+    // scoped by `group_id IN $gids` and nothing else, which is what makes FR-008 (a
+    // `RelatesToNode_` owned by a group outside `$gids` is never touched) hold by construction:
+    // a node whose own `group_id` isn't in the list is simply never matched.
+
+    /// Returns the count of `Entity` nodes in the given group_ids.
+    pub fn count_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<u64, Error> {
+        self.count_by_group_ids("Entity", "e", group_ids)
+    }
+
+    /// Returns the count of `Episodic` nodes in the given group_ids.
+    pub fn count_episodics_by_group_ids(&self, group_ids: &[&str]) -> Result<u64, Error> {
+        self.count_by_group_ids("Episodic", "ep", group_ids)
+    }
+
+    /// Returns the count of `RelatesToNode_` nodes (i.e. RELATES_TO edges, see
+    /// `count_relates_to_edges`) owned by the given group_ids. Scoped by the edge's own
+    /// `group_id`, not either endpoint's — matching `get_edges_by_group_ids`.
+    pub fn count_relates_to_by_group_ids(&self, group_ids: &[&str]) -> Result<u64, Error> {
+        self.count_by_group_ids("RelatesToNode_", "rn", group_ids)
+    }
+
+    fn count_by_group_ids(&self, label: &str, var: &str, group_ids: &[&str]) -> Result<u64, Error> {
+        let sql = format!("MATCH ({var}:{label}) WHERE {var}.group_id IN $gids RETURN count(*)");
+        let rows = self.query_params(&sql, serde_json::json!({ "gids": group_ids }))?;
+        for row in rows {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
+    /// `DETACH DELETE`s every `Entity` node in the given group_ids. This is the deliberate,
+    /// sole-with-`delete_relates_to_by_group_ids` exception to the "only ever `Episodic`" rule
+    /// documented on `remove_episode` — callers MUST also invalidate/rebuild the `NameIndex`
+    /// (see `mark_name_index_untrusted`/`rebuild_name_index`) after calling this.
+    pub fn delete_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (e:Entity) WHERE e.group_id IN $gids DETACH DELETE e",
+            serde_json::json!({ "gids": group_ids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `Episodic` node in the given group_ids.
+    pub fn delete_episodics_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id IN $gids DETACH DELETE ep",
+            serde_json::json!({ "gids": group_ids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `RelatesToNode_` node *owned by* the given group_ids (i.e. whose
+    /// own `rn.group_id` is in the list) — never one merely hopped-to by an `Entity` being
+    /// deleted elsewhere. A cross-group edge's `RelatesToNode_` belongs to the layer group that
+    /// asserted it, not to either endpoint's group (FR-008), so this only ever removes
+    /// same-group edges; a foreign `RelatesToNode_` loses its hop when the purged-group `Entity`
+    /// it pointed to is `DETACH DELETE`d, but the node itself is never matched here.
+    pub fn delete_relates_to_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids DETACH DELETE rn",
+            serde_json::json!({ "gids": group_ids }),
+        )
     }
 
     /// Returns all Entity nodes in the given group_ids.

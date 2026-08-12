@@ -14,6 +14,7 @@ use crate::{
     db::{self, Db},
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
+    group_purge,
     ipc::{IpcRequest, IpcResponse},
     ontology_sidecar,
     pointer::{self, EndpointSide, PointerStateCounts},
@@ -122,6 +123,7 @@ async fn handle(
         "knowledge_build_indices" => handle_build_indices(state).await,
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
+        "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
@@ -1173,6 +1175,74 @@ async fn handle_delete_chunk_episode(
         "chunk_id": req.params["chunk_id"],
         "deleted_count": deleted_uuids.len(),
         "deleted_uuids": deleted_uuids,
+    }))
+}
+
+/// `knowledge_delete_by_group` (issue #361): removes all `Entity`, `Episodic`, and same-group
+/// `RelatesToNode_` data for one or more `group_ids`, leaving no orphans and never deleting a
+/// `RelatesToNode_` owned by a group outside the call (FR-008). See `crate::group_purge` for
+/// the full mechanism.
+///
+/// `group_ids` is required and validated explicitly here rather than via
+/// `extract_optional_group_ids` (which treats an absent/empty value as "all groups") — a
+/// destructive admin op must never silently default to purging everything.
+///
+/// `confirm` gates the real (mutating) call, exactly like `handle_clear_all`; `dry_run: true`
+/// takes precedence and skips the gate entirely (FR-013), since it doesn't mutate anything.
+///
+/// This tool is `admin`-scoped (FR-007), not `write` — a read-only replica launched without
+/// `write` still needs to purge as part of a per-source refresh.
+async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_ids: Vec<String> = p["group_ids"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            Error::Ipc("group_ids is required and must be a non-empty array of strings".to_string())
+        })?;
+
+    let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+    let confirm = p["confirm"].as_bool().unwrap_or(false);
+    if !dry_run && !confirm {
+        return Err(Error::Ipc(
+            "Must set 'confirm' to true to purge group data (or 'dry_run' to preview)".to_string(),
+        ));
+    }
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let counts = tokio::task::spawn_blocking(move || -> Result<group_purge::PurgeCounts, Error> {
+        let conn = db.connect()?;
+        let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
+        let ts = chrono::Utc::now().to_rfc3339();
+        let counts = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        Ok(counts)
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "dry_run": counts.dry_run,
+        "groups": counts.groups.iter().map(|g| json!({
+            "group_id": g.group_id,
+            "entities": g.entities,
+            "episodes": g.episodes,
+            "edges": g.edges,
+        })).collect::<Vec<_>>(),
+        "unbound_impacts": counts.unbound_impacts.iter().map(|u| json!({
+            "group_id": u.owning_group_id,
+            "pointer_count": u.pointer_count,
+        })).collect::<Vec<_>>(),
+        "applied_seq_reset": false,
     }))
 }
 
