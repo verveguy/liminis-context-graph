@@ -2390,6 +2390,18 @@ async fn parity_merge_entities_noop_single_entity() {
         r["edges_deduplicated"].is_number(),
         "edges_deduplicated must be numeric: {v}"
     );
+    assert_eq!(
+        r["foreign_edges_skipped"], 0,
+        "foreign_edges_skipped must be present and zero for a single-entity noop: {v}"
+    );
+    assert!(
+        r.get("foreign_edges_rewritten").is_none(),
+        "removed field foreign_edges_rewritten must not reappear in the IPC response: {v}"
+    );
+    assert!(
+        r.get("foreign_edges_deduplicated").is_none(),
+        "removed field foreign_edges_deduplicated must not reappear in the IPC response: {v}"
+    );
     assert!(r["errors"].is_array(), "errors must be an array: {v}");
 }
 

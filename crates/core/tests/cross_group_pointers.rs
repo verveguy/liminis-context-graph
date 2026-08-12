@@ -391,6 +391,36 @@ fn resolve_endpoint_unbound_when_merged_into_missing() {
 }
 
 #[test]
+fn resolve_endpoint_unbound_when_merged_into_target_does_not_exist() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    // A tombstone whose merged_into points at a UUID with no corresponding entity row —
+    // distinct from the "no merged_into recorded" case above: here forwarding data exists but
+    // is dangling (e.g. corrupted, or the target was later hard-deleted). Must still floor to
+    // Unbound, never report Bound with a made-up UUID.
+    let mut dangling = make_entity("Dangling", GROUP_A, TS);
+    conn.insert_entity(&dangling).unwrap();
+    dangling.labels.push("Merged".to_string());
+    conn.update_entity_labels(&dangling.uuid, &dangling.labels)
+        .unwrap();
+    conn.update_entity_attributes(
+        &dangling.uuid,
+        &pointer::write_merged_into("{}", "does-not-exist-uuid"),
+    )
+    .unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "dangling").unwrap();
+    assert_eq!(
+        state,
+        BindingState::Unbound,
+        "a dangling merged_into target must never be reported Bound"
+    );
+    assert_eq!(uuid, None);
+}
+
+#[test]
 fn resolve_endpoint_unbound_on_merged_into_cycle() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);

@@ -518,6 +518,111 @@ fn test_canonical_already_merged_error() {
     );
 }
 
+// ── Test 7b: UUID-specified canonical/alias must belong to the declared merge group ───
+
+/// A canonical or alias resolved by explicit UUID is not otherwise scoped to `group_id` (unlike
+/// the by-name paths, which already query within group_id) — a caller could name an entity
+/// belonging to a different group's WAL stream. Reject rather than tombstone/write merged_into
+/// onto a foreign-group entity (issue #371's core invariant applied at the entity level).
+#[test]
+fn test_canonical_uuid_foreign_group_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let mut foreign_canonical =
+        make_entity("foreign-canonical-001", "Brett", "2026-01-01 00:00:00");
+    foreign_canonical.group_id = "group-F".to_string();
+    conn.insert_entity(&foreign_canonical).unwrap();
+    conn.insert_entity(&make_entity("alias-001", "Brett", "2026-01-01 00:01:00"))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("foreign-canonical-001".to_string()),
+        alias_uuids: vec!["alias-001".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(
+        !result.success,
+        "must reject a canonical belonging to a foreign group"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("foreign to the requested merge group")),
+        "error should explain the foreign-group rejection, got: {:?}",
+        result.errors
+    );
+    assert_eq!(result.merged_count, 0, "nothing should be merged");
+
+    // The foreign canonical must not have been touched.
+    let untouched = conn
+        .get_entity_by_uuid("foreign-canonical-001")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !untouched.labels.contains(&"Merged".to_string()),
+        "foreign canonical must not be tombstoned"
+    );
+}
+
+#[test]
+fn test_alias_uuid_foreign_group_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    conn.insert_entity(&make_entity(
+        "canonical-001",
+        "Brett",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    let mut foreign_alias = make_entity("foreign-alias-001", "Brett", "2026-01-01 00:01:00");
+    foreign_alias.group_id = "group-F".to_string();
+    conn.insert_entity(&foreign_alias).unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("canonical-001".to_string()),
+        alias_uuids: vec!["foreign-alias-001".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(
+        !result.success,
+        "must reject an alias belonging to a foreign group"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("foreign to the requested merge group")),
+        "error should explain the foreign-group rejection, got: {:?}",
+        result.errors
+    );
+    assert_eq!(result.merged_count, 0, "nothing should be merged");
+
+    // The foreign alias must not have been touched.
+    let untouched = conn
+        .get_entity_by_uuid("foreign-alias-001")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !untouched.labels.contains(&"Merged".to_string()),
+        "foreign alias must not be tombstoned"
+    );
+    assert!(
+        read_merged_into(&untouched.attributes).is_none(),
+        "foreign alias must not have merged_into written"
+    );
+}
+
 // ── Test 8: single entity, no aliases ────────────────────────────────────────
 
 /// Edge case: only 1 entity with given name → merged_count: 0, success: true.

@@ -1011,6 +1011,24 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         };
     }
 
+    // A canonical resolved by explicit UUID is not otherwise scoped to `group_id` (unlike the
+    // by-name path, which already queries within group_id). Reject a foreign-group canonical
+    // outright — a merge must never tombstone or write merged_into onto an entity belonging to
+    // another group's WAL stream (issue #371's core invariant, applied at the entity level, not
+    // just the edge level FR-001 covers).
+    if canonical.group_id != group_id {
+        return MergeEntitiesResult {
+            success: false,
+            canonical_uuid: canonical.uuid.clone(),
+            errors: vec![format!(
+                "canonical entity {} belongs to group '{}', foreign to the requested merge \
+                 group '{group_id}' — merge never writes another group's data",
+                canonical.uuid, canonical.group_id
+            )],
+            ..Default::default()
+        };
+    }
+
     let canonical_uuid = canonical.uuid.clone();
 
     // Expand alias set (FR-004, FR-005)
@@ -1022,14 +1040,33 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
     if !params.alias_uuids.is_empty() {
         match conn.get_entities_by_uuids(&params.alias_uuids) {
             Ok(rows) => {
+                let mut foreign_uuids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for row in rows {
-                    if row.uuid != canonical_uuid {
-                        alias_map.insert(row.uuid.clone(), row);
+                    if row.uuid == canonical_uuid {
+                        continue;
                     }
+                    // Same invariant as the canonical check above: an alias UUID is not
+                    // otherwise scoped to group_id (unlike the by-name path), so a caller could
+                    // name an entity belonging to another group's WAL stream. Reject it rather
+                    // than tombstone + write merged_into onto it.
+                    if row.group_id != group_id {
+                        errors.push(format!(
+                            "alias uuid {} belongs to group '{}', foreign to the requested \
+                             merge group '{group_id}' — merge never writes another group's data",
+                            row.uuid, row.group_id
+                        ));
+                        foreign_uuids.insert(row.uuid.clone());
+                        continue;
+                    }
+                    alias_map.insert(row.uuid.clone(), row);
                 }
-                // Report UUIDs that weren't found
+                // Report UUIDs that weren't found (already-reported foreign-group UUIDs excluded)
                 for uuid in &params.alias_uuids {
-                    if uuid != &canonical_uuid && !alias_map.contains_key(uuid) {
+                    if uuid != &canonical_uuid
+                        && !alias_map.contains_key(uuid)
+                        && !foreign_uuids.contains(uuid)
+                    {
                         errors.push(format!("alias uuid not found: {uuid}"));
                     }
                 }

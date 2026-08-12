@@ -48,7 +48,7 @@ Foreign edges are skipped entirely and left for their owning group to re-resolve
 `unbound` by derivation rather than by anyone writing to them.
 
 This is a simplification, not an addition — the loop gains an early `continue` for foreign edges.
-#368's per-edge-group `has_directed_edge` scoping stays correct (every edge a merge still
+Issue #368's per-edge-group `has_directed_edge` scoping stays correct (every edge a merge still
 processes belongs to the merging group by construction) but stops being load-bearing for foreign
 edges, since they never reach that check.
 
