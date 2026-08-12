@@ -8,6 +8,7 @@ use uuid::Uuid;
 use crate::{
     db::Conn,
     error::Error,
+    pointer,
     types::{EntityRow, RelatesToEdge},
 };
 
@@ -99,8 +100,7 @@ pub struct AliasInfo {
     pub name: String,
     pub active_edges: usize,
     pub duplicate_edges: usize,
-    pub foreign_active_edges: usize,
-    pub foreign_duplicate_edges: usize,
+    pub foreign_edges_skipped: usize,
 }
 
 #[derive(Debug, Default)]
@@ -108,8 +108,7 @@ pub struct MergePlan {
     pub aliases: Vec<AliasInfo>,
     pub total_edges_rewritten: usize,
     pub total_edges_collapsed: usize,
-    pub total_foreign_edges_rewritten: usize,
-    pub total_foreign_edges_collapsed: usize,
+    pub total_foreign_edges_skipped: usize,
 }
 
 #[derive(Debug, Default)]
@@ -120,23 +119,20 @@ pub struct MergeEntitiesResult {
     pub skipped: usize,
     pub edges_rewritten: usize,
     pub edges_deduplicated: usize,
-    pub foreign_edges_rewritten: usize,
-    pub foreign_edges_deduplicated: usize,
+    pub foreign_edges_skipped: usize,
     pub errors: Vec<String>,
     pub plan: Option<MergePlan>,
 }
 
-/// Edge rewrite/dedup counts from a single alias→canonical merge pass, split by whether the
-/// edge belonged to the merging group or a different group (see issue #368). "Foreign" counts
-/// describe edges whose own `group_id` differs from the merge's `group_id` parameter — they are
-/// reported separately so a merge's result never conflates another group's graph activity with
-/// its own (FR-003).
+/// Edge rewrite/dedup/skip counts from a single alias→canonical merge pass (issue #371). A
+/// merge in group G only ever rewrites or deduplicates an edge whose own `group_id == G`;
+/// every edge belonging to a *different* group is left completely untouched and counted in
+/// `foreign_skipped` instead — a merge must never write another group's data (FR-001).
 #[derive(Debug, Default)]
 struct MergeEdgeCounts {
     rewritten: usize,
-    foreign_rewritten: usize,
     deduped: usize,
-    foreign_deduped: usize,
+    foreign_skipped: usize,
 }
 
 // ── File location ─────────────────────────────────────────────────────────────
@@ -546,6 +542,13 @@ fn apply_same_as(
                 if old_edge.invalid_at.is_some() {
                     continue; // already invalid, skip
                 }
+                // A merge touches only edges whose own group_id matches the merging group
+                // (canonical_group, since the alias was resolved within it) — never write
+                // another group's data (issue #371, FR-001/FR-006). The foreign group
+                // re-resolves its own binding at its own re-bind time (ADR-0369/ADR-0371).
+                if old_edge.group_id != canonical_group {
+                    continue;
+                }
                 // Compute new source/target (replace alias with canonical)
                 let new_src = if old_edge.source_node_uuid == alias_uuid {
                     canonical_uuid.clone()
@@ -594,6 +597,10 @@ fn apply_same_as(
                 new_labels.push("Merged".to_string());
             }
             conn.update_entity_labels(&alias_uuid, &new_labels)?;
+
+            // Record what this alias became (FR-005), same as merge_entities.
+            let new_attrs = pointer::write_merged_into(&alias_entity.attributes, &canonical_uuid);
+            conn.update_entity_attributes(&alias_uuid, &new_attrs)?;
         }
     }
 
@@ -821,10 +828,16 @@ pub(crate) fn list_entities_for_scope(
 
 /// Inner edge-rewrite loop for a single alias → canonical merge.
 ///
-/// `merging_group_id` is the `group_id` the merge operation itself was invoked under — used
-/// only to classify each edge's own `group_id` as same-group or foreign for reporting purposes
-/// (FR-003). It is NOT used to scope duplicate detection: that scope is always the edge's own
-/// `group_id`, per issue #368.
+/// A merge in group `merging_group_id` touches only edges whose own `group_id ==
+/// merging_group_id` (issue #371, FR-001). Every edge belonging to a different group is skipped
+/// entirely, before any self-loop/dedup/rewrite branch runs — not rewritten onto the canonical,
+/// not invalidated as a duplicate, not invalidated as a self-loop — and counted in
+/// `foreign_skipped` instead. The foreign group re-resolves its own binding at its own re-bind
+/// time (ADR-0369/ADR-0371); this function never writes another group's data.
+///
+/// Because foreign edges are skipped up front, `has_directed_edge`'s own-group scoping (issue
+/// #368) stays correct but is now structurally unreachable for foreign edges — every edge that
+/// reaches the dedup check already belongs to `merging_group_id`.
 /// In `dry_run` mode, reads DB state to compute counts but does not mutate anything.
 fn merge_entities_inner(
     conn: &Conn,
@@ -843,7 +856,10 @@ fn merge_entities_inner(
         if old_edge.invalid_at.is_some() {
             continue; // skip already-invalid edges (FR-011)
         }
-        let is_foreign = old_edge.group_id != merging_group_id;
+        if old_edge.group_id != merging_group_id {
+            counts.foreign_skipped += 1;
+            continue; // never write another group's data (FR-001)
+        }
 
         let new_src = if old_edge.source_node_uuid == *alias_uuid {
             canonical_uuid.to_string()
@@ -865,16 +881,13 @@ fn merge_entities_inner(
         }
 
         // Dedup: skip if canonical already has this directed edge in the same group as this
-        // edge (FR-009, scoped per FR-001/issue #368 — not the merging group).
+        // edge (FR-009, scoped per FR-002/issue #368 — always the edge's own group, which is
+        // now always `merging_group_id` since foreign edges never reach this point).
         if conn.has_directed_edge(&new_src, &new_dst, &old_edge.name, &old_edge.group_id)? {
             if !dry_run {
                 conn.invalidate_edge(&old_edge.uuid, ts)?;
             }
-            if is_foreign {
-                counts.foreign_deduped += 1;
-            } else {
-                counts.deduped += 1;
-            }
+            counts.deduped += 1;
             continue;
         }
 
@@ -898,11 +911,7 @@ fn merge_entities_inner(
             conn.insert_relates_to_edge(&new_edge)?;
             conn.invalidate_edge(&old_edge.uuid, ts)?;
         }
-        if is_foreign {
-            counts.foreign_rewritten += 1;
-        } else {
-            counts.rewritten += 1;
-        }
+        counts.rewritten += 1;
     }
 
     Ok(counts)
@@ -1002,6 +1011,24 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         };
     }
 
+    // A canonical resolved by explicit UUID is not otherwise scoped to `group_id` (unlike the
+    // by-name path, which already queries within group_id). Reject a foreign-group canonical
+    // outright — a merge must never tombstone or write merged_into onto an entity belonging to
+    // another group's WAL stream (issue #371's core invariant, applied at the entity level, not
+    // just the edge level FR-001 covers).
+    if canonical.group_id != group_id {
+        return MergeEntitiesResult {
+            success: false,
+            canonical_uuid: canonical.uuid.clone(),
+            errors: vec![format!(
+                "canonical entity {} belongs to group '{}', foreign to the requested merge \
+                 group '{group_id}' — merge never writes another group's data",
+                canonical.uuid, canonical.group_id
+            )],
+            ..Default::default()
+        };
+    }
+
     let canonical_uuid = canonical.uuid.clone();
 
     // Expand alias set (FR-004, FR-005)
@@ -1013,14 +1040,33 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
     if !params.alias_uuids.is_empty() {
         match conn.get_entities_by_uuids(&params.alias_uuids) {
             Ok(rows) => {
+                let mut foreign_uuids: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for row in rows {
-                    if row.uuid != canonical_uuid {
-                        alias_map.insert(row.uuid.clone(), row);
+                    if row.uuid == canonical_uuid {
+                        continue;
                     }
+                    // Same invariant as the canonical check above: an alias UUID is not
+                    // otherwise scoped to group_id (unlike the by-name path), so a caller could
+                    // name an entity belonging to another group's WAL stream. Reject it rather
+                    // than tombstone + write merged_into onto it.
+                    if row.group_id != group_id {
+                        errors.push(format!(
+                            "alias uuid {} belongs to group '{}', foreign to the requested \
+                             merge group '{group_id}' — merge never writes another group's data",
+                            row.uuid, row.group_id
+                        ));
+                        foreign_uuids.insert(row.uuid.clone());
+                        continue;
+                    }
+                    alias_map.insert(row.uuid.clone(), row);
                 }
-                // Report UUIDs that weren't found
+                // Report UUIDs that weren't found (already-reported foreign-group UUIDs excluded)
                 for uuid in &params.alias_uuids {
-                    if uuid != &canonical_uuid && !alias_map.contains_key(uuid) {
+                    if uuid != &canonical_uuid
+                        && !alias_map.contains_key(uuid)
+                        && !foreign_uuids.contains(uuid)
+                    {
                         errors.push(format!("alias uuid not found: {uuid}"));
                     }
                 }
@@ -1068,8 +1114,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
     let mut skipped = 0usize;
     let mut total_rewritten = 0usize;
     let mut total_deduped = 0usize;
-    let mut total_foreign_rewritten = 0usize;
-    let mut total_foreign_deduped = 0usize;
+    let mut total_foreign_skipped = 0usize;
     let mut plan_aliases: Vec<AliasInfo> = Vec::new();
     let mut earliest_created_at = canonical.created_at.clone();
 
@@ -1088,8 +1133,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
             Ok(counts) => {
                 total_rewritten += counts.rewritten;
                 total_deduped += counts.deduped;
-                total_foreign_rewritten += counts.foreign_rewritten;
-                total_foreign_deduped += counts.foreign_deduped;
+                total_foreign_skipped += counts.foreign_skipped;
 
                 if params.dry_run {
                     plan_aliases.push(AliasInfo {
@@ -1097,8 +1141,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
                         name: alias.name.clone(),
                         active_edges: counts.rewritten,
                         duplicate_edges: counts.deduped,
-                        foreign_active_edges: counts.foreign_rewritten,
-                        foreign_duplicate_edges: counts.foreign_deduped,
+                        foreign_edges_skipped: counts.foreign_skipped,
                     });
                 } else {
                     // Mark alias as merged (FR-008)
@@ -1109,6 +1152,16 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
                     if let Err(e) = conn.update_entity_labels(&alias.uuid, &new_labels) {
                         errors.push(format!(
                             "failed to mark alias {} as merged: {e}",
+                            alias.uuid
+                        ));
+                    }
+                    // Record what this alias became (FR-005) — the fixpoint a foreign group's
+                    // re-bind pass follows when name-based re-resolution would otherwise land on
+                    // this tombstone instead of the canonical (issue #371, User Story 2/3).
+                    let new_attrs = pointer::write_merged_into(&alias.attributes, &canonical_uuid);
+                    if let Err(e) = conn.update_entity_attributes(&alias.uuid, &new_attrs) {
+                        errors.push(format!(
+                            "failed to record merged_into for alias {}: {e}",
                             alias.uuid
                         ));
                     }
@@ -1136,8 +1189,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         Some(MergePlan {
             total_edges_rewritten: total_rewritten,
             total_edges_collapsed: total_deduped,
-            total_foreign_edges_rewritten: total_foreign_rewritten,
-            total_foreign_edges_collapsed: total_foreign_deduped,
+            total_foreign_edges_skipped: total_foreign_skipped,
             aliases: plan_aliases,
         })
     } else {
@@ -1156,8 +1208,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         skipped,
         edges_rewritten: total_rewritten,
         edges_deduplicated: total_deduped,
-        foreign_edges_rewritten: total_foreign_rewritten,
-        foreign_edges_deduplicated: total_foreign_deduped,
+        foreign_edges_skipped: total_foreign_skipped,
         errors,
         plan,
     }

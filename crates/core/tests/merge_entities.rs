@@ -2,7 +2,8 @@
 ///
 /// Covers SC-001 through SC-006 and the user stories in the spec.
 use lcg_core::{
-    corrections::{merge_entities, MergeEntitiesParams},
+    corrections::{apply_corrections_file, merge_entities, MergeEntitiesParams},
+    pointer::read_merged_into,
     Db, EntityRow, RelatesToEdge, WalReplayer, WalWriter,
 };
 use tempfile::TempDir;
@@ -517,6 +518,111 @@ fn test_canonical_already_merged_error() {
     );
 }
 
+// ── Test 7b: UUID-specified canonical/alias must belong to the declared merge group ───
+
+/// A canonical or alias resolved by explicit UUID is not otherwise scoped to `group_id` (unlike
+/// the by-name paths, which already query within group_id) — a caller could name an entity
+/// belonging to a different group's WAL stream. Reject rather than tombstone/write merged_into
+/// onto a foreign-group entity (issue #371's core invariant applied at the entity level).
+#[test]
+fn test_canonical_uuid_foreign_group_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let mut foreign_canonical =
+        make_entity("foreign-canonical-001", "Brett", "2026-01-01 00:00:00");
+    foreign_canonical.group_id = "group-F".to_string();
+    conn.insert_entity(&foreign_canonical).unwrap();
+    conn.insert_entity(&make_entity("alias-001", "Brett", "2026-01-01 00:01:00"))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("foreign-canonical-001".to_string()),
+        alias_uuids: vec!["alias-001".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(
+        !result.success,
+        "must reject a canonical belonging to a foreign group"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("foreign to the requested merge group")),
+        "error should explain the foreign-group rejection, got: {:?}",
+        result.errors
+    );
+    assert_eq!(result.merged_count, 0, "nothing should be merged");
+
+    // The foreign canonical must not have been touched.
+    let untouched = conn
+        .get_entity_by_uuid("foreign-canonical-001")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !untouched.labels.contains(&"Merged".to_string()),
+        "foreign canonical must not be tombstoned"
+    );
+}
+
+#[test]
+fn test_alias_uuid_foreign_group_rejected() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    conn.insert_entity(&make_entity(
+        "canonical-001",
+        "Brett",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    let mut foreign_alias = make_entity("foreign-alias-001", "Brett", "2026-01-01 00:01:00");
+    foreign_alias.group_id = "group-F".to_string();
+    conn.insert_entity(&foreign_alias).unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("canonical-001".to_string()),
+        alias_uuids: vec!["foreign-alias-001".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(
+        !result.success,
+        "must reject an alias belonging to a foreign group"
+    );
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| e.contains("foreign to the requested merge group")),
+        "error should explain the foreign-group rejection, got: {:?}",
+        result.errors
+    );
+    assert_eq!(result.merged_count, 0, "nothing should be merged");
+
+    // The foreign alias must not have been touched.
+    let untouched = conn
+        .get_entity_by_uuid("foreign-alias-001")
+        .unwrap()
+        .unwrap();
+    assert!(
+        !untouched.labels.contains(&"Merged".to_string()),
+        "foreign alias must not be tombstoned"
+    );
+    assert!(
+        read_merged_into(&untouched.attributes).is_none(),
+        "foreign alias must not have merged_into written"
+    );
+}
+
 // ── Test 8: single entity, no aliases ────────────────────────────────────────
 
 /// Edge case: only 1 entity with given name → merged_count: 0, success: true.
@@ -543,16 +649,17 @@ fn test_single_entity_no_aliases_noop() {
     assert_eq!(count_active_entities_named(&db, "Brett"), 1);
 }
 
-// ── Test 10: cross-group edge survives merge (issue #368, SC-003) ────────────
+// ── Test 10: cross-group edge survives merge untouched (issue #371, SC-001/SC-006) ──
 
-/// SC-003 / User Story 1: a foreign group's edge must never be silently dropped as a
-/// "duplicate" of an unrelated edge sharing only the relation name and endpoints.
+/// SC-001 / User Story 1 AC3: a foreign group's edge that would otherwise be rewritten onto
+/// the canonical must instead be left completely untouched — no replacement edge written, and
+/// the original edge's endpoints still reference the alias.
 ///
 /// Setup: entities X1, X2, Y (group "liminis" — stands in for the spec's group A). Edge
 /// X2 --[rel]--> Y in group "liminis". Edge X1 --[rel]--> Y in a different group,
-/// "group-L". Merging X1 into X2 (merge invoked under group "liminis") must rewrite the
-/// group-L edge onto the canonical, retaining group_id "group-L" — never invalidate it as a
-/// duplicate of X2's unrelated group-"liminis" edge.
+/// "group-L" (stands in for the spec's layer group L). Merging X1 into X2 (merge invoked
+/// under group "liminis") must leave the group-L edge byte-for-byte unchanged: still
+/// pointing X1 --[rel]--> Y, group_id "group-L", invalid_at unset.
 #[test]
 fn test_cross_group_edge_survives_merge() {
     let dir = TempDir::new().unwrap();
@@ -580,14 +687,9 @@ fn test_cross_group_edge_survives_merge() {
     ))
     .unwrap();
     // Group L's edge, same relation name/endpoints-after-merge, different group: X1 --[rel]--> Y
-    conn.insert_relates_to_edge(&make_edge_in_group(
-        x1_uuid,
-        y_uuid,
-        "rel",
-        "2026-01-01 00:00:00",
-        "group-L",
-    ))
-    .unwrap();
+    let group_l_edge = make_edge_in_group(x1_uuid, y_uuid, "rel", "2026-01-01 00:00:00", "group-L");
+    let group_l_edge_uuid = group_l_edge.uuid.clone();
+    conn.insert_relates_to_edge(&group_l_edge).unwrap();
 
     let params = MergeEntitiesParams {
         canonical_uuid: Some(x2_uuid.to_string()),
@@ -604,30 +706,37 @@ fn test_cross_group_edge_survives_merge() {
         "group L's edge must not be counted as a same-group duplicate"
     );
     assert_eq!(
-        result.foreign_edges_rewritten, 1,
-        "group L's edge should be rewritten (re-pointed) as foreign activity"
+        result.foreign_edges_skipped, 1,
+        "group L's edge must be counted as skipped, not rewritten"
     );
 
-    // Group L's edge must survive: exactly one active "rel" edge in group "group-L" remains,
-    // now pointing from the canonical (X2) to Y, retaining group_id "group-L".
+    // Group L's edge must be completely untouched: same uuid, same group_id, same endpoints
+    // (still referencing the alias X1, NOT re-pointed to the canonical), invalid_at unset.
+    let untouched = conn.get_edge_by_uuid(&group_l_edge_uuid).unwrap().unwrap();
+    assert_eq!(untouched.group_id, "group-L");
+    assert_eq!(untouched.name, "rel");
+    assert_eq!(
+        untouched.source_node_uuid, x1_uuid,
+        "group L's edge must still reference the alias — never rewritten onto the canonical"
+    );
+    assert_eq!(untouched.target_node_uuid, y_uuid);
+    assert!(
+        untouched.invalid_at.is_none(),
+        "group L's edge must not be invalidated by group liminis's merge"
+    );
+
+    // No new edge silently conflates group L's assertion into group "liminis" or creates any
+    // replacement edge for it in group "group-L".
     let canonical_edges = conn.get_full_edges_for_entity(x2_uuid).unwrap();
-    let group_l_edges: Vec<_> = canonical_edges
+    let group_l_edges_on_canonical: Vec<_> = canonical_edges
         .iter()
         .filter(|e| e.group_id == "group-L" && e.invalid_at.is_none())
         .collect();
     assert_eq!(
-        group_l_edges.len(),
-        1,
-        "group L's edge must survive the merge, either re-pointed or left as-is"
+        group_l_edges_on_canonical.len(),
+        0,
+        "no replacement group-L edge should be written onto the canonical"
     );
-    assert_eq!(group_l_edges[0].name, "rel");
-    assert_eq!(group_l_edges[0].target_node_uuid, y_uuid);
-    assert_eq!(
-        group_l_edges[0].source_node_uuid, x2_uuid,
-        "group L's edge should be re-pointed to the canonical"
-    );
-
-    // No new edge silently conflates group L's assertion into group "liminis".
     let liminis_edges: Vec<_> = canonical_edges
         .iter()
         .filter(|e| e.group_id == "liminis" && e.invalid_at.is_none())
@@ -636,6 +745,107 @@ fn test_cross_group_edge_survives_merge() {
         liminis_edges.len(),
         1,
         "group liminis's own edge count must be unaffected by group L's edge"
+    );
+}
+
+/// User Story 1 AC1: a foreign edge that would collapse into a self-loop under the merge
+/// (`new_src == new_dst`) must be left completely untouched — not invalidated, no replacement.
+#[test]
+fn test_foreign_self_loop_edge_untouched() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let x1_uuid = "x1-001";
+    let x2_uuid = "x2-001";
+
+    conn.insert_entity(&make_entity(x2_uuid, "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(x1_uuid, "X", "2026-01-01 00:01:00"))
+        .unwrap();
+
+    // Group L's edge: X1 --[rel]--> X2. After X1 merges into X2, this would become a
+    // self-loop (X2 --[rel]--> X2) under same-group handling — but it belongs to group-L.
+    let group_l_edge =
+        make_edge_in_group(x1_uuid, x2_uuid, "rel", "2026-01-01 00:00:00", "group-L");
+    let group_l_edge_uuid = group_l_edge.uuid.clone();
+    conn.insert_relates_to_edge(&group_l_edge).unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(x2_uuid.to_string()),
+        alias_uuids: vec![x1_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(result.foreign_edges_skipped, 1);
+
+    let untouched = conn.get_edge_by_uuid(&group_l_edge_uuid).unwrap().unwrap();
+    assert_eq!(untouched.source_node_uuid, x1_uuid);
+    assert_eq!(untouched.target_node_uuid, x2_uuid);
+    assert!(
+        untouched.invalid_at.is_none(),
+        "foreign would-be-self-loop edge must not be invalidated"
+    );
+}
+
+/// User Story 1 AC2: a foreign edge that would duplicate an edge the canonical already has
+/// (in the foreign edge's own group) must be left completely untouched — not invalidated as a
+/// duplicate.
+#[test]
+fn test_foreign_duplicate_edge_untouched() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let x1_uuid = "x1-001";
+    let x2_uuid = "x2-001";
+    let y_uuid = "y-001";
+
+    conn.insert_entity(&make_entity(x2_uuid, "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(x1_uuid, "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "Y", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Group L already has X2 --[rel]--> Y (the canonical's own group-L edge).
+    conn.insert_relates_to_edge(&make_edge_in_group(
+        x2_uuid,
+        y_uuid,
+        "rel",
+        "2026-01-01 00:00:00",
+        "group-L",
+    ))
+    .unwrap();
+    // Group L also has X1 --[rel]--> Y — after merge this would duplicate the edge above.
+    let dup_edge = make_edge_in_group(x1_uuid, y_uuid, "rel", "2026-01-01 00:00:01", "group-L");
+    let dup_edge_uuid = dup_edge.uuid.clone();
+    conn.insert_relates_to_edge(&dup_edge).unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(x2_uuid.to_string()),
+        alias_uuids: vec![x1_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(
+        result.edges_deduplicated, 0,
+        "group L's would-be duplicate must not be counted as a same-group dedup"
+    );
+    assert_eq!(result.foreign_edges_skipped, 1);
+
+    let untouched = conn.get_edge_by_uuid(&dup_edge_uuid).unwrap().unwrap();
+    assert_eq!(untouched.source_node_uuid, x1_uuid);
+    assert_eq!(untouched.target_node_uuid, y_uuid);
+    assert!(
+        untouched.invalid_at.is_none(),
+        "foreign would-be-duplicate edge must not be invalidated"
     );
 }
 
@@ -682,7 +892,7 @@ fn test_same_group_dedup_still_collapses() {
         "same-group duplicate must still collapse"
     );
     assert_eq!(
-        result.foreign_edges_deduplicated, 0,
+        result.foreign_edges_skipped, 0,
         "no foreign-group activity in this scenario"
     );
 
@@ -805,5 +1015,185 @@ fn test_merge_with_timestamp_edges() {
     assert!(
         active_edges.iter().all(|e| e.valid_at.is_some()),
         "all active rewritten edges should retain valid_at"
+    );
+}
+
+// ── Test: merged_into forwarding reference recorded on tombstoned alias (issue #371) ──
+
+/// User Story 2 AC1: merging alias X into canonical Y records Y's UUID as the `merged_into`
+/// forwarding reference on X's tombstoned row.
+#[test]
+fn test_merge_entities_records_merged_into() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alias_uuid = "ibm-001";
+    let canonical_uuid = "ibm-canonical-001";
+
+    conn.insert_entity(&make_entity(
+        canonical_uuid,
+        "International Business Machines",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias_uuid, "IBM", "2026-01-01 00:01:00"))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(canonical_uuid.to_string()),
+        alias_uuids: vec![alias_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(result.merged_count, 1);
+
+    let alias_row = conn.get_entity_by_uuid(alias_uuid).unwrap().unwrap();
+    assert!(alias_row.labels.contains(&"Merged".to_string()));
+    assert_eq!(
+        read_merged_into(&alias_row.attributes),
+        Some(canonical_uuid.to_string()),
+        "tombstoned alias must record the canonical it became, readable by a reader that \
+         doesn't already know the canonical's UUID"
+    );
+}
+
+// ── Test: merge never produces a mutation attributed to a foreign group (issue #371, FR-003) ──
+
+/// SC-001: verified directly against `Conn::drain_mutations()` output, not only post-merge
+/// graph state — a mutation could in principle be authored correctly in graph-state terms
+/// while still being attributed to the wrong stream.
+#[test]
+fn test_merge_produces_no_mutation_for_foreign_edge() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let x1_uuid = "x1-001";
+    let x2_uuid = "x2-001";
+    let y_uuid = "y-001";
+
+    conn.insert_entity(&make_entity(x2_uuid, "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(x1_uuid, "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "Y", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Same-group edge: will be rewritten.
+    conn.insert_relates_to_edge(&make_edge(x1_uuid, y_uuid, "rel", "2026-01-01 00:00:00"))
+        .unwrap();
+    // Foreign-group edge: must be skipped, and must never appear in drain_mutations() output.
+    let group_l_edge = make_edge_in_group(x1_uuid, y_uuid, "rel", "2026-01-01 00:00:01", "group-L");
+    let group_l_edge_uuid = group_l_edge.uuid.clone();
+    conn.insert_relates_to_edge(&group_l_edge).unwrap();
+
+    // Drain the setup's own mutations so only the merge's mutations remain below.
+    conn.drain_mutations();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(x2_uuid.to_string()),
+        alias_uuids: vec![x1_uuid.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "merge should succeed: {:?}", result.errors);
+    assert_eq!(result.foreign_edges_skipped, 1);
+
+    let mutations = conn.drain_mutations();
+    assert!(
+        !mutations.is_empty(),
+        "the same-group edge rewrite should have produced at least one mutation"
+    );
+    for (cypher, params) in &mutations {
+        let params_str = params.to_string();
+        assert!(
+            !cypher.contains(&group_l_edge_uuid) && !params_str.contains(&group_l_edge_uuid),
+            "no mutation may reference the foreign edge's uuid: {cypher} {params_str}"
+        );
+    }
+}
+
+// ── Test: apply_same_as leaves a foreign-group edge untouched (issue #371, FR-006) ──
+
+/// FR-006: `apply_same_as` (the YAML-corrections-driven merge path) must receive the same
+/// foreign-edge-skip treatment as `merge_entities_inner` (FR-001) — a risk the spec calls out
+/// explicitly, since `apply_same_as` had zero foreign-edge awareness before this issue. Unlike
+/// `test_merge_entities_records_merged_into`/`test_same_as_correction_timestamp_type` (which
+/// only check `merged_into` recording), this test exercises the actual skip behavior end to end
+/// via `apply_corrections_file`, mirroring `test_cross_group_edge_survives_merge`'s assertions
+/// for the `merge_entities` path.
+#[test]
+fn test_apply_same_as_leaves_foreign_edge_untouched() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical_uuid = "sasl-canonical-001";
+    let alias_uuid = "sasl-alias-001";
+    let y_uuid = "sasl-y-001";
+
+    conn.insert_entity(&make_entity(
+        canonical_uuid,
+        "SaslCanonical",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias_uuid, "SaslAlias", "2026-01-01 00:00:01"))
+        .unwrap();
+    conn.insert_entity(&make_entity(y_uuid, "SaslY", "2026-01-01 00:00:00"))
+        .unwrap();
+
+    // Group L's edge, referencing the alias — must survive apply_same_as untouched.
+    let group_l_edge =
+        make_edge_in_group(alias_uuid, y_uuid, "rel", "2026-01-01 00:00:00", "group-L");
+    let group_l_edge_uuid = group_l_edge.uuid.clone();
+    conn.insert_relates_to_edge(&group_l_edge).unwrap();
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical_uuid}\"\n    aliases: [\"SaslAlias\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(
+        result.success,
+        "apply_corrections should succeed: {:?}",
+        result.errors
+    );
+    assert_eq!(result.applied, 1);
+
+    // Group L's edge must be completely untouched: same uuid, same group_id, same endpoints
+    // (still referencing the alias, NOT re-pointed to the canonical), invalid_at unset.
+    let untouched = conn.get_edge_by_uuid(&group_l_edge_uuid).unwrap().unwrap();
+    assert_eq!(untouched.group_id, "group-L");
+    assert_eq!(
+        untouched.source_node_uuid, alias_uuid,
+        "group L's edge must still reference the alias — apply_same_as must never rewrite it"
+    );
+    assert_eq!(untouched.target_node_uuid, y_uuid);
+    assert!(
+        untouched.invalid_at.is_none(),
+        "group L's edge must not be invalidated by apply_same_as"
+    );
+
+    // No replacement group-L edge should have been written onto the canonical.
+    let canonical_edges = conn.get_full_edges_for_entity(canonical_uuid).unwrap();
+    let group_l_edges_on_canonical: Vec<_> = canonical_edges
+        .iter()
+        .filter(|e| e.group_id == "group-L" && e.invalid_at.is_none())
+        .collect();
+    assert_eq!(
+        group_l_edges_on_canonical.len(),
+        0,
+        "no replacement group-L edge should be written onto the canonical by apply_same_as"
     );
 }

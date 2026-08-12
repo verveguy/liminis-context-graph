@@ -30,6 +30,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
+    pointer::read_merged_into,
     telemetry::{NoopSink, TelemetrySink},
     types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
     EntityRow, Ontology, RelatesToEdge, WalWriter,
@@ -2389,6 +2390,18 @@ async fn parity_merge_entities_noop_single_entity() {
         r["edges_deduplicated"].is_number(),
         "edges_deduplicated must be numeric: {v}"
     );
+    assert_eq!(
+        r["foreign_edges_skipped"], 0,
+        "foreign_edges_skipped must be present and zero for a single-entity noop: {v}"
+    );
+    assert!(
+        r.get("foreign_edges_rewritten").is_none(),
+        "removed field foreign_edges_rewritten must not reappear in the IPC response: {v}"
+    );
+    assert!(
+        r.get("foreign_edges_deduplicated").is_none(),
+        "removed field foreign_edges_deduplicated must not reappear in the IPC response: {v}"
+    );
     assert!(r["errors"].is_array(), "errors must be an array: {v}");
 }
 
@@ -2962,6 +2975,24 @@ async fn test_same_as_correction_timestamp_type() {
              after same_as correction (FR-012): {created_at}"
         );
     }
+
+    // apply_same_as (the same_as correction's merge path) must record merged_into on the
+    // tombstoned alias, exactly like merge_entities (issue #371, User Story 2 AC2).
+    let alias = db
+        .connect()
+        .unwrap()
+        .get_entity_by_uuid("samc-alias-001")
+        .unwrap()
+        .expect("alias entity must still be queryable (tombstoned, not deleted)");
+    assert!(
+        alias.labels.contains(&"Merged".to_string()),
+        "alias must be tombstoned with the Merged label"
+    );
+    assert_eq!(
+        read_merged_into(&alias.attributes),
+        Some("samc-canonical-001".to_string()),
+        "apply_same_as must record merged_into on the tombstoned alias, same as merge_entities"
+    );
 }
 
 /// Without an ontology in AppState → -32000 error mentioning relation_types.

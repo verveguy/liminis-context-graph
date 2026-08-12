@@ -1915,6 +1915,16 @@ impl<'db> Conn<'db> {
         )
     }
 
+    /// Updates the `attributes` JSON column on the Entity with the given UUID (mirrors
+    /// `update_relates_to_attributes` for the edge side). Used by `corrections::merge_entities`
+    /// to record a `merged_into` forwarding reference on a tombstoned alias (issue #371).
+    pub fn update_entity_attributes(&self, uuid: &str, attributes: &str) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid}) SET e.attributes = $attributes",
+            serde_json::json!({ "uuid": uuid, "attributes": attributes }),
+        )
+    }
+
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
     /// on the RelatesToNode_ shadow node. Also attempts to set `invalid_at` on the
     /// RELATES_TO relationship property (lbug 0.17.0 may not support SET on rels;

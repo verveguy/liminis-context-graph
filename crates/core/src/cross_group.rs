@@ -61,6 +61,19 @@ pub struct CreateCrossGroupEdgeParams {
 /// name genuinely shared by two or more *active* entities is reported `Ambiguous` rather than
 /// silently taking the name index's winner (FR-006).
 ///
+/// If the winner is itself `Merged` (issue #371: a merge that also changed the canonical's name
+/// leaves re-resolution landing back on the tombstoned alias, since name resolution deliberately
+/// resolves *through* `Merged` rows), the winner's `merged_into` forwarding reference is followed
+/// to a fixpoint — repeating while the target is itself `Merged` — rather than reporting the
+/// tombstone as `Bound` (FR-007). A visited-UUID guard bounds the walk against a cycle (FR-008);
+/// a cycle, a missing `merged_into`, a dangling `merged_into` target, or a `merged_into` target
+/// that resolves outside `source_group_id` all resolve `Unbound` rather than ever reporting a
+/// dead end — or a cross-group leak — as `Bound` (FR-009). The group check exists because
+/// `merged_into` is a raw UUID lookup (unlike the initial name-based winner, which is already
+/// scoped to `source_group_id`): nothing today guarantees a canonical and its alias share a
+/// group, so a malformed or corrupted forwarding reference must never bind this function's
+/// caller to an entity outside the group it asked to resolve within.
+///
 /// Returns `(binding_state, resolved_uuid)`; `resolved_uuid` is `Some` only when
 /// `binding_state == Bound`.
 pub fn resolve_endpoint(
@@ -76,7 +89,31 @@ pub fn resolve_endpoint(
     if conn.count_active_entities_by_name_ci(endpoint_name, source_group_id)? > 1 {
         return Ok((BindingState::Ambiguous, None));
     }
-    Ok((BindingState::Bound, Some(winner.uuid)))
+    if !winner.labels.contains(&"Merged".to_string()) {
+        return Ok((BindingState::Bound, Some(winner.uuid)));
+    }
+
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(winner.uuid.clone());
+    let mut current = winner;
+    loop {
+        let Some(target_uuid) = pointer::read_merged_into(&current.attributes) else {
+            return Ok((BindingState::Unbound, None)); // no forwarding reference recorded
+        };
+        if !visited.insert(target_uuid.clone()) {
+            return Ok((BindingState::Unbound, None)); // cycle guard (FR-008)
+        }
+        let Some(next) = conn.get_entity_by_uuid(&target_uuid)? else {
+            return Ok((BindingState::Unbound, None)); // dangling merged_into target
+        };
+        if next.group_id != source_group_id {
+            return Ok((BindingState::Unbound, None)); // merged_into escaped the source group
+        }
+        if !next.labels.contains(&"Merged".to_string()) {
+            return Ok((BindingState::Bound, Some(next.uuid)));
+        }
+        current = next;
+    }
 }
 
 /// Resolves one endpoint spec into `(uuid_for_the_hop, pointer_if_foreign)`. Read-only — no
