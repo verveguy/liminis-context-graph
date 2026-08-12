@@ -61,6 +61,16 @@ pub struct CreateCrossGroupEdgeParams {
 /// name genuinely shared by two or more *active* entities is reported `Ambiguous` rather than
 /// silently taking the name index's winner (FR-006).
 ///
+/// A merge that also changes the resolvable name (e.g. alias "IBM" merged into a
+/// differently-named canonical) is not covered by the tombstone-resolves-to-canonical case
+/// above: no *live* row matches the old name anymore, so the name index's winner is the
+/// `Merged`-labelled alias itself — `count_active_entities_by_name_ci` correctly excludes it
+/// and returns 0, which is not `> 1`, so without this check the pointer would silently bind to
+/// a tombstone with no active edges (issue #369 comment 2026-08-12T02:59Z). A winner that
+/// itself carries the `Merged` label is therefore treated the same as no live match: `Unbound`,
+/// consistent with how this issue's model already treats a plain rename (Edge Cases: "Source
+/// graph renames a node").
+///
 /// Returns `(binding_state, resolved_uuid)`; `resolved_uuid` is `Some` only when
 /// `binding_state == Bound`.
 pub fn resolve_endpoint(
@@ -75,6 +85,9 @@ pub fn resolve_endpoint(
     };
     if conn.count_active_entities_by_name_ci(endpoint_name, source_group_id)? > 1 {
         return Ok((BindingState::Ambiguous, None));
+    }
+    if winner.labels.iter().any(|l| l == "Merged") {
+        return Ok((BindingState::Unbound, None));
     }
     Ok((BindingState::Bound, Some(winner.uuid)))
 }

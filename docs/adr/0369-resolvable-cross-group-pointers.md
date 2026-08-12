@@ -103,6 +103,19 @@ than a Cypher-side label-list predicate. `resolve_endpoint` calls the winner loo
 common single-match path benefits from the index's self-heal/trust behavior), then checks the
 active count only when a winner exists.
 
+A winner that is itself `Merged`-tombstoned is not automatically `bound`, either. The
+tombstone-resolves-to-canonical case above only holds when the alias and canonical share the
+same name — merge backdates the canonical's `created_at` to the earliest across all merged
+aliases (`corrections.rs:1092`), so the canonical wins the winner-selection tie-break. When a
+merge also changes the resolvable name — the common case, since merges typically consolidate
+name variants rather than literal duplicates — no live row matches the alias's old name anymore,
+so the winner returned by `get_entity_by_name_ci_with_scan_fallback` is the `Merged`-labelled
+alias itself, and `count_active_entities_by_name_ci` correctly reports 0 active matches (not
+`> 1`). Left unchecked, this would silently report `bound` to a tombstone with no active edges,
+indistinguishable from a healthy binding. `resolve_endpoint` therefore checks the winner's own
+labels after the ambiguity check and reports `Unbound` if the winner itself carries `Merged` —
+the same outcome this issue's model already defines for a plain rename.
+
 ### Two-hop writes are split into independent, idempotent statements
 
 `insert_relates_to_edge`'s existing shape is a single `MATCH`-both-endpoints `CREATE` per hop —

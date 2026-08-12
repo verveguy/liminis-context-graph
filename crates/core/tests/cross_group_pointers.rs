@@ -304,6 +304,42 @@ fn resolve_endpoint_resolves_through_merged_tombstone_to_canonical() {
     assert_eq!(uuid, Some(canonical.uuid));
 }
 
+#[test]
+fn resolve_endpoint_unbound_when_winner_is_merged_tombstone_with_no_live_match() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    // A merge that also changes the resolvable name: canonical is named differently from the
+    // alias it absorbed, so once the alias is tombstoned no *live* entity matches the alias's
+    // old name anymore.
+    let canonical = make_entity(
+        "International Business Machines",
+        GROUP_A,
+        "2026-01-01 00:00:00",
+    );
+    let mut alias = make_entity("IBM", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&canonical).unwrap();
+    conn.insert_entity(&alias).unwrap();
+
+    alias.labels.push("Merged".to_string());
+    conn.update_entity_labels(&alias.uuid, &alias.labels)
+        .unwrap();
+
+    // The name index itself still returns the tombstoned alias as the winner for "ibm" — the
+    // pointer resolver must recognize the label and refuse to bind to it rather than silently
+    // reporting Bound to a row with no active edges (issue #369 comment 2026-08-12T02:59Z).
+    let winner = conn
+        .get_entity_by_name_ci_with_scan_fallback("ibm", GROUP_A)
+        .unwrap()
+        .unwrap();
+    assert!(winner.labels.contains(&"Merged".to_string()));
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "ibm").unwrap();
+    assert_eq!(state, BindingState::Unbound);
+    assert_eq!(uuid, None);
+}
+
 // ── User Story 3: refresh cycle — purge, rehydrate, re-bind ────────────────────────────────────
 
 #[test]
