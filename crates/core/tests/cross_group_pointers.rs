@@ -420,6 +420,42 @@ fn resolve_endpoint_unbound_on_merged_into_cycle() {
     assert_eq!(uuid, None);
 }
 
+/// A `merged_into` reference is a raw UUID lookup, unlike the initial name-based winner (which
+/// is already scoped to `source_group_id`) — nothing in `merge_entities`/`apply_same_as` today
+/// guarantees a canonical and its alias share a group, so a forwarding reference could in
+/// principle point outside `source_group_id`. `resolve_endpoint` must never report `Bound` to an
+/// entity outside the group it was asked to resolve within — a cross-group target must floor to
+/// `Unbound`, the same as a dangling target (PR #377 review finding).
+#[test]
+fn resolve_endpoint_unbound_when_merged_into_target_is_foreign_group() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let mut alias = make_entity("Alpha", GROUP_A, "2026-01-01 00:00:00");
+    let foreign_target = make_entity("Beta", GROUP_LAYER, "2026-01-02 00:00:00");
+    conn.insert_entity(&alias).unwrap();
+    conn.insert_entity(&foreign_target).unwrap();
+
+    // Simulate a corrupted/malformed merged_into reference that escaped the source group.
+    alias.labels.push("Merged".to_string());
+    conn.update_entity_labels(&alias.uuid, &alias.labels)
+        .unwrap();
+    conn.update_entity_attributes(
+        &alias.uuid,
+        &pointer::write_merged_into("{}", &foreign_target.uuid),
+    )
+    .unwrap();
+
+    let (state, uuid) = cross_group::resolve_endpoint(&conn, GROUP_A, "alpha").unwrap();
+    assert_eq!(
+        state,
+        BindingState::Unbound,
+        "a merged_into target outside source_group_id must never be reported Bound"
+    );
+    assert_eq!(uuid, None);
+}
+
 // ── Original case regression (issue #371, SC-006) ───────────────────────────────────────────────
 
 /// The scenario that originally motivated this issue: source group A holds X1 and Y; layer

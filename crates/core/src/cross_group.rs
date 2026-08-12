@@ -66,8 +66,13 @@ pub struct CreateCrossGroupEdgeParams {
 /// resolves *through* `Merged` rows), the winner's `merged_into` forwarding reference is followed
 /// to a fixpoint — repeating while the target is itself `Merged` — rather than reporting the
 /// tombstone as `Bound` (FR-007). A visited-UUID guard bounds the walk against a cycle (FR-008);
-/// a cycle, a missing `merged_into`, or a dangling `merged_into` target all resolve `Unbound`
-/// rather than ever reporting a dead end as `Bound` (FR-009).
+/// a cycle, a missing `merged_into`, a dangling `merged_into` target, or a `merged_into` target
+/// that resolves outside `source_group_id` all resolve `Unbound` rather than ever reporting a
+/// dead end — or a cross-group leak — as `Bound` (FR-009). The group check exists because
+/// `merged_into` is a raw UUID lookup (unlike the initial name-based winner, which is already
+/// scoped to `source_group_id`): nothing today guarantees a canonical and its alias share a
+/// group, so a malformed or corrupted forwarding reference must never bind this function's
+/// caller to an entity outside the group it asked to resolve within.
 ///
 /// Returns `(binding_state, resolved_uuid)`; `resolved_uuid` is `Some` only when
 /// `binding_state == Bound`.
@@ -101,6 +106,9 @@ pub fn resolve_endpoint(
         let Some(next) = conn.get_entity_by_uuid(&target_uuid)? else {
             return Ok((BindingState::Unbound, None)); // dangling merged_into target
         };
+        if next.group_id != source_group_id {
+            return Ok((BindingState::Unbound, None)); // merged_into escaped the source group
+        }
         if !next.labels.contains(&"Merged".to_string()) {
             return Ok((BindingState::Bound, Some(next.uuid)));
         }
