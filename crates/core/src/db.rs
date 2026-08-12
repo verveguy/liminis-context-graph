@@ -8,6 +8,7 @@ use lbug::{LogicalType, Value};
 use crate::{
     error::Error,
     name_index::NameIndex,
+    pointer::EndpointSide,
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
@@ -454,6 +455,173 @@ impl<'db> Conn<'db> {
                 "dst": edge.target_node_uuid,
             }),
         )
+    }
+
+    /// Inserts a cross-group `RelatesToEdge` (issue #369) whose foreign endpoint(s) may be
+    /// currently unresolved — `source_node_uuid`/`target_node_uuid` is the empty string
+    /// sentinel for `Unbound`/`Ambiguous` (see `cross_group::resolve_endpoint`), never a valid
+    /// entity UUID.
+    ///
+    /// Unlike `insert_relates_to_edge`'s single all-or-nothing three-statement shape (a `MATCH`
+    /// that fails to bind silently creates zero rows), each hop here is created independently
+    /// and only when that side's UUID is non-empty — so a foreign endpoint that doesn't
+    /// currently resolve leaves only that hop absent (FR-004) rather than blocking the whole
+    /// insert. `MERGE` (not `CREATE`) makes every statement safe to re-run, which is what makes
+    /// `cross_group::rebind_pointers` idempotent (FR-009). `insert_relates_to_edge` itself is
+    /// left byte-for-byte unchanged — this is a separate function specifically so the hot
+    /// intra-group insert path pays zero cost for this feature (SC-004).
+    pub fn insert_cross_group_edge(&self, edge: &RelatesToEdge) -> Result<(), Error> {
+        self.exec_params(
+            "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
+             created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
+             valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
+             relation_type: $relation_type})",
+            serde_json::json!({
+                "uuid": edge.uuid,
+                "name": edge.name,
+                "group_id": edge.group_id,
+                "created_at": edge.created_at,
+                "fact": edge.fact,
+                "fact_embedding": edge.fact_embedding,
+                "valid_at": edge.valid_at,
+                "invalid_at": edge.invalid_at,
+                "attributes": edge.attributes,
+                "relation_type": edge.relation_type,
+            }),
+        )?;
+
+        if !edge.source_node_uuid.is_empty() && !edge.target_node_uuid.is_empty() {
+            self.create_relates_to_direct(edge)?;
+        }
+
+        if !edge.source_node_uuid.is_empty() {
+            self.create_relates_to_hop(&edge.uuid, EndpointSide::Src, &edge.source_node_uuid)?;
+        }
+        if !edge.target_node_uuid.is_empty() {
+            self.create_relates_to_hop(&edge.uuid, EndpointSide::Dst, &edge.target_node_uuid)?;
+        }
+        Ok(())
+    }
+
+    /// Creates (via `MERGE` on the rel's `uuid` property) the direct `Entity→Entity` compat rel
+    /// — matching `insert_relates_to_edge`'s second statement — only meaningful once both
+    /// endpoints resolve. Shared by `insert_cross_group_edge` (initial creation, when both sides
+    /// already resolve) and `cross_group::rebind_pointers` (when a pointer transitions into
+    /// `Bound` and its counterpart side is already resolved too). Callers whose src/dst may have
+    /// changed since a prior direct rel was created should call [`Self::delete_relates_to_direct`]
+    /// first — `MERGE` matches on `(src, uuid, dst)` together, so a stale rel pointing at a
+    /// *different* dst/src is not found and would be left behind rather than replaced.
+    pub fn create_relates_to_direct(&self, edge: &RelatesToEdge) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) \
+             MERGE (src)-[:RELATES_TO {uuid: $uuid, name: $name, group_id: $group_id, \
+             fact: $fact, valid_at: $valid_at, invalid_at: $invalid_at, \
+             attributes: $attributes}]->(dst)",
+            serde_json::json!({
+                "src": edge.source_node_uuid,
+                "dst": edge.target_node_uuid,
+                "uuid": edge.uuid,
+                "name": edge.name,
+                "group_id": edge.group_id,
+                "fact": edge.fact,
+                "valid_at": edge.valid_at,
+                "invalid_at": edge.invalid_at,
+                "attributes": edge.attributes,
+            }),
+        )
+    }
+
+    /// Removes the direct `Entity→Entity` compat rel for the given edge uuid, if present. The
+    /// rel is always created `src→dst` (never the reverse), so this matches that one direction
+    /// only — consistent with [`Self::create_relates_to_direct`]. Used by
+    /// `cross_group::rebind_pointers` before re-syncing the compat rel (a stale rel may point at
+    /// a since-changed src/dst) and when a previously-`Bound` pointer loses resolution (the
+    /// compat rel, like the two-hop model, should not survive that).
+    pub fn delete_relates_to_direct(&self, rn_uuid: &str) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) DELETE r",
+            serde_json::json!({ "uuid": rn_uuid }),
+        )
+    }
+
+    /// Creates (idempotently, via `MERGE`) one `RelatesToNode_ -[:RELATES_TO]- Entity` hop in
+    /// the given direction. Shared by `insert_cross_group_edge` (initial creation) and
+    /// `cross_group::rebind_pointers` (re-creating a hop after a pointer resolves).
+    pub fn create_relates_to_hop(
+        &self,
+        rn_uuid: &str,
+        side: EndpointSide,
+        entity_uuid: &str,
+    ) -> Result<(), Error> {
+        match side {
+            EndpointSide::Src => self.exec_params(
+                "MATCH (src:Entity {uuid: $src}), (rn:RelatesToNode_ {uuid: $rn}) \
+                 MERGE (src)-[:RELATES_TO]->(rn)",
+                serde_json::json!({ "src": entity_uuid, "rn": rn_uuid }),
+            ),
+            EndpointSide::Dst => self.exec_params(
+                "MATCH (rn:RelatesToNode_ {uuid: $rn}), (dst:Entity {uuid: $dst}) \
+                 MERGE (rn)-[:RELATES_TO]->(dst)",
+                serde_json::json!({ "rn": rn_uuid, "dst": entity_uuid }),
+            ),
+        }
+    }
+
+    /// Removes an existing `RelatesToNode_ -[:RELATES_TO]- Entity` hop in the given direction,
+    /// if present. Used by `cross_group::rebind_pointers` to drop a stale hop before creating
+    /// the (possibly different) resolved one — e.g. a source rename or re-extraction under a
+    /// new UUID generation leaves the old hop pointing at a UUID that no longer names the same
+    /// entity, or at a UUID that no longer exists at all.
+    pub fn delete_relates_to_hop(&self, rn_uuid: &str, side: EndpointSide) -> Result<(), Error> {
+        match side {
+            EndpointSide::Src => self.exec_params(
+                "MATCH (src:Entity)-[r:RELATES_TO]->(rn:RelatesToNode_ {uuid: $rn}) DELETE r",
+                serde_json::json!({ "rn": rn_uuid }),
+            ),
+            EndpointSide::Dst => self.exec_params(
+                "MATCH (rn:RelatesToNode_ {uuid: $rn})-[r:RELATES_TO]->(dst:Entity) DELETE r",
+                serde_json::json!({ "rn": rn_uuid }),
+            ),
+        }
+    }
+
+    /// Overwrites `RelatesToNode_.attributes` for the given edge. Used by
+    /// `cross_group::rebind_pointers` to persist a re-resolved pointer's new
+    /// `resolved_uuid`/`bound_at_seq`/`binding_state` back into the JSON column.
+    pub fn update_relates_to_attributes(&self, uuid: &str, attributes: &str) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.attributes = $attributes",
+            serde_json::json!({ "uuid": uuid, "attributes": attributes }),
+        )
+    }
+
+    /// Lists `(uuid, name, group_id, attributes)` for every non-invalidated `RelatesToNode_`
+    /// row carrying at least one cross-group pointer, regardless of which source group it
+    /// points into — `cross_group::rebind_pointers` filters this candidate set down to
+    /// pointers matching its target source group. A `CONTAINS` pre-filter narrows the scan to
+    /// nodes carrying the `cross_group_pointers` key at all; full-table, but acceptable since
+    /// this is admin-triggered, not on the hot read/write path (mirrors
+    /// `count_cross_group_pointers`).
+    pub fn list_cross_group_pointer_candidates(
+        &self,
+    ) -> Result<Vec<(String, String, String, String)>, Error> {
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) \
+             WHERE rn.attributes CONTAINS '\"cross_group_pointers\"' AND rn.invalid_at IS NULL \
+             RETURN rn.uuid, rn.name, rn.group_id, rn.attributes",
+            serde_json::json!({}),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    value_as_string(&row[0]),
+                    value_as_string(&row[1]),
+                    value_as_string(&row[2]),
+                    value_as_string(&row[3]),
+                )
+            })
+            .collect())
     }
 
     pub fn insert_mentions_edge(&self, e: &MentionsEdge) -> Result<(), Error> {
@@ -1281,6 +1449,32 @@ impl<'db> Conn<'db> {
             .unwrap_or(0))
     }
 
+    /// Case-insensitive count of *active* (non-`Merged`-tombstoned) entities matching `name`
+    /// within `group_id` — filters in Rust after the fetch, mirroring how
+    /// `corrections::merge_entities` itself excludes `Merged` rows (`corrections.rs:970`),
+    /// rather than a Cypher-side label-list predicate. Unlike `count_entities_by_name_ci`
+    /// (which counts every row regardless of tombstone status, used by dedup-regression tests
+    /// to assert no *extra* row was created), this is what `cross_group::resolve_endpoint`
+    /// needs for ambiguity detection: a name shared by a canonical and its own merged-away
+    /// aliases must resolve `Bound` to the canonical, not `Ambiguous` (issue #369 User Story 2
+    /// AC 4) — counting tombstones as distinct candidates would contradict that.
+    pub fn count_active_entities_by_name_ci(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<usize, Error> {
+        let lower_name = name.trim().to_lowercase();
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
+             RETURN e.labels",
+            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| !value_as_str_list(&row[0]).contains(&"Merged".to_string()))
+            .count())
+    }
+
     /// Returns a full EntityRow by UUID.
     pub fn get_entity_by_uuid(&self, uuid: &str) -> Result<Option<EntityRow>, Error> {
         let rows = self.query_params(
@@ -1486,6 +1680,33 @@ impl<'db> Conn<'db> {
     /// by insert_relates_to_edge) to avoid relying on an unverified rel-table Cypher pattern.
     pub fn count_relates_to_edges(&self) -> Result<u64, Error> {
         self.count_nodes("RelatesToNode_")
+    }
+
+    /// Counts cross-group pointers by `binding_state` across every non-invalidated
+    /// `RelatesToNode_` row (FR-012), so a refresh in progress is observable via
+    /// `knowledge_status`. Excludes invalidated rows (`rn.invalid_at IS NOT NULL`) — matching
+    /// `list_cross_group_pointer_candidates`'s candidate set — since an edge invalidated by
+    /// `rebind_pointers`'s self-loop/duplicate handling is no longer a live assertion and
+    /// counting it would inflate the reported state and mislead refresh observability. A
+    /// `CONTAINS` pre-filter narrows the scan to nodes carrying the `cross_group_pointers` key at
+    /// all, followed by a real JSON parse for per-pointer (not per-node) accuracy. This is a
+    /// full-table scan, acceptable because it's admin/status-triggered, not on the hot
+    /// read/write path — cross-group edges are expected to stay a small minority of total edges.
+    pub fn count_cross_group_pointers(&self) -> Result<crate::pointer::PointerStateCounts, Error> {
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) \
+             WHERE rn.attributes CONTAINS '\"cross_group_pointers\"' AND rn.invalid_at IS NULL \
+             RETURN rn.attributes",
+            serde_json::json!({}),
+        )?;
+        let mut counts = crate::pointer::PointerStateCounts::default();
+        for row in rows {
+            let attrs = value_as_string(&row[0]);
+            for (_, ptr) in crate::pointer::read_pointers(&attrs).iter() {
+                counts.record(ptr.binding_state);
+            }
+        }
+        Ok(counts)
     }
 
     pub fn count_mentions_edges(&self) -> Result<u64, Error> {
@@ -2148,6 +2369,12 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// | `corrections::apply_retract`            | via invalidate   | ✓ exec_params gate          |
 /// | `corrections::apply_entity_type_labels` | via update_labels| ✓ no timestamp fields       |
 /// | `merge_entities`                        | via insert/inval | ✓ exec_params gate          |
+/// | `insert_cross_group_edge` (#369)        | `exec_params`    | ✓ exec_params gate          |
+/// | `create_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
+/// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
+/// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
+/// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
+/// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
 /// | `knowledge_query_cypher`                | `cypher_query`   | safe — raw Cypher, no param |
