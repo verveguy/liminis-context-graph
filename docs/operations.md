@@ -149,10 +149,13 @@ mechanism.
 `knowledge_status` call and an integer comparison, whether its local DB is already consistent
 with the WAL, needs an incremental resume, or needs a full rebuild. `wal.applied_seq` is read
 from a persisted DB row on every call — never cached in memory, so the value survives a service
-restart. `wal.max_seq` is recomputed fresh from the on-disk WAL files on every call (the highest
-`seq` actually present, or `None`/`null` if the WAL is empty or unconfigured) — never cached,
-so an externally-updated WAL (e.g. a distributed, git-published WAL pulled by another process) is
-observed on the very next call.
+restart. `wal.max_seq` always reports the true highest `seq` actually present on disk (or
+`None`/`null` if the WAL is empty or unconfigured); an externally-updated WAL (e.g. a distributed,
+git-published WAL pulled by another process) is observed on the very next call, at worst after one
+reconciling full scan (issue #375). In the common case it's computed from a small manifest sidecar
+(`<wal_dir>/.wal-bounds.json`) rather than by rereading every `.jsonl` file in the WAL directory on
+every call — see [ADR-0375](adr/0375-wal-max-seq-bounds-manifest.md) for the caching mechanism and
+why an earlier "never cached" design was revised.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison:
