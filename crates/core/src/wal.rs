@@ -280,40 +280,200 @@ fn count_jsonl_files(dir: &Path) -> u32 {
         .unwrap_or(0)
 }
 
-/// Reads all `.jsonl` files in `wal_dir` (reverse lexicographic) and returns `max_seq + 1`,
-/// or 0 if no lines are found. Tolerates truncated final lines.
-fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
-    let mut files: Vec<PathBuf> = fs::read_dir(wal_dir)?
+/// Result of a full directory scan for the highest WAL seq present, carrying enough detail to
+/// populate a [`WalBoundsManifest`] alongside the plain max-seq value `scan_max_seq` needs.
+struct ScanMaxSeqDetail {
+    /// The literal highest seq found across all files, or `None` if the directory holds no
+    /// parseable lines (including an empty/absent directory).
+    max_seq: Option<u64>,
+    /// File name (not full path) of the file that held `max_seq`, so it can be re-checked
+    /// cheaply on a subsequent call without re-deriving it from a full scan.
+    max_seq_file: Option<String>,
+    /// Byte size of `max_seq_file` at scan time, used to detect further growth.
+    max_seq_file_size: u64,
+    /// Count of `.jsonl` files seen, used to detect files added/removed since this scan.
+    file_count: u32,
+}
+
+/// Reads all `.jsonl` files in `wal_dir` and returns the literal highest seq present, along with
+/// which file held it and how many files were seen — the full-scan path both `scan_max_seq` and
+/// `wal_max_seq`'s fast-path fallback are built on. Tolerates truncated final lines. Visits every
+/// file regardless of iteration order, so — unlike a filename-sorted approximation — this is
+/// correct even when the lexicographically-first/last file doesn't hold the true min/max seq
+/// (clock skew, concurrent writers sharing a directory).
+fn scan_max_seq_detailed(wal_dir: &Path) -> Result<ScanMaxSeqDetail, Error> {
+    let files: Vec<PathBuf> = fs::read_dir(wal_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .collect();
-
-    files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let file_count = files.len() as u32;
 
     let mut max_seq: Option<u64> = None;
+    let mut max_seq_path: Option<PathBuf> = None;
     for path in &files {
         if let Some(seq) = read_last_seq(path)? {
-            max_seq = Some(match max_seq {
-                None => seq,
-                Some(m) => m.max(seq),
-            });
+            if max_seq.is_none_or(|m| seq > m) {
+                max_seq = Some(seq);
+                max_seq_path = Some(path.clone());
+            }
         }
     }
 
-    Ok(max_seq.map(|s| s + 1).unwrap_or(0))
+    let max_seq_file_size = match &max_seq_path {
+        Some(p) => fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+        None => 0,
+    };
+    let max_seq_file =
+        max_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+
+    Ok(ScanMaxSeqDetail {
+        max_seq,
+        max_seq_file,
+        max_seq_file_size,
+        file_count,
+    })
+}
+
+/// Reads all `.jsonl` files in `wal_dir` and returns `max_seq + 1`, or 0 if no lines are found.
+fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
+    Ok(scan_max_seq_detailed(wal_dir)?
+        .max_seq
+        .map(|s| s + 1)
+        .unwrap_or(0))
+}
+
+/// File name (not full path — the manifest lives alongside the WAL files it describes) of the
+/// on-disk cache `wal_max_seq` maintains so repeated calls against an unchanged WAL directory
+/// don't have to reopen every `.jsonl` file. See issue #375 / ADR-0375.
+const WAL_BOUNDS_MANIFEST_FILE: &str = ".wal-bounds.json";
+
+/// Cached WAL seq bounds for a directory, persisted next to the WAL files it describes. The
+/// `.json` extension keeps it invisible to every existing non-recursive `.jsonl` scan (FR-003):
+/// `replay.rs`'s file lister, `count_jsonl_files`, and `scan_max_seq_detailed` all filter on
+/// exact extension `"jsonl"`.
+///
+/// This is a read-side optimization layered over `scan_max_seq_detailed`, never a new source of
+/// truth (FR-004): it is rebuilt from a full scan whenever it is absent, its `file_count` no
+/// longer matches the directory, or the file it names has been removed or is unparseable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WalBoundsManifest {
+    /// Count of `.jsonl` files present at manifest-write time. A live-writer file mid-append
+    /// doesn't change this; only rotation, or an external process adding/removing a file, does —
+    /// so this is the cheap (one `read_dir`, no file opens) signal that something in the
+    /// directory may have changed since the manifest was written.
+    file_count: u32,
+    /// File name of the `.jsonl` file that held `max_seq`. `None` iff `max_seq` is `None` (empty
+    /// WAL directory).
+    max_seq_file: Option<String>,
+    /// Byte size of `max_seq_file` at manifest-write time. The only file in a WAL directory that
+    /// can grow without changing `file_count` is the one a live writer still has open — so an
+    /// unchanged size, combined with an unchanged `file_count`, is sufficient to trust the cached
+    /// `max_seq` without reopening anything.
+    max_seq_file_size: u64,
+    /// The literal highest seq present as of manifest-write time.
+    max_seq: Option<u64>,
+}
+
+fn wal_bounds_manifest_path(wal_dir: &Path) -> PathBuf {
+    wal_dir.join(WAL_BOUNDS_MANIFEST_FILE)
+}
+
+/// Reads the manifest. Returns `None` if it is missing, corrupt, or unparseable — callers treat
+/// that identically to "not established yet" and fall back to a full scan (FR-004).
+fn read_wal_bounds_manifest(wal_dir: &Path) -> Option<WalBoundsManifest> {
+    let text = fs::read_to_string(wal_bounds_manifest_path(wal_dir)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Best-effort atomic write (tmp file + rename); failures are silently ignored. A manifest write
+/// failure must never be fatal to the read it's caching (FR-004) — worst case, the next call pays
+/// the full-scan cost again. The tmp file uses a UUID suffix (not a single fixed name, unlike
+/// `ontology_sidecar`'s startup-time writer) because `wal_max_seq` can be called concurrently by
+/// multiple async tasks in one process; a fixed tmp name would let concurrent writers corrupt
+/// each other's in-flight write.
+fn write_wal_bounds_manifest(wal_dir: &Path, manifest: &WalBoundsManifest) {
+    let Ok(json) = serde_json::to_string(manifest) else {
+        return;
+    };
+    let tmp_path = wal_dir.join(format!(".wal-bounds.{}.tmp", Uuid::new_v4().as_simple()));
+    if fs::write(&tmp_path, json).is_err() {
+        return;
+    }
+    let _ = fs::rename(&tmp_path, wal_bounds_manifest_path(wal_dir));
 }
 
 /// Returns the highest WAL `seq` actually present across `wal_dir` (issue #353), or `None` if
 /// the WAL is empty — the same units as `applied_seq` (a literal seq value), unlike
 /// `scan_max_seq`'s internal "next seq to assign" convention (`scan_max_seq() - 1` when
 /// non-empty). This is what makes the `applied_seq == wal_max_seq` "caught up" check in
-/// `knowledge_status` well-defined. Safe to call fresh on every `knowledge_status` request —
-/// see `read_last_seq`'s bounded tail-read, which keeps this from re-reading the full contents
-/// of every WAL file at production scale (ADR-0026 documents ~43,820 files in one deployment).
+/// `knowledge_status` well-defined.
+///
+/// In the common case (a directory whose manifest is already established and hasn't been
+/// invalidated by an out-of-band write since) this returns without opening any `.jsonl` file —
+/// see [`WalBoundsManifest`] / ADR-0375. Any miss, mismatch, or corruption falls back to
+/// `scan_max_seq_detailed`'s full scan, which the manifest is rebuilt from — so this always
+/// returns the true value, never a filename-sorted or otherwise stale approximation, even at the
+/// ~43,820-file production scale ADR-0026 documents.
 pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
-    let next = scan_max_seq(wal_dir)?;
-    Ok(if next == 0 { None } else { Some(next - 1) })
+    if let Some(fast) = wal_max_seq_fast_path(wal_dir) {
+        return Ok(fast);
+    }
+
+    let detailed = scan_max_seq_detailed(wal_dir)?;
+    write_wal_bounds_manifest(
+        wal_dir,
+        &WalBoundsManifest {
+            file_count: detailed.file_count,
+            max_seq_file: detailed.max_seq_file.clone(),
+            max_seq_file_size: detailed.max_seq_file_size,
+            max_seq: detailed.max_seq,
+        },
+    );
+    Ok(detailed.max_seq)
+}
+
+/// Attempts to answer `wal_max_seq` from the manifest alone. Returns `None` (not `Some(None)`)
+/// on any miss, mismatch, or corruption — that's the "give up, caller should fall back to a full
+/// scan" signal, distinct from `Some(None)`, which means "the fast path succeeded and the true
+/// answer is an empty WAL directory."
+fn wal_max_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
+    let manifest = read_wal_bounds_manifest(wal_dir)?;
+    let current_file_count = count_jsonl_files(wal_dir);
+    if current_file_count != manifest.file_count {
+        return None;
+    }
+
+    match (&manifest.max_seq_file, manifest.max_seq) {
+        (None, None) => Some(None),
+        (Some(file_name), Some(cached_seq)) => {
+            let file_path = wal_dir.join(file_name);
+            let current_size = fs::metadata(&file_path).ok()?.len();
+            if current_size == manifest.max_seq_file_size {
+                return Some(Some(cached_seq));
+            }
+            // Same file count, different size: the only file that can grow without a rotation
+            // is the one a live writer still has open, so re-read just that file's tail rather
+            // than rescanning the whole directory.
+            let new_seq = match read_last_seq(&file_path) {
+                Ok(Some(seq)) => seq,
+                _ => return None,
+            };
+            write_wal_bounds_manifest(
+                wal_dir,
+                &WalBoundsManifest {
+                    file_count: current_file_count,
+                    max_seq_file: Some(file_name.clone()),
+                    max_seq_file_size: current_size,
+                    max_seq: Some(new_seq),
+                },
+            );
+            Some(Some(new_seq))
+        }
+        // Inconsistent manifest shape (shouldn't happen from our own writer, but a hand-edited
+        // or foreign-format file could produce this) — fall back to a full scan.
+        _ => None,
+    }
 }
 
 /// Returns the lowest WAL `seq` currently present across `wal_dir` (issue #365), or `None` if
@@ -479,6 +639,9 @@ pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
 /// truncated final lines" guarantee: truncation can only affect the *end* of the file, and both
 /// paths always read through to EOF.
 fn read_last_seq(path: &Path) -> Result<Option<u64>, Error> {
+    #[cfg(test)]
+    READ_LAST_SEQ_CALLS.with(|c| c.set(c.get() + 1));
+
     let file_len = fs::metadata(path)?.len();
     if file_len > TAIL_READ_WINDOW {
         if let Some(seq) = read_last_seq_in_range(path, file_len - TAIL_READ_WINDOW)? {
@@ -519,6 +682,27 @@ fn read_last_seq_in_range(path: &Path, start: u64) -> Result<Option<u64>, Error>
         }
     }
     Ok(None)
+}
+
+// Counts calls to `read_last_seq` — the sole choke point that opens a `.jsonl` file's content —
+// so tests can assert "this call did not reopen any WAL file" directly (FR-001/SC-001), rather
+// than relying on wall-clock timing. Thread-local (not a shared global) because the standard test
+// harness runs each `#[test]` on its own thread and this crate's tests run with real parallelism
+// (`RUST_TEST_THREADS=4`, see `.cargo/config.toml`) — a shared counter would be incremented by
+// unrelated tests running concurrently and make these assertions flaky.
+#[cfg(test)]
+thread_local! {
+    static READ_LAST_SEQ_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_read_last_seq_call_count() {
+    READ_LAST_SEQ_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn read_last_seq_call_count() -> usize {
+    READ_LAST_SEQ_CALLS.with(|c| c.get())
 }
 
 #[cfg(test)]
@@ -765,5 +949,131 @@ mod tests {
         fs::write(&path, existing).unwrap();
 
         assert_eq!(read_last_seq(&path).unwrap(), Some(3));
+    }
+
+    /// SC-001/SC-005: once the manifest is established, a second `wal_max_seq` call against an
+    /// unchanged directory must not reopen a single `.jsonl` file — regardless of how many files
+    /// are present.
+    #[test]
+    fn wal_max_seq_warm_cache_avoids_reopening_files_at_scale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n = 3_000u64;
+        for i in 0..n {
+            write_wal_line(tmp.path(), &format!("f_{:06}.jsonl", i), i);
+        }
+
+        // Cold call: establishes the manifest, still returns the correct value.
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(n - 1));
+
+        reset_read_last_seq_call_count();
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(n - 1));
+        assert_eq!(
+            read_last_seq_call_count(),
+            0,
+            "warm-cache call must not reopen any .jsonl file"
+        );
+    }
+
+    /// FR-008: a new file appearing between calls (rotation, or an external writer) changes the
+    /// `.jsonl` file count, which must force a reconciling full scan rather than serve a stale
+    /// cached value.
+    #[test]
+    fn wal_max_seq_detects_new_file_via_count_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5);
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5)); // establishes the manifest
+
+        // Simulates rotation or an external writer adding a file with a higher seq.
+        write_wal_line(tmp.path(), "b_0000.jsonl", 9);
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(9));
+    }
+
+    /// FR-008: the file count alone doesn't change when a live writer keeps appending to the
+    /// file it already has open (no rotation yet) — that's detected via the tracked file's byte
+    /// size instead, and reconciled with exactly one re-read of that file, not a full rescan.
+    #[test]
+    fn wal_max_seq_detects_growth_in_tracked_file_with_single_reread() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5);
+        write_wal_line(tmp.path(), "b_0000.jsonl", 1); // lower seq; never the tracked max file
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5));
+
+        // Append another line to the tracked max-seq file, simulating active ingestion that
+        // hasn't rotated yet.
+        let path = tmp.path().join("a_0000.jsonl");
+        let mut existing = fs::read_to_string(&path).unwrap();
+        let extra_line = WalLine {
+            seq: 42,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "y" }),
+        };
+        existing.push_str(&serde_json::to_string(&extra_line).unwrap());
+        existing.push('\n');
+        fs::write(&path, existing).unwrap();
+
+        reset_read_last_seq_call_count();
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(42));
+        assert_eq!(
+            read_last_seq_call_count(),
+            1,
+            "growth in the tracked max-seq file must cost exactly one re-read, not a full rescan"
+        );
+    }
+
+    /// FR-004: a truncated/corrupt manifest must not be trusted — it's treated the same as
+    /// "absent," falls back to a full scan, and self-heals (a fresh, valid manifest is written)
+    /// rather than permanently degrading to full-scan-every-time.
+    #[test]
+    fn wal_max_seq_recovers_from_corrupt_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 7);
+        fs::write(tmp.path().join(".wal-bounds.json"), b"{not valid json").unwrap();
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(7));
+
+        // Self-healed: the manifest written by the fallback above should now serve the
+        // warm-cache path without reopening any file.
+        reset_read_last_seq_call_count();
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(7));
+        assert_eq!(read_last_seq_call_count(), 0);
+    }
+
+    /// Edge case: an empty WAL directory must keep reporting `None` on both the first (cold) and
+    /// a subsequent (warm-cache) call.
+    #[test]
+    fn wal_max_seq_empty_dir_stays_none_warm_and_cold() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), None);
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), None);
+    }
+
+    /// SC-004: a directory with no manifest at all — predating this feature, or written entirely
+    /// by the Python producer, which never creates one — must still return the correct value on
+    /// first access.
+    #[test]
+    fn wal_max_seq_first_access_with_no_manifest_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "py_0000.jsonl", 3);
+        write_wal_line(tmp.path(), "py_0001.jsonl", 12);
+
+        assert!(!tmp.path().join(".wal-bounds.json").exists());
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(12));
+    }
+
+    /// FR-003: the manifest file itself must stay invisible to the existing non-recursive
+    /// `.jsonl` scans — `count_jsonl_files` here stands in for the shared extension-filter
+    /// discipline `replay.rs`'s file lister and `scan_max_seq_detailed` also use.
+    #[test]
+    fn wal_bounds_manifest_is_invisible_to_jsonl_file_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 1);
+        wal_max_seq(tmp.path()).unwrap(); // establishes the manifest
+        assert!(tmp.path().join(".wal-bounds.json").exists());
+
+        assert_eq!(count_jsonl_files(tmp.path()), 1);
     }
 }
