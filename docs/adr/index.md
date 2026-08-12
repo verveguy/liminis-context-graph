@@ -93,7 +93,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0368](0368-group-scoped-edge-dedup-in-merge.md) | Duplicate-Edge Detection During Merge Scopes by the Edge's Own `group_id`, Not the Merge's | 2026-08-11 |
 | [0369](0369-resolvable-cross-group-pointers.md) | Resolvable Semantic Pointers for Cross-Group Edges | 2026-08-11 |
 | [0371](0371-merge-never-writes-foreign-group-data.md) | Merge Skips Foreign-Group Edges Entirely; `merged_into` Forwarding Closes the Rename Gap | 2026-08-12 |
-| [0375](0375-wal-max-seq-bounds-manifest.md) | `wal_max_seq` Bounds Manifest | 2026-08-12 |
+| [0375](0375-wal-max-seq-bounds-manifest.md) | WAL Seq Bounds Manifest | 2026-08-12 |
 
 ## Historical numbering
 

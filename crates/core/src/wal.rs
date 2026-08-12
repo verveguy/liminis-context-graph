@@ -282,61 +282,30 @@ fn count_jsonl_files(dir: &Path) -> u32 {
         .unwrap_or(0)
 }
 
-/// Result of a full directory scan for the highest WAL seq present, carrying enough detail to
-/// populate a [`WalBoundsManifest`] alongside the plain max-seq value `scan_max_seq` needs.
-struct ScanMaxSeqDetail {
-    /// The literal highest seq found across all files, or `None` if the directory holds no
-    /// parseable lines (including an empty/absent directory).
-    max_seq: Option<u64>,
-    /// File name (not full path) of the file that held `max_seq`, so it can be re-checked
-    /// cheaply on a subsequent call without re-deriving it from a full scan.
-    max_seq_file: Option<String>,
-    /// Byte size of `max_seq_file` at scan time, used to detect further growth.
-    max_seq_file_size: u64,
-    /// Fingerprint of the `.jsonl` file *name set* seen during this scan (see
-    /// [`jsonl_file_set_fingerprint`]), used to detect any file added/removed/renamed since —
-    /// not just a net change in count, which a same-count swap would miss.
-    file_set_fingerprint: u64,
-}
-
-/// Reads all `.jsonl` files in `wal_dir` and returns the literal highest seq present, along with
-/// which file held it and how many files were seen — the full-scan path both `scan_max_seq` and
-/// `wal_max_seq`'s fast-path fallback are built on. Tolerates truncated final lines. Visits every
+/// Reads all `.jsonl` files in `wal_dir` and returns the literal highest seq present. Used only
+/// by `scan_max_seq` (`WalWriter::new`/`resync_global_seq`'s hot startup/resync path), which
+/// needs nothing beyond the plain value — unlike `wal_max_seq`'s fallback, which needs the fuller
+/// [`ScanWalBoundsDetail`] to populate the manifest. Tolerates truncated final lines. Visits every
 /// file regardless of iteration order, so — unlike a filename-sorted approximation — this is
 /// correct even when the lexicographically-first/last file doesn't hold the true min/max seq
 /// (clock skew, concurrent writers sharing a directory).
-fn scan_max_seq_detailed(wal_dir: &Path) -> Result<ScanMaxSeqDetail, Error> {
+fn scan_max_seq_detailed(wal_dir: &Path) -> Result<Option<u64>, Error> {
     let files: Vec<PathBuf> = fs::read_dir(wal_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
         .collect();
-    let file_set_fingerprint = jsonl_file_set_fingerprint(&files);
 
     let mut max_seq: Option<u64> = None;
-    let mut max_seq_path: Option<PathBuf> = None;
     for path in &files {
         if let Some(seq) = read_last_seq(path)? {
             if max_seq.is_none_or(|m| seq > m) {
                 max_seq = Some(seq);
-                max_seq_path = Some(path.clone());
             }
         }
     }
 
-    let max_seq_file_size = match &max_seq_path {
-        Some(p) => fs::metadata(p).map(|m| m.len()).unwrap_or(0),
-        None => 0,
-    };
-    let max_seq_file =
-        max_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-
-    Ok(ScanMaxSeqDetail {
-        max_seq,
-        max_seq_file,
-        max_seq_file_size,
-        file_set_fingerprint,
-    })
+    Ok(max_seq)
 }
 
 /// Fingerprint of a `.jsonl` file *name set* (order-independent — the input is sorted before
@@ -377,10 +346,76 @@ fn current_jsonl_file_set_fingerprint(wal_dir: &Path) -> Option<u64> {
 
 /// Reads all `.jsonl` files in `wal_dir` and returns `max_seq + 1`, or 0 if no lines are found.
 fn scan_max_seq(wal_dir: &Path) -> Result<u64, Error> {
-    Ok(scan_max_seq_detailed(wal_dir)?
-        .max_seq
-        .map(|s| s + 1)
-        .unwrap_or(0))
+    Ok(scan_max_seq_detailed(wal_dir)?.map(|s| s + 1).unwrap_or(0))
+}
+
+/// Result of a full directory scan for *both* WAL seq bounds, enough to populate a complete
+/// [`WalBoundsManifest`] in one pass. Used by `wal_max_seq`/`wal_min_seq`'s fallback path (issue
+/// #375's follow-up extending the manifest to `wal_min_seq`) so that establishing — or
+/// re-establishing — the manifest for either bound always leaves *both* bounds cached: a call to
+/// the other function afterward gets the fast path "for free," without a second full scan.
+///
+/// Deliberately separate from [`ScanMaxSeqDetail`]/`scan_max_seq_detailed`, which stays max-only
+/// and unchanged: that one also backs `WalWriter::new`/`resync_global_seq`, hot paths that have
+/// never needed `min_seq` and shouldn't pay `first_seq_in_file`'s extra per-file read to get it.
+struct ScanWalBoundsDetail {
+    max_seq: Option<u64>,
+    max_seq_file: Option<String>,
+    max_seq_file_size: u64,
+    /// The literal lowest seq found across all files, or `None` if no file has a parseable line.
+    min_seq: Option<u64>,
+    /// File name of the file that held `min_seq`, so the manifest can cache it too.
+    min_seq_file: Option<String>,
+    file_set_fingerprint: u64,
+}
+
+/// Reads all `.jsonl` files in `wal_dir` once and returns both the highest and lowest seq
+/// present, along with which files held them — the shared full-scan fallback for both
+/// `wal_max_seq` and `wal_min_seq`. See [`ScanWalBoundsDetail`].
+fn scan_wal_bounds_detailed(wal_dir: &Path) -> Result<ScanWalBoundsDetail, Error> {
+    let files: Vec<PathBuf> = fs::read_dir(wal_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+    let file_set_fingerprint = jsonl_file_set_fingerprint(&files);
+
+    let mut max_seq: Option<u64> = None;
+    let mut max_seq_path: Option<PathBuf> = None;
+    let mut min_seq: Option<u64> = None;
+    let mut min_seq_path: Option<PathBuf> = None;
+    for path in &files {
+        if let Some(seq) = read_last_seq(path)? {
+            if max_seq.is_none_or(|m| seq > m) {
+                max_seq = Some(seq);
+                max_seq_path = Some(path.clone());
+            }
+        }
+        if let Some(seq) = first_seq_in_file(path) {
+            if min_seq.is_none_or(|m| seq < m) {
+                min_seq = Some(seq);
+                min_seq_path = Some(path.clone());
+            }
+        }
+    }
+
+    let max_seq_file_size = match &max_seq_path {
+        Some(p) => fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+        None => 0,
+    };
+    let max_seq_file =
+        max_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+    let min_seq_file =
+        min_seq_path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+
+    Ok(ScanWalBoundsDetail {
+        max_seq,
+        max_seq_file,
+        max_seq_file_size,
+        min_seq,
+        min_seq_file,
+        file_set_fingerprint,
+    })
 }
 
 /// File name (not full path — the manifest lives alongside the WAL files it describes) of the
@@ -417,6 +452,19 @@ struct WalBoundsManifest {
     max_seq_file_size: u64,
     /// The literal highest seq present as of manifest-write time.
     max_seq: Option<u64>,
+    /// File name of the `.jsonl` file that held `min_seq` at manifest-write time. `None` iff
+    /// `min_seq` is `None`.
+    ///
+    /// Unlike `max_seq_file`, no companion size field is needed: a WAL file's first line is
+    /// fixed the moment it's written, and a file only ever grows by appending to its *end* — so
+    /// once a file has contributed a cached `min_seq`, no amount of further growth (to this file
+    /// or any other) can change that value. The only thing that invalidates a cached `min_seq` is
+    /// a change to the `.jsonl` name set itself (a file added, removed, or renamed), which
+    /// `file_set_fingerprint` above already detects — so the fingerprint check alone is
+    /// sufficient staleness detection for this field, cheaper than `max_seq`'s path.
+    min_seq_file: Option<String>,
+    /// The literal lowest seq present as of manifest-write time.
+    min_seq: Option<u64>,
 }
 
 fn wal_bounds_manifest_path(wal_dir: &Path) -> PathBuf {
@@ -498,15 +546,19 @@ fn sweep_stale_manifest_tmp_files(wal_dir: &Path) {
 /// In the common case (a directory whose manifest is already established and hasn't been
 /// invalidated by an out-of-band write since) this returns without opening any `.jsonl` file —
 /// see [`WalBoundsManifest`] / ADR-0375. Any miss, mismatch, or corruption falls back to
-/// `scan_max_seq_detailed`'s full scan, which the manifest is rebuilt from — so this always
+/// `scan_wal_bounds_detailed`'s full scan, which the manifest is rebuilt from — so this always
 /// returns the true value, never a filename-sorted or otherwise stale approximation, even at the
 /// ~43,820-file production scale ADR-0026 documents.
+///
+/// The fallback scan computes `wal_min_seq`'s bound too (not just this function's own), so a
+/// `wal_min_seq` call against the same directory afterward gets its fast path "for free" without
+/// paying for a second full scan — see `scan_wal_bounds_detailed`.
 pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
     if let Some(fast) = wal_max_seq_fast_path(wal_dir) {
         return Ok(fast);
     }
 
-    let detailed = scan_max_seq_detailed(wal_dir)?;
+    let detailed = scan_wal_bounds_detailed(wal_dir)?;
     write_wal_bounds_manifest(
         wal_dir,
         &WalBoundsManifest {
@@ -514,6 +566,8 @@ pub fn wal_max_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
             max_seq_file: detailed.max_seq_file.clone(),
             max_seq_file_size: detailed.max_seq_file_size,
             max_seq: detailed.max_seq,
+            min_seq_file: detailed.min_seq_file.clone(),
+            min_seq: detailed.min_seq,
         },
     );
     Ok(detailed.max_seq)
@@ -588,6 +642,13 @@ fn wal_max_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
                     max_seq_file: Some(file_name.clone()),
                     max_seq_file_size: current_size,
                     max_seq: Some(new_seq),
+                    // Pass the existing min-seq fields through unchanged: the fingerprint match
+                    // above already guarantees the file name set hasn't changed since they were
+                    // cached, and growth in the max-seq file (even if it's the same file as the
+                    // min-seq one) never changes that file's *first* line, so the cached min bound
+                    // is still valid regardless of what happened to the max bound here.
+                    min_seq_file: manifest.min_seq_file.clone(),
+                    min_seq: manifest.min_seq,
                 },
             );
             Some(Some(new_seq))
@@ -601,34 +662,79 @@ fn wal_max_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
 /// Returns the lowest WAL `seq` currently present across `wal_dir` (issue #365), or `None` if
 /// the WAL is empty — the symmetric counterpart to `wal_max_seq`, used by the checkpoint
 /// reachability check (FR-009) to bound a checkpoint's seq against the WAL content actually on
-/// disk. Like `scan_max_seq`, this scans every `.jsonl` file rather than trusting filename sort
-/// order to reflect seq order — a checkpoint reachability check that trusted sort order could
-/// misreport a checkpoint as unreachable if a file sorting later on disk happens to hold a lower
-/// seq (e.g. clock skew across concurrent writers sharing a WAL directory, per FR-012). Unlike
+/// disk. On a full scan, this visits every `.jsonl` file rather than trusting filename sort order
+/// to reflect seq order — a checkpoint reachability check that trusted sort order could misreport
+/// a checkpoint as unreachable if a file sorting later on disk happens to hold a lower seq (e.g.
+/// clock skew across concurrent writers sharing a WAL directory, per FR-012). Unlike
 /// `wal_max_seq`'s tail-read trick (needed because the *last* line of a file sits at an unknown
 /// offset), each file's *first* line is already at offset 0, so `first_seq_in_file` reads forward
-/// only as far as the first parseable line — the same bounded-per-file cost class `scan_max_seq`
+/// only as far as the first parseable line — the same bounded-per-file cost class the full scan
 /// already pays at the ADR-0026 ~43,820-file scale.
+///
+/// In the common case (a directory whose manifest is already established and hasn't been
+/// invalidated by an out-of-band write since) this returns without opening any `.jsonl` file —
+/// the same [`WalBoundsManifest`] `wal_max_seq` maintains, extended with a `min_seq`/`min_seq_file`
+/// pair (issue #375's follow-up, once `wal_min_seq` existed on `main` — see ADR-0375). Any miss,
+/// mismatch, or corruption falls back to `scan_wal_bounds_detailed`'s full scan, which both bounds
+/// are rebuilt from — so this always returns the true value, never a filename-sorted or otherwise
+/// stale approximation.
 pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
-    let files: Vec<PathBuf> = match fs::read_dir(wal_dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-            .collect(),
-        Err(_) => return Ok(None),
-    };
-
-    let mut min_seq: Option<u64> = None;
-    for path in &files {
-        if let Some(seq) = first_seq_in_file(path) {
-            min_seq = Some(match min_seq {
-                None => seq,
-                Some(m) => m.min(seq),
-            });
-        }
+    if let Some(fast) = wal_min_seq_fast_path(wal_dir) {
+        return Ok(fast);
     }
-    Ok(min_seq)
+
+    // A missing/unreadable WAL directory reports "empty" rather than erroring, matching this
+    // function's pre-existing behavior (unlike `wal_max_seq`, which propagates the error).
+    let Ok(detailed) = scan_wal_bounds_detailed(wal_dir) else {
+        return Ok(None);
+    };
+    write_wal_bounds_manifest(
+        wal_dir,
+        &WalBoundsManifest {
+            file_set_fingerprint: detailed.file_set_fingerprint,
+            max_seq_file: detailed.max_seq_file.clone(),
+            max_seq_file_size: detailed.max_seq_file_size,
+            max_seq: detailed.max_seq,
+            min_seq_file: detailed.min_seq_file.clone(),
+            min_seq: detailed.min_seq,
+        },
+    );
+    Ok(detailed.min_seq)
+}
+
+/// Attempts to answer `wal_min_seq` from the manifest alone, mirroring `wal_max_seq_fast_path`.
+/// Returns `None` on any miss/mismatch/corruption (caller falls back to a full scan);
+/// `Some(None)`/`Some(Some(seq))` on a fast-path hit.
+///
+/// Unlike `wal_max_seq_fast_path`, no re-read-on-growth step is needed for the `(Some, Some)`
+/// case: as [`WalBoundsManifest::min_seq_file`]'s doc comment explains, a cached min-seq file's
+/// first line can't change via ordinary append growth, so the file-set fingerprint check above is
+/// sufficient staleness detection on its own — no per-call stat needed at all, cheaper than
+/// `wal_max_seq`'s path.
+///
+/// The `(None, None)` case inherits the same accepted limitation `wal_max_seq_fast_path`'s
+/// carries: a file with no parseable line at manifest-write time that later gains one via append,
+/// without any change to the file *name* set, isn't detected here. Closing that gap would need a
+/// new signal beyond what this issue's manifest mechanism already reuses; out of scope for this
+/// extension.
+fn wal_min_seq_fast_path(wal_dir: &Path) -> Option<Option<u64>> {
+    let manifest = read_wal_bounds_manifest(wal_dir)?;
+    let current_fingerprint = current_jsonl_file_set_fingerprint(wal_dir)?;
+    if current_fingerprint != manifest.file_set_fingerprint {
+        return None;
+    }
+
+    match (&manifest.min_seq_file, manifest.min_seq) {
+        (None, None) => Some(None),
+        (Some(file_name), Some(cached_seq)) => {
+            if !is_safe_wal_file_name(file_name) {
+                return None;
+            }
+            Some(Some(cached_seq))
+        }
+        // Inconsistent manifest shape — fall back to a full scan.
+        _ => None,
+    }
 }
 
 /// Reads a WAL file and returns the `seq` value of its first line that parses successfully.
@@ -645,6 +751,9 @@ pub fn wal_min_seq(wal_dir: &Path) -> Result<Option<u64>, Error> {
 /// UTF-8 conversion, having already consumed those bytes, so the next line is unaffected and
 /// scanning can continue.
 pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
+    #[cfg(test)]
+    FIRST_SEQ_IN_FILE_CALLS.with(|c| c.set(c.get() + 1));
+
     let file = fs::File::open(path).ok()?;
     let reader = std::io::BufReader::new(file);
     for line in std::io::BufRead::lines(reader) {
@@ -825,6 +934,24 @@ fn reset_read_last_seq_call_count() {
 #[cfg(test)]
 fn read_last_seq_call_count() -> usize {
     READ_LAST_SEQ_CALLS.with(|c| c.get())
+}
+
+// Mirrors READ_LAST_SEQ_CALLS above, but for `first_seq_in_file` — the sole choke point that
+// opens a `.jsonl` file's content for a min-seq read — so `wal_min_seq`'s fast path can be
+// asserted against the same "did not reopen any file" contract `wal_max_seq`'s already is.
+#[cfg(test)]
+thread_local! {
+    static FIRST_SEQ_IN_FILE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_first_seq_in_file_call_count() {
+    FIRST_SEQ_IN_FILE_CALLS.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+fn first_seq_in_file_call_count() -> usize {
+    FIRST_SEQ_IN_FILE_CALLS.with(|c| c.get())
 }
 
 #[cfg(test)]
@@ -1233,6 +1360,8 @@ mod tests {
             max_seq_file: Some("../evil.jsonl".to_string()),
             max_seq_file_size: 0,
             max_seq: Some(999_999),
+            min_seq_file: None,
+            min_seq: None,
         };
         fs::write(
             tmp.path().join(".wal-bounds.json"),
@@ -1317,5 +1446,145 @@ mod tests {
             "a seq decrease on the tracked file must trigger a full-scan fallback (visiting every \
              file), not be trusted directly from a single re-read"
         );
+    }
+
+    /// SC-001/SC-005 extended to `wal_min_seq` (issue #375 follow-up): once the manifest is
+    /// established, a second `wal_min_seq` call against an unchanged directory must not reopen a
+    /// single `.jsonl` file, regardless of how many files are present.
+    #[test]
+    fn wal_min_seq_warm_cache_avoids_reopening_files_at_scale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n = 3_000u64;
+        for i in 0..n {
+            write_wal_line(tmp.path(), &format!("f_{:06}.jsonl", i), i);
+        }
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(0));
+
+        reset_first_seq_in_file_call_count();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(0));
+        assert_eq!(
+            first_seq_in_file_call_count(),
+            0,
+            "warm-cache call must not reopen any .jsonl file"
+        );
+    }
+
+    /// A `wal_max_seq` fallback scan establishes `min_seq` too (via `scan_wal_bounds_detailed`),
+    /// so a subsequent `wal_min_seq` call against the same directory hits its fast path
+    /// immediately without ever doing its own full scan — and vice versa. This is the whole point
+    /// of extending the manifest to both bounds rather than maintaining two independent caches.
+    #[test]
+    fn establishing_one_bound_benefits_the_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5);
+        write_wal_line(tmp.path(), "b_0000.jsonl", 1);
+
+        assert_eq!(wal_max_seq(tmp.path()).unwrap(), Some(5)); // cold: establishes both bounds
+
+        reset_first_seq_in_file_call_count();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(1));
+        assert_eq!(
+            first_seq_in_file_call_count(),
+            0,
+            "wal_min_seq must be able to serve from the manifest wal_max_seq's fallback wrote, \
+             without any file reads of its own"
+        );
+
+        // And the reverse direction.
+        let tmp2 = tempfile::tempdir().unwrap();
+        write_wal_line(tmp2.path(), "a_0000.jsonl", 5);
+        write_wal_line(tmp2.path(), "b_0000.jsonl", 1);
+
+        assert_eq!(wal_min_seq(tmp2.path()).unwrap(), Some(1)); // cold: establishes both bounds
+
+        reset_read_last_seq_call_count();
+        assert_eq!(wal_max_seq(tmp2.path()).unwrap(), Some(5));
+        assert_eq!(
+            read_last_seq_call_count(),
+            0,
+            "wal_max_seq must be able to serve from the manifest wal_min_seq's fallback wrote, \
+             without any file reads of its own"
+        );
+    }
+
+    /// FR-008 extended to `wal_min_seq`: a file being added or removed changes the `.jsonl` file
+    /// *name* set, which the shared `file_set_fingerprint` check already forces a reconciling
+    /// full scan on for both bounds — including when the change affects the minimum specifically
+    /// (e.g. retention trimming the oldest file away).
+    #[test]
+    fn wal_min_seq_detects_file_removal_via_fingerprint_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_oldest.jsonl", 1);
+        write_wal_line(tmp.path(), "b_0000.jsonl", 5);
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(1)); // establishes manifest
+
+        // Simulates retention removing the oldest WAL file.
+        fs::remove_file(tmp.path().join("a_oldest.jsonl")).unwrap();
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
+    }
+
+    /// FR-004 extended to `wal_min_seq`: a truncated/corrupt manifest is treated as absent, falls
+    /// back to a full scan, and self-heals rather than degrading permanently.
+    #[test]
+    fn wal_min_seq_recovers_from_corrupt_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 7);
+        fs::write(tmp.path().join(".wal-bounds.json"), b"{not valid json").unwrap();
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(7));
+
+        reset_first_seq_in_file_call_count();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(7));
+        assert_eq!(first_seq_in_file_call_count(), 0);
+    }
+
+    /// Edge case extended to `wal_min_seq`: an empty WAL directory must keep reporting `None` on
+    /// both the first (cold) and a subsequent (warm-cache) call.
+    #[test]
+    fn wal_min_seq_empty_dir_stays_none_warm_and_cold() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), None);
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), None);
+    }
+
+    /// SC-004 extended to `wal_min_seq`: a directory with no manifest at all — predating this
+    /// feature, or written entirely by the Python producer — must still return the correct value
+    /// on first access.
+    #[test]
+    fn wal_min_seq_first_access_with_no_manifest_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "py_0000.jsonl", 3);
+        write_wal_line(tmp.path(), "py_0001.jsonl", 12);
+
+        assert!(!tmp.path().join(".wal-bounds.json").exists());
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(3));
+    }
+
+    /// The manifest is untrusted input, mirroring
+    /// `wal_max_seq_rejects_path_traversal_in_manifest_max_seq_file` — a crafted `min_seq_file`
+    /// value must not be allowed to make `wal_dir.join(file_name)` escape the WAL directory.
+    #[test]
+    fn wal_min_seq_rejects_path_traversal_in_manifest_min_seq_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line(tmp.path(), "a_0000.jsonl", 5);
+
+        let real_files = vec![tmp.path().join("a_0000.jsonl")];
+        let malicious = WalBoundsManifest {
+            file_set_fingerprint: jsonl_file_set_fingerprint(&real_files),
+            max_seq_file: Some("a_0000.jsonl".to_string()),
+            max_seq_file_size: fs::metadata(tmp.path().join("a_0000.jsonl")).unwrap().len(),
+            max_seq: Some(5),
+            min_seq_file: Some("../evil.jsonl".to_string()),
+            min_seq: Some(0),
+        };
+        fs::write(
+            tmp.path().join(".wal-bounds.json"),
+            serde_json::to_string(&malicious).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(wal_min_seq(tmp.path()).unwrap(), Some(5));
     }
 }

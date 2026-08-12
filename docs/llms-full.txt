@@ -1250,7 +1250,9 @@ git-published WAL pulled by another process) is observed on the very next call, 
 reconciling full scan (issue #375). In the common case it's computed from a small manifest sidecar
 (`<wal_dir>/.wal-bounds.json`) rather than by rereading every `.jsonl` file in the WAL directory on
 every call — see [ADR-0375](adr/0375-wal-max-seq-bounds-manifest.md) for the caching mechanism and
-why an earlier "never cached" design was revised.
+why an earlier "never cached" design was revised. The same manifest and fast path also back
+`wal_min_seq`, so `knowledge_wal_mark_list`'s reachability check (below) does not scale with WAL
+file count either.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison:
@@ -2409,7 +2411,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0368](0368-group-scoped-edge-dedup-in-merge.md) | Duplicate-Edge Detection During Merge Scopes by the Edge's Own `group_id`, Not the Merge's | 2026-08-11 |
 | [0369](0369-resolvable-cross-group-pointers.md) | Resolvable Semantic Pointers for Cross-Group Edges | 2026-08-11 |
 | [0371](0371-merge-never-writes-foreign-group-data.md) | Merge Skips Foreign-Group Edges Entirely; `merged_into` Forwarding Closes the Rename Gap | 2026-08-12 |
-| [0375](0375-wal-max-seq-bounds-manifest.md) | `wal_max_seq` Bounds Manifest | 2026-08-12 |
+| [0375](0375-wal-max-seq-bounds-manifest.md) | WAL Seq Bounds Manifest | 2026-08-12 |
 
 ## Historical numbering
 

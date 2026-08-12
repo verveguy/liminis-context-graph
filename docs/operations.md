@@ -155,7 +155,9 @@ git-published WAL pulled by another process) is observed on the very next call, 
 reconciling full scan (issue #375). In the common case it's computed from a small manifest sidecar
 (`<wal_dir>/.wal-bounds.json`) rather than by rereading every `.jsonl` file in the WAL directory on
 every call — see [ADR-0375](adr/0375-wal-max-seq-bounds-manifest.md) for the caching mechanism and
-why an earlier "never cached" design was revised.
+why an earlier "never cached" design was revised. The same manifest and fast path also back
+`wal_min_seq`, so `knowledge_wal_mark_list`'s reachability check (below) does not scale with WAL
+file count either.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison:

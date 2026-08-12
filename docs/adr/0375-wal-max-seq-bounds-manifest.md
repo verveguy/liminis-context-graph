@@ -1,10 +1,10 @@
-# ADR-0375: `wal_max_seq` Bounds Manifest
+# ADR-0375: WAL Seq Bounds Manifest
 
 **Status**: Accepted
-**Date**: 2026-08-12
+**Date**: 2026-08-12 (extended to `wal_min_seq` same day, once #367 merged — see "Extension" below)
 **Issue**: #375
 **Relates to**: ADR-0353 (persist and expose `applied_seq`/`max_seq`), ADR-0026 (episode-cursor
-WAL resume)
+WAL resume), #365/PR #367 (`wal_min_seq`/`knowledge_wal_mark_list`)
 
 ## Context
 
@@ -37,8 +37,13 @@ struct WalBoundsManifest {
     max_seq_file: Option<String>,  // file name (not path) holding max_seq
     max_seq_file_size: u64,    // that file's byte size at manifest-write time
     max_seq: Option<u64>,      // the literal highest seq present
+    min_seq_file: Option<String>,  // file name (not path) holding min_seq
+    min_seq: Option<u64>,      // the literal lowest seq present
 }
 ```
+
+(`min_seq_file`/`min_seq` were added same-day, once #367 merged — see "Extension" below. No
+companion `min_seq_file_size` field is needed; see that section for why.)
 
 Rejected an `AppState`-resident in-memory cache instead: it would reintroduce exactly the
 divergence ADR-0353 rejected for a live, long-running process (nothing invalidates it when another
@@ -159,7 +164,57 @@ this is not a residual limitation.
   reconciliation mechanism, while preserving the behavioral guarantee ADR-0353 established: the
   true value, with an externally-updated WAL observed on the next call (now: at worst after one
   reconciling full scan, not unconditionally on every call).
-- **`wal_min_seq`/`knowledge_wal_mark_list` (#365) are out of scope here** — neither exists on
-  `main` as of this issue's implementation (PR #367 not yet merged). The same manifest shape
-  extends naturally to a minimum-seq field later; FR-009's cost bound for
-  `knowledge_wal_mark_list` is deferred to a follow-up issue once #365 lands.
+- **`wal_min_seq` and `knowledge_wal_mark_list`'s reachability check are in scope as of the
+  Extension below** — both now share this same manifest and fast path. `checkpoint.rs::list`
+  needed no code changes at all: it already called the `wal_min_seq`/`wal_max_seq` free functions
+  directly, so extending those functions' internals was sufficient to satisfy FR-009's original
+  cost bound.
+
+## Extension: `wal_min_seq` (same day, once #367 merged)
+
+This issue's Implement stage forked before #365/PR #367 merged to `main`, so `wal_min_seq` did not
+exist yet and FR-009 was deferred per the spec's self-adjusting scope (see Sequencing note in the
+issue body). #367 merged shortly after this ADR's initial Accepted state, making the deferred half
+addressable; this section documents that follow-up rather than filing a second ADR for what is the
+same mechanism applied to the second bound.
+
+**The manifest gained two fields**: `min_seq_file` and `min_seq`, described above. Establishing
+either bound via a full-scan fallback now populates *both* — `scan_wal_bounds_detailed` reads
+every file's head (`first_seq_in_file`) and tail (`read_last_seq`) in the same pass, replacing the
+narrower `scan_max_seq_detailed` `wal_max_seq`'s fallback used to call directly. A call to
+`wal_min_seq` after `wal_max_seq` has already established the manifest (or vice versa) hits the
+fast path immediately, with no second full scan — and the reverse direction holds too.
+
+`scan_max_seq_detailed` itself was kept, unchanged in purpose, but narrowed to return a plain
+`Option<u64>`: it now serves only `WalWriter::new`/`resync_global_seq`, hot paths that have never
+needed `min_seq` and shouldn't pay `first_seq_in_file`'s extra per-file read to get it. Only the
+manifest-fallback path (`wal_max_seq`/`wal_min_seq`) pays the doubled per-file I/O of computing
+both bounds together, and only on a fallback — not on every call.
+
+**No companion `min_seq_file_size` field, unlike `max_seq_file`'s size check.** A WAL file's first
+line is fixed the moment it's written; a file only ever grows by *appending* to its end, which
+cannot change its own first line. So once a file has contributed a cached `min_seq`, no amount of
+further growth — to that file or any other — can invalidate it. The only thing that can invalidate
+a cached `min_seq` is a change to the `.jsonl` *name* set (a file added, removed, or renamed),
+which the existing `file_set_fingerprint` check already detects on its own. This makes
+`wal_min_seq_fast_path` cheaper than `wal_max_seq_fast_path`: no per-call `stat` at all once the
+fingerprint matches, versus `wal_max_seq`'s one `stat` (and occasional single-file re-read) to
+detect growth in the file a live writer still has open.
+
+**Reconciliation writes preserve the other bound's fields unchanged, never recompute them.** When
+`wal_max_seq_fast_path` re-derives `max_seq` after detecting growth in the tracked file, it writes
+back `manifest.min_seq`/`min_seq_file` exactly as read — untouched — rather than attempting to
+verify or refresh them. This is safe (the fingerprint match already guarantees the file name set,
+and therefore the min-seq file's first line, hasn't changed) and avoids a subtler bug: updating one
+bound's on-disk size/seq fields from within the other bound's reconciliation path risks the two
+functions' independent staleness signals drifting out of sync with each other. Keeping each
+function's fast path strictly read-only with respect to the other bound's fields sidesteps that
+class of bug entirely.
+
+**Inherited limitation, not a new one.** `wal_min_seq_fast_path`'s `(None, None)` case — "no file
+had a parseable line as of manifest-write time" — carries the same accepted gap
+`wal_max_seq_fast_path`'s `(None, None)` case already has: a file that later gains a first
+parseable line via append, without any change to the file *name* set, is not detected by the
+fingerprint check. This is pre-existing in the merged `wal_max_seq` design (not introduced by this
+extension) and considered out of scope to close here — it would need a new signal beyond what this
+issue's manifest mechanism reuses.
