@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    backfill, canonicalize, corrections,
+    assert, backfill, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
-    db::Db,
+    db::{self, Db},
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
     ipc::{IpcRequest, IpcResponse},
@@ -21,7 +21,7 @@ use crate::{
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     reprocess_relations, search,
     telemetry::{now_ms, TelemetryEvent},
-    types::SourceType,
+    types::{EntityRow, RelatesToEdge, SourceType},
     wal::WalWriter,
     wal_exec,
 };
@@ -143,6 +143,8 @@ async fn handle(
         "knowledge_merge_entities" => handle_merge_entities(req, state).await,
         "knowledge_add_cross_group_edge" => handle_add_cross_group_edge(req, state).await,
         "knowledge_rebind_pointers" => handle_rebind_pointers(req, state).await,
+        "knowledge_assert_entity" => handle_assert_entity(req, state).await,
+        "knowledge_assert_relationship" => handle_assert_relationship(req, state).await,
         "knowledge_reprocess_entity_types" => {
             handle_reprocess_entity_types(req, state, progress_tx).await
         }
@@ -2646,6 +2648,244 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
         "ambiguous": counts.ambiguous,
         "invalidated_self_loop": counts.invalidated_self_loop,
         "invalidated_duplicate": counts.invalidated_duplicate,
+    }))
+}
+
+/// Extracts a JSON object param as its serialized string form, defaulting to `"{}"` when
+/// absent or not an object — the shared `attributes` convention both assert tools use (issue
+/// #379 FR-005/FR-020), matching the existing `attributes: String` field on entity/edge rows.
+fn attributes_param_to_string(p: &Value) -> String {
+    match p {
+        Value::Object(_) => p.to_string(),
+        _ => "{}".to_string(),
+    }
+}
+
+/// `knowledge_assert_entity` (issue #379): creates or updates a single entity identified by
+/// `name` (or, if `entity_uuid` is supplied, by that strict group-scoped UUID lookup — FR-007)
+/// within `group_id`. Resolution (including forward-through-`Merged` per FR-008/FR-009) is
+/// delegated to `assert::resolve_entity_by_name`/`resolve_entity_by_uuid`; this handler owns
+/// only param parsing, the embed-with-fallback step (FR-012/FR-012a), and the create-vs-update
+/// branch (FR-010/FR-011). `summary` always fully replaces the prior value — a re-assert that
+/// omits it clears it, matching `attributes`/`labels`.
+async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("name is required".to_string()))?
+        .to_string();
+    let entity_uuid = p["entity_uuid"].as_str().map(|s| s.to_string());
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let labels: Vec<String> = p["labels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["Entity".to_string()]);
+    let summary = p["summary"].as_str().unwrap_or("").to_string();
+    let attributes = attributes_param_to_string(&p["attributes"]);
+
+    let (name_embedding, embedding_warning) = match state.embedder.embed(&name).await {
+        Ok(v) => (v, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "embedder unavailable; stored an empty name_embedding: {e}"
+            )),
+        ),
+    };
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let (entity_uuid_out, created) = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+
+        let resolved = if let Some(ref eu) = entity_uuid {
+            Some(assert::resolve_entity_by_uuid(&conn, &group_id, eu)?)
+        } else {
+            match assert::resolve_entity_by_name(&conn, &group_id, &name)? {
+                assert::Resolved::Existing(existing) => Some(*existing),
+                assert::Resolved::NotFound => None,
+            }
+        };
+
+        let (uuid, created) = match resolved {
+            Some(existing) => {
+                conn.update_entity_core(
+                    &existing,
+                    &name,
+                    &labels,
+                    &name_embedding,
+                    &summary,
+                    &attributes,
+                )?;
+                (existing.uuid, false)
+            }
+            None => {
+                let ts = chrono::Utc::now().to_rfc3339();
+                let row = EntityRow {
+                    uuid: Uuid::new_v4().to_string(),
+                    name,
+                    group_id,
+                    labels,
+                    created_at: ts,
+                    name_embedding,
+                    summary,
+                    attributes,
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
+                };
+                conn.insert_entity(&row)?;
+                (row.uuid, true)
+            }
+        };
+
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        Ok::<_, Error>((uuid, created))
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "entity_uuid": entity_uuid_out,
+        "created": created,
+        "embedding_warning": embedding_warning,
+    }))
+}
+
+/// `knowledge_assert_relationship` (issue #379): creates or updates a single directed edge
+/// between two entities resolved by name — strictly within the call's own `group_id`
+/// (FR-013/FR-014), never falling back to a cross-group search — naming
+/// `knowledge_add_cross_group_edge` in the error when a name doesn't resolve (FR-015). The
+/// upsert match is `(source_node_uuid, predicate, target_node_uuid, group_id)` via
+/// `find_active_relates_to_uuid` (FR-016/FR-017): `predicate` is bound to `RelatesToEdge.name`,
+/// the same field `has_directed_edge`/`knowledge_add_cross_group_edge` already treat as an
+/// edge's identity label, not a free-text description. `valid_at`, when supplied, is validated
+/// and normalized before any write (FR-022).
+async fn handle_assert_relationship(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let source_name = p["source_name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("source_name is required".to_string()))?
+        .to_string();
+    let target_name = p["target_name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("target_name is required".to_string()))?
+        .to_string();
+    let predicate = p["predicate"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("predicate is required".to_string()))?
+        .to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let fact = p["fact"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{source_name} {predicate} {target_name}"));
+    let attributes = attributes_param_to_string(&p["attributes"]);
+    let relation_type = p["relation_type"].as_str().map(|s| s.to_string());
+    let valid_at = match p["valid_at"].as_str() {
+        Some(raw) => Some(db::validate_and_normalize_valid_at(raw)?),
+        None => None,
+    };
+
+    let (fact_embedding, embedding_warning) = match state.embedder.embed(&fact).await {
+        Ok(v) => (v, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!(
+                "embedder unavailable; stored an empty fact_embedding: {e}"
+            )),
+        ),
+    };
+
+    let db = load_db(&state)?;
+    let wal_writer_c = Arc::clone(&state.wal_writer);
+    let sink_c = Arc::clone(&state.sink);
+    let _guard = state.write_lock.write().await;
+    let (edge_uuid, created) = tokio::task::spawn_blocking(move || {
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+
+        let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
+            match assert::resolve_entity_by_name(&conn, &group_id, n)? {
+                assert::Resolved::Existing(existing) => Ok(*existing),
+                assert::Resolved::NotFound => Err(Error::Ipc(format!(
+                    "'{n}' does not exist in group '{group_id}' — \
+                     knowledge_assert_relationship only resolves endpoints within its own \
+                     group_id and never falls back to a cross-group search; use \
+                     knowledge_add_cross_group_edge to connect entities across groups"
+                ))),
+            }
+        };
+        let source = resolve_or_err(&source_name)?;
+        let target = resolve_or_err(&target_name)?;
+
+        let existing_uuid =
+            conn.find_active_relates_to_uuid(&source.uuid, &target.uuid, &predicate, &group_id)?;
+
+        let (uuid, created) = match existing_uuid {
+            Some(uuid) => {
+                conn.update_relates_to_core(
+                    &uuid,
+                    &fact,
+                    &fact_embedding,
+                    valid_at.as_deref(),
+                    relation_type.as_deref(),
+                    &attributes,
+                )?;
+                (uuid, false)
+            }
+            None => {
+                let ts = chrono::Utc::now().to_rfc3339();
+                let edge = RelatesToEdge {
+                    uuid: Uuid::new_v4().to_string(),
+                    name: predicate,
+                    source_node_uuid: source.uuid,
+                    target_node_uuid: target.uuid,
+                    group_id,
+                    fact,
+                    fact_embedding,
+                    created_at: ts,
+                    valid_at,
+                    invalid_at: None,
+                    attributes,
+                    relation_type,
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
+                };
+                conn.insert_relates_to_edge(&edge)?;
+                (edge.uuid, true)
+            }
+        };
+
+        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        Ok::<_, Error>((uuid, created))
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "edge_uuid": edge_uuid,
+        "created": created,
+        "embedding_warning": embedding_warning,
     }))
 }
 
