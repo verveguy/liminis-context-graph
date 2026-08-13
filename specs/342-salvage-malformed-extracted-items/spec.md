@@ -26,13 +26,13 @@ This is confirmed present on `main` at 0.12.0 (originally reported against 0.11.
 | `crates/core/src/extractor.rs:1991-2000` | OAI entities | same shape |
 | `crates/core/src/extractor.rs:2017-2025` | OAI edges | same shape |
 
-`ExtractedEntity.name` and `ExtractedEdge.name` are bare `String` with no `#[serde(default)]`, so
-a missing key is a hard deserialization error. The resulting `ParseError` is not salvaged or
+`ExtractedEntity.name` and `ExtractedEdge`'s `source_name`, `target_name`, and `fact` are bare
+`String` with no `#[serde(default)]`, so a missing key is a hard deserialization error. The resulting `ParseError` is not salvaged or
 retried — `extractor.rs:375-385` (entities) and `:549` (edges) call `emit_extraction_failure(...)`
 and then `return Err(e)`, which surfaces to the caller as `-32000`.
 
 **This behaviour is already inconsistent, which is the strongest argument that it's a defect.**
-`crates/core/src/episode.rs:218` already drops empty-name entities without complaint:
+`crates/core/src/episode.rs:254` already drops empty-name entities without complaint:
 
 ```rust
 extraction.entities.retain(|e| !e.name.trim().is_empty());
@@ -51,7 +51,7 @@ because deserialization fails before `episode.rs` runs.
 `crates/core/src/types.rs:109-112` states the principle: *"losing an entire chunk's entities over
 one missing string field is a disproportionate trade."* That fix defaulted a value. `name` cannot
 be defaulted — a nameless entity has no identity and no downstream meaning — so the equivalent
-remedy here is to **drop the item**, matching what `episode.rs:218` already does for the
+remedy here is to **drop the item**, matching what `episode.rs:254` already does for the
 empty-string case.
 
 This ships as a 0.12.1 patch release: it costs users data on a released version, and the fix is
@@ -119,7 +119,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   present-but-`""` currently produce three different outcomes (hard failure, hard failure, and
   silent drop, respectively — see Background). All three MUST reach the same outcome: item
   dropped, drop counted, chunk succeeds. This includes the empty-string case that
-  `episode.rs:218` already handles silently today — it must now also be counted (see FR-007).
+  `episode.rs:254` already handles silently today — it must now also be counted (see FR-007).
 - **Edge with missing `source_name`/`target_name`**: same bare-`String`, no-default shape as
   `name`, so the same per-item drop logic applies. Post-#281 the tool schema constrains these
   fields to an enum of already-extracted entity names, so a well-behaved model shouldn't emit a
@@ -173,7 +173,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   say so in the ADR" — but the outcome MUST NOT be reported as `clean`, and MUST be visibly
   different from both `recovered` and `malformed` so the two signals aren't conflated.
 - **FR-007**: The drop counters in FR-003 MUST count every item dropped for being malformed,
-  regardless of which layer performs the drop. Today, `episode.rs:218` already silently drops
+  regardless of which layer performs the drop. Today, `episode.rs:254` already silently drops
   empty-name entities post-parse without incrementing any counter; per the Edge Cases section,
   that silent case must now also be counted so that missing/`null`/empty-string `name` all produce
   the same observable outcome, including in telemetry. This may mean the counting responsibility
@@ -236,7 +236,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   sites.
 - `crates/core/src/extractor.rs:375-385`, `:549` — where `ParseError` currently surfaces as a hard
   chunk failure.
-- `crates/core/src/episode.rs:218` — existing silent empty-name drop (the precedent tolerant
+- `crates/core/src/episode.rs:254` — existing silent empty-name drop (the precedent-tolerant
   behavior this spec extends and makes consistent).
 - `crates/core/src/types.rs:95-118` — `ExtractedEntity`, and the `deserialize_summary_or_default`
   precedent from #314.

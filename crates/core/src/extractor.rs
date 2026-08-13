@@ -17,7 +17,10 @@ use crate::{
         compute_initial_max_tokens, next_retry_max_tokens, resolve_max_tokens_ceiling,
         ExtractionCallType,
     },
-    types::{ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
+    types::{
+        ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, RequiredFieldsPresent,
+        SourceType,
+    },
 };
 
 pub const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -960,13 +963,22 @@ enum EdgeOutcome {
 /// check (is the array key present at all, is its value an array) already ran before this is
 /// called — `salvage_items` only handles per-item defects, never a structurally broken response
 /// (FR-005).
-fn salvage_items<T: serde::de::DeserializeOwned>(raw: Vec<Value>) -> (Vec<T>, usize) {
+///
+/// Also drops and counts items that deserialize successfully but are semantically empty — e.g.
+/// an empty or whitespace-only required `String` field, which satisfies `serde` but carries no
+/// usable content (#347 FR-001/FR-002). Both failure modes (deserialize failure, semantic
+/// emptiness) fold into the same `dropped` count and are indistinguishable to the caller — an
+/// item with two blank fields is still counted once, since `is_well_formed` returns a single
+/// bool rather than a per-field tally.
+fn salvage_items<T: serde::de::DeserializeOwned + RequiredFieldsPresent>(
+    raw: Vec<Value>,
+) -> (Vec<T>, usize) {
     let mut items = Vec::with_capacity(raw.len());
     let mut dropped = 0usize;
     for value in raw {
         match serde_json::from_value::<T>(value) {
-            Ok(item) => items.push(item),
-            Err(_) => dropped += 1,
+            Ok(item) if item.is_well_formed() => items.push(item),
+            Ok(_) | Err(_) => dropped += 1,
         }
     }
     (items, dropped)
@@ -2468,6 +2480,42 @@ mod tests {
         }
     }
 
+    // #347 FR-001/FR-003: an entity whose `name` deserializes fine but is blank or
+    // whitespace-only must be dropped and counted, same as a missing `name`.
+    #[test]
+    fn parse_entity_response_blank_name_dropped_and_counted() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_06",
+                    "name": "extract_entities",
+                    "input": {
+                        "entities": [
+                            {"name": "Alice", "entity_type": "Person", "summary": "A person"},
+                            {"name": "", "entity_type": "Mission", "summary": "blank name"},
+                            {"name": "   \t", "entity_type": "Mission", "summary": "whitespace-only name"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_entity_response(resp) {
+            EntityOutcome::Success { entities, dropped } => {
+                assert_eq!(entities.len(), 1, "only the well-formed entity is kept");
+                assert_eq!(
+                    dropped, 2,
+                    "both the blank-name and whitespace-only-name entities must be dropped and counted"
+                );
+                assert_eq!(entities[0].name, "Alice");
+            }
+            EntityOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EntityOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
     #[test]
     fn parse_entity_response_missing_tool_block() {
         let resp = json!({
@@ -2606,6 +2654,112 @@ mod tests {
                     "the edge missing source_name must be dropped and counted"
                 );
                 assert_eq!(edges[0].source_name, "Alice");
+            }
+            EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #347 FR-001/FR-003 (SC-001): an edge whose `fact` deserializes fine but is blank or
+    // whitespace-only must be dropped and counted in `edges_dropped_malformed`.
+    #[test]
+    fn parse_edge_response_blank_fact_dropped_and_counted() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_07",
+                    "name": "extract_edges",
+                    "input": {
+                        "edges": [
+                            {"source_name": "Alice", "target_name": "Acme", "fact": "Alice works at Acme"},
+                            {"source_name": "Bob", "target_name": "Acme", "fact": ""},
+                            {"source_name": "Carol", "target_name": "Acme", "fact": "   "}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_edge_response(resp) {
+            EdgeOutcome::Success { edges, dropped } => {
+                assert_eq!(edges.len(), 1, "only the well-formed edge is kept");
+                assert_eq!(
+                    dropped, 2,
+                    "both the blank-fact and whitespace-only-fact edges must be dropped"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
+            }
+            EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #347 FR-002/FR-003 (SC-002): a blank `source_name` or `target_name` must be dropped and
+    // counted in `edges_dropped_malformed`, not `edges_dropped_unresolvable` (that counter is
+    // populated only in episode.rs's Phase C, which a parse-time-rejected edge never reaches).
+    #[test]
+    fn parse_edge_response_blank_endpoint_names_dropped_and_counted() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_08",
+                    "name": "extract_edges",
+                    "input": {
+                        "edges": [
+                            {"source_name": "Alice", "target_name": "Acme", "fact": "Alice works at Acme"},
+                            {"source_name": "", "target_name": "Acme", "fact": "blank source_name"},
+                            {"source_name": "Dave", "target_name": "  ", "fact": "whitespace-only target_name"}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_edge_response(resp) {
+            EdgeOutcome::Success { edges, dropped } => {
+                assert_eq!(edges.len(), 1, "only the well-formed edge is kept");
+                assert_eq!(
+                    dropped, 2,
+                    "both the blank-source_name and whitespace-only-target_name edges must be dropped"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
+            }
+            EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // Edge Cases: an edge with both a blank `fact` *and* a blank `source_name` simultaneously
+    // must be dropped and counted exactly once, not once per violated field.
+    #[test]
+    fn parse_edge_response_edge_with_two_blank_fields_counted_once() {
+        let resp = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_09",
+                    "name": "extract_edges",
+                    "input": {
+                        "edges": [
+                            {"source_name": "", "target_name": "Acme", "fact": ""}
+                        ]
+                    }
+                }
+            ]
+        });
+
+        match parse_edge_response(resp) {
+            EdgeOutcome::Success { edges, dropped } => {
+                assert_eq!(edges.len(), 0);
+                assert_eq!(
+                    dropped, 1,
+                    "an edge with two blank fields must count as a single drop"
+                );
             }
             EdgeOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
             EdgeOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
@@ -2751,6 +2905,36 @@ mod tests {
         }
     }
 
+    // #347 FR-001/FR-003 (SC-004): same blank-name behavior as the Anthropic entity path, on
+    // the OAI-compatible parse site.
+    #[test]
+    fn parse_oai_entity_response_blank_name_dropped_and_counted() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"entities\": [{\"name\": \"Alice\", \"entity_type\": \"Person\", \"summary\": \"A person\"}, {\"name\": \"\", \"entity_type\": \"Mission\", \"summary\": \"blank name\"}, {\"name\": \"  \", \"entity_type\": \"Mission\", \"summary\": \"whitespace-only name\"}]}"
+                }
+            }]
+        });
+        match parse_oai_entity_response(&resp) {
+            OaiChatOutcome::Success {
+                value: entities,
+                dropped,
+                ..
+            } => {
+                assert_eq!(entities.len(), 1, "only the well-formed entity is kept");
+                assert_eq!(
+                    dropped, 2,
+                    "both the blank-name and whitespace-only-name entities must be dropped"
+                );
+                assert_eq!(entities[0].name, "Alice");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
     #[test]
     fn parse_oai_entity_response_malformed_content_is_parse_error() {
         let resp = json!({
@@ -2836,6 +3020,37 @@ mod tests {
                 assert_eq!(
                     dropped, 1,
                     "the edge missing source_name must be dropped and counted"
+                );
+                assert_eq!(edges[0].source_name, "Alice");
+            }
+            OaiChatOutcome::BudgetExhausted => panic!("unexpected BudgetExhausted"),
+            OaiChatOutcome::ParseError(e) => panic!("unexpected ParseError: {e}"),
+        }
+    }
+
+    // #347 FR-001/FR-002/FR-003 (SC-001/SC-002/SC-004): same blank-`fact`/blank-endpoint
+    // behavior as the Anthropic edge path, on the OAI-compatible parse site. Also covers the
+    // Edge Cases requirement that an edge with two blank fields counts once, not twice.
+    #[test]
+    fn parse_oai_edge_response_blank_fields_dropped_and_counted() {
+        let resp = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "content": "{\"edges\": [{\"source_name\": \"Alice\", \"target_name\": \"Acme\", \"fact\": \"Alice works at Acme\"}, {\"source_name\": \"Bob\", \"target_name\": \"Acme\", \"fact\": \"\"}, {\"source_name\": \"\", \"target_name\": \"Acme\", \"fact\": \"   \"}]}"
+                }
+            }]
+        });
+        match parse_oai_edge_response(&resp) {
+            OaiChatOutcome::Success {
+                value: edges,
+                dropped,
+                ..
+            } => {
+                assert_eq!(edges.len(), 1, "only the well-formed edge is kept");
+                assert_eq!(
+                    dropped, 2,
+                    "the blank-fact edge and the edge with two blank fields must each count once"
                 );
                 assert_eq!(edges[0].source_name, "Alice");
             }

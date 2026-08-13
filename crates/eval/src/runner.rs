@@ -309,6 +309,13 @@ pub async fn run_backend(
         // Per-chunk drop-count visibility (#342) comes from the StructuredOutputCounts.salvaged
         // telemetry tally below, not from ChunkResult — unwrap to `.result` here so the rest of
         // this function's existing ExtractionResult-typed logic is untouched.
+        //
+        // This unwrap reads `outcome.result` directly, upstream of `episode.rs`'s empty-name
+        // `retain` — eval never calls `episode::add_episode`. That bypass no longer causes
+        // eval/ingest score drift (#347 FR-005): since #347, blank-name entities and blank-fact/
+        // blank-endpoint edges are rejected inside the extractor's own `salvage_items` (parse
+        // time), which sits upstream of both this call and `episode.rs`. Eval and ingest see the
+        // same filtered `ExtractionResult` by construction, with no code change needed here.
         let result = extractor.extract(opts).await.map(|outcome| outcome.result);
         let latency_ms = start.elapsed().as_millis() as u64;
 
