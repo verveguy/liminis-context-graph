@@ -158,6 +158,27 @@ now reused by a live-write path for the first time. A failure partway through pu
 `["A", "B"]` therefore cannot leave A purged and B not (or half of either purged) — the whole
 call rolls back as one unit.
 
+### FR-007 scope: `admin`, not `write`
+
+`knowledge_delete_by_group` is registered under `Scope::Admin`. Every sibling deletion tool —
+`knowledge_delete_by_source`, `knowledge_delete_episode`, `knowledge_delete_chunk_episode`, and
+`knowledge_clear_all` (which is *strictly more destructive*, clearing every group rather than
+one) — is `Scope::Write`. Read next to those siblings, `Admin` looks like an oversight; it is not.
+
+The split this codebase's scope buckets encode is not read-vs-write — it is
+"can this instance mutate the graph's *content*" vs. "can this instance manage the graph's
+*lifecycle/infrastructure*" (WAL replay, index rebuild, recovery — see the scope-bucket table in
+this repo's `handlers.rs` guidance). #360/#378's multi-source read replica is designed to launch
+with `read` + `admin` and **no `write`** scope, because hydration itself is an `admin`-scoped
+operation (`knowledge_rebuild_from_wal`), not a content-write one. Putting purge in `write` would
+have made this issue's own primary motivating use case — a read-only replica performing a
+per-stream reset via `delete_by_group(["B"])` followed by replaying B — impossible without
+granting the replica full content-write access it is deliberately launched without. `admin` is
+what makes the feature usable in the topology it exists for.
+
+**Decision: `knowledge_delete_by_group` stays `Scope::Admin`.** This is deliberate, not a
+placeholder pending cleanup.
+
 ## Consequences
 
 ### Positive
@@ -191,6 +212,13 @@ call rolls back as one unit.
   `Bound`/`Ambiguous`. This is the simpler, more defensible reading of "would be left unbound" and
   keeps the pre-mutation query exact, but a caller expecting only newly-affected pointers should
   be aware the count is a snapshot of final state, not a diff.
+- **Known, acknowledged scope asymmetry**: a replica holding `read` + `admin` (no `write`) can
+  call `knowledge_delete_by_group` to purge an individual group, but cannot call
+  `knowledge_clear_all` — which is `Scope::Write` despite being the more destructive of the two,
+  since it clears every group rather than one. This is understood, not accidental: `clear_all`
+  predates the read-only-replica-with-`admin` topology this issue's scope decision serves, and
+  reclassifying it is out of scope here. If a future issue wants `clear_all` reachable from the
+  same topology, that is a deliberate follow-up, not a bug this ADR failed to catch.
 
 ## Alternatives Considered
 
