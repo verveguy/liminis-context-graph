@@ -26,8 +26,8 @@ This is confirmed present on `main` at 0.12.0 (originally reported against 0.11.
 | `crates/core/src/extractor.rs:1991-2000` | OAI entities | same shape |
 | `crates/core/src/extractor.rs:2017-2025` | OAI edges | same shape |
 
-`ExtractedEntity.name` and `ExtractedEdge.name` are bare `String` with no `#[serde(default)]`, so
-a missing key is a hard deserialization error. The resulting `ParseError` is not salvaged or
+`ExtractedEntity.name` and `ExtractedEdge`'s `source_name`, `target_name`, and `fact` are bare
+`String` with no `#[serde(default)]`, so a missing key is a hard deserialization error. The resulting `ParseError` is not salvaged or
 retried — `extractor.rs:375-385` (entities) and `:549` (edges) call `emit_extraction_failure(...)`
 and then `return Err(e)`, which surfaces to the caller as `-32000`.
 
@@ -236,7 +236,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   sites.
 - `crates/core/src/extractor.rs:375-385`, `:549` — where `ParseError` currently surfaces as a hard
   chunk failure.
-- `crates/core/src/episode.rs:218` — existing silent empty-name drop (the precedent tolerant
+- `crates/core/src/episode.rs:253` — existing silent empty-name drop (the precedent-tolerant
   behavior this spec extends and makes consistent).
 - `crates/core/src/types.rs:95-118` — `ExtractedEntity`, and the `deserialize_summary_or_default`
   precedent from #314.
