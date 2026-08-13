@@ -172,7 +172,7 @@ isolation (each group's own `global_seq` counter and on-disk stream) is isolated
 was never going to be isolated (the single embedded DB) stays exactly as serialized as it always
 was.
 
-### FR-004: four call sites that genuinely span groups route to the default group, not mutation-level attribution
+### FR-004: call sites that genuinely span groups route to the default group, not mutation-level attribution
 
 FR-004 forbids designing mutation-level attribution (tagging each individual mutation with its own
 group as it flows through `Conn::executed_mutations` → `drain_mutations` →
@@ -180,8 +180,8 @@ group as it flows through `Conn::executed_mutations` → `drain_mutations` →
 attribution (naming one group at the flush site) is sufficient everywhere else because #371
 already stopped merge from writing across groups within one `drain_mutations()` call.
 
-Four call sites remain that don't fit "exactly one group in scope at the flush site," because they
-are themselves multi-group by design or take arbitrary input:
+At the time this issue shipped, four call sites didn't fit "exactly one group in scope at the
+flush site," because they were themselves multi-group by design or took arbitrary input:
 
 - `handle_delete_by_group` (#361/ADR-0361) — its forced rebind pass can write into a *foreign,
   non-purged* owning group's `RelatesToNode_` rows in the same `drain_mutations()` call.
@@ -195,14 +195,36 @@ are themselves multi-group by design or take arbitrary input:
 - `handle_query_cypher` — an arbitrary-Cypher escape hatch with no group attribution at all by
   design.
 
-**Decision: all four route their WAL flush through `DEFAULT_GROUP_ID`'s writer unconditionally**,
-regardless of which group(s) the mutations actually touched, each with an inline comment citing
-this rationale. This mirrors ADR-0361's already-shipped precedent (`"applied_seq_reset": false`,
-explicitly deferred to this issue) rather than inventing a new pattern. The DB write itself is
-unaffected — it already committed via the normal Cypher path before this decision is even
-consulted; only that mutation's WAL-replay coverage lands in the default group's stream rather
-than a stream matching its actual data. This is accepted as a documented limitation, not treated
-as a defect.
+**Decision (as originally shipped): all four route their WAL flush through `DEFAULT_GROUP_ID`'s
+writer unconditionally**, regardless of which group(s) the mutations actually touched, each with
+an inline comment citing this rationale. This mirrored ADR-0361's already-shipped precedent
+(`"applied_seq_reset": false`, explicitly deferred to this issue) rather than inventing a new
+pattern. The DB write itself was unaffected — it already committed via the normal Cypher path
+before this decision was even consulted; only that mutation's WAL-replay coverage landed in the
+default group's stream rather than a stream matching its actual data.
+
+**Correction (#385, 2026-08-13): per-operation attribution turned out to be insufficient for
+handlers that span groups by design, not merely an accepted documented limitation for all four
+sites indefinitely.** `handle_delete_by_group` and `knowledge_rebind_pointers` (plus
+`clear_group_for_rebuild`, sharing `handle_delete_by_group`'s underlying `purge_groups` call —
+see [ADR-0385](0385-per-group-mutation-attribution-for-multi-group-writers.md)) each mutate a
+small, fully-known set of specific, identifiable non-default groups per call — the group(s) named
+in the request plus whichever owning group(s) a forced or standalone rebind touches. Routing
+their entire flush to the default group meant a stream never contained its own group's
+deletions or rebind writes: replaying a purged group's own stream in isolation resurrected what
+had been purged, and `liminis/` accumulated other groups' mutations as a side effect of
+operations that never legitimately wrote to the default group. #385 fixed this by draining each
+mutation at the point its owning group is already known and flushing per group — see ADR-0385 for
+the mechanism. Also corrected here: the inline comment at `handle_rebind_pointers`'s pre-#385
+call site cited this FR-004 rationale, but this section's original "four call sites" enumeration
+never actually named `handle_rebind_pointers`/`knowledge_rebind_pointers` among them — that
+citation referenced a rationale that had never been extended to cover it in writing.
+
+**The remaining three call sites keep routing to the default group under this section's original
+rationale, unchanged by #385**: `backfill.rs` and `canonicalize.rs`'s database-wide maintenance
+passes (no `group_id` filter at all — there is no small known set of groups to attribute to), and
+`handle_query_cypher`'s arbitrary-Cypher escape hatch (no group attribution possible by design).
+This is accepted as a documented limitation for these three, not treated as a defect.
 
 ### FR-006: `knowledge_rebuild_from_wal`'s `force_clear` stops wiping the whole DB file
 
@@ -315,9 +337,9 @@ call reports the same, correctly-backfilled position.
 
 ### Negative / Residual risks
 
-- The FR-004-exempted call sites (group-scoped purge's foreign-group rebind, `backfill.rs`'s and
-  `canonicalize.rs`'s database-wide `RelatesToNode_` passes, raw Cypher) have WAL-replay coverage
-  that doesn't match their actual data's group. This is a deliberate, documented gap (the DB write
+- The FR-004-exempted call sites (`backfill.rs`'s and `canonicalize.rs`'s database-wide
+  `RelatesToNode_` passes, and raw Cypher via `handle_query_cypher`) have WAL-replay coverage that
+  doesn't match their actual data's group. This is a deliberate, documented gap (the DB write
   itself is never affected), but it means a full rebuild of a non-default group from its own WAL
   directory alone will not reproduce a maintenance-pass mutation that happened to touch that
   group's data — only a rebuild that includes the default group's stream will. Found during
@@ -325,7 +347,9 @@ call reports the same, correctly-backfilled position.
   `DEFAULT_GROUP_ID` alongside these three, but unlike them it is genuinely single-group scoped —
   its Phase A candidate selection already filters by `params.group_id` via
   `list_edges_for_scope` — so it was corrected to route to that group directly; it does not belong
-  on this list.
+  on this list. (Group-scoped purge's foreign-group rebind was originally on this list too, but
+  #385/[ADR-0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) corrected its
+  routing — see this ADR's FR-004 section as amended.)
 - The non-fallback ("checkpoint-drop") branch of `run_full_recovery_sequence` only catches up the
   default group's own app-WAL tail. `attempt_checkpoint_drop` renames aside lbug's own
   engine-level `.wal` file, which is shared across every group's not-yet-durable writes, not just
@@ -422,6 +446,10 @@ usable directory without that trap.
   issue replaces with one row per group.
 - [ADR-0361](0361-group-scoped-purge.md) — explicitly deferred per-group `applied_seq` reset and
   the FR-004 foreign-group-write tension to this issue; `purge_groups` is reused as-is here.
+- [ADR-0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) — corrects this
+  ADR's FR-004 decision for `handle_delete_by_group`, `knowledge_rebind_pointers`, and
+  `clear_group_for_rebuild`: each now attributes its mutations to the specific group(s) it
+  actually modifies instead of routing everything to `DEFAULT_GROUP_ID`.
 - [ADR-0365](0365-wal-checkpoints-directory-per-name-store.md) — the directory-per-name checkpoint
   store this issue's migration relocates as a unit and whose IPC methods gain `group_id` (FR-012).
 - [ADR-0369](0369-resolvable-cross-group-pointers.md) — defines `binding_state`/`bound_at_seq`,

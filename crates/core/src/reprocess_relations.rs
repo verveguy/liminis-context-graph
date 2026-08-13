@@ -289,7 +289,8 @@ pub async fn reprocess_relation_types(
             // Unlike backfill.rs/canonicalize.rs's genuinely database-wide passes, Phase A above
             // already scoped every candidate edge to params.group_id via list_edges_for_scope —
             // so this flush routes to that same group directly, not the default group's writer.
-            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            wal_exec::advance_applied_seq(&conn, &gid_c, seq);
             Ok(batch.len())
         })
         .await??;

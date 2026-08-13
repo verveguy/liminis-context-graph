@@ -818,7 +818,8 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
             .get_episode_group_id(&episode_uuid)?
             .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
-        wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, &group_id, seq);
         Ok(())
     })
     .await??;
@@ -901,7 +902,10 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         let rows = conn.cypher_query(&query)?;
         // Arbitrary Cypher carries no group attribution at all (FR-004): routes through the
         // default group's writer, a documented limitation rather than mutation-level tracking.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // Its applied_seq advances uniformly with every other wal_flush_ungrouped caller (issue
+        // #383 FR-006) — no per-caller exception for raw cypher's trust level.
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
         // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
         // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
         // an Entity row with the index never learning about it. Reuse the WAL's own
@@ -1219,7 +1223,8 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             Some([single]) => single.as_str(),
             _ => DEFAULT_GROUP_ID,
         };
-        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, target_group, seq);
         Ok(uuids)
     })
     .await??;
@@ -1268,7 +1273,8 @@ async fn handle_delete_chunk_episode(
             Some([single]) => single.as_str(),
             _ => DEFAULT_GROUP_ID,
         };
-        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, target_group, seq);
         Ok(uuids)
     })
     .await??;
@@ -1342,12 +1348,19 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
-        let counts = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
-        // Purges an array of group_ids and its forced rebind can write into other, non-purged
-        // "owning" groups' RelatesToNode_ rows in the same drain_mutations call (ADR-0361) —
-        // genuinely multi-group, so per-operation attribution can't name one group (FR-004).
-        // Routes through the default group's writer, a documented limitation.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        let (counts, grouped) = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
+        // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
+        // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's
+        // writer, never the default group's. Each iteration's wal_flush_ungrouped call is its
+        // own independently best-effort, non-fatal flush (same tolerance the pre-#385 single
+        // call already had, now spanning N streams instead of 1 — see ADR-0385's residual risks),
+        // and advances that same group's own applied_seq (issue #383) — per-bucket attribution
+        // makes this per-group by construction, with no default-group fallback to reason about.
+        for (group_id, mutations) in grouped {
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+        }
         Ok(counts)
     })
     .await??;
@@ -2545,12 +2558,27 @@ async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Resul
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         let ts = chrono::Utc::now().to_rfc3339();
-        group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
-        // The forced rebind inside purge_groups can touch a foreign, non-purged group's
-        // RelatesToNode_ rows in the same transaction (ADR-0361) — genuinely multi-group, so
-        // per-operation attribution can't name one group (FR-004). Routes through the default
-        // group's writer, the same documented limitation as handle_delete_by_group.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        let (_, mut grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
+        // gid's own bucket (its own deletions, and any forced-rebind write that happened to
+        // land back on gid's own edges) is deliberately dropped, never flushed — this purge
+        // exists solely to clear room for the from_seq: 0 replay that immediately follows in
+        // the same knowledge_rebuild_from_wal call (below, in the caller), and that replay
+        // re-derives gid's entire state from gid's own WAL directory. Flushing these mutations
+        // into that same directory would inject them into the very history about to be
+        // replayed — turning a "recreate then re-delete" sequence into gid's own stream and
+        // silently discarding whatever the replay was supposed to reconstruct. Any mutation
+        // attributed to a *foreign* owning group is real, independent history for that group
+        // and is unaffected by gid's own replay — it must still be flushed to its own stream
+        // (issue #385 / ADR-0385).
+        grouped.remove(gid.as_str());
+        // Every remaining bucket belongs to a foreign group, so each one advances its own
+        // group's applied_seq (issue #383). Dropping gid's own bucket above also removes the
+        // pre-#385 ordering hazard: no flush here can credit gid, so the unconditional
+        // "this group is now empty" reset below is never racing an advance of its own position.
+        for (group_id, mutations) in grouped {
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+        }
         // Reset this group's applied-WAL-seq position (issue #353 FR-005, scoped per group by
         // issue #378) — its data is freshly empty. The from_seq: 0 rebuild this function exists
         // to enable will overwrite this with the replay's precise last_committed_seq once it
@@ -2639,7 +2667,9 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
             // A corrections file can address entities across several groups in one call, with
             // no single group_id in scope here (FR-004). Routes through the default group's
             // writer, the same documented limitation as handle_delete_by_group.
-            wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+            let seq =
+                wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+            wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
         }
         Ok::<_, Error>(apply_result)
     })
@@ -2702,7 +2732,8 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             // Since #371, merge_entities_inner never writes into a group other than the one
             // owning the merge — this call's mutations all belong to gid_c, so (unlike the
             // FR-004-exempt sites) per-operation attribution names it directly.
-            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            wal_exec::advance_applied_seq(&conn, &gid_c, seq);
         }
         Ok::<_, Error>(merge_result)
     })
@@ -2815,7 +2846,8 @@ async fn handle_add_cross_group_edge(
         )?;
         // The new RelatesToNode_ edge is owned by gid_c alone — its two endpoints may point into
         // other groups, but the mutation itself belongs to exactly one group (FR-004).
-        wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, &gid_c, seq);
         Ok::<_, Error>(edge)
     })
     .await??;
@@ -2848,11 +2880,16 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let counts = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let ts = chrono::Utc::now().to_rfc3339();
-        let counts = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
+        let (counts, grouped) = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
         // Rebinds every pointer whose source_group_id matches, regardless of which group owns
-        // the RelatesToNode_ row carrying it — genuinely multi-group, so per-operation
-        // attribution can't name one group (FR-004). Routes through the default group's writer.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // the RelatesToNode_ row carrying it — `grouped` already attributes each mutation to
+        // that owning group (issue #385 / ADR-0385), never source_group_id itself and never the
+        // default group. Flush each bucket to its own group's writer, advancing that same
+        // group's applied_seq (issue #383).
+        for (group_id, mutations) in grouped {
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+        }
         Ok::<_, Error>(counts)
     })
     .await??;
@@ -2984,7 +3021,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, &gid_wal, seq);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3119,7 +3157,8 @@ async fn handle_assert_relationship(
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+        wal_exec::advance_applied_seq(&conn, &gid_wal, seq);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3364,7 +3403,8 @@ async fn handle_reprocess_entity_types(
         let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
-            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            wal_exec::advance_applied_seq(&conn, &gid_c, seq);
             Ok(count)
         })
         .await??;
@@ -3446,7 +3486,8 @@ async fn handle_reprocess_entity_types(
                     restamped_count += 1;
                 }
             }
-            wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
+            let seq = wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
+            wal_exec::advance_applied_seq(&conn, &group_id_d, seq);
             Ok(restamped_count)
         })
         .await??
