@@ -39,9 +39,13 @@ fn make_db() -> (Arc<Db>, TempDir) {
     (db, dir)
 }
 
-fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState> {
+/// `wal_root` becomes `AppState.wal_root` (issue #378): a WAL **root** containing one
+/// subdirectory per `group_id`, not a single shared stream. Per-group writers/directories are
+/// created lazily on first write (FR-003) — callers that need to inspect a particular group's
+/// WAL files directly should look under `wal_root.join(<that group's dir name>)`, e.g. via
+/// [`group_wal_dir`].
+fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000, 0).ok();
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
@@ -51,11 +55,11 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: Some(wal_dir),
+        wal_root: Some(wal_root),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -65,6 +69,13 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
+}
+
+/// A `group_id` used by this file's tests always already satisfies
+/// `checkpoint::validate_name`'s charset, so its WAL directory name is the `group_id` itself,
+/// unchanged (`wal_group::encode_group_dir_name`'s "already safe" case).
+fn group_wal_dir(wal_root: &std::path::Path, group_id: &str) -> std::path::PathBuf {
+    wal_root.join(group_id)
 }
 
 fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
@@ -78,11 +89,11 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: None,
+        wal_root: None,
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(None)),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -168,12 +179,13 @@ async fn test_add_episode_populates_wal() {
         "expected episode_uuid: {v}"
     );
 
-    // WAL must be populated
+    // WAL must be populated, under this episode's own group's subdirectory (issue #378).
+    let group_dir = group_wal_dir(wal_dir.path(), "test");
     assert!(
-        has_wal_files(wal_dir.path()),
+        has_wal_files(&group_dir),
         "WAL directory must contain at least one JSONL file after add_episode"
     );
-    let line_count = count_wal_lines(wal_dir.path());
+    let line_count = count_wal_lines(&group_dir);
     assert!(
         line_count >= 1,
         "WAL must contain at least one mutation line, got {line_count}"
@@ -223,11 +235,12 @@ async fn test_add_episode_advances_applied_seq_to_chunk_max_seq() {
     .await;
     assert!(v.get("result").is_some(), "expected result, got: {v}");
 
-    let expected_seq = max_wal_seq(wal_dir.path()).expect("WAL must contain at least one line");
+    let group_dir = group_wal_dir(wal_dir.path(), "test");
+    let expected_seq = max_wal_seq(&group_dir).expect("WAL must contain at least one line");
 
     let conn = db.connect().unwrap();
     assert_eq!(
-        conn.get_applied_seq().unwrap(),
+        conn.get_applied_seq("test").unwrap(),
         Some(expected_seq),
         "applied_seq must equal the chunk's max WAL seq"
     );

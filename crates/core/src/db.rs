@@ -113,7 +113,10 @@ impl Db {
             // only means the boot-time check falls back to a rescan, not that the rebuild
             // itself is compromised.
             if let Some(seq) = stats.last_committed_seq {
-                if let Err(e) = conn.set_applied_seq(seq) {
+                // `open_or_rebuild` replays exactly one WAL directory into a fresh DB — there is
+                // no notion of multiple groups at this call site, so the position it persists is
+                // the default group's (issue #378 FR-009: single-group parity).
+                if let Err(e) = conn.set_applied_seq(crate::wal_group::DEFAULT_GROUP_ID, seq) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
                     );
@@ -131,7 +134,11 @@ impl Db {
             // (FR-007), or set it to 0 for a genuinely fresh DB. Non-fatal: a missed backfill
             // just leaves the boot-time check reporting null (safe — the documented action is
             // a full rebuild).
-            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(&conn, wal_dir_path) {
+            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(
+                &conn,
+                crate::wal_group::DEFAULT_GROUP_ID,
+                wal_dir_path,
+            ) {
                 eprintln!(
                     "liminis-context-graph: open_or_rebuild: applied_seq backfill failed (non-fatal): {e}"
                 );
@@ -1860,41 +1867,56 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_timestamp_str(&row[0])))
     }
 
-    /// Returns the uuid of the most-recently created Episodic node across all groups, or `None`
-    /// if there are no episodes yet. Used by episode-cursor derivation during WAL recovery.
-    pub fn get_latest_episode_uuid(&self) -> Result<Option<String>, Error> {
-        let result = self
-            .inner
-            .query("MATCH (ep:Episodic) RETURN ep.uuid ORDER BY ep.created_at DESC LIMIT 1")?;
-        Ok(result
+    /// Returns the uuid of the most-recently created Episodic node belonging to `group_id`, or
+    /// `None` if that group has no episodes yet. Used by episode-cursor derivation during WAL
+    /// recovery, scoped per group (issue #378 FR-010) so a backfill for one group can never pick
+    /// up another group's most recent episode.
+    pub fn get_latest_episode_uuid(&self, group_id: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic {group_id: $group_id}) RETURN ep.uuid \
+             ORDER BY ep.created_at DESC LIMIT 1",
+            serde_json::json!({ "group_id": group_id }),
+        )?;
+        Ok(rows
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
-    /// Returns the persisted applied-WAL-seq position (issue #353), or `None` if no position
-    /// has ever been recorded. Row-absence is the sole representation of "unknown" — both
-    /// "never written" (fresh DB, backfill not yet run) and "backfill failed" (FR-008) collapse
-    /// to this, distinct from a written `0` ("nothing applied yet, but known").
-    pub fn get_applied_seq(&self) -> Result<Option<u64>, Error> {
-        let result = self
-            .inner
-            .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
-        Ok(result
+    /// Returns the persisted applied-WAL-seq position for `group_id` (issue #353, made per-group
+    /// by issue #378), or `None` if no position has ever been recorded for that group.
+    /// Row-absence is the sole representation of "unknown" — both "never written" (fresh
+    /// group, backfill not yet run) and "backfill failed" (FR-008) collapse to this, distinct
+    /// from a written `0` ("nothing applied yet, but known"). A `seq` from one group's stream
+    /// must never be compared against another group's row (FR-008) — this always reads exactly
+    /// one group's `WalPosition` row, selected by its primary key.
+    pub fn get_applied_seq(&self, group_id: &str) -> Result<Option<u64>, Error> {
+        let rows = self.query_params(
+            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq",
+            serde_json::json!({ "group_id": group_id }),
+        )?;
+        Ok(rows
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_u64(&row[0])))
     }
 
-    /// Persists `seq` as the applied-WAL-seq position (issue #353). Uses `Connection::query`
-    /// directly rather than `raw_query`/`exec_params`, so this write is never itself recorded
-    /// into `executed_mutations` and re-logged to the WAL — that would make `applied_seq`
-    /// immediately stale by the write that just recorded it (a self-referential regress).
-    /// Same non-recording bypass as `exec_transaction_control`/`count_nodes`. `seq` is a `u64`
-    /// interpolated directly (not a string), so there is no injection surface.
-    pub fn set_applied_seq(&self, seq: u64) -> Result<(), Error> {
-        let sql = format!("MERGE (w:WalPosition {{id: 'singleton'}}) SET w.applied_seq = {seq}");
-        let _ = self.inner.query(&sql)?;
+    /// Persists `seq` as `group_id`'s applied-WAL-seq position (issue #353, made per-group by
+    /// issue #378). Uses `Connection::execute` via a prepared statement directly rather than
+    /// `raw_query`/`exec_params`, so this write is never itself recorded into
+    /// `executed_mutations` and re-logged to the WAL — that would make `applied_seq` immediately
+    /// stale by the write that just recorded it (a self-referential regress). Same non-recording
+    /// bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a parameter,
+    /// not interpolated, since it is caller-controlled (IPC-supplied).
+    pub fn set_applied_seq(&self, group_id: &str, seq: u64) -> Result<(), Error> {
+        let mut prepared = self
+            .inner
+            .prepare("MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq")?;
+        let bound: Vec<(&str, Value)> = vec![
+            ("group_id", Value::String(group_id.to_string())),
+            ("seq", Value::Int64(seq as i64)),
+        ];
+        self.inner.execute(&mut prepared, bound)?;
         Ok(())
     }
 
@@ -3243,7 +3265,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), None);
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
     }
 
     /// Basic write/read round-trip.
@@ -3254,12 +3276,12 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(41).unwrap();
+        conn.set_applied_seq("liminis", 41).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(41));
     }
 
-    /// `set_applied_seq` MERGEs onto the singleton row rather than inserting a duplicate —
+    /// `set_applied_seq` MERGEs onto that group's row rather than inserting a duplicate —
     /// repeated writes (the normal case, once per chunk) must overwrite, not accumulate.
     #[test]
     fn set_applied_seq_overwrites_existing_value() {
@@ -3268,10 +3290,10 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(5).unwrap();
-        conn.set_applied_seq(12).unwrap();
+        conn.set_applied_seq("liminis", 5).unwrap();
+        conn.set_applied_seq("liminis", 12).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(12));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(12));
         assert_eq!(
             conn.count_nodes("WalPosition").unwrap(),
             1,
@@ -3288,9 +3310,9 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(0).unwrap();
+        conn.set_applied_seq("liminis", 0).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(0));
     }
 
     /// `get_applied_seq`/`set_applied_seq` must not themselves become a WAL line — using
@@ -3304,12 +3326,47 @@ mod applied_seq_tests {
         conn.init_schema(4).unwrap();
         conn.drain_mutations(); // discard init_schema's own recorded DDL
 
-        conn.set_applied_seq(7).unwrap();
+        conn.set_applied_seq("liminis", 7).unwrap();
 
         assert!(
             conn.drain_mutations().is_empty(),
             "set_applied_seq must never record into executed_mutations"
         );
+    }
+
+    /// Two different `group_id`s must produce two independent `WalPosition` rows: writing one
+    /// group's position must never be visible from, or overwrite, another group's row (issue
+    /// #378 FR-002/FR-008 — SC-003 groundwork).
+    #[test]
+    fn different_groups_have_independent_applied_seq_rows() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("group-a", 10).unwrap();
+        conn.set_applied_seq("group-b", 0).unwrap();
+
+        assert_eq!(conn.get_applied_seq("group-a").unwrap(), Some(10));
+        assert_eq!(
+            conn.get_applied_seq("group-b").unwrap(),
+            Some(0),
+            "group-b's own Some(0) must not be shadowed by group-a's higher seq"
+        );
+        assert_eq!(
+            conn.get_applied_seq("group-c").unwrap(),
+            None,
+            "a third, never-written group must still report unknown, not either sibling's value"
+        );
+        assert_eq!(
+            conn.count_nodes("WalPosition").unwrap(),
+            2,
+            "each group must own exactly one WalPosition row"
+        );
+
+        // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
+        conn.set_applied_seq("group-a", 25).unwrap();
+        assert_eq!(conn.get_applied_seq("group-b").unwrap(), Some(0));
     }
 }
 

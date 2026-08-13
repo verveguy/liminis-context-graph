@@ -94,7 +94,7 @@ fn make_state_with(
     db_path: String,
 ) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let (wal_dir, wal_writer) = match wal {
+    let (wal_root, wal_writer) = match wal {
         Some((dir, writer)) => (Some(dir), writer),
         None => (None, None),
     };
@@ -107,11 +107,16 @@ fn make_state_with(
         write_lock: Arc::new(tokio::sync::RwLock::new(())),
         sink,
         db_path,
-        wal_dir,
+        wal_root,
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
