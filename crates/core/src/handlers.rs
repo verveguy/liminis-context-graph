@@ -1946,11 +1946,15 @@ async fn handle_rebuild_from_wal(
         .await??
     };
     let current_generation = crate::wal_generation::read_generation(&wal_dir);
-    // Either side being `None` — a recorded position that predates #387, or a stream that has
-    // never had a generation minted into it — is never treated as a mismatch (FR-009, Story 5):
-    // it's adopted as the baseline the moment this rebuild's own completion writes it, with no
-    // separate branch needed here.
-    let reset_detected = crate::wal_generation::generation_mismatch(
+    // `position_reset_detected` (not the simpler `generation_mismatch`, which is right for an
+    // immutable checkpoint record but wrong here — see its own doc comment) is row-existence-
+    // aware: no row yet (`applied_seq: None`) means first encounter, nothing to compare, the
+    // completion write below performs the adoption itself (FR-009). Once a row exists, though, an
+    // adopted `generation: None` baseline from a stream that had no generation yet is a real
+    // prior value — if the stream is later genuinely reset and gains a generation for the first
+    // time, that must still be caught (Story 5, Scenario 3), not silently exempted forever.
+    let reset_detected = crate::wal_generation::position_reset_detected(
+        recorded_position.applied_seq,
         recorded_position.generation.as_deref(),
         current_generation.as_deref(),
     );

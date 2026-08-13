@@ -115,12 +115,50 @@ fn sync_dir(dir: &Path) {
     }
 }
 
-/// Pure comparison: `true` only when both sides are recorded and differ. Opaque equality only —
-/// a generation is never ordered or interpreted (spec Assumptions). Either side being `None`
-/// (never recorded, or unreadable/corrupt) is never a mismatch — see FR-009 (Story 5) and the
-/// Edge Cases section.
+/// Pure comparison for an **immutable** recorded generation (a checkpoint's, FR-007): `true`
+/// only when both sides are known and differ. Opaque equality only — a generation is never
+/// ordered or interpreted (spec Assumptions). Either side being `None` (never recorded — a
+/// checkpoint taken before this feature or against a not-yet-generationed stream — or currently
+/// unreadable/corrupt) is never a mismatch. A checkpoint has no "adopt on first encounter"
+/// concept the way a consumer position does (see [`position_reset_detected`]): its generation is
+/// set once, at creation, and never revisited, so a `None` recorded value stays permanently
+/// generation-blind rather than ever being compared against a later `Some`.
 pub fn generation_mismatch(recorded: Option<&str>, current: Option<&str>) -> bool {
     matches!((recorded, current), (Some(a), Some(b)) if a != b)
+}
+
+/// Row-existence-aware reset check for the **consumer-side WAL position** (`WalPosition`,
+/// #353/#378/#387) — distinct from [`generation_mismatch`], which is the right (simpler) rule for
+/// an immutable checkpoint record but wrong here.
+///
+/// The two differ because a `WalPosition` row is a *live, self-updating* baseline: every
+/// successful completion write (`Conn::set_wal_position`) carries whatever generation is
+/// currently on disk at that moment, adopting it — including adopting `None` when the stream
+/// itself has no generation recorded yet. That adoption is silent and correct for an unchanged,
+/// still-generation-less stream (Story 5, Scenarios 1-2): comparing a freshly-adopted `None`
+/// against a still-`None` current value must never itself look like a reset.
+///
+/// But once a row exists at all (`applied_seq.is_some()` — including a row adopted with
+/// `generation: None`), a *later* check where the current on-disk generation has become `Some`
+/// must still be caught as a reset (Story 5, Scenario 3): a stream that never had a generation
+/// and is later genuinely wiped and republished gains one for the first time, at the exact
+/// moment it changes underneath the consumer — `recorded: None` is then a real prior value being
+/// compared, not an unset placeholder to skip past. This is exactly the "no recorded generation"
+/// case FR-009 says "later changes... are still detected normally" for.
+///
+/// `current: None` (the on-disk sidecar is itself missing, corrupt, or the directory has reverted
+/// to looking like a legacy stream) is always exempt, symmetrically with `generation_mismatch` —
+/// a damaged-but-harmless artifact must never fake a reset (Edge Cases).
+///
+/// `applied_seq: None` (no row recorded yet — literal first encounter for this stream/consumer
+/// pair) is always exempt: there is nothing yet to have diverged from, and the replay this check
+/// gates is itself what performs the adoption.
+pub fn position_reset_detected(
+    applied_seq: Option<u64>,
+    recorded_generation: Option<&str>,
+    current_generation: Option<&str>,
+) -> bool {
+    applied_seq.is_some() && current_generation.is_some() && recorded_generation != current_generation
 }
 
 #[cfg(test)]
@@ -170,6 +208,50 @@ mod tests {
         assert!(!generation_mismatch(None, Some("a")));
         assert!(!generation_mismatch(Some("a"), Some("a")));
         assert!(generation_mismatch(Some("a"), Some("b")));
+    }
+
+    #[test]
+    fn position_reset_detected_is_false_with_no_row_yet() {
+        // First encounter (applied_seq: None): nothing to compare against, regardless of what
+        // current on-disk generation looks like.
+        assert!(!position_reset_detected(None, None, None));
+        assert!(!position_reset_detected(None, None, Some("a")));
+        assert!(!position_reset_detected(None, Some("a"), Some("b")));
+    }
+
+    #[test]
+    fn position_reset_detected_is_false_when_current_is_unreadable() {
+        // A row exists, but the current on-disk generation can't be read (missing/corrupt) —
+        // never treated as a mismatch (Edge Cases).
+        assert!(!position_reset_detected(Some(5), Some("a"), None));
+        assert!(!position_reset_detected(Some(5), None, None));
+    }
+
+    #[test]
+    fn position_reset_detected_is_false_for_an_unchanged_still_generationless_stream() {
+        // Story 5 Scenarios 1-2: a row exists (adopted with generation: None because the stream
+        // itself has never had one), and the stream still has none — ordinary continued
+        // operation, not a reset.
+        assert!(!position_reset_detected(Some(5), None, None));
+    }
+
+    #[test]
+    fn position_reset_detected_is_true_when_a_generationless_baseline_later_gains_one() {
+        // Story 5 Scenario 3: a row exists with an adopted generation: None, and the stream has
+        // since been genuinely reset and republished — now carrying a generation for the first
+        // time. This is the one case generation_mismatch's simpler both-Some rule would (wrongly,
+        // for this use) miss.
+        assert!(position_reset_detected(Some(5), None, Some("new-gen")));
+    }
+
+    #[test]
+    fn position_reset_detected_is_true_for_two_different_known_generations() {
+        assert!(position_reset_detected(Some(5), Some("g1"), Some("g2")));
+    }
+
+    #[test]
+    fn position_reset_detected_is_false_for_matching_known_generations() {
+        assert!(!position_reset_detected(Some(5), Some("g1"), Some("g1")));
     }
 
     #[test]
