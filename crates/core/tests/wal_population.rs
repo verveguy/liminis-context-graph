@@ -239,7 +239,7 @@ async fn test_add_episode_advances_applied_seq_to_chunk_max_seq() {
 
     let conn = db.connect().unwrap();
     assert_eq!(
-        conn.get_applied_seq("test").unwrap(),
+        conn.get_wal_position("test").unwrap().applied_seq,
         Some(expected_seq),
         "applied_seq must equal the chunk's max WAL seq"
     );

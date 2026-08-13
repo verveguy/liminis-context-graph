@@ -12,7 +12,8 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ```text
 .lcg/
 ├── wal/                    # WAL root — one subdirectory per group_id (issue #378)
-│   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json
+│   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json,
+│                            #   .wal-generation.json
 ├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL
 ├── ontology.yaml           # optional extraction vocabulary (yours to edit)
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
@@ -26,15 +27,42 @@ documents, diff it, and carry it across machines. The database is a derived inde
 
 **`.lcg/wal/` is a WAL root, not a single stream (issue #378).** Each `group_id` gets its own
 subdirectory — its own `*.jsonl` files, its own `.checkpoints/` store, its own
-`.wal-bounds.json` manifest, and its own independent `seq` numbering starting at 0. A group's
-subdirectory is created lazily on that group's first write; a group that has never been written
-to simply has no subdirectory yet. A single-group deployment (the common case — everything under
-the default `"liminis"` group, no caller ever passing a different `group_id`) behaves exactly as
-a pre-378 deployment did: one subdirectory, one writer, one recorded position. An **existing**
-pre-378 `.lcg/wal/` (loose `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` directly under `wal/`, no
-`liminis/` subdirectory) is migrated automatically and idempotently on first boot under the
-upgraded binary — see [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the
-migration mechanics; no operator action is required.
+`.wal-bounds.json` manifest, its own `.wal-generation.json` identity, and its own independent
+`seq` numbering starting at 0. A group's subdirectory is created lazily on that group's first
+write; a group that has never been written to simply has no subdirectory yet. A single-group
+deployment (the common case — everything under the default `"liminis"` group, no caller ever
+passing a different `group_id`) behaves exactly as a pre-378 deployment did: one subdirectory, one
+writer, one recorded position. An **existing** pre-378 `.lcg/wal/` (loose
+`*.jsonl`/`.checkpoints/`/`.wal-bounds.json` directly under `wal/`, no `liminis/` subdirectory) is
+migrated automatically and idempotently on first boot under the upgraded binary — see
+[ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the migration mechanics; no
+operator action is required.
+
+**`.wal-generation.json` (issue #387) gives each group's stream a stable identity, distinct from
+its `seq` numbering.** `seq` identifies a position *within* a stream; it says nothing about
+*which* stream a position belongs to — so nothing distinguishes "the same stream, further along"
+from "a different stream that happens to also number its lines from 0." A publisher can
+legitimately reset a group's stream (re-extract a corpus and republish from `seq: 0` with
+entirely different content and entity identities); the generation is what lets a consumer tell
+that apart from ordinary forward progress. It is minted once, the first time a group's directory
+is created with no prior content, and never changes for the life of that stream — appending never
+changes it, and it is opaque (compared for equality only, never interpreted or ordered). The file
+holds a single JSON object:
+
+```json
+{"generation": "3f9a1c2e-4b7d-4e21-9c8a-1a2b3c4d5e6f"}
+```
+
+Any string value works — lcg mints a UUID, but nothing requires that shape. **This file is
+publisher-writable**: an external, non-lcg publisher (e.g. a distributed, git-published WAL model)
+that creates a group's stream directory directly, without going through lcg, MUST write this file
+itself (a plain `json.dump({"generation": <any unique string>}, f)` from Python is sufficient) for
+`knowledge_rebuild_from_wal`'s reset detection (below) to work against that stream — lcg never
+retroactively mints one into a directory it didn't create, and a directory with no
+`.wal-generation.json` is treated as having an unknown generation (see FR-009 in
+[the generation-scoped `applied_seq` fields below](#knowledge_status-health-fields)), not as an
+error. Like `.checkpoints/` and `.wal-bounds.json`, it is invisible to every existing
+non-recursive `*.jsonl` scan.
 
 ## WAL administration
 
@@ -49,6 +77,21 @@ migration mechanics; no operator action is required.
   data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
   indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
   afterward — `knowledge_build_indices` is not normally required.
+- **Reset detection (issue #387).** Before doing anything else, `knowledge_rebuild_from_wal`
+  compares the group's recorded generation against what's currently on disk
+  (`.wal-generation.json`). If they differ (both known and unequal — see FR-009 above for the
+  unknown-generation case), the caller's `from_seq`/`to_seq`/`force_clear` are overridden
+  entirely: this is always a full, automatic self-heal — purge the group, replay it from scratch
+  against the new generation, then re-bind any cross-group pointers into it — rather than
+  silently replaying new-generation mutations on top of old-generation data (the corruption this
+  issue exists to prevent; the two do not reconcile, since the native write path emits `CREATE`
+  rather than `MERGE`). The result reports `reset_detected: true`, `previous_generation`,
+  `generation` (the generation just replayed), and `cross_group_rebind` (the same counts
+  `knowledge_rebind_pointers` reports), on both the streaming response and the background-job's
+  polled `result`, so a caller can tell this apart from an ordinary incremental replay. A
+  `dry_run: true` call against a mismatched group reports the same `reset_detected`/
+  `previous_generation`/`generation` fields but purges and replays nothing — report-only, like
+  every other dry-run path in this codebase.
 - **Bounded rebuild** with `to_seq`: pass an inclusive upper bound (`from_seq <= seq <= to_seq`)
   to exclude a known-bad mutation and everything after it — e.g. recovering from an operator
   mistake that is itself recorded in the WAL. `knowledge_rebuild_from_wal {from_seq: 0,
@@ -62,24 +105,34 @@ migration mechanics; no operator action is required.
   way to take a restore-point snapshot before a large or destructive operation, since WAL replay
   is forward-only. The output directory starts with no checkpoints: any WAL marks (below)
   recorded against the source directory are not carried forward, since dump_wal renumbers
-  sequence numbers and a copied mark's `seq` would be meaningless against the new numbering.
+  sequence numbers and a copied mark's `seq` would be meaningless against the new numbering. For
+  the same reason, the output always gets a freshly minted generation (issue #387) — never the
+  source's: it is a new stream, not a copy of the source's identity, so a consumer must not treat
+  it as "the same stream" it was tracking before.
 - **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
   defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
   when all you need is a durable pointer back to "this group's stream was good here," not a
   materialized copy. A `name` must be 1-200 characters of `[A-Za-z0-9_-]`, because it becomes a
   single directory name under that group's own `.checkpoints/`. It records the target group's
-  current `applied_seq` under `<wal_root>/<group_id>/.checkpoints/`, is O(1) (no WAL scan or
-  replay), and fails if the position is unknown (`applied_seq` is `null`) or the name is already
-  in use by an active mark **within that group** — two different groups may each have an active
-  mark of the same name, since each group's checkpoint store is independent. `knowledge_wal_mark_list
+  current `applied_seq`, **and the group's current generation (issue #387)**, under
+  `<wal_root>/<group_id>/.checkpoints/`, is O(1) (no WAL scan or replay), and fails if the
+  position is unknown (`applied_seq` is `null`) or the name is already in use by an active mark
+  **within that group** — two different groups may each have an active mark of the same name,
+  since each group's checkpoint store is independent. `knowledge_wal_mark_list
   {group_id}` (also defaulting to `"liminis"`, and always scoped to exactly one group — there is
   no cross-group aggregate listing) lists every active mark in that group with its `seq`, its
-  `wal_min_seq`/`wal_max_seq` (the bounds of that group's WAL content currently on disk), and
-  whether it is currently `reachable`: this requires both `wal_min_seq == 0` (the WAL's own prefix
-  has not been externally truncated, e.g. by routine retention deleting old WAL files) and `seq <=
-  wal_max_seq` — a mark whose `seq` merely falls inside `[wal_min_seq, wal_max_seq]` is still
-  reported unreachable if `wal_min_seq > 0`, since a restore would silently omit everything before
-  it. This does not detect a gap in the *middle* of that range. `knowledge_wal_mark_delete {name,
+  `generation`, its `wal_min_seq`/`wal_max_seq` (the bounds of that group's WAL content currently
+  on disk), and whether it is currently `reachable`: this requires both the existing bounds check
+  (`wal_min_seq == 0` — the WAL's own prefix has not been externally truncated, e.g. by routine
+  retention deleting old WAL files — and `seq <= wal_max_seq`) **and**, independently, that the
+  mark's recorded `generation` matches the group's current on-disk generation whenever both are
+  known (issue #387, FR-007) — a mark taken against a generation that has since been reset is
+  never reachable, even when its `seq` still falls comfortably inside
+  `[wal_min_seq, wal_max_seq]` (exactly the "looks like forward progress, isn't" case issue #387
+  exists to close). Separately, on the bounds side, a mark whose `seq` merely falls inside
+  `[wal_min_seq, wal_max_seq]` is still reported unreachable if `wal_min_seq > 0`, since a restore
+  would silently omit everything before it. Neither check detects a gap in the *middle* of that
+  range. `knowledge_wal_mark_delete {name,
   group_id}` removes a mark from that group (recording a tombstone, never rewriting the original
   record) and frees the name for reuse within that group. To restore: `knowledge_rebuild_from_wal
   {group_id, from_seq: 0, to_seq: <seq>, force_clear: true}` for a mark with an integer `seq`, or
@@ -173,16 +226,16 @@ mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
-(`{applied_seq, max_seq}`). This is the multi-group view; the flat `wal.applied_seq`/`wal.max_seq`
-fields described next remain present and **pinned specifically to the default `"liminis"`
-group**, unchanged in meaning from a pre-378 single-group deployment — a caller that only reads
-the flat fields (e.g. an existing integration written before this issue) needs no change. If the
-default group has no WAL directory at all (e.g. a pure replica that has only ever hydrated
-non-default groups), the flat fields report `null`/absent rather than an error — a documented
-signal that this instance has no default group, not a broken or un-hydrated instance. Do not
-confuse "not in `wal_groups`" with "at position 0": a group present in the map with
-`applied_seq: 0` has a directory and a known position; a group absent from the map entirely has no
-WAL directory yet.
+(`{applied_seq, max_seq, generation}`). This is the multi-group view; the flat
+`wal.applied_seq`/`wal.max_seq`/`wal.generation` fields described next remain present and
+**pinned specifically to the default `"liminis"` group**, unchanged in meaning from a pre-378
+single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
+written before this issue) needs no change. If the default group has no WAL directory at all
+(e.g. a pure replica that has only ever hydrated non-default groups), the flat fields report
+`null`/absent rather than an error — a documented signal that this instance has no default group,
+not a broken or un-hydrated instance. Do not confuse "not in `wal_groups`" with "at position 0": a
+group present in the map with `applied_seq: 0` has a directory and a known position; a group
+absent from the map entirely has no WAL directory yet.
 
 **`wal.applied_seq`** and **`wal.max_seq`** (issue #353; scoped to the default group by issue
 #378) — let a caller decide, from a single `knowledge_status` call and an integer comparison,
@@ -198,6 +251,20 @@ every call — see [ADR-0375](adr/0375-wal-max-seq-bounds-manifest.md) for the c
 why an earlier "never cached" design was revised. The same manifest and fast path also back
 `wal_min_seq`, so `knowledge_wal_mark_list`'s reachability check (below) does not scale with WAL
 file count either.
+
+**`wal.generation`** (issue #387; also scoped to the default group, and mirrored per-group inside
+`wal_groups`) — the group's current **on-disk (source-side)** generation, read from
+`.wal-generation.json` alongside the same `wal_max_seq` machinery above, so reporting it costs
+nothing beyond what `applied_seq`/`max_seq` already pay (no new full-directory scan). This is
+deliberately the on-disk value, not lcg's own DB-recorded consumer-side position — an external
+consumer (e.g. orac) compares this against its *own* bookkeeping to answer "is this the same
+stream I was tracking?", the same on-disk-authoritative role `max_seq` already plays. `null`
+means the stream currently has no generation recorded — either it predates issue #387, or (for a
+group with no WAL directory at all) there is no stream to have one. Opaque: compare for equality
+only, never interpret or order it. lcg's own internally-recorded generation (paired with its own
+`applied_seq`, and what `knowledge_rebuild_from_wal`'s reset detection actually compares against)
+is not surfaced by `knowledge_status` at all — it is a purely internal bookkeeping value with no
+separate consumer-facing use.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison:

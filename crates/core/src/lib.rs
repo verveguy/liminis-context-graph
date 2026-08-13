@@ -36,11 +36,12 @@ pub mod token_budget;
 pub mod types;
 pub mod wal;
 pub(crate) mod wal_exec;
+pub mod wal_generation;
 pub mod wal_group;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
-pub use db::{Conn, Db};
+pub use db::{Conn, Db, WalPositionRecord};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;

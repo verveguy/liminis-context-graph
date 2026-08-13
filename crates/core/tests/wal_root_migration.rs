@@ -150,7 +150,7 @@ async fn pre_378_flat_wal_dir_migrates_and_preserves_position_and_checkpoint_rea
             ..Default::default()
         })
         .unwrap();
-        conn.set_applied_seq("singleton", 1).unwrap();
+        conn.set_wal_position("singleton", 1, None).unwrap();
     }
 
     // This is what the upgraded binary's startup does before constructing AppState/any
@@ -161,7 +161,7 @@ async fn pre_378_flat_wal_dir_migrates_and_preserves_position_and_checkpoint_rea
         conn.migrate_legacy_singleton_wal_position(wal_group::DEFAULT_GROUP_ID)
             .unwrap();
         assert_eq!(
-            conn.get_applied_seq("singleton").unwrap(),
+            conn.get_wal_position("singleton").unwrap().applied_seq,
             None,
             "the legacy singleton row must be gone after migration"
         );
@@ -226,7 +226,7 @@ async fn migration_is_a_noop_on_second_startup() {
     let (db, _db_dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(wal_group::DEFAULT_GROUP_ID, 0)
+        conn.set_wal_position(wal_group::DEFAULT_GROUP_ID, 0, None)
             .unwrap();
     }
     let state = make_state_with_wal(db, wal_root);

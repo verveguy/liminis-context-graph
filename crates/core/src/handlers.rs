@@ -218,6 +218,10 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task, for the healthy
 /// (graph queryable) case.
+/// One group's `(group_id, applied_seq, max_seq, generation)` in `knowledge_status`'s
+/// `wal_groups` breakdown (issue #378 FR-007; generation added by issue #387).
+type WalGroupPosition = (String, Option<u64>, Option<u64>, Option<String>);
+
 struct StatusFields {
     entity_count: u64,
     episode_count: u64,
@@ -227,10 +231,15 @@ struct StatusFields {
     wal_byte_size: u64,
     wal_applied_seq: Option<u64>,
     wal_max_seq: Option<u64>,
-    /// Per-group `(group_id, applied_seq, max_seq)` for every group that has a WAL directory
-    /// (issue #378 FR-007) — additive to the flat `wal_applied_seq`/`wal_max_seq` fields above,
-    /// which stay pinned to the default group.
-    wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
+    /// The default group's current on-disk generation (issue #387) — the source-side value, not
+    /// lcg's DB-recorded consumer-side position, mirroring `wal_max_seq`'s "what's actually on
+    /// disk right now" role. `None` for a pre-#387 stream that has never had one recorded.
+    wal_generation: Option<String>,
+    /// Per-group `(group_id, applied_seq, max_seq, generation)` for every group that has a WAL
+    /// directory (issue #378 FR-007; generation added by issue #387) — additive to the flat
+    /// `wal_applied_seq`/`wal_max_seq`/`wal_generation` fields above, which stay pinned to the
+    /// default group.
+    wal_group_positions: Vec<WalGroupPosition>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
     name_index_trusted: bool,
@@ -252,7 +261,8 @@ enum StatusOutcome {
         wal_byte_size: u64,
         wal_applied_seq: Option<u64>,
         wal_max_seq: Option<u64>,
-        wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
+        wal_generation: Option<String>,
+        wal_group_positions: Vec<WalGroupPosition>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
     },
@@ -335,7 +345,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     // Phase 0 (write lock): backfill every group's applied_seq that isn't known yet, before the
     // read-locked status computation below reads it (issue #378 Review finding). Every other
     // write in this codebase goes through the exclusive write_lock; backfill_applied_seq_if_absent
-    // can issue a real MERGE...SET (set_applied_seq) once per group, the first time that group is
+    // can issue a real MERGE...SET (set_wal_position) once per group, the first time that group is
     // ever queried, so it must not run under a shared read lock — otherwise two concurrent
     // knowledge_status calls racing to backfill the same not-yet-backfilled group could issue
     // concurrent write transactions against the single-writer embedded DB with no serialization.
@@ -371,23 +381,33 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // never fatal to the rest of the status response. If the default group has no WAL
             // directory at all (e.g. a pure replica that only ever hydrated other groups), both
             // stay `null` — a documented signal of "no default group", not an error.
-            let wal_applied_seq = conn.get_applied_seq(DEFAULT_GROUP_ID).unwrap_or(None);
+            let wal_applied_seq = conn
+                .get_wal_position(DEFAULT_GROUP_ID)
+                .unwrap_or_default()
+                .applied_seq;
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
+            // On-disk (source-side) generation for the default group (issue #387) — mirrors
+            // wal_max_seq's role: what's actually on disk right now, read from the same sidecar
+            // file `wal_max_seq` reads its manifest from, no extra directory scan.
+            let wal_generation = default_group_dir
+                .as_deref()
+                .and_then(crate::wal_generation::read_generation);
             // Per-group breakdown (FR-007): every group that currently has a WAL directory.
             // Backfilling already happened above under the write lock (Phase 0) — this is a pure
             // read of whatever that pass established, never a write, so it's safe under the
             // shared read lock this closure runs under.
-            let wal_group_positions: Vec<(String, Option<u64>, Option<u64>)> = wal_root
+            let wal_group_positions: Vec<WalGroupPosition> = wal_root
                 .as_deref()
                 .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(gid, dir)| {
-                    let applied = conn.get_applied_seq(&gid).unwrap_or(None);
+                    let applied = conn.get_wal_position(&gid).unwrap_or_default().applied_seq;
                     let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
-                    (gid, applied, max)
+                    let generation = crate::wal_generation::read_generation(&dir);
+                    (gid, applied, max, generation)
                 })
                 .collect();
             let name_index_trusted = conn.name_index_trusted();
@@ -429,6 +449,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_generation,
                     wal_group_positions,
                     last_index_time,
                     index_created_at,
@@ -446,6 +467,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_generation,
                     wal_group_positions,
                     name_index_trusted,
                     name_index_fallback_scans,
@@ -483,6 +505,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // and Python where it breaks arithmetic).
                     "applied_seq": fields.wal_applied_seq,
                     "max_seq": fields.wal_max_seq,
+                    // issue #387: the default group's current on-disk (source-side) generation —
+                    // null for a pre-#387 stream that has never had one recorded (Story 5).
+                    // Compared for equality only; never ordered or interpreted.
+                    "generation": fields.wal_generation,
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
@@ -510,6 +536,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_byte_size,
             wal_applied_seq,
             wal_max_seq,
+            wal_generation,
             wal_group_positions,
             name_index_trusted,
             name_index_fallback_scans,
@@ -541,6 +568,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "byte_size": wal_byte_size,
                 "applied_seq": wal_applied_seq,
                 "max_seq": wal_max_seq,
+                "generation": wal_generation,
             },
             "wal_groups": wal_group_positions_json(&wal_group_positions),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
@@ -563,15 +591,16 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     Ok(result)
 }
 
-/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq)` tuples
-/// (issue #378 FR-007) into the additive `wal_groups` JSON map.
-fn wal_group_positions_json(positions: &[(String, Option<u64>, Option<u64>)]) -> Value {
+/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
+/// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
+/// JSON map.
+fn wal_group_positions_json(positions: &[WalGroupPosition]) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
-        .map(|(gid, applied, max)| {
+        .map(|(gid, applied, max, generation)| {
             (
                 gid.clone(),
-                json!({ "applied_seq": applied, "max_seq": max }),
+                json!({ "applied_seq": applied, "max_seq": max, "generation": generation }),
             )
         })
         .collect();
@@ -819,7 +848,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
             .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, &group_id, seq);
+        wal_exec::advance_wal_position(&conn, &group_id, seq);
         Ok(())
     })
     .await??;
@@ -905,7 +934,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // Its applied_seq advances uniformly with every other wal_flush_ungrouped caller (issue
         // #383 FR-006) — no per-caller exception for raw cypher's trust level.
         let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
+        wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
         // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
         // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
         // an Entity row with the index never learning about it. Reuse the WAL's own
@@ -1224,7 +1253,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, target_group, seq);
+        wal_exec::advance_wal_position(&conn, target_group, seq);
         Ok(uuids)
     })
     .await??;
@@ -1274,7 +1303,7 @@ async fn handle_delete_chunk_episode(
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, target_group, seq);
+        wal_exec::advance_wal_position(&conn, target_group, seq);
         Ok(uuids)
     })
     .await??;
@@ -1359,7 +1388,7 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // makes this per-group by construction, with no default-group fallback to reason about.
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq);
         }
         Ok(counts)
     })
@@ -1407,7 +1436,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     // below. That window grew long enough for lbug's own internal checkpoint to occasionally
     // fire against the now-deleted file (`Error renaming file ... to ....wal.checkpoint: No
     // such file or directory`) once Phase 2 started doing more work per reinit (issue #353's
-    // set_applied_seq(0) write below). load_db() already treats a None state.db as
+    // set_wal_position(0) write below). load_db() already treats a None state.db as
     // Error::DbUnavailable, so this briefly surfaces as the existing degraded-mode error rather
     // than a file-not-found.
     state.db.store(None);
@@ -1427,6 +1456,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     // Phase 1: delete DB files (and optionally WAL directory) — point of no return
     let db_path_del = db_path.clone();
+    let wal_root_for_reinit = wal_root.clone();
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let path = std::path::Path::new(&db_path_del);
         if path.is_dir() {
@@ -1480,7 +1510,19 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             // next open. Other groups' WalPosition rows are simply absent post-clear (correct:
             // "unknown/no stream yet", not "known-empty" — issue #378 preserves FR-009 parity
             // for the default group only, matching pre-378 single-group behavior exactly).
-            conn.set_applied_seq(DEFAULT_GROUP_ID, 0)?;
+            // The generation persisted alongside it (issue #387) is whatever is currently on
+            // disk: `preserve_wal:true` leaves the WAL directory (and its generation record)
+            // untouched, so that value is read fresh here; `preserve_wal:false` just deleted the
+            // WAL root entirely, so there is nothing to read and this is `None`.
+            let generation = if preserve_wal {
+                wal_root_for_reinit
+                    .as_deref()
+                    .and_then(|root| crate::wal_group::group_wal_dir(root, DEFAULT_GROUP_ID).ok())
+                    .and_then(|dir| crate::wal_generation::read_generation(&dir))
+            } else {
+                None
+            };
+            conn.set_wal_position(DEFAULT_GROUP_ID, 0, generation.as_deref())?;
             // Fresh empty table — a no-op today, kept for uniformity with every other
             // Entity-population path (issue #219).
             conn.rebuild_name_index()?;
@@ -1753,7 +1795,7 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let gid_c = group_id.clone();
     let seq = tokio::task::spawn_blocking(move || -> Result<Option<u64>, Error> {
         let conn = db.connect()?;
-        let applied_seq = conn.get_applied_seq(&gid_c)?.ok_or_else(|| {
+        let applied_seq = conn.get_wal_position(&gid_c)?.applied_seq.ok_or_else(|| {
             Error::Ipc(
                 "knowledge_wal_mark_create: applied_seq is unknown (null) — the current \
                  position cannot be determined, so no checkpoint can be recorded. Resolve the \
@@ -1775,15 +1817,24 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
     .await??;
     drop(_guard);
 
+    // The generation this checkpoint is taken against (issue #387, FR-007) — the on-disk
+    // (source-side) value, resolved fresh at record time, mirroring `seq`'s own
+    // caller-resolved contract into `checkpoint::create`.
+    let generation = crate::wal_generation::read_generation(&wal_dir);
+
     let name_c = name.clone();
-    tokio::task::spawn_blocking(move || crate::checkpoint::create(&wal_dir, &name_c, seq))
-        .await??;
+    let generation_c = generation.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::checkpoint::create(&wal_dir, &name_c, seq, generation_c.as_deref())
+    })
+    .await??;
 
     Ok(json!({
         "success": true,
         "name": name,
         "group_id": group_id,
         "seq": seq,
+        "generation": generation,
     }))
 }
 
@@ -1836,7 +1887,7 @@ fn warn_on_rebuild_seq_gap(
     if from_seq == 0 {
         return;
     }
-    if let Ok(Some(prior)) = conn.get_applied_seq(group_id) {
+    if let Ok(Some(prior)) = conn.get_wal_position(group_id).map(|p| p.applied_seq) {
         if from_seq > prior + 1 {
             eprintln!(
                 "liminis-context-graph: {context}: knowledge_rebuild_from_wal called with \
@@ -1860,8 +1911,8 @@ async fn handle_rebuild_from_wal(
 ) -> Result<Value, Error> {
     let p = &req.params;
 
-    let from_seq = validate_from_seq(&p["from_seq"])?;
-    let to_seq = validate_to_seq(&p["to_seq"])?;
+    let mut from_seq = validate_from_seq(&p["from_seq"])?;
+    let mut to_seq = validate_to_seq(&p["to_seq"])?;
     if let Some(to_seq) = to_seq {
         if to_seq < from_seq {
             return Err(Error::Ipc(format!(
@@ -1882,6 +1933,66 @@ async fn handle_rebuild_from_wal(
         )));
     }
 
+    // ── Generation-mismatch detection (issue #387, FR-005) ──────────────────────────────────
+    // Single insertion point ahead of every downstream replay path (streaming, non-streaming
+    // dry-run, non-streaming background job) and ahead of the from_seq==0 non-empty-group guard
+    // below, so a detected reset overrides whatever the caller asked for rather than tripling
+    // this check into each path separately. Compares the group's recorded consumer-side
+    // generation (WalPosition, #353/#378) against what's actually on disk right now — an
+    // `applied_seq` from a different generation is never a valid position in the current one
+    // (FR-004), regardless of whether the on-disk stream ended up longer or shorter (SC-001/002
+    // both take this same path, not a separate `applied_seq > max_seq` special case).
+    let recorded_position = {
+        let db_for_check = load_db(&state)?;
+        let gid_check = group_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<crate::db::WalPositionRecord, Error> {
+            let conn = db_for_check.connect()?;
+            conn.get_wal_position(&gid_check)
+        })
+        .await??
+    };
+    let current_generation = crate::wal_generation::read_generation(&wal_dir);
+    // `position_reset_detected` (not the simpler `generation_mismatch`, which is right for an
+    // immutable checkpoint record but wrong here — see its own doc comment) is row-existence-
+    // aware: no row yet (`applied_seq: None`) means first encounter, nothing to compare, the
+    // completion write below performs the adoption itself (FR-009). Once a row exists, though, an
+    // adopted `generation: None` baseline from a stream that had no generation yet is a real
+    // prior value — if the stream is later genuinely reset and gains a generation for the first
+    // time, that must still be caught (Story 5, Scenario 3), not silently exempted forever.
+    let reset_detected = crate::wal_generation::position_reset_detected(
+        recorded_position.applied_seq,
+        recorded_position.generation.as_deref(),
+        current_generation.as_deref(),
+    );
+    let previous_generation = recorded_position.generation.clone();
+
+    if reset_detected && dry_run {
+        // Report-only, consistent with every other dry-run path in this codebase (group_purge,
+        // checkpoint, this handler's own non-empty-group guard below): a caller previewing a
+        // rebuild must be told a reset was detected without anything being purged or replayed.
+        return Ok(json!({
+            "success": true,
+            "group_id": group_id,
+            "dry_run": true,
+            "reset_detected": true,
+            "previous_generation": previous_generation,
+            "generation": current_generation,
+            "message": "A WAL stream generation mismatch was detected for this group: the \
+                recorded position belongs to a different generation than what is currently on \
+                disk. A non-dry-run call will purge this group and perform a full replay against \
+                the new generation, then re-bind any cross-group pointers into it."
+        }));
+    }
+
+    // A genuine mismatch always means full self-heal: purge and replay from scratch against the
+    // new generation, regardless of what the caller requested (FR-005) — matching ADR-0353's
+    // "a corpus reset is a case a consumer must self-heal from" precedent this issue's Assumptions
+    // section builds on.
+    if reset_detected {
+        from_seq = 0;
+        to_seq = None;
+    }
+
     // FR-005: a `from_seq: 0` full rebuild against a group that already has data would emit
     // a native CREATE (Entity/Episodic/RelatesToNode_, see db.rs) for every existing row,
     // producing a duplicate-primary-key failure per node — a large, benign-looking failed_lines
@@ -1890,7 +2001,11 @@ async fn handle_rebuild_from_wal(
     // resuming after a checkpoint) and must not be affected — see FR-006. Scoped to `group_id`
     // alone (issue #378 FR-006): a full rebuild of one group must not be blocked by, nor collide
     // with, another group's data.
-    let force_clear = p["force_clear"].as_bool().unwrap_or(false);
+    // A detected reset forces the same automatic-clear path a caller would otherwise have to
+    // opt into with `force_clear: true` (FR-005's self-heal-by-default resolution) — the
+    // dry-run case already returned above, so `reset_detected` here always means "the caller is
+    // about to get a full purge-and-replay whether or not they asked for one."
+    let force_clear = p["force_clear"].as_bool().unwrap_or(false) || reset_detected;
     if from_seq == 0 {
         let db_for_check = load_db(&state)?;
         let gid_check = group_id.clone();
@@ -1948,7 +2063,7 @@ async fn handle_rebuild_from_wal(
             // of those call resync_global_seq_after_rebuild on completion. If
             // clear_group_for_rebuild ever grows a second caller that doesn't fall through to a
             // replay, that caller needs its own re-derivation call.
-            clear_group_for_rebuild(&state, &group_id).await?;
+            clear_group_for_rebuild(&state, &group_id, &wal_dir).await?;
         }
     }
 
@@ -2011,8 +2126,16 @@ async fn handle_rebuild_from_wal(
         if !dry_run {
             bg_indices_built.store(false, Ordering::Release);
         }
-        let (stats, indices_built) = tokio::task::spawn_blocking(
-            move || -> Result<(crate::replay::ReplayStats, bool), Error> {
+        let generation_for_replay = current_generation.clone();
+        let (stats, indices_built, cross_group_rebind) = tokio::task::spawn_blocking(
+            move || -> Result<
+                (
+                    crate::replay::ReplayStats,
+                    bool,
+                    Option<crate::cross_group::RebindCounts>,
+                ),
+                Error,
+            > {
                 // Issue #352 (FR-002): armed whenever this is a real (non-dry-run) attempt, so
                 // an early `?` return below — e.g. `db.connect()` or `replay_opts` failing after
                 // a `force_clear` already ran — still resyncs `global_seq` on the way out,
@@ -2065,6 +2188,7 @@ async fn handle_rebuild_from_wal(
                 // real outcome is captured and returned so the caller can observe it (FR-004/006)
                 // rather than have it silently swallowed.
                 let mut build_ok = false;
+                let mut rebind_counts = None;
                 if !dry_run {
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
@@ -2099,19 +2223,60 @@ async fn handle_rebuild_from_wal(
                             g.mark_done();
                         }
                     }
-                    // Persist this group's applied-WAL-seq position at the replay's own
-                    // last_committed_seq (issue #353, FR-004; scoped per group by issue #378).
-                    // Non-fatal: a missed write doesn't undo the rebuild that just succeeded.
+                    // Persist this group's WAL position at the replay's own last_committed_seq
+                    // (issue #353, FR-004; scoped per group by issue #378) and the generation
+                    // that was on disk when detection ran (issue #387) — the same value the
+                    // caller's response reports, so the recorded position and the reported
+                    // generation can never diverge. Non-fatal: a missed write doesn't undo the
+                    // rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
                         warn_on_rebuild_seq_gap(&conn, &gid_c, from_seq, "reload");
-                        if let Err(e) = conn.set_applied_seq(&gid_c, seq) {
-                            eprintln!(
-                                "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
-                            );
+                        match conn.set_wal_position(&gid_c, seq, generation_for_replay.as_deref())
+                        {
+                            Ok(()) => {
+                                // FR-010: a reset-triggered self-heal also re-binds cross-group
+                                // pointers into this group, immediately after the full replay
+                                // completes, as part of the same recovery operation — not left
+                                // as a separate, operator-triggered step. The ordinary
+                                // staleness-gated rebind_pointers (not the `_forced` variant
+                                // group_purge already ran pre-replay) correctly re-checks every
+                                // affected pointer now that applied_seq has advanced past what
+                                // was recorded pre-purge.
+                                if reset_detected {
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    match crate::cross_group::rebind_pointers(&conn, &gid_c, &ts) {
+                                        Ok((counts, grouped)) => {
+                                            // `grouped` attributes each rebind mutation to the
+                                            // group whose RelatesToNode_ row it actually touched
+                                            // (issue #385 / ADR-0385), never gid_c itself — flush
+                                            // each bucket to its own group's writer, advancing
+                                            // that group's own WAL position (issue #383),
+                                            // mirroring handle_rebind_pointers's own flush.
+                                            for (group_id, mutations) in grouped {
+                                                let seq = wal_exec::wal_flush_ungrouped(
+                                                    &state_c, &group_id, mutations,
+                                                );
+                                                wal_exec::advance_wal_position(
+                                                    &conn, &group_id, seq,
+                                                );
+                                            }
+                                            rebind_counts = Some(counts);
+                                        }
+                                        Err(e) => eprintln!(
+                                            "liminis-context-graph: reload: post-reset cross-group rebind failed (non-fatal): {e}"
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
+                                );
+                            }
                         }
                     }
                 }
-                Ok((stats, build_ok))
+                Ok((stats, build_ok, rebind_counts))
             },
         )
         .await??;
@@ -2206,6 +2371,13 @@ async fn handle_rebuild_from_wal(
         } else {
             result["indices_built"] = json!(indices_built);
         }
+        // FR-005: MUST clearly indicate when a reset-triggered full replay occurred, so an
+        // operator or automated caller can tell this apart from an ordinary incremental replay
+        // rather than have the two look identical.
+        result["reset_detected"] = json!(reset_detected);
+        result["previous_generation"] = json!(previous_generation);
+        result["generation"] = json!(current_generation);
+        result["cross_group_rebind"] = json!(cross_group_rebind);
         return Ok(result);
     }
 
@@ -2280,6 +2452,16 @@ async fn handle_rebuild_from_wal(
             "last_committed_seq": stats.last_committed_seq,
             "transactions_committed": stats.transactions_committed,
             "transactions_rolled_back": stats.transactions_rolled_back,
+            // FR-005: reported unconditionally, mirroring the streaming path's tail (above) and
+            // the shared reset-detected early return — a caller previewing via the non-streaming
+            // dry-run path must be able to positively confirm "no reset was detected" from this
+            // response too, not just infer it from the fields' absence. `reset_detected` is
+            // always `false` here: a genuine mismatch is caught by the shared early return before
+            // this branch is ever reached.
+            "reset_detected": false,
+            "previous_generation": previous_generation,
+            "generation": current_generation,
+            "cross_group_rebind": Value::Null,
         }));
     }
 
@@ -2320,6 +2502,8 @@ async fn handle_rebuild_from_wal(
     let bg_indices_built = Arc::clone(&state.indices_built);
     let bg_state = Arc::clone(&state);
     let bg_gid = group_id.clone();
+    let bg_previous_generation = previous_generation.clone();
+    let bg_current_generation = current_generation.clone();
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -2343,9 +2527,19 @@ async fn handle_rebuild_from_wal(
         // bg_gid is moved into the spawn_blocking closure below; keep a clone for the
         // post-completion job_result JSON.
         let bg_gid_for_result = bg_gid.clone();
+        // bg_current_generation is moved into the spawn_blocking closure below (it's what gets
+        // persisted alongside applied_seq); keep a clone for the post-completion job_result JSON.
+        let bg_current_generation_for_replay = bg_current_generation.clone();
 
         let result = tokio::task::spawn_blocking(
-            move || -> Result<(crate::replay::ReplayStats, bool), Error> {
+            move || -> Result<
+                (
+                    crate::replay::ReplayStats,
+                    bool,
+                    Option<crate::cross_group::RebindCounts>,
+                ),
+                Error,
+            > {
                 // Issue #352 (FR-002): armed whenever this is a real (non-dry-run) attempt, so
                 // an early `?` return below — e.g. `db.connect()` or `replay_opts` failing after
                 // a `force_clear` already ran — still resyncs `global_seq` on the way out,
@@ -2390,6 +2584,7 @@ async fn handle_rebuild_from_wal(
                 // Non-fatal to the replay outcome; the real outcome is captured and returned
                 // (FR-004/006) instead of being silently swallowed.
                 let mut build_ok = false;
+                let mut rebind_counts = None;
                 if !dry_run {
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
@@ -2424,19 +2619,52 @@ async fn handle_rebuild_from_wal(
                             g.mark_done();
                         }
                     }
-                    // Persist this group's applied-WAL-seq position at the replay's own
-                    // last_committed_seq (issue #353, FR-004; scoped per group by issue #378).
-                    // Non-fatal: a missed write doesn't undo the rebuild that just succeeded.
+                    // Persist this group's WAL position at the replay's own last_committed_seq
+                    // (issue #353, FR-004; scoped per group by issue #378) and the generation
+                    // that was on disk when detection ran (issue #387). Non-fatal: a missed
+                    // write doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
                         warn_on_rebuild_seq_gap(&conn, &bg_gid, from_seq, "reload(bg)");
-                        if let Err(e) = conn.set_applied_seq(&bg_gid, seq) {
-                            eprintln!(
-                                "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"
-                            );
+                        match conn.set_wal_position(
+                            &bg_gid,
+                            seq,
+                            bg_current_generation_for_replay.as_deref(),
+                        ) {
+                            Ok(()) => {
+                                // FR-010: same post-replay re-bind as the streaming path — part
+                                // of the same reset-triggered recovery operation, not a separate
+                                // operator-triggered step.
+                                if reset_detected {
+                                    let ts = chrono::Utc::now().to_rfc3339();
+                                    match crate::cross_group::rebind_pointers(&conn, &bg_gid, &ts) {
+                                        Ok((counts, grouped)) => {
+                                            // Same per-group flush of the rebind's grouped
+                                            // mutations as the streaming path above.
+                                            for (group_id, mutations) in grouped {
+                                                let seq = wal_exec::wal_flush_ungrouped(
+                                                    &bg_state, &group_id, mutations,
+                                                );
+                                                wal_exec::advance_wal_position(
+                                                    &conn, &group_id, seq,
+                                                );
+                                            }
+                                            rebind_counts = Some(counts);
+                                        }
+                                        Err(e) => eprintln!(
+                                            "liminis-context-graph: reload(bg): post-reset cross-group rebind failed (non-fatal): {e}"
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"
+                                );
+                            }
                         }
                     }
                 }
-                Ok((stats, build_ok))
+                Ok((stats, build_ok, rebind_counts))
             },
         )
         .await;
@@ -2444,7 +2672,7 @@ async fn handle_rebuild_from_wal(
         // Unconditional store of the real outcome (FR-006), mirroring the streaming path. Stored
         // while the write lock is still held so a concurrent search never observes a stale value
         // in the gap between the build outcome landing and the lock being released.
-        if let Ok(Ok((_, build_ok))) = &result {
+        if let Ok(Ok((_, build_ok, _))) = &result {
             if !dry_run {
                 ib.store(*build_ok, Ordering::Release);
             }
@@ -2455,7 +2683,7 @@ async fn handle_rebuild_from_wal(
         if let Ok(mut jobs) = rebuild_jobs.lock() {
             if let Some(job) = jobs.get_mut(&job_id_task) {
                 match result {
-                    Ok(Ok((stats, indices_built))) => {
+                    Ok(Ok((stats, indices_built, cross_group_rebind))) => {
                         job.status = JobStatus::Completed;
                         job.mutations_replayed = stats.lines_replayed;
                         job.wal_files_processed = stats.files_read;
@@ -2494,6 +2722,12 @@ async fn handle_rebuild_from_wal(
                         if !dry_run {
                             job_result["indices_built"] = json!(indices_built);
                         }
+                        // FR-005: MUST clearly indicate when a reset-triggered full replay
+                        // occurred, mirroring the streaming path's response shape.
+                        job_result["reset_detected"] = json!(reset_detected);
+                        job_result["previous_generation"] = json!(bg_previous_generation);
+                        job_result["generation"] = json!(bg_current_generation);
+                        job_result["cross_group_rebind"] = json!(cross_group_rebind);
                         job.result = Some(job_result);
                         // Update the sidecar so drift clears after a successful WAL rebuild.
                         if !dry_run {
@@ -2550,11 +2784,19 @@ async fn handle_rebuild_from_wal(
 /// `group_purge::purge_groups` against the already-open DB — group_purge already handles the
 /// forced rebind of any foreign pointer into the cleared group within the same transaction, so
 /// no `state.db` swap or file deletion is needed here.
-async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Result<(), Error> {
+async fn clear_group_for_rebuild(
+    state: &Arc<AppState>,
+    group_id: &str,
+    wal_dir: &std::path::Path,
+) -> Result<(), Error> {
     let _guard = state.write_lock.write().await;
     let db = load_db(state)?;
     let state_c = Arc::clone(state);
     let gid = group_id.to_string();
+    // Read fresh, immediately before the purge: this is the generation the group's post-clear
+    // position (below) is scoped to, and the one the caller's subsequent full replay will
+    // confirm/overwrite via its own last_committed_seq write (issue #387).
+    let generation = crate::wal_generation::read_generation(wal_dir);
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         let ts = chrono::Utc::now().to_rfc3339();
@@ -2572,18 +2814,19 @@ async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Resul
         // (issue #385 / ADR-0385).
         grouped.remove(gid.as_str());
         // Every remaining bucket belongs to a foreign group, so each one advances its own
-        // group's applied_seq (issue #383). Dropping gid's own bucket above also removes the
-        // pre-#385 ordering hazard: no flush here can credit gid, so the unconditional
-        // "this group is now empty" reset below is never racing an advance of its own position.
+        // group's WAL position (issue #383; generation-scoped by issue #387). Dropping gid's
+        // own bucket above also removes the pre-#385 ordering hazard: no flush here can credit
+        // gid, so the unconditional "this group is now empty" reset below is never racing an
+        // advance of its own position.
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq);
         }
-        // Reset this group's applied-WAL-seq position (issue #353 FR-005, scoped per group by
-        // issue #378) — its data is freshly empty. The from_seq: 0 rebuild this function exists
-        // to enable will overwrite this with the replay's precise last_committed_seq once it
-        // completes.
-        conn.set_applied_seq(&gid, 0)?;
+        // Reset this group's WAL position (issue #353 FR-005, scoped per group by issue #378;
+        // generation-scoped by issue #387) — its data is freshly empty. The from_seq: 0 rebuild
+        // this function exists to enable will overwrite this with the replay's precise
+        // last_committed_seq (and its own freshly-read generation) once it completes.
+        conn.set_wal_position(&gid, 0, generation.as_deref())?;
         Ok(())
     })
     .await??;
@@ -2669,7 +2912,7 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
             // writer, the same documented limitation as handle_delete_by_group.
             let seq =
                 wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-            wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
+            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
         }
         Ok::<_, Error>(apply_result)
     })
@@ -2733,7 +2976,7 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             // owning the merge — this call's mutations all belong to gid_c, so (unlike the
             // FR-004-exempt sites) per-operation attribution names it directly.
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_applied_seq(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq);
         }
         Ok::<_, Error>(merge_result)
     })
@@ -2847,7 +3090,7 @@ async fn handle_add_cross_group_edge(
         // The new RelatesToNode_ edge is owned by gid_c alone — its two endpoints may point into
         // other groups, but the mutation itself belongs to exactly one group (FR-004).
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, &gid_c, seq);
+        wal_exec::advance_wal_position(&conn, &gid_c, seq);
         Ok::<_, Error>(edge)
     })
     .await??;
@@ -2888,7 +3131,7 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // group's applied_seq (issue #383).
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_applied_seq(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq);
         }
         Ok::<_, Error>(counts)
     })
@@ -3022,7 +3265,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         };
 
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, &gid_wal, seq);
+        wal_exec::advance_wal_position(&conn, &gid_wal, seq);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3158,7 +3401,7 @@ async fn handle_assert_relationship(
         };
 
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_applied_seq(&conn, &gid_wal, seq);
+        wal_exec::advance_wal_position(&conn, &gid_wal, seq);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3404,7 +3647,7 @@ async fn handle_reprocess_entity_types(
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_applied_seq(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq);
             Ok(count)
         })
         .await??;
@@ -3487,7 +3730,7 @@ async fn handle_reprocess_entity_types(
                 }
             }
             let seq = wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
-            wal_exec::advance_applied_seq(&conn, &group_id_d, seq);
+            wal_exec::advance_wal_position(&conn, &group_id_d, seq);
             Ok(restamped_count)
         })
         .await??
@@ -3915,7 +4158,8 @@ async fn recover_rebuild_from_workspace_wal(
             for (gid, dir) in wal_group::list_group_wal_dirs(&wal_root)? {
                 let stats = crate::replay::WalReplayer::new(&dir).replay(&conn)?;
                 if let Some(seq) = stats.last_committed_seq {
-                    if let Err(e) = conn.set_applied_seq(&gid, seq) {
+                    let generation = crate::wal_generation::read_generation(&dir);
+                    if let Err(e) = conn.set_wal_position(&gid, seq, generation.as_deref()) {
                         eprintln!(
                             "liminis-context-graph: rebuild_from_workspace_wal: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
                         );

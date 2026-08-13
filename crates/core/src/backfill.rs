@@ -209,7 +209,7 @@ pub async fn backfill_relation_types(
             // mutation-level attribution.
             let seq =
                 wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-            wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
+            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
             Ok(())
         })
         .await??;

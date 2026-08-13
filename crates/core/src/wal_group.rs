@@ -6,8 +6,8 @@
 //!
 //! ```text
 //! <wal_root>/
-//!   liminis/     *.jsonl   .checkpoints/   .wal-bounds.json
-//!   group-a/     *.jsonl   .checkpoints/   .wal-bounds.json
+//!   liminis/     *.jsonl   .checkpoints/   .wal-bounds.json   .wal-generation.json
+//!   group-a/     *.jsonl   .checkpoints/   .wal-bounds.json   .wal-generation.json
 //! ```
 //!
 //! The lower-level WAL machinery (`WalWriter`, `checkpoint.rs`, the bounds manifest) is already
@@ -35,6 +35,15 @@ const WAL_BOUNDS_MANIFEST_FILE: &str = ".wal-bounds.json";
 /// Directory name of the checkpoint store (issue #365) — the other sibling artifact FR-001's
 /// migration must relocate as a unit, not only the `.jsonl` files.
 const CHECKPOINTS_DIR_NAME: &str = ".checkpoints";
+
+/// File name of the generation sidecar (issue #387) — a third sibling artifact
+/// `migrate_wal_root_if_needed` must relocate alongside the others. Mirrors
+/// `wal_generation::WAL_GENERATION_FILE`, duplicated here for the same reason as
+/// `WAL_BOUNDS_MANIFEST_FILE` above: this is the only other place that needs to recognize the
+/// file by name, not open or parse it. No pre-378 install could actually have this file (this
+/// feature postdates #378), but recognizing it keeps this list consistent with the other two
+/// sidecars for any future top-level-artifact migration.
+const WAL_GENERATION_FILE: &str = ".wal-generation.json";
 
 /// Encodes `group_id` into a filesystem-safe, bijective WAL directory name (FR-005).
 ///
@@ -215,6 +224,7 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
     name.ends_with(".jsonl")
         || name == WAL_BOUNDS_MANIFEST_FILE
         || (name.starts_with(".wal-bounds.") && name.ends_with(".tmp"))
+        || name == WAL_GENERATION_FILE
 }
 
 /// Migrates a pre-378 single-stream `wal_root` (today's flat `LCG_WAL_DIR`, holding `*.jsonl`

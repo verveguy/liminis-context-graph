@@ -47,8 +47,10 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
-                           embedding config, WAL state, ontology summary, and whether search \
-                           indices are built. Returns a status object (not a JSON-RPC error) \
+                           embedding config, WAL state (including each group's applied_seq, \
+                           max_seq, and current on-disk generation — issue #387, cheap: no extra \
+                           WAL directory scan), ontology summary, and whether search indices are \
+                           built. Returns a status object (not a JSON-RPC error) \
                            when the database is open but a core table is missing — check the \
                            `queryable` field (and `reason` when false) to distinguish that state \
                            from a genuinely empty graph, whose counts read as 0 rather than \
@@ -686,7 +688,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            `knowledge_wal_mark_*` checkpoints recorded against the source WAL \
                            directory are NOT carried forward, since dump_wal renumbers \
                            sequence numbers and a copied checkpoint's seq would be meaningless \
-                           against the new numbering.",
+                           against the new numbering. For the same reason, the output always \
+                           gets a freshly minted stream generation (issue #387) — never the \
+                           source's: it is a new stream, not a copy of the source's identity.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -714,8 +718,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_wal_mark_create",
             description: "Record a new named, retained WAL position — 'this graph was \
-                           known-good here' — at the database's current applied_seq for \
-                           `group_id`'s own WAL directory (default \"liminis\", issue #378). \
+                           known-good here' — at the database's current applied_seq and \
+                           current generation (issue #387) for `group_id`'s own WAL directory \
+                           (default \"liminis\", issue #378). \
                            Distinct from knowledge_prepare_checkpoint (a WAL flush/rotate \
                            operation, not a named position). O(1): does not scan or replay the \
                            WAL. Fails if the current position is unknown (applied_seq is null — \
@@ -758,17 +763,24 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "List every active (non-deleted) named WAL checkpoint in `group_id`'s \
                            own WAL directory (default \"liminis\" when omitted — this does NOT \
                            aggregate checkpoints across every active group, issue #378 FR-012), \
-                           each with its `seq`, whether it is currently `reachable`, and the \
+                           each with its `seq`, its recorded `generation` (issue #387), whether \
+                           it is currently `reachable`, and the \
                            `wal_min_seq`/`wal_max_seq` bounds of WAL content presently on disk \
-                           for that group. `reachable` requires BOTH `wal_min_seq == 0` (the \
-                           WAL's own prefix has not been externally truncated, e.g. by routine \
-                           retention deleting old WAL files) AND `seq <= wal_max_seq` — a \
-                           checkpoint whose seq merely falls inside `[wal_min_seq, wal_max_seq]` \
-                           is still reported unreachable if `wal_min_seq > 0`, since restoring \
-                           it would silently omit everything before `wal_min_seq`. This does NOT \
-                           detect a gap in the middle of that range, so `reachable: true` is a \
+                           for that group. `reachable` requires the existing bounds check — BOTH \
+                           `wal_min_seq == 0` (the WAL's own prefix has not been externally \
+                           truncated, e.g. by routine retention deleting old WAL files) AND \
+                           `seq <= wal_max_seq`, where a checkpoint whose seq merely falls \
+                           inside `[wal_min_seq, wal_max_seq]` is still reported unreachable if \
+                           `wal_min_seq > 0` since restoring it would silently omit everything \
+                           before `wal_min_seq` — AND, independently, that the checkpoint's \
+                           recorded `generation` matches the group's current on-disk generation \
+                           whenever both are known: a checkpoint taken against a generation that \
+                           has since been reset is never reachable, even when its seq still \
+                           falls comfortably inside the bounds. Neither check detects a gap in \
+                           the middle of that range, so `reachable: true` is a \
                            necessary, not sufficient, signal that a restore will succeed; use \
-                           `wal_min_seq`/`wal_max_seq` to diagnose an unreachable checkpoint. \
+                           `wal_min_seq`/`wal_max_seq`/`generation` to diagnose an unreachable \
+                           checkpoint. \
                            Works even when the database is degraded or unavailable, since it \
                            only reads the WAL-directory checkpoint store.",
             scope: Scope::Admin,
@@ -823,7 +835,18 @@ pub fn registry() -> Vec<ToolSpec> {
                            that group's WAL files, optionally from a given sequence number \
                            and/or up to a given sequence number — never disturbing any other \
                            group's WalPosition row (issue #378 FR-006). Supports MCP progress \
-                           notifications when called with a progress token. A `from_seq: 0` \
+                           notifications when called with a progress token. Before anything \
+                           else, compares the group's recorded generation against what's \
+                           currently on disk (issue #387): if they differ, the caller's \
+                           from_seq/to_seq/force_clear are overridden entirely and this becomes \
+                           an automatic full self-heal — purge the group, replay it from scratch \
+                           against the new generation, then re-bind any cross-group pointers \
+                           into it — rather than silently layering new-generation mutations onto \
+                           old-generation data. The result reports `reset_detected`, \
+                           `previous_generation`, `generation`, and `cross_group_rebind` so a \
+                           caller can tell this apart from an ordinary incremental replay; a \
+                           `dry_run: true` call against a mismatched group reports the same \
+                           fields but mutates nothing. Absent a detected reset, a `from_seq: 0` \
                            (default) full rebuild fails fast with an explicit error if that \
                            group already contains data, rather than silently producing a \
                            duplicate-primary-key failure per node — pass `force_clear: true` to \

@@ -162,14 +162,20 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
 /// `group_id` throughout (issue #378 FR-010): both the emptiness check and the episode-cursor
 /// derivation only ever look at `group_id`'s own content, so a backfill for group A can never
 /// be derived from — or degrade because of — group B's episodes.
+///
+/// Every position this backfills carries whatever generation is currently on disk for `wal_dir`
+/// (issue #387) — `None` for a pre-#387 stream. This is FR-009's "adopt on first encounter"
+/// behavior: it falls out of the ordinary write path with no separate branch, since a backfill
+/// only ever runs when no position (and so no generation) has been recorded yet.
 pub fn backfill_applied_seq_if_absent(
     conn: &crate::db::Conn<'_>,
     group_id: &str,
     wal_dir: &Path,
 ) -> Result<(), Error> {
-    if conn.get_applied_seq(group_id)?.is_some() {
+    if conn.get_wal_position(group_id)?.applied_seq.is_some() {
         return Ok(());
     }
+    let generation = crate::wal_generation::read_generation(wal_dir);
     let gids = [group_id];
     if conn.count_episodics_by_group_ids(&gids)? == 0 {
         // Episodic count alone doesn't prove the group is empty: `remove_episode` and
@@ -181,13 +187,13 @@ pub fn backfill_applied_seq_if_absent(
         // (`null`, the documented "unknown, full rebuild" signal) rather than falsely
         // reporting "known, nothing applied" for a populated-but-episode-less group.
         if group_has_no_content(conn, group_id)? {
-            return conn.set_applied_seq(group_id, 0);
+            return conn.set_wal_position(group_id, 0, generation.as_deref());
         }
         return Ok(());
     }
     let (seq, reason) = derive_episode_cursor(conn, group_id, wal_dir)?;
     if reason == CursorReason::UuidMatch {
-        conn.set_applied_seq(group_id, seq)?;
+        conn.set_wal_position(group_id, seq, generation.as_deref())?;
     }
     // UuidNotFound (and the unreachable NoEpisodes): leave the row absent — null is the
     // correct, documented "backfill failed, full rebuild required" report (FR-008).
@@ -345,7 +351,8 @@ pub fn run_full_recovery_sequence(
             )?;
             total += group_stats.lines_replayed;
             if let Some(seq) = group_stats.last_committed_seq {
-                positions.push((gid, seq));
+                let generation = crate::wal_generation::read_generation(&dir);
+                positions.push((gid, seq, generation));
             }
         }
         (total, positions)
@@ -361,7 +368,10 @@ pub fn run_full_recovery_sequence(
         )?;
         let positions = stats
             .last_committed_seq
-            .map(|seq| vec![(group_id.to_string(), seq)])
+            .map(|seq| {
+                let generation = crate::wal_generation::read_generation(&wal_dir);
+                vec![(group_id.to_string(), seq, generation)]
+            })
             .unwrap_or_default();
         (stats.lines_replayed, positions)
     };
@@ -394,8 +404,8 @@ pub fn run_full_recovery_sequence(
         // `knowledge_status` rely on elsewhere — a caller reading a non-null `applied_seq` after
         // a failed rebuild would wrongly skip re-deriving it. Each write is independently
         // non-fatal: a missed write doesn't undo the recovery that already succeeded.
-        for (gid, seq) in &positions_to_persist {
-            if let Err(e) = conn.set_applied_seq(gid, *seq) {
+        for (gid, seq, generation) in &positions_to_persist {
+            if let Err(e) = conn.set_wal_position(gid, *seq, generation.as_deref()) {
                 eprintln!(
                     "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
                 );
@@ -650,7 +660,7 @@ mod tests {
 
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(0));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(0));
     }
 
     /// A DB with zero `Episodic` nodes but a surviving `Entity` (e.g. every episode was
@@ -673,7 +683,7 @@ mod tests {
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("g").unwrap(),
+            conn.get_wal_position("g").unwrap().applied_seq,
             None,
             "an Entity-only DB (no episodes) must not be backfilled to 0 — its position is \
              genuinely unknown, not known-empty"
@@ -704,7 +714,7 @@ mod tests {
         let conn = db.connect().unwrap();
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(41));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(41));
     }
 
     /// SC-007: a populated DB whose last episode's uuid is absent from the WAL leaves
@@ -731,7 +741,7 @@ mod tests {
         let conn = db.connect().unwrap();
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), None);
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, None);
     }
 
     /// A DB that already has a persisted position must not be overwritten by backfill —
@@ -744,11 +754,11 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        conn.set_applied_seq("g", 99).unwrap();
+        conn.set_wal_position("g", 99, None).unwrap();
 
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(99));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(99));
     }
 
     /// FR-010 (issue #378): in a multi-group database, backfilling group A must never derive
@@ -789,12 +799,12 @@ mod tests {
         backfill_applied_seq_if_absent(&conn, "group-b", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("group-a").unwrap(),
+            conn.get_wal_position("group-a").unwrap().applied_seq,
             None,
             "group-a has no episodes of its own and must not borrow group-b's cursor"
         );
         assert_eq!(
-            conn.get_applied_seq("group-b").unwrap(),
+            conn.get_wal_position("group-b").unwrap().applied_seq,
             Some(7),
             "group-b's own backfill must still derive its own cursor correctly"
         );
