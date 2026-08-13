@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.13.0] - 2026-08-13
+
+A minor release making the graph genuinely multi-tenant. Groups become a real isolation boundary
+rather than a filter applied by convention: each group gets its own WAL stream, merges can no
+longer reach across groups, and cross-group references are expressed as resolvable pointers
+instead of edges that silently break. Alongside that, the WAL gains the primitives needed to
+treat it as a backup you can restore *from* — a replay upper bound, named recovery positions, and
+a generation identity that lets a consumer tell an advance from a reset.
+
+### Added
+
+- **One WAL directory per group.** A group's mutations are written to its own WAL stream rather
+  than a single shared log, so a consumer can hydrate, replay, or discard one group without
+  touching another. This is the structural change the rest of the group work depends on.
+  (#378, [ADR-0378](docs/adr/0378-multi-stream-wal-per-group-directory.md))
+- **Generation identity on WAL streams.** A stream now carries an identity that distinguishes a
+  forward advance from a reset, so a consumer can no longer mistake a rebuilt stream for an
+  extension of the one it already replayed — previously indistinguishable, and silently corrupting
+  for an incremental consumer. (#387, [ADR-0387](docs/adr/0387-wal-stream-generation-identity.md))
+- **`knowledge_delete_by_group`** — a group-scoped purge that removes entities and edges, not just
+  episodes. The pre-existing episode-deletion paths only `DETACH DELETE` the `Episodic` node,
+  leaving the entity and edge data they created behind, so a graph could report zero episodes while
+  still holding real content. (#361, [ADR-0361](docs/adr/0361-group-scoped-purge.md))
+- **`knowledge_wal_mark_create` / `_list` / `_delete`** — named, retained WAL positions ("this
+  graph was known-good here"), stored in a `.checkpoints/` subdirectory of the WAL directory
+  rather than in the database, so they survive exactly the database loss they exist to recover
+  from. `_list` reports whether each position is still reachable given the WAL content on disk.
+  (#365, [ADR-0365](docs/adr/0365-wal-checkpoints-directory-per-name-store.md))
+- **A `to_seq` upper bound on `knowledge_rebuild_from_wal`.** Replay previously accepted only a
+  lower bound and always ran to the end of the WAL, so a bad mutation — itself recorded in the WAL
+  — was replayed back on every restore. A bounded rebuild can now stop before it. Note this is not
+  durable: entries beyond `to_seq` remain on disk unapplied, and a later unbounded rebuild will
+  reapply them. (#362)
+- **`knowledge_add_cross_group_edge` and `knowledge_rebind_pointers`** — cross-group references
+  expressed as resolvable semantic pointers rather than raw edges. This supports a hub topology:
+  N independently-hydrated source groups living in one database, with a separate *layer graph*
+  carrying its own `group_id` whose edges connect entities across two source groups. A pointer
+  survives its target group being re-ingested or re-canonicalised, where a raw edge would dangle.
+  (#369, [ADR-0369](docs/adr/0369-resolvable-cross-group-pointers.md))
+- **`knowledge_assert_entity` and `knowledge_assert_relationship`** — a direct assertion API for
+  writing graph content without going through episode extraction.
+  (#379, [ADR-0379](docs/adr/0379-direct-assertion-conventions.md))
+- **A cached WAL seq-bounds manifest**, so establishing a stream's minimum and maximum sequence no
+  longer requires scanning every file in the WAL directory — the operation sits behind reachability
+  checks and status calls at deployments with tens of thousands of WAL files.
+  (#375, [ADR-0375](docs/adr/0375-wal-max-seq-bounds-manifest.md))
+
+### Fixed
+
+- **Entity merge silently destroyed cross-group edges.** `has_directed_edge` and
+  `get_full_edges_for_entity` were not group-scoped, so a merge in one group could consider — and
+  destroy — edge data belonging to another. (#368,
+  [ADR-0368](docs/adr/0368-group-scoped-edge-dedup-in-merge.md))
+- **Merge could write another group's data.** Foreign-group edges encountered during a merge are
+  now skipped and left for their owning group to re-bind, rather than being rewritten by a merge
+  that has no authority over them. (#371,
+  [ADR-0371](docs/adr/0371-merge-never-writes-foreign-group-data.md))
+- **`delete_by_group` and `rebind_pointers` wrote other groups' mutations to the default WAL
+  stream**, breaking per-group stream isolation for exactly the operations most likely to span
+  groups. Mutations are now attributed to the group they belong to. (#385,
+  [ADR-0385](docs/adr/0385-per-group-mutation-attribution-for-multi-group-writers.md))
+- **`applied_seq` never advanced for `wal_flush_ungrouped` writes** — which is every write path
+  except episode ingest. Harmless while episode ingest was the only writer, but with the assertion
+  API (#379) and per-group positions (#378) both landed, it left the re-bind trigger inert for
+  graphs built by any other path. (#383)
+- **Semantically-empty required fields were persisted.** #342 (0.12.1) made extraction-response
+  parsing tolerant of items that fail to *deserialize*, but an empty or whitespace-only string
+  deserializes fine — so an edge whose `fact` was blank had no validation at any layer and could
+  reach storage. Blank required fields are now rejected during item salvage, at parse time, across
+  both the Anthropic and OAI-compatible paths, and counted in the existing drop counters. The eval
+  path, which consumes extractor output directly, now sees the same filtered item set the ingest
+  path would store. (#347,
+  [ADR-0347](docs/adr/0347-reject-semantically-empty-required-fields-during-salvage.md))
+
 ## [0.12.2] - 2026-08-06
 
 A patch release implementing a community-requested feature (#351): a reliable, cheap boot-time

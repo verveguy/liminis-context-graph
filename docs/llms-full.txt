@@ -10,7 +10,7 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This site documents **v0.12.2** (see [`Cargo.toml`](https://github.com/verveguy/liminis-context-graph/blob/main/Cargo.toml)).
+This site documents **v0.13.0** (see [`Cargo.toml`](https://github.com/verveguy/liminis-context-graph/blob/main/Cargo.toml)).
 It describes the `main` branch as of that release; unreleased changes on `main` since the
 last tag may not yet be reflected here.
 
