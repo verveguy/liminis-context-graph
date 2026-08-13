@@ -398,19 +398,18 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // Backfilling already happened above under the write lock (Phase 0) — this is a pure
             // read of whatever that pass established, never a write, so it's safe under the
             // shared read lock this closure runs under.
-            let wal_group_positions: Vec<WalGroupPosition> =
-                wal_root
-                    .as_deref()
-                    .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(gid, dir)| {
-                        let applied = conn.get_wal_position(&gid).unwrap_or_default().applied_seq;
-                        let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
-                        let generation = crate::wal_generation::read_generation(&dir);
-                        (gid, applied, max, generation)
-                    })
-                    .collect();
+            let wal_group_positions: Vec<WalGroupPosition> = wal_root
+                .as_deref()
+                .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(gid, dir)| {
+                    let applied = conn.get_wal_position(&gid).unwrap_or_default().applied_seq;
+                    let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
+                    let generation = crate::wal_generation::read_generation(&dir);
+                    (gid, applied, max, generation)
+                })
+                .collect();
             let name_index_trusted = conn.name_index_trusted();
             let name_index_fallback_scans = conn.name_index_fallback_scan_count();
 
@@ -595,9 +594,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
 /// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
 /// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
 /// JSON map.
-fn wal_group_positions_json(
-    positions: &[WalGroupPosition],
-) -> Value {
+fn wal_group_positions_json(positions: &[WalGroupPosition]) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
         .map(|(gid, applied, max, generation)| {
