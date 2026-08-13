@@ -30,6 +30,25 @@ pub struct Db {
     name_index: NameIndex,
 }
 
+/// The persisted consumer-side WAL position for one group (issue #353, made per-group by
+/// issue #378, scoped to a generation by issue #387): `applied_seq` and the generation it was
+/// recorded against, always read/written together as a single row so a caller can never see one
+/// without the other — splitting them would reintroduce the two-read/write coordination problem
+/// ADR-0353's single-row design was built to avoid (see ADR-0387).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WalPositionRecord {
+    /// `None` iff no position has ever been recorded for this group. Row-absence is the sole
+    /// representation of "unknown" — both "never written" (fresh group, backfill not yet run)
+    /// and "backfill failed" collapse to this, distinct from a written `0` ("nothing applied
+    /// yet, but known").
+    pub applied_seq: Option<u64>,
+    /// The generation `applied_seq` was recorded against. `None` means either no position has
+    /// ever been recorded, or the position was recorded before issue #387 (a pre-existing stream
+    /// with no generation concept yet) — both collapse to "unknown," never treated as a mismatch
+    /// (FR-009).
+    pub generation: Option<String>,
+}
+
 pub struct Conn<'db> {
     inner: lbug::Connection<'db>,
     /// Recorded mutations as `(cypher_template, json_params)` pairs, in execution order.
@@ -121,8 +140,14 @@ impl Db {
             if let Some(seq) = stats.last_committed_seq {
                 // `open_or_rebuild` replays exactly one WAL directory into a fresh DB — there is
                 // no notion of multiple groups at this call site, so the position it persists is
-                // the default group's (issue #378 FR-009: single-group parity).
-                if let Err(e) = conn.set_applied_seq(crate::wal_group::DEFAULT_GROUP_ID, seq) {
+                // the default group's (issue #378 FR-009: single-group parity). The generation
+                // persisted alongside it is whatever is currently on disk for that directory
+                // (issue #387) — `None` for a pre-#387 stream, matching FR-009's adopt-on-first-
+                // encounter semantics.
+                let generation = crate::wal_generation::read_generation(wal_dir_path);
+                if let Err(e) =
+                    conn.set_wal_position(crate::wal_group::DEFAULT_GROUP_ID, seq, generation.as_deref())
+                {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
                     );
@@ -1932,38 +1957,58 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
-    /// Returns the persisted applied-WAL-seq position for `group_id` (issue #353, made per-group
-    /// by issue #378), or `None` if no position has ever been recorded for that group.
-    /// Row-absence is the sole representation of "unknown" — both "never written" (fresh
-    /// group, backfill not yet run) and "backfill failed" (FR-008) collapse to this, distinct
-    /// from a written `0` ("nothing applied yet, but known"). A `seq` from one group's stream
-    /// must never be compared against another group's row (FR-008) — this always reads exactly
-    /// one group's `WalPosition` row, selected by its primary key.
-    pub fn get_applied_seq(&self, group_id: &str) -> Result<Option<u64>, Error> {
+    /// Returns the persisted `(applied_seq, generation)` position for `group_id`, or the default
+    /// (`None`, `None`) if no position has ever been recorded for that group. A `seq`/generation
+    /// from one group's stream must never be compared against another group's row (FR-008 of
+    /// #378) — this always reads exactly one group's `WalPosition` row, selected by its primary
+    /// key.
+    pub fn get_wal_position(&self, group_id: &str) -> Result<WalPositionRecord, Error> {
         let rows = self.query_params(
-            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq",
+            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation",
             serde_json::json!({ "group_id": group_id }),
         )?;
         Ok(rows
             .into_iter()
             .next()
-            .and_then(|row| value_as_optional_u64(&row[0])))
+            .map(|row| WalPositionRecord {
+                applied_seq: value_as_optional_u64(&row[0]),
+                generation: value_as_optional_string(&row[1]),
+            })
+            .unwrap_or_default())
     }
 
-    /// Persists `seq` as `group_id`'s applied-WAL-seq position (issue #353, made per-group by
-    /// issue #378). Uses `Connection::execute` via a prepared statement directly rather than
-    /// `raw_query`/`exec_params`, so this write is never itself recorded into
-    /// `executed_mutations` and re-logged to the WAL — that would make `applied_seq` immediately
-    /// stale by the write that just recorded it (a self-referential regress). Same non-recording
-    /// bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a parameter,
-    /// not interpolated, since it is caller-controlled (IPC-supplied).
-    pub fn set_applied_seq(&self, group_id: &str, seq: u64) -> Result<(), Error> {
-        let mut prepared = self
-            .inner
-            .prepare("MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq")?;
+    /// Persists `seq` and `generation` as `group_id`'s WAL position (issue #353, made per-group
+    /// by issue #378, generation-scoped by issue #387). Uses `Connection::execute` via a prepared
+    /// statement directly rather than `raw_query`/`exec_params`, so this write is never itself
+    /// recorded into `executed_mutations` and re-logged to the WAL — that would make the position
+    /// immediately stale by the write that just recorded it (a self-referential regress). Same
+    /// non-recording bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a
+    /// parameter, not interpolated, since it is caller-controlled (IPC-supplied).
+    ///
+    /// `generation: None` is a legitimate value (a legacy pre-#387 stream that has never had a
+    /// generation recorded, per FR-009's Story 5) — it is written as an explicit SQL `NULL`, not
+    /// skipped, so a later `set_wal_position` call for the same group correctly clears out any
+    /// stale generation from a previous write rather than leaving it silently orphaned.
+    pub fn set_wal_position(
+        &self,
+        group_id: &str,
+        seq: u64,
+        generation: Option<&str>,
+    ) -> Result<(), Error> {
+        let mut prepared = self.inner.prepare(
+            "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
+             w.generation = $generation",
+        )?;
         let bound: Vec<(&str, Value)> = vec![
             ("group_id", Value::String(group_id.to_string())),
             ("seq", Value::Int64(seq as i64)),
+            (
+                "generation",
+                match generation {
+                    Some(g) => Value::String(g.to_string()),
+                    None => Value::Null(LogicalType::Any),
+                },
+            ),
         ];
         self.inner.execute(&mut prepared, bound)?;
         Ok(())
@@ -1985,6 +2030,10 @@ impl<'db> Conn<'db> {
     /// exists, the singleton row is stale leftover from before `group_id`'s own value was
     /// established and is simply removed, not blended with it — `group_id`'s existing row is by
     /// construction more recent than a not-yet-migrated legacy row could be.
+    ///
+    /// The legacy singleton row predates generation entirely (issue #387), so the carried-forward
+    /// value has no generation to bring with it — it lands with `generation: None`, the same
+    /// "unknown" state FR-009 already defines for any pre-#387 recorded position.
     pub fn migrate_legacy_singleton_wal_position(&self, group_id: &str) -> Result<(), Error> {
         let legacy = self
             .inner
@@ -1996,8 +2045,8 @@ impl<'db> Conn<'db> {
         else {
             return Ok(());
         };
-        if self.get_applied_seq(group_id)?.is_none() {
-            self.set_applied_seq(group_id, seq)?;
+        if self.get_wal_position(group_id)?.applied_seq.is_none() {
+            self.set_wal_position(group_id, seq, None)?;
         }
         let _ = self
             .inner
@@ -2859,7 +2908,7 @@ fn value_as_usize(v: &lbug::Value) -> usize {
 
 /// Reads an `INT64` column as `Option<u64>`, treating `Null` as `None` rather than `0` — the
 /// `applied_seq` "unknown" state (issue #353) must stay distinguishable from "nothing applied".
-/// A negative value (never written by `set_applied_seq`, but not excluded by the `INT64` column
+/// A negative value (never written by `set_wal_position`, but not excluded by the `INT64` column
 /// type — e.g. a hand-edited or corrupted row) is also treated as `None` rather than wrapping to
 /// a huge `u64` via `as` casting, which would otherwise report a nonsensical applied position.
 fn value_as_optional_u64(v: &lbug::Value) -> Option<u64> {

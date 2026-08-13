@@ -59,16 +59,20 @@ fn emit_rotation_if_any(writer: &mut WalWriter, sink: &dyn TelemetrySink) {
 ///
 /// Use for episode Phase C where all mutations for one chunk should land atomically.
 ///
-/// Returns the max `seq` assigned to this chunk's lines (issue #353), or `None` if nothing was
-/// actually written — an empty `mutations` list, a lock/writer-absent short-circuit, or a chunk
-/// whose entries were all filtered out by `WalWriter::log_mutation` (reads / index DDL), or a
-/// write failure. Callers use `Some(seq)` to advance `group_id`'s persisted `applied_seq`
-/// position; `None` means "leave it where it is" — always the safe direction (FR-003).
+/// Returns the max `seq` assigned to this chunk's lines (issue #353) together with this stream's
+/// generation identity as observed on the writer at flush time (issue #387), or `None` if
+/// nothing was actually written — an empty `mutations` list, a lock/writer-absent short-circuit,
+/// or a chunk whose entries were all filtered out by `WalWriter::log_mutation` (reads / index
+/// DDL), or a write failure. Callers use `Some((seq, generation))` to advance `group_id`'s
+/// persisted WAL position; `None` means "leave it where it is" — always the safe direction
+/// (FR-003). The generation is read from the writer's own cached value
+/// (`WalWriter::generation`), not a fresh disk read, so this hot path (once per WAL chunk) pays
+/// no extra filesystem I/O.
 pub(crate) fn wal_flush_chunk(
     state: &AppState,
     group_id: &str,
     mutations: Vec<(String, serde_json::Value)>,
-) -> Option<u64> {
+) -> Option<(u64, Option<String>)> {
     if mutations.is_empty() {
         return None;
     }
@@ -85,7 +89,8 @@ pub(crate) fn wal_flush_chunk(
                 Ok(_) => {
                     emit_rotation_if_any(writer, state.sink.as_ref());
                     let after = writer.global_seq();
-                    (after > before).then(|| after - 1)
+                    let generation = writer.generation().map(str::to_string);
+                    (after > before).then(|| (after - 1, generation))
                 }
                 Err(e) => {
                     eprintln!(
@@ -340,14 +345,14 @@ mod tests {
     }
 
     /// SC-004 (FR-003 crash safety): a crash between a chunk's WAL flush and the
-    /// `set_applied_seq` write that normally follows it (episode.rs, immediately after this
+    /// `set_wal_position` write that normally follows it (episode.rs, immediately after this
     /// function returns) must leave `applied_seq` trailing what's actually committed, never
     /// advancing past it. Simulated deterministically by committing a second chunk's mutation
     /// and flushing it to WAL — both actually happen — then simply not calling
-    /// `set_applied_seq` for it, mirroring exactly what a `kill -9` between those two steps
+    /// `set_wal_position` for it, mirroring exactly what a `kill -9` between those two steps
     /// would leave behind.
     #[test]
-    fn skipped_set_applied_seq_write_leaves_applied_seq_trailing_not_leading() {
+    fn skipped_set_wal_position_write_leaves_applied_seq_trailing_not_leading() {
         let db_dir = tempfile::tempdir().unwrap();
         let db = crate::db::Db::open(db_dir.path().join("t.db").to_str().unwrap()).unwrap();
         let conn = db.connect().unwrap();
@@ -363,9 +368,10 @@ mod tests {
              content: 'c', valid_at: timestamp('2026-01-01')})",
         )
         .unwrap();
-        let seq1 = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
+        let (seq1, gen1) = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
             .expect("chunk 1 must assign a seq");
-        conn.set_applied_seq("liminis", seq1).unwrap();
+        conn.set_wal_position("liminis", seq1, gen1.as_deref())
+            .unwrap();
 
         // Chunk 2: commit and flush — both really happen — but the position write that would
         // normally follow is deliberately skipped, simulating a crash right after the flush.
@@ -375,10 +381,10 @@ mod tests {
              content: 'c', valid_at: timestamp('2026-01-01')})",
         )
         .unwrap();
-        let seq2 = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
+        let (seq2, _gen2) = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
             .expect("chunk 2 must assign a seq");
         assert!(seq2 > seq1, "chunk 2's seq must be strictly higher");
-        // No conn.set_applied_seq(seq2) call here — the simulated crash.
+        // No conn.set_wal_position(seq2) call here — the simulated crash.
 
         // Both episodes are actually committed in the graph...
         assert_eq!(
@@ -389,7 +395,7 @@ mod tests {
         // ...but applied_seq must still report only chunk 1's position — never chunk 2's,
         // which would wrongly signal chunk 2's mutations are a recorded, skippable position.
         assert_eq!(
-            conn.get_applied_seq("liminis").unwrap(),
+            conn.get_wal_position("liminis").unwrap().applied_seq,
             Some(seq1),
             "a skipped position write must leave applied_seq trailing the last chunk that \
              actually recorded it, never advancing to an unrecorded chunk's seq"

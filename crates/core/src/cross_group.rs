@@ -177,7 +177,7 @@ fn resolve_side(
             // The staleness signal is source_group_id's own applied position (issue #378
             // FR-011) — a single edge's two endpoints can point into two different foreign
             // groups, so this must be looked up per endpoint, not shared across both.
-            let applied_seq = conn.get_applied_seq(source_group_id)?;
+            let applied_seq = conn.get_wal_position(source_group_id)?.applied_seq;
             let ptr = CrossGroupPointer {
                 source_group_id: source_group_id.clone(),
                 endpoint_name: normalized_name,
@@ -325,7 +325,7 @@ fn rebind_pointers_impl(
     // The staleness signal is source_group_id's own applied position (issue #378 FR-011) — the
     // group being pointed *into*, and whose replay is what should drive re-binding (User Story
     // 4), not any other group's (or the pre-378 DB-wide singleton's).
-    let current_seq = conn.get_applied_seq(source_group_id)?;
+    let current_seq = conn.get_wal_position(source_group_id)?.applied_seq;
     let mut counts = RebindCounts::default();
     // Bucketed by rn_group_id — the owning group of the RelatesToNode_ row each candidate's
     // writes actually land on (issue #385 FR-003) — never source_group_id itself. Drained after

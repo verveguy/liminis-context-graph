@@ -827,19 +827,21 @@ pub async fn add_episode(
             })?;
         }
 
-        let flushed_seq =
-            wal_exec::wal_flush_chunk(&state_c, &gid_wal, conn.drain_mutations());
-        // Advance this group's persisted applied-WAL-seq position (issue #353, FR-002; made
-        // per-group by issue #378) after the WAL flush, which itself runs after every graph
-        // mutation above already committed individually (lbug auto-commits per statement; this
-        // codebase reserves explicit transactions for replay's flush_batch only). Writing here —
-        // strictly after both the graph commit and the WAL flush — is the write-after-commit
-        // mechanism FR-003 requires: a crash before this point leaves applied_seq trailing
-        // what's actually committed (safe, redoes a little work on resume), never ahead of it
-        // (which would skip committed-but-unrecorded mutations). Non-fatal: a missed write only
-        // means applied_seq stays stale, not that the chunk's mutations are lost.
-        if let Some(seq) = flushed_seq {
-            if let Err(e) = conn.set_applied_seq(&gid_wal, seq) {
+        let flushed = wal_exec::wal_flush_chunk(&state_c, &gid_wal, conn.drain_mutations());
+        // Advance this group's persisted WAL position (issue #353, FR-002; made per-group by
+        // issue #378; generation-scoped by issue #387) after the WAL flush, which itself runs
+        // after every graph mutation above already committed individually (lbug auto-commits per
+        // statement; this codebase reserves explicit transactions for replay's flush_batch
+        // only). Writing here — strictly after both the graph commit and the WAL flush — is the
+        // write-after-commit mechanism FR-003 requires: a crash before this point leaves
+        // applied_seq trailing what's actually committed (safe, redoes a little work on resume),
+        // never ahead of it (which would skip committed-but-unrecorded mutations). Non-fatal: a
+        // missed write only means applied_seq stays stale, not that the chunk's mutations are
+        // lost. The generation persisted alongside it is the writer's own cached value (read once
+        // at construction, not a fresh disk read), so this highest-frequency write path pays no
+        // extra filesystem I/O.
+        if let Some((seq, generation)) = flushed {
+            if let Err(e) = conn.set_wal_position(&gid_wal, seq, generation.as_deref()) {
                 eprintln!(
                     "liminis-context-graph: add_episode: failed to persist applied_seq={seq} (non-fatal): {e}"
                 );

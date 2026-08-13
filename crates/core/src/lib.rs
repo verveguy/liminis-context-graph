@@ -41,7 +41,7 @@ pub mod wal_group;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
-pub use db::{Conn, Db};
+pub use db::{Conn, Db, WalPositionRecord};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use error::Error;

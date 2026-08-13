@@ -227,10 +227,15 @@ struct StatusFields {
     wal_byte_size: u64,
     wal_applied_seq: Option<u64>,
     wal_max_seq: Option<u64>,
-    /// Per-group `(group_id, applied_seq, max_seq)` for every group that has a WAL directory
-    /// (issue #378 FR-007) — additive to the flat `wal_applied_seq`/`wal_max_seq` fields above,
-    /// which stay pinned to the default group.
-    wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
+    /// The default group's current on-disk generation (issue #387) — the source-side value, not
+    /// lcg's DB-recorded consumer-side position, mirroring `wal_max_seq`'s "what's actually on
+    /// disk right now" role. `None` for a pre-#387 stream that has never had one recorded.
+    wal_generation: Option<String>,
+    /// Per-group `(group_id, applied_seq, max_seq, generation)` for every group that has a WAL
+    /// directory (issue #378 FR-007; generation added by issue #387) — additive to the flat
+    /// `wal_applied_seq`/`wal_max_seq`/`wal_generation` fields above, which stay pinned to the
+    /// default group.
+    wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
     name_index_trusted: bool,
@@ -252,7 +257,8 @@ enum StatusOutcome {
         wal_byte_size: u64,
         wal_applied_seq: Option<u64>,
         wal_max_seq: Option<u64>,
-        wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
+        wal_generation: Option<String>,
+        wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
     },
@@ -371,25 +377,33 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // never fatal to the rest of the status response. If the default group has no WAL
             // directory at all (e.g. a pure replica that only ever hydrated other groups), both
             // stay `null` — a documented signal of "no default group", not an error.
-            let wal_applied_seq = conn.get_applied_seq(DEFAULT_GROUP_ID).unwrap_or(None);
+            let wal_applied_seq = conn.get_wal_position(DEFAULT_GROUP_ID).unwrap_or_default().applied_seq;
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
+            // On-disk (source-side) generation for the default group (issue #387) — mirrors
+            // wal_max_seq's role: what's actually on disk right now, read from the same sidecar
+            // file `wal_max_seq` reads its manifest from, no extra directory scan.
+            let wal_generation = default_group_dir
+                .as_deref()
+                .and_then(crate::wal_generation::read_generation);
             // Per-group breakdown (FR-007): every group that currently has a WAL directory.
             // Backfilling already happened above under the write lock (Phase 0) — this is a pure
             // read of whatever that pass established, never a write, so it's safe under the
             // shared read lock this closure runs under.
-            let wal_group_positions: Vec<(String, Option<u64>, Option<u64>)> = wal_root
-                .as_deref()
-                .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(gid, dir)| {
-                    let applied = conn.get_applied_seq(&gid).unwrap_or(None);
-                    let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
-                    (gid, applied, max)
-                })
-                .collect();
+            let wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)> =
+                wal_root
+                    .as_deref()
+                    .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(gid, dir)| {
+                        let applied = conn.get_wal_position(&gid).unwrap_or_default().applied_seq;
+                        let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
+                        let generation = crate::wal_generation::read_generation(&dir);
+                        (gid, applied, max, generation)
+                    })
+                    .collect();
             let name_index_trusted = conn.name_index_trusted();
             let name_index_fallback_scans = conn.name_index_fallback_scan_count();
 
@@ -429,6 +443,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_generation,
                     wal_group_positions,
                     last_index_time,
                     index_created_at,
@@ -446,6 +461,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_generation,
                     wal_group_positions,
                     name_index_trusted,
                     name_index_fallback_scans,
@@ -483,6 +499,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // and Python where it breaks arithmetic).
                     "applied_seq": fields.wal_applied_seq,
                     "max_seq": fields.wal_max_seq,
+                    // issue #387: the default group's current on-disk (source-side) generation —
+                    // null for a pre-#387 stream that has never had one recorded (Story 5).
+                    // Compared for equality only; never ordered or interpreted.
+                    "generation": fields.wal_generation,
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
@@ -510,6 +530,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_byte_size,
             wal_applied_seq,
             wal_max_seq,
+            wal_generation,
             wal_group_positions,
             name_index_trusted,
             name_index_fallback_scans,
@@ -541,6 +562,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "byte_size": wal_byte_size,
                 "applied_seq": wal_applied_seq,
                 "max_seq": wal_max_seq,
+                "generation": wal_generation,
             },
             "wal_groups": wal_group_positions_json(&wal_group_positions),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
@@ -563,15 +585,16 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     Ok(result)
 }
 
-/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq)` tuples
-/// (issue #378 FR-007) into the additive `wal_groups` JSON map.
-fn wal_group_positions_json(positions: &[(String, Option<u64>, Option<u64>)]) -> Value {
+/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
+/// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
+/// JSON map.
+fn wal_group_positions_json(positions: &[(String, Option<u64>, Option<u64>, Option<String>)]) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
-        .map(|(gid, applied, max)| {
+        .map(|(gid, applied, max, generation)| {
             (
                 gid.clone(),
-                json!({ "applied_seq": applied, "max_seq": max }),
+                json!({ "applied_seq": applied, "max_seq": max, "generation": generation }),
             )
         })
         .collect();
@@ -1427,6 +1450,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
 
     // Phase 1: delete DB files (and optionally WAL directory) — point of no return
     let db_path_del = db_path.clone();
+    let wal_root_for_reinit = wal_root.clone();
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let path = std::path::Path::new(&db_path_del);
         if path.is_dir() {
@@ -1480,7 +1504,19 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             // next open. Other groups' WalPosition rows are simply absent post-clear (correct:
             // "unknown/no stream yet", not "known-empty" — issue #378 preserves FR-009 parity
             // for the default group only, matching pre-378 single-group behavior exactly).
-            conn.set_applied_seq(DEFAULT_GROUP_ID, 0)?;
+            // The generation persisted alongside it (issue #387) is whatever is currently on
+            // disk: `preserve_wal:true` leaves the WAL directory (and its generation record)
+            // untouched, so that value is read fresh here; `preserve_wal:false` just deleted the
+            // WAL root entirely, so there is nothing to read and this is `None`.
+            let generation = if preserve_wal {
+                wal_root_for_reinit
+                    .as_deref()
+                    .and_then(|root| crate::wal_group::group_wal_dir(root, DEFAULT_GROUP_ID).ok())
+                    .and_then(|dir| crate::wal_generation::read_generation(&dir))
+            } else {
+                None
+            };
+            conn.set_wal_position(DEFAULT_GROUP_ID, 0, generation.as_deref())?;
             // Fresh empty table — a no-op today, kept for uniformity with every other
             // Entity-population path (issue #219).
             conn.rebuild_name_index()?;
