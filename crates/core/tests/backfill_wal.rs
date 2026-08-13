@@ -183,8 +183,8 @@ async fn test_backfill_wal_round_trip() {
         // Write seed mutations to WAL through the same WalWriter session as canonicalize,
         // so file-sequence ordering is deterministic on replay.
         let seed_mutations = conn.drain_mutations();
-        let mut wal_guard = state.wal_writer.lock().unwrap();
-        if let Some(ref mut writer) = *wal_guard {
+        let mut wal_guard = state.wal_writers.lock().unwrap();
+        if let Some(writer) = wal_guard.get_mut("liminis") {
             writer
                 .with_chunk(|w| {
                     for (cypher, params) in &seed_mutations {
@@ -292,8 +292,8 @@ async fn test_backfill_idempotency_wal() {
             .unwrap();
         }
         let seed_mutations = conn.drain_mutations();
-        let mut wal_guard = state.wal_writer.lock().unwrap();
-        if let Some(ref mut writer) = *wal_guard {
+        let mut wal_guard = state.wal_writers.lock().unwrap();
+        if let Some(writer) = wal_guard.get_mut("liminis") {
             writer
                 .with_chunk(|w| {
                     for (cypher, params) in &seed_mutations {
