@@ -354,6 +354,101 @@ async fn test_delete_episode_appends_to_wal() {
     );
 }
 
+/// knowledge_delete_by_source, called with exactly one group_id in its `group_ids` filter, is
+/// not ambiguous — the delete mutation must land in that named group's own WAL directory, not
+/// the default group's.
+#[tokio::test]
+async fn test_delete_by_source_with_single_group_routes_to_that_group() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    dispatch(
+        1,
+        "knowledge_add_episode",
+        json!({
+            "name": "src-chunk",
+            "episode_body": "Dave writes code.",
+            "source": "text",
+            "source_description": "single-source-file.md",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "team-a"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let owning_group_dir = group_wal_dir(wal_dir.path(), "team-a");
+    let default_group_dir = group_wal_dir(wal_dir.path(), "liminis");
+    let owning_lines_before = count_wal_lines(&owning_group_dir);
+
+    let del_v = dispatch(
+        2,
+        "knowledge_delete_by_source",
+        json!({"source_file": "single-source-file.md", "group_ids": ["team-a"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(del_v["result"]["success"], true, "{del_v}");
+
+    assert!(
+        count_wal_lines(&owning_group_dir) > owning_lines_before,
+        "a single-group-scoped delete_by_source must land in that group's own WAL directory"
+    );
+    assert!(
+        !default_group_dir.exists() || count_wal_lines(&default_group_dir) == 0,
+        "a single-group-scoped delete_by_source must not fall back to the default group's writer"
+    );
+}
+
+/// knowledge_delete_chunk_episode, called with exactly one group_id in its `group_ids` filter,
+/// routes the same way as delete_by_source above.
+#[tokio::test]
+async fn test_delete_chunk_episode_with_single_group_routes_to_that_group() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    // remove_episodes_by_chunk_id (db.rs) matches on the episode's own `name` field, so the
+    // episode's `name` must equal the chunk_id the delete call below targets.
+    dispatch(
+        1,
+        "knowledge_add_episode",
+        json!({
+            "name": "chunk-xyz",
+            "episode_body": "Erin reviews PRs.",
+            "source": "text",
+            "source_description": "some/doc.md",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "team-b"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let owning_group_dir = group_wal_dir(wal_dir.path(), "team-b");
+    let default_group_dir = group_wal_dir(wal_dir.path(), "liminis");
+    let owning_lines_before = count_wal_lines(&owning_group_dir);
+
+    let del_v = dispatch(
+        2,
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "chunk-xyz", "group_ids": ["team-b"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(del_v["result"]["success"], true, "{del_v}");
+
+    assert!(
+        count_wal_lines(&owning_group_dir) > owning_lines_before,
+        "a single-group-scoped delete_chunk_episode must land in that group's own WAL directory"
+    );
+    assert!(
+        !default_group_dir.exists() || count_wal_lines(&default_group_dir) == 0,
+        "a single-group-scoped delete_chunk_episode must not fall back to the default group's writer"
+    );
+}
+
 // ── User Story 2: WAL rebuild reproduces DB counts ────────────────────────────
 
 /// Ingest episodes, populate WAL. Open a fresh empty DB. Replay WAL.
