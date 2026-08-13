@@ -91,8 +91,9 @@ corrupt record degrades to "unknown," not to "recompute."
 
 ### Minting: only inside `WalWriter::new`'s already-existing "no content" branch
 
-`WalWriter::new` mints a generation (via `wal_generation::ensure_generation`, an `O_EXCL` atomic
-create) only when no generation record exists yet **and** the directory has no prior `.jsonl`
+`WalWriter::new` mints a generation (via `wal_generation::ensure_generation`, an atomic
+write-temp-then-`hard_link` publish — see below) only when no generation record exists yet **and**
+the directory has no prior `.jsonl`
 content (`scan_max_seq(&wal_dir)? == 0`) — the same "no existing content" condition that already
 governs first-time directory creation there. A pre-existing, populated directory with no
 generation record (a pre-#387 stream — Story 5) is **never** retroactively minted; it stays
@@ -108,12 +109,41 @@ branch that handles ordinary first-time stream creation handles it.
 ### First-creation race: the loser adopts, it does not error
 
 Two processes racing to create the same group's stream directory for the first time both call
-`ensure_generation`. Exactly one wins the atomic `O_EXCL` create; the loser does not error the
-way `checkpoint.rs`'s duplicate-name case does — it re-reads the winner's file (with a small
-bounded retry to cover the brief window between the winner's `create_new` succeeding and its
-`write_all` landing) and adopts that value. Concurrent process startup contending for a group's
-directory is an expected race, not a user error — the correctness requirement is that exactly one
-generation ends up recorded, not that exactly one caller succeeds.
+`ensure_generation`. Exactly one wins; the loser does not error the way `checkpoint.rs`'s
+duplicate-name case does — it reads the winner's file and adopts that value. Concurrent process
+startup contending for a group's directory is an expected race, not a user error — the
+correctness requirement is that exactly one generation ends up recorded, not that exactly one
+caller succeeds.
+
+**Publish via write-temp-then-`hard_link`, not `create_new`-then-write-in-place.** The first
+implementation used `OpenOptions::create_new` (the same `O_EXCL` pattern `checkpoint.rs` uses for
+its duplicate-name check) directly against the target path, then wrote the content into the
+just-created file. That shape has a real window between the file becoming visible to other
+callers and its content actually landing — a process crashing inside that window (between
+`create_new` succeeding and `write_all`/`sync_all` completing) leaves a permanently unreadable
+file at the target, which every future caller (including a fresh process on the next boot) would
+keep hitting. A first fix bounded a loser's read-retry with a fixed budget and, on exhausting it,
+self-healed by deleting the target and re-minting — but review (PR #391) correctly identified that
+this cannot distinguish a winner that genuinely crashed mid-write from one that is merely slow
+(e.g. fsync contention when several groups' streams mint concurrently at process startup): the
+self-healer could unlink a still-writing winner's file out from under it, and the winner's own
+`write_all`/`sync_all` would then succeed against the now-unlinked inode while the self-healer
+mints and publishes a second, different generation at the same path — two callers each holding a
+different "the" generation for one stream, a false-positive reset triggered by this function's own
+internals rather than an actual publisher reset.
+
+The fix removes the window instead of trying to time around it: each caller writes its complete
+content to its own uniquely-named temp file in the same directory and durably `sync_all`s it
+*before* touching the shared target path at all, then publishes with `fs::hard_link(tmp, target)`.
+`hard_link` is atomic and fails with `AlreadyExists` for exactly one side when two callers race;
+critically, the target can never become observable in a partially-written state, because nothing
+ever links a temp file whose content isn't already complete and fsynced. A loser's `read_generation`
+immediately after its failed `hard_link` is therefore guaranteed to see the winner's finished
+content with no retry loop needed at all. Self-healing is retained, but is now safe to apply
+unconditionally the moment the target exists yet reads as `None`: since this function's own writes
+can no longer produce that state, observing it here can only mean genuinely pre-existing wreckage
+unrelated to a live racer (e.g. external corruption, or a leftover from a binary built before this
+fix) — never a live writer that self-heal might unlink out from under.
 
 ### `WalPosition` schema extension, not a new table or a sidecar file
 

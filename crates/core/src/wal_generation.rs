@@ -17,11 +17,9 @@
 //! Story 5 upgrade path and the Edge Cases section both require that a damaged-but-harmless
 //! artifact can never masquerade as a detected reset.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -54,13 +52,6 @@ pub fn read_generation(wal_dir: &Path) -> Option<String> {
     Some(record.generation)
 }
 
-/// Number of times a loser of the first-creation race re-reads the winner's file before giving
-/// up. The winner's write (a few dozen bytes, `create_new` + `write_all` + `sync_all`) completes
-/// far faster than this bound in practice; the retry only covers the brief window between the
-/// winner's `create_new` succeeding and its `write_all` landing.
-const ADOPT_RETRY_ATTEMPTS: u32 = 50;
-const ADOPT_RETRY_DELAY: Duration = Duration::from_millis(2);
-
 /// Ensures `wal_dir` has a recorded generation, minting a fresh one if none exists yet.
 ///
 /// Callers MUST only invoke this when the stream has no prior content (see `WalWriter::new`,
@@ -68,24 +59,34 @@ const ADOPT_RETRY_DELAY: Duration = Duration::from_millis(2);
 /// no generation file (a pre-#387 stream) must stay `None` rather than being retroactively
 /// minted (Out of Scope).
 ///
-/// Race-safe: two processes racing to create the same stream's directory for the first time
-/// (Edge Cases) both call this. Exactly one wins an atomic `O_EXCL` create; the loser does not
-/// error — it re-reads the winner's file and adopts that value, so both processes agree on one
-/// generation for the stream.
+/// Race-safe by construction, not by timing: two processes racing to create the same stream's
+/// directory for the first time (Edge Cases) both call this. Each writes its full, complete
+/// content to its own uniquely-named temp file in `wal_dir` and durably `sync_all`s it, *before*
+/// either ever touches the shared target path — then publishes atomically via `hard_link`, which
+/// fails with `AlreadyExists` for exactly one side. Because the target only ever comes into
+/// existence already fully written (nothing ever links a partial temp file), the loser's `read_generation`
+/// immediately after its failed `hard_link` is guaranteed to see the winner's complete content —
+/// there is no window, timing-dependent or otherwise, in which the target is observable but
+/// incomplete. This is a stronger guarantee than a `create_new`-then-write-in-place approach:
+/// that shape leaves a real window between file creation and content landing, and a prior version
+/// of this function tried to paper over it with a bounded read-retry loop that self-healed by
+/// deleting the target once the loser gave up waiting — which could not distinguish a winner that
+/// had genuinely crashed mid-write from one that was merely slow (e.g. fsync contention when many
+/// streams mint concurrently at process startup), so it could unlink a still-writing winner's
+/// file out from under it and mint a second, different generation for the same stream: a
+/// false-positive reset triggered by this function's own internals rather than an actual
+/// publisher reset. The hard-link design removes the need for any such heuristic.
 ///
-/// Self-healing on a crashed winner: if the race winner is killed between `create_new` succeeding
-/// and `write_all`/`sync_all` landing, the file exists but never becomes readable — a live
-/// winner's write of a few dozen bytes finishes far inside the retry window, so exhausting
-/// `ADOPT_RETRY_ATTEMPTS` is treated as proof the file is stale wreckage, not a still-in-flight
-/// write. That stale file is removed and minting is retried exactly once more; without this, a
-/// mid-write crash would otherwise brick the stream permanently — every future call would keep
-/// hitting the same unreadable file, and `WalWriter::new` would fail forever until a human
-/// deleted it by hand.
+/// Self-healing still applies to genuinely pre-existing wreckage at the target that did **not**
+/// come from a concurrent call to this function — e.g. an externally corrupted sidecar, or a
+/// leftover empty file from a binary built before this fix. Because our own writes can no longer
+/// produce that state, observing it here safely implies "not a live racer" and it is removed and
+/// re-minted once, rather than bricking the stream permanently.
 pub fn ensure_generation(wal_dir: &Path) -> Result<String, Error> {
     ensure_generation_impl(wal_dir, true)
 }
 
-fn ensure_generation_impl(wal_dir: &Path, self_heal_on_stale_file: bool) -> Result<String, Error> {
+fn ensure_generation_impl(wal_dir: &Path, self_heal_on_wreckage: bool) -> Result<String, Error> {
     if let Some(existing) = read_generation(wal_dir) {
         return Ok(existing);
     }
@@ -96,22 +97,34 @@ fn ensure_generation_impl(wal_dir: &Path, self_heal_on_stale_file: bool) -> Resu
     };
     let json = serde_json::to_string(&record)?;
     let path = generation_file_path(wal_dir);
+    let tmp_path = wal_dir.join(format!("{WAL_GENERATION_FILE}.tmp-{}", Uuid::new_v4()));
 
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            file.write_all(json.as_bytes())?;
-            file.sync_all()?;
+    let write_tmp = (|| -> Result<(), Error> {
+        let mut tmp_file = fs::File::create(&tmp_path)?;
+        tmp_file.write_all(json.as_bytes())?;
+        tmp_file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_tmp {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+
+    // Publish atomically: the target either ends up exactly this fully-written content, or this
+    // call learns someone else's fully-written content already won — never anything in between.
+    let link_result = fs::hard_link(&tmp_path, &path);
+    let _ = fs::remove_file(&tmp_path); // best-effort; the temp file's only job was the link above
+
+    match link_result {
+        Ok(()) => {
             sync_dir(wal_dir);
             Ok(generation)
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            for _ in 0..ADOPT_RETRY_ATTEMPTS {
-                if let Some(winner) = read_generation(wal_dir) {
-                    return Ok(winner);
-                }
-                thread::sleep(ADOPT_RETRY_DELAY);
+            if let Some(winner) = read_generation(wal_dir) {
+                return Ok(winner);
             }
-            if self_heal_on_stale_file {
+            if self_heal_on_wreckage {
                 let _ = fs::remove_file(&path);
                 return ensure_generation_impl(wal_dir, false);
             }
@@ -212,12 +225,12 @@ mod tests {
         assert_eq!(read_generation(tmp.path()), Some(g1));
     }
 
-    /// A file left behind by a winner that crashed between `create_new` succeeding and its
-    /// content ever landing (empty, in this simulation) must not permanently brick the stream:
-    /// after the adopt-retry window finds nothing readable, `ensure_generation` must self-heal
-    /// by removing the stale file and minting a fresh one, rather than erroring forever.
+    /// Wreckage at the target path that did not come from a concurrent call to this function
+    /// (e.g. externally corrupted, or left by a pre-fix binary — never something our own
+    /// hard_link-based mint can produce) must not permanently brick the stream: `ensure_generation`
+    /// must self-heal by removing it and minting a fresh one, rather than erroring forever.
     #[test]
-    fn ensure_generation_self_heals_a_stale_unreadable_file_from_a_crashed_winner() {
+    fn ensure_generation_self_heals_pre_existing_wreckage_not_caused_by_a_concurrent_mint() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(generation_file_path(tmp.path()), "").unwrap();
 
@@ -290,6 +303,7 @@ mod tests {
     #[test]
     fn concurrent_first_creation_exactly_one_generation_is_recorded() {
         use std::sync::{Arc, Barrier};
+        use std::thread;
 
         let tmp = tempfile::tempdir().unwrap();
         let wal_dir: Arc<PathBuf> = Arc::new(tmp.path().to_path_buf());
