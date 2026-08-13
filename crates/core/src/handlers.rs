@@ -2547,11 +2547,19 @@ async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Resul
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         let ts = chrono::Utc::now().to_rfc3339();
-        let (_, grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
-        // The forced rebind inside purge_groups can touch a foreign, non-purged group's
-        // RelatesToNode_ rows in the same transaction (ADR-0361); `grouped` already attributes
-        // each mutation to the group it actually modifies (issue #385 / ADR-0385) — flush each
-        // bucket to its own group's writer, never the default group's.
+        let (_, mut grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
+        // gid's own bucket (its own deletions, and any forced-rebind write that happened to
+        // land back on gid's own edges) is deliberately dropped, never flushed — this purge
+        // exists solely to clear room for the from_seq: 0 replay that immediately follows in
+        // the same knowledge_rebuild_from_wal call (below, in the caller), and that replay
+        // re-derives gid's entire state from gid's own WAL directory. Flushing these mutations
+        // into that same directory would inject them into the very history about to be
+        // replayed — turning a "recreate then re-delete" sequence into gid's own stream and
+        // silently discarding whatever the replay was supposed to reconstruct. Any mutation
+        // attributed to a *foreign* owning group is real, independent history for that group
+        // and is unaffected by gid's own replay — it must still be flushed to its own stream
+        // (issue #385 / ADR-0385).
+        grouped.remove(gid.as_str());
         for (group_id, mutations) in grouped {
             wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
         }
