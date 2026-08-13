@@ -32,8 +32,8 @@ path that had just changed — the wrong addition to bundle into a data-loss pat
 deferred follow-up, targeted at 0.13.0.
 
 **Entities already have a partial answer; edges do not.** `episode.rs`'s existing `retain(|e|
-!e.name.trim().is_empty())` (episode.rs:242) drops blank-name entities downstream of parsing, and
-folds its count into `entities_dropped_malformed` (episode.rs:44) so that a missing, `null`, or
+!e.name.trim().is_empty())` (episode.rs:254) drops blank-name entities downstream of parsing, and
+folds its count into `entities_dropped_malformed` (episode.rs:47) so that a missing, `null`, or
 empty-string `name` all produce the same observable outcome at the `knowledge_process_chunk`
 result (#342 FR-007). No entity-side gap remains today. Two real gaps remain:
 
@@ -41,7 +41,7 @@ result (#342 FR-007). No entity-side gap remains today. Two real gaps remain:
    `source_name`/`target_name` at least lands in `edges_dropped_unresolvable`
    (episode.rs:27); `fact` has no equivalent check anywhere in the pipeline. An edge whose fact is
    `""` is not useful to any consumer and should not reach storage.
-2. **The eval path bypasses the ingest path's filtering.** `crates/eval/src/runner.rs:312` consumes
+2. **The eval path bypasses the ingest path's filtering.** `crates/eval/src/runner.rs:319` consumes
    `outcome.result` directly (`.map(|outcome| outcome.result)`), never passing through
    `episode.rs`'s `retain`. The eval path therefore sees blank-name entities that the ingest path
    would silently drop, so eval scores are computed over a slightly different item set than
@@ -53,7 +53,7 @@ counting layers disjoint: parse-time salvage (`entities_dropped_malformed` /
 `edges_dropped_malformed`, from deserialize failure) and the downstream `retain` (folded into
 `entities_dropped_malformed`, from semantic emptiness) never count the same item, because
 parse-time salvage only removes items that failed to deserialize at all — an item with an
-empty-string name deserializes fine and is never touched at that layer (episode.rs:236-240's
+empty-string name deserializes fine and is never touched at that layer (episode.rs:243-252's
 comment states this invariant explicitly). If semantic validation moves to parse time — as the
 edge-level fix in this issue requires, and as extending it to catch entity names at the same layer
 would also imply — that invariant no longer holds automatically and must be re-established
@@ -173,24 +173,24 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   reasoning — see Assumptions.
 - **FR-003**: The validation added for FR-001 and FR-002 MUST apply uniformly at all four
   extraction-response parse sites — Anthropic entities, Anthropic edges, OAI-compatible entities,
-  OAI-compatible edges (`salvage_items` call sites, `crates/core/src/extractor.rs:1022`, `:1061`,
-  `:2093`, `:2122`) — per #342 FR-002's precedent of uniform behavior across both providers.
+  OAI-compatible edges (`salvage_items` call sites, `crates/core/src/extractor.rs:1034`, `:1073`,
+  `:2105`, `:2134`) — per #342 FR-002's precedent of uniform behavior across both providers.
 - **FR-004**: No item MUST ever be counted more than once toward `entities_dropped_malformed` or
   `edges_dropped_malformed`. If blank-field validation is implemented at parse time (inside
   `salvage_items` or equivalent), any existing downstream check that would otherwise also catch
-  the same condition — specifically `episode.rs`'s empty-name `retain` (episode.rs:242) — MUST be
+  the same condition — specifically `episode.rs`'s empty-name `retain` (episode.rs:254) — MUST be
   adjusted (e.g. reduced to a defensive no-op, or removed and its invariant re-verified by test)
   so the two layers remain disjoint by construction, re-establishing the invariant documented at
-  episode.rs:236-240. Once this move happens, a blank-name entity MUST still be counted exactly
+  episode.rs:243-252. Once this move happens, a blank-name entity MUST still be counted exactly
   once in `entities_dropped_malformed` — the counter itself does not change, only the layer that
-  populates it (episode.rs:242's `retain` today; parse time after this issue) — preserving #342
+  populates it (episode.rs:254's `retain` today; parse time after this issue) — preserving #342
   FR-007's guarantee that missing, `null`, and empty-string `name` all produce a single observable
   outcome at the `knowledge_process_chunk` result.
 - **FR-005**: The eval path (`crates/eval/src/runner.rs`) MUST score the same filtered item set
   that the ingest path would persist for the same extraction response — i.e., blank-name entities
   and blank-fact/blank-endpoint edges MUST be excluded from eval scoring exactly as they would be
   dropped from storage. This is a direct consequence of FR-004's placement choice, not independent
-  work: `runner.rs:312` consumes the extractor's output (`outcome.result`) directly, upstream of
+  work: `runner.rs:319` consumes the extractor's output (`outcome.result`) directly, upstream of
   `episode.rs`'s `retain`, which is exactly why blank-name entities reach eval today. Placing the
   blank-field check at parse time (inside `salvage_items`, per FR-004) puts it upstream of *both*
   `episode.rs` and `runner.rs`, so eval and ingest see the same filtered set with no `runner.rs`
@@ -206,7 +206,7 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
 - **FR-007**: The same spec file's Source References section MUST have "precedent tolerant
   behavior" corrected to "precedent-tolerant behavior".
 - **FR-008**: The same line's citation of `crates/core/src/episode.rs:218` for the empty-name
-  `retain` MUST be corrected to its current location (`episode.rs:242` as of this issue, or
+  `retain` MUST be corrected to its current location (`episode.rs:254` as of this issue, or
   wherever the `retain` lands after FR-004's change — whichever is accurate once this issue's
   changes are implemented).
 
@@ -216,10 +216,10 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   String`, `fact: String`, plus optional relation-type fields. This issue adds semantic
   (non-blank) validation to the three `String` fields.
 - **`ExtractedEntity`** (`crates/core/src/types.rs:125-137`): `name: String`, already validated
-  for blankness downstream (episode.rs:242); this issue changes *where* that validation happens
+  for blankness downstream (episode.rs:254); this issue changes *where* that validation happens
   (per FR-004) but not *whether* it happens.
-- **Drop counters** (`crates/core/src/episode.rs`): `entities_dropped_malformed` (:44),
-  `edges_dropped_malformed` (:49), `edges_dropped_unresolvable` (:27) — existing telemetry fields
+- **Drop counters** (`crates/core/src/episode.rs`): `entities_dropped_malformed` (:47),
+  `edges_dropped_malformed` (:56), `edges_dropped_unresolvable` (:27) — existing telemetry fields
   on the chunk-processing result that this issue's drops must be reflected in.
 
 ## Success Criteria *(mandatory)*
@@ -258,7 +258,7 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   rather than requiring separate `runner.rs` changes, per FR-005's own text). Research should
   confirm this before Plan commits to it.
 - `str::trim().is_empty()` is the intended blankness test, matching the existing entity-name check
-  at episode.rs:242 exactly (no new whitespace-detection semantics are introduced).
+  at episode.rs:254 exactly (no new whitespace-detection semantics are introduced).
 - This issue does not change entity-side *behavior* (blank names were already dropped and counted
   correctly before this issue); it only guards against a mechanism change (parse-time validation)
   regressing that existing correctness into a double count.
@@ -280,16 +280,16 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
 
 ## Source References
 
-- `crates/core/src/extractor.rs:963` — `salvage_items`, unchanged since #342, four call sites at
-  `:1022`, `:1061`, `:2093`, `:2122`.
-- `crates/core/src/episode.rs:242` — existing empty-name `retain`; disjointness invariant
-  documented at `:236-240`.
-- `crates/core/src/episode.rs:27` (`edges_dropped_unresolvable`), `:44`
-  (`entities_dropped_malformed`), `:49` (`edges_dropped_malformed`) — the three existing counters.
+- `crates/core/src/extractor.rs:973` — `salvage_items`, unchanged since #342, four call sites at
+  `:1034`, `:1073`, `:2105`, `:2134`.
+- `crates/core/src/episode.rs:254` — existing empty-name `retain`; disjointness invariant
+  documented at `:243-252`.
+- `crates/core/src/episode.rs:27` (`edges_dropped_unresolvable`), `:47`
+  (`entities_dropped_malformed`), `:56` (`edges_dropped_malformed`) — the three existing counters.
 - `crates/core/src/types.rs:151-167` — `ExtractedEdge` (`source_name`, `target_name`, `fact`, no
   `name` field).
 - `crates/core/src/types.rs:125-137` — `ExtractedEntity` (`name` field).
-- `crates/eval/src/runner.rs:312` — `.map(|outcome| outcome.result)`, the eval-path bypass FR-005
+- `crates/eval/src/runner.rs:319` — `.map(|outcome| outcome.result)`, the eval-path bypass FR-005
   addresses.
 - `specs/342-salvage-malformed-extracted-items/spec.md:29`, `:239` — the two text errors FR-006
   through FR-008 correct.
