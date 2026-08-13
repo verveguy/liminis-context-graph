@@ -87,10 +87,16 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // check needs a persisted cursor; ADR-0026's episode-cursor mechanism is retroactive but
     // requires a WAL scan, unsuitable for a per-`knowledge_status`-call hot path). A single
     // row with id: 'singleton' holds the current position; row-absence means "unknown".
+    // `generation` (issue #387) extends this same divergence rather than introducing a second
+    // one: it scopes `applied_seq` to the WAL stream generation it was recorded against, so a
+    // stream reset can be detected as "different generation" rather than misread as forward
+    // progress. See ADR-0387 for why this lives on the same row instead of a separate table or
+    // sidecar file.
     conn.raw_query(
         "CREATE NODE TABLE IF NOT EXISTS WalPosition (\
          id STRING PRIMARY KEY, \
-         applied_seq INT64\
+         applied_seq INT64, \
+         generation STRING\
          )",
     )?;
     Ok(())
@@ -223,6 +229,18 @@ pub fn migrate(conn: &Conn<'_>) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE MENTIONS ADD created_at TIMESTAMP") {
             eprintln!("liminis-context-graph: schema migrate: ALTER TABLE MENTIONS ADD created_at TIMESTAMP: {e} (non-fatal)");
+        }
+    }
+    // WalPosition gained `generation` (issue #387) to scope applied_seq to the stream
+    // generation it was recorded against. Probe via the singleton row id (PK index), which
+    // exists whenever any group has ever recorded a position; an absent row is not an error
+    // here, only a genuine binder failure (missing column) drives the ALTER.
+    if conn
+        .raw_query("MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.generation LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD generation STRING") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD generation STRING: {e} (non-fatal)");
         }
     }
 }
