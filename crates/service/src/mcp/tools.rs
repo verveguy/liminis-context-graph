@@ -39,7 +39,7 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (41 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (42 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -678,7 +678,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (11) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (12) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -905,6 +905,54 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_delete_by_group",
+            description: "Purge ALL data for one or more group_ids: Entity nodes, Episodic \
+                           nodes, and the RELATES_TO edges among them, leaving no orphans \
+                           (issue #361). Supersedes the ad hoc `knowledge_query_cypher` \
+                           `DELETE ... WHERE group_id = $g` workaround, which bypasses the WAL \
+                           and embedding invariants the structured write tools maintain. Never \
+                           deletes a RelatesToNode_ owned by a group outside the call, even when \
+                           it deletes an Entity that node is attached to via a hop relationship \
+                           — the foreign edge node survives, left `unbound` (issue #369's \
+                           binding_state), so a later rehydration can re-bind it with \
+                           knowledge_rebind_pointers. Purging a group_id with no data is a \
+                           no-op success, not an error. Does not reset the applied WAL position \
+                           (`applied_seq`), which is a DB-wide singleton, not per-group, until \
+                           #378 lands. Pass `dry_run: true` to preview per-group entity/edge/ \
+                           episode counts and the cross-group pointers that would become \
+                           `unbound` (broken out by owning group_id) without mutating anything \
+                           — `dry_run` takes precedence over `confirm` when both are set.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "Required, non-empty list of group_ids to purge \
+                                             completely. Unlike other tools' optional group_ids \
+                                             filter, this one is never defaulted — a destructive \
+                                             admin op must never silently guess which group to \
+                                             purge."
+                        },
+                        "confirm": {
+                            "type": "boolean", "default": false,
+                            "description": "Must be true to perform the real (mutating) purge. \
+                                             Ignored when dry_run is true."
+                        },
+                        "dry_run": {
+                            "type": "boolean", "default": false,
+                            "description": "Preview the purge's counts without mutating \
+                                             anything. Takes precedence over confirm."
+                        }
+                    },
+                    "required": ["group_ids"]
+                })
+            },
+        },
     ]
 }
 
@@ -945,11 +993,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_41_unique_tools() {
+    fn registry_has_42_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 41);
+        assert_eq!(r.len(), 42);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 41, "tool names must be unique");
+        assert_eq!(names.len(), 42, "tool names must be unique");
     }
 
     #[test]
@@ -959,7 +1007,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 14);
         assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 11);
+        assert_eq!(count(Scope::Admin), 12);
     }
 
     #[test]
