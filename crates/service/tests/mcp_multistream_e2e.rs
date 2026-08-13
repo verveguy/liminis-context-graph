@@ -27,7 +27,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 mod common;
-use common::wal_inspect::wal_snapshot;
+use common::wal_inspect::{group_ids_in, wal_snapshot};
 use common::{binary_path, spawn_stub_embedder, McpClient};
 
 fn structured<'a>(resp: &'a Value, context: &str) -> &'a Value {
@@ -91,13 +91,22 @@ fn wal_groups(client: &mut McpClient) -> Value {
     structured(&resp, "knowledge_status")["wal_groups"].clone()
 }
 
-/// Reads group `C`'s `RelatesToNode_` rows and returns, per edge name, the `binding_state` of
+/// One cross-group pointer's resolution target and current state, read off a `RelatesToNode_`
+/// row's `attributes.cross_group_pointers.<side>` JSON.
+#[derive(Debug, Clone)]
+struct PointerInfo {
+    source_group_id: String,
+    binding_state: String,
+}
+
+/// Reads group `C`'s `RelatesToNode_` rows and returns, per edge name, the [`PointerInfo`] of
 /// each cross-group pointer side (`"src"`/`"dst"`) it carries — the same shape the reference
-/// Python harness's `c_bindings()` produces. `handle_query_cypher` returns `rows` as
-/// `Vec<Vec<String>>` (stringified columns, not maps — confirmed against
-/// `crates/core/src/handlers.rs`), so each row is indexed positionally: `[0]` is `rn.name`,
-/// `[1]` is `rn.attributes` (a JSON string).
-fn c_bindings(client: &mut McpClient) -> HashMap<String, HashMap<String, String>> {
+/// Python harness's `c_bindings()` produces, plus `source_group_id` so callers can distinguish
+/// "a pointer into A" from "a pointer into B" rather than treating every pointer alike.
+/// `handle_query_cypher` returns `rows` as `Vec<Vec<String>>` (stringified columns, not maps —
+/// confirmed against `crates/core/src/handlers.rs`), so each row is indexed positionally: `[0]`
+/// is `rn.name`, `[1]` is `rn.attributes` (a JSON string).
+fn c_bindings(client: &mut McpClient) -> HashMap<String, HashMap<String, PointerInfo>> {
     let query = "MATCH (rn:RelatesToNode_) WHERE rn.group_id = 'C' RETURN rn.name, rn.attributes";
     let resp = client.call_tool("knowledge_query_cypher", json!({"query": query}));
     let result = structured(&resp, "query_cypher (c_bindings)");
@@ -120,11 +129,19 @@ fn c_bindings(client: &mut McpClient) -> HashMap<String, HashMap<String, String>
         let mut sides = HashMap::new();
         if let Some(obj) = pointers.as_object() {
             for (side, ptr) in obj {
-                let state = ptr["binding_state"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_string();
-                sides.insert(side.clone(), state);
+                sides.insert(
+                    side.clone(),
+                    PointerInfo {
+                        source_group_id: ptr["source_group_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                        binding_state: ptr["binding_state"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string(),
+                    },
+                );
             }
         }
         out.insert(name, sides);
@@ -132,10 +149,20 @@ fn c_bindings(client: &mut McpClient) -> HashMap<String, HashMap<String, String>
     out
 }
 
-fn any_unbound(bindings: &HashMap<String, HashMap<String, String>>) -> bool {
+/// The `binding_state` of every cross-group pointer (across all of C's edges, either side) that
+/// resolves into `into_group` specifically — e.g. `binding_states_into(&bindings, "A")` isolates
+/// pointers into A from pointers into B, so a regression that unbinds the wrong group's pointers
+/// still gets caught instead of passing a weaker "some pointer somewhere is unbound" check.
+fn binding_states_into<'a>(
+    bindings: &'a HashMap<String, HashMap<String, PointerInfo>>,
+    into_group: &str,
+) -> Vec<&'a str> {
     bindings
         .values()
-        .any(|sides| sides.values().any(|s| s == "unbound"))
+        .flat_map(|sides| sides.values())
+        .filter(|p| p.source_group_id == into_group)
+        .map(|p| p.binding_state.as_str())
+        .collect()
 }
 
 #[test]
@@ -207,6 +234,36 @@ fn multistream_layer_graph_composition() {
         json!({"source_group_id": "A", "endpoint_name": "A1"}),
         json!({"source_group_id": "B", "endpoint_name": "B1"}),
     );
+
+    // ── Edge case (FR-003): each group's own WAL stream contains only that group's own
+    //    mutations (#385) ─────────────────────────────────────────────────────────────────────
+    // This is the core "which group subdirectory received which mutations" property FR-003
+    // names directly — C's four cross-group edges (phase 3) and its A→B layer edge (phase 4)
+    // reference A's and B's entities as endpoints, but must still be attributed entirely to C's
+    // own stream, never leaking a foreign group_id into A's or B's directory (or vice versa).
+    let snapshot_after_writes = wal_snapshot(&wal_dir);
+    for group_id in ["A", "B", "C"] {
+        let dir = snapshot_after_writes.get(group_id).unwrap_or_else(|| {
+            panic!(
+                "group {group_id}'s WAL stream must exist on disk after phase 1-4 writes \
+                 (#385): dirs={:?}",
+                snapshot_after_writes.keys().collect::<Vec<_>>()
+            )
+        });
+        let lines: Vec<String> = dir
+            .jsonl_files
+            .iter()
+            .flat_map(|(_file, file_lines)| file_lines.iter().cloned())
+            .collect();
+        let ids = group_ids_in(&lines);
+        let foreign: Vec<&String> = ids.keys().filter(|g| g.as_str() != group_id).collect();
+        assert!(
+            foreign.is_empty(),
+            "group {group_id}'s own WAL stream must only contain mutations attributed to \
+             {group_id} itself (#385): found foreign group_id(s) embedded in its stream: \
+             {foreign:?} (full counts: {ids:?})"
+        );
+    }
 
     // ── Assertion (a): applied_seq advances per group after writes (#383) ───────────────────
     let groups_after_writes = wal_groups(&mut client);
@@ -305,11 +362,19 @@ fn multistream_layer_graph_composition() {
         );
     }
 
-    // ── Assertion (e): C's pointers into A go unbound after A's purge (#369) ────────────────
+    // ── Assertion (e): C's pointers into A go unbound after A's purge, while C's pointers into
+    //    B (never touched) stay bound (#369) ─────────────────────────────────────────────────
+    let into_a_after_purge = binding_states_into(&after_purge, "A");
     assert!(
-        any_unbound(&after_purge),
-        "C's pointers into A must be reported unbound after A's purge (#369): \
-         after_purge={after_purge:?}"
+        !into_a_after_purge.is_empty() && into_a_after_purge.iter().all(|s| *s == "unbound"),
+        "C's pointers into A must all be reported unbound after A's purge (#369): \
+         into_a={into_a_after_purge:?} after_purge={after_purge:?}"
+    );
+    let into_b_after_purge = binding_states_into(&after_purge, "B");
+    assert!(
+        !into_b_after_purge.is_empty() && into_b_after_purge.iter().all(|s| *s == "bound"),
+        "C's pointers into B must remain bound after A's purge, since B was never touched by \
+         it (#369/#385): into_b={into_b_after_purge:?} after_purge={after_purge:?}"
     );
 
     // ── Assertion (f): purging A's graph does not delete A's own WAL stream (#385) ──────────
@@ -329,39 +394,24 @@ fn multistream_layer_graph_composition() {
     // ── Phase 8: rebuild group A from its own WAL, replayed up to its pre-purge checkpoint ──
     let positions_before_rebuild = wal_groups(&mut client);
 
-    let rebuild = client.call_tool(
+    // A progress token makes `knowledge_rebuild_from_wal` run synchronously within this one
+    // request (see `handle_rebuild_from_wal`'s `is_streaming` branch in
+    // `crates/core/src/handlers.rs`) instead of returning a `job_id` to poll — the same pattern
+    // `mcp_real_corpus_admin_data_e2e.rs` uses for the identical call, with the same generous
+    // 600s timeout. This test's tiny (2-entity) dataset still completes in low single-digit
+    // seconds either way, but this removes the fixed short poll budget as a source of CI
+    // flakiness on a loaded/slow runner.
+    let rebuild_resp = client.call_tool_with_progress(
         "knowledge_rebuild_from_wal",
         json!({"group_id": "A", "from_seq": 0, "to_seq": cp_seq, "force_clear": true}),
+        "multistream-rebuild-A",
+        Duration::from_secs(600),
     );
-    let rebuild_result = structured(&rebuild, "rebuild_from_wal(A)");
-    let job_id = rebuild_result["job_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("rebuild_from_wal(A) returned no job_id: {rebuild_result}"))
-        .to_string();
-
-    let mut final_job_status = None;
-    for _ in 0..40 {
-        let poll = client.call_tool("knowledge_rebuild_status", json!({"job_id": job_id}));
-        let poll_result = structured(&poll, "rebuild_status(A)");
-        let status = poll_result["status"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if status == "completed" || status == "failed" {
-            final_job_status = Some((status, poll_result.clone()));
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-    let (final_status, final_result) = final_job_status.unwrap_or_else(|| {
-        panic!(
-            "rebuild_from_wal(A) job {job_id} did not reach a terminal status within the \
-             polling budget (SC-001)"
-        )
-    });
+    let rebuild_result = structured(&rebuild_resp, "rebuild_from_wal(A)");
     assert_eq!(
-        final_status, "completed",
-        "rebuild_from_wal(A) must complete successfully (#378): {final_result}"
+        rebuild_result["success"],
+        json!(true),
+        "rebuild_from_wal(A) must complete successfully (#378): {rebuild_result}"
     );
 
     let positions_after_rebuild = wal_groups(&mut client);
@@ -428,13 +478,31 @@ fn multistream_layer_graph_composition() {
     // being `#[ignore]`d, so the fix for #392 is a deliberate, visible diff to this test: once
     // fixed, `any_unbound(&after_rebind)` will be `false` and this assertion must be flipped to
     // require that (removing this TODO), not deleted.
+    let into_a_after_rebind = binding_states_into(&after_rebind, "A");
     assert!(
-        any_unbound(&after_rebind),
+        !into_a_after_rebind.is_empty() && into_a_after_rebind.iter().all(|s| *s == "unbound"),
         "TODO(#392): expected C's pointers into A to still be reported unbound after \
          knowledge_rebind_pointers, due to the known rebind_pointers staleness-gate bug (#392) \
          — if this assertion now fails, #392 may have been fixed upstream; flip this assertion \
-         to require every pointer be 'bound' and remove the TODO(#392) comment above. \
-         after_rebind={after_rebind:?}"
+         to require every pointer into A be 'bound' and remove the TODO(#392) comment above. \
+         into_a={into_a_after_rebind:?} after_rebind={after_rebind:?}"
+    );
+
+    // ── Edge case (FR-003 / Background #385): no mutation in this test ever targets the
+    //    default group, so no `liminis` WAL stream should exist on disk at all ────────────────
+    // This is #385's exact original failure mode: `delete_by_group` and `rebind_pointers`
+    // writing other groups' mutations into the default stream instead of the owning group's own
+    // — invisible from `knowledge_status` (which reports per-group positions, not directory
+    // existence) and invisible from every assertion above, which only inspect A/B/C's own
+    // streams and never check that a stray fourth stream didn't appear alongside them.
+    let final_snapshot = wal_snapshot(&wal_dir);
+    assert!(
+        !final_snapshot.contains_key(lcg_core::DEFAULT_GROUP_ID),
+        "no operation in this test targets the default group {:?}, so no WAL stream for it \
+         should exist on disk (#385): a stray directory there would mean a mutation belonging \
+         to A/B/C was misattributed to the default group instead. dirs={:?}",
+        lcg_core::DEFAULT_GROUP_ID,
+        final_snapshot.keys().collect::<Vec<_>>()
     );
 
     client.shutdown();
