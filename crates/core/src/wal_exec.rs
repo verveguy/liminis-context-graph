@@ -23,20 +23,24 @@ use crate::{
     wal::WalWriter,
 };
 
-/// Persists `group_id`'s advanced `applied_seq` after a `wal_flush_ungrouped` (or
-/// `wal_flush_chunk`) call returns `Some(seq)` — the same write-after-commit, non-fatal pattern
-/// `episode::add_episode` models for the chunk-flush path (issue #353 FR-002; per-group since
-/// #378). A no-op on `None`, matching FR-003's "leave it where it is" safe direction. Kept as a
-/// shared helper (issue #383) rather than inlined at each of `wal_flush_ungrouped`'s ~17 call
-/// sites, since the one thing that must never be copy-paste-wrong here is which `group_id`
-/// expression gets passed to `set_applied_seq` — a single call site makes that a type-level
-/// pairing with the flush call's own `group_id` argument instead of a repeated, error-prone
-/// literal.
-pub(crate) fn advance_applied_seq(conn: &Conn<'_>, group_id: &str, seq: Option<u64>) {
-    if let Some(seq) = seq {
-        if let Err(e) = conn.set_applied_seq(group_id, seq) {
+/// Persists `group_id`'s advanced WAL position after a `wal_flush_ungrouped` (or
+/// `wal_flush_chunk`) call returns `Some((seq, generation))` — the same write-after-commit,
+/// non-fatal pattern `episode::add_episode` models for the chunk-flush path (issue #353 FR-002;
+/// per-group since #378; generation-scoped by issue #387). A no-op on `None`, matching FR-003's
+/// "leave it where it is" safe direction. Kept as a shared helper (issue #383) rather than
+/// inlined at each of `wal_flush_ungrouped`'s ~17 call sites, since the one thing that must never
+/// be copy-paste-wrong here is which `group_id` expression gets passed to `set_wal_position` — a
+/// single call site makes that a type-level pairing with the flush call's own `group_id`
+/// argument instead of a repeated, error-prone literal.
+pub(crate) fn advance_wal_position(
+    conn: &Conn<'_>,
+    group_id: &str,
+    result: Option<(u64, Option<String>)>,
+) {
+    if let Some((seq, generation)) = result {
+        if let Err(e) = conn.set_wal_position(group_id, seq, generation.as_deref()) {
             eprintln!(
-                "liminis-context-graph: advance_applied_seq: failed to persist applied_seq={seq} for group {group_id} (non-fatal): {e}"
+                "liminis-context-graph: advance_wal_position: failed to persist applied_seq={seq} for group {group_id} (non-fatal): {e}"
             );
         }
     }
@@ -111,22 +115,23 @@ pub(crate) fn wal_flush_chunk(
 /// delete/merge/rebind/correction handlers, raw cypher (`handle_query_cypher`), and maintenance
 /// helpers (backfill, canonicalize, reprocess).
 ///
-/// Returns the highest `seq` actually, durably flushed across the batch (issue #383), or `None`
-/// if nothing was — an empty `mutations` list, every mutation's `with_chunk` call failing, or
-/// every mutation being filtered out by `WalWriter::log_mutation` (reads / index DDL) despite
-/// each call returning `Ok`.
+/// Returns the highest `seq` actually, durably flushed across the batch (issue #383) together
+/// with this stream's generation identity as observed on the writer at flush time (issue #387),
+/// or `None` if nothing was — an empty `mutations` list, every mutation's `with_chunk` call
+/// failing, or every mutation being filtered out by `WalWriter::log_mutation` (reads / index
+/// DDL) despite each call returning `Ok`.
 /// Unlike `wal_flush_chunk`'s all-or-nothing chunk, this loop does not abort on a per-mutation
 /// failure, so a later mutation's success after an earlier one's failure is still credited: the
 /// returned seq is a running max over every successfully-flushed mutation's seq (diffed
 /// per-mutation via `writer.global_seq()`, gated on that mutation's `Result::Ok`), not a single
-/// before/after diff across the whole batch. Callers use `Some(seq)` to advance `group_id`'s
-/// persisted `applied_seq` position exactly as `wal_flush_chunk`'s callers do; `None` means
+/// before/after diff across the whole batch. Callers use `Some((seq, generation))` to advance
+/// `group_id`'s persisted WAL position exactly as `wal_flush_chunk`'s callers do; `None` means
 /// "leave it where it is" — always the safe direction (FR-003).
 pub(crate) fn wal_flush_ungrouped(
     state: &AppState,
     group_id: &str,
     mutations: Vec<(String, serde_json::Value)>,
-) -> Option<u64> {
+) -> Option<(u64, Option<String>)> {
     if mutations.is_empty() {
         return None;
     }
@@ -153,7 +158,7 @@ pub(crate) fn wal_flush_ungrouped(
                     }
                 }
             }
-            max_seq
+            max_seq.map(|seq| (seq, writer.generation().map(str::to_string)))
         })
         .flatten()
 }
@@ -432,7 +437,8 @@ mod tests {
         let state = test_state(Some(wal_root.path().to_path_buf()));
 
         let mutations = vec![mutation("a"), mutation("b"), mutation("c")];
-        let seq = wal_flush_ungrouped(&state, "g1", mutations).expect("all 3 mutations must flush");
+        let (seq, _generation) =
+            wal_flush_ungrouped(&state, "g1", mutations).expect("all 3 mutations must flush");
         assert_eq!(
             seq, 2,
             "3 mutations assigned seqs 0,1,2 — the returned value must be the highest, 2"
@@ -441,7 +447,7 @@ mod tests {
 
     /// User Story 3 / SC-002: a write to one group must never move another group's position.
     /// `wal_flush_ungrouped` itself doesn't touch `applied_seq` (its callers do, via
-    /// `advance_applied_seq`), but the per-group isolation must already hold one layer down, at
+    /// `advance_wal_position`), but the per-group isolation must already hold one layer down, at
     /// the returned-seq/writer level — group B's writer and returned seq must be completely
     /// unaffected by group A's flush.
     #[test]
@@ -451,7 +457,7 @@ mod tests {
 
         // Establish group B's baseline position first.
         let b_seq_before = wal_flush_ungrouped(&state, "groupb", vec![mutation("b1")]);
-        assert_eq!(b_seq_before, Some(0));
+        assert_eq!(b_seq_before.map(|(seq, _)| seq), Some(0));
 
         // Flush several mutations into group A only.
         let a_seq = wal_flush_ungrouped(
@@ -459,7 +465,7 @@ mod tests {
             "groupa",
             vec![mutation("a1"), mutation("a2"), mutation("a3")],
         );
-        assert_eq!(a_seq, Some(2));
+        assert_eq!(a_seq.map(|(seq, _)| seq), Some(2));
 
         // Group B's own writer state (global_seq) must be byte-identical to before group A's
         // write — group A's activity must not leak into group B's sequence space at all.
@@ -485,7 +491,7 @@ mod tests {
         let state = test_state(Some(wal_root.path().to_path_buf()));
 
         // Mutation 1 succeeds normally, creating group g1's WAL file.
-        let seq1 = wal_flush_ungrouped(&state, "g1", vec![mutation("a")])
+        let (seq1, _gen1) = wal_flush_ungrouped(&state, "g1", vec![mutation("a")])
             .expect("first mutation must flush durably");
         assert_eq!(seq1, 0);
 
@@ -524,7 +530,7 @@ mod tests {
         let mut perms = std::fs::metadata(&wal_file).unwrap().permissions();
         perms.set_mode(0o644);
         std::fs::set_permissions(&wal_file, perms).unwrap();
-        let seq3 = wal_flush_ungrouped(&state, "g1", vec![mutation("c")])
+        let (seq3, _gen3) = wal_flush_ungrouped(&state, "g1", vec![mutation("c")])
             .expect("a later, genuinely successful flush must still succeed");
         assert!(
             seq3 > seq1,

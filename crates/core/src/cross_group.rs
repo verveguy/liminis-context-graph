@@ -7,6 +7,7 @@
 //! ADR-0051's commit-time drop). See `crate::pointer` for the persisted data model and
 //! `docs/adr/0369-resolvable-cross-group-pointers.md` for the full design.
 
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::{
@@ -236,7 +237,7 @@ pub fn create_cross_group_edge(
 
 /// Outcome counters for a [`rebind_pointers`] pass (FR-012-adjacent observability for the
 /// operation itself, distinct from `knowledge_status`'s aggregate `PointerStateCounts`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct RebindCounts {
     /// Pointers actually re-resolved (i.e. not skipped by the staleness gate).
     pub checked: u64,

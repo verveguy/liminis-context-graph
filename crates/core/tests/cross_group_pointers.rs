@@ -498,7 +498,7 @@ fn original_self_loop_layer_scenario_recovers_via_rebind_not_via_merge() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     let conn = db.connect().unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let x1 = make_entity("X1", GROUP_A, "2026-01-01 00:00:00");
     let y = make_entity("Y", GROUP_A, "2026-01-01 00:00:01");
@@ -562,7 +562,7 @@ fn original_self_loop_layer_scenario_recovers_via_rebind_not_via_merge() {
     // tombstoned row, since X1's own name is unchanged), and merged_into forwarding routes it
     // to Y — producing a genuine self-loop, invalidated by rebind_pointers's own derived logic,
     // not by anything A's merge did.
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_self_loop, 1);
 
@@ -594,7 +594,7 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
     let bob_v1 = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&alice).unwrap();
     conn.insert_entity(&bob_v1).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let edge = cross_group::create_cross_group_edge(
         &conn,
@@ -632,7 +632,7 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
     .unwrap();
     let bob_v2 = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob_v2).unwrap();
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
 
     // RelatesToNode_(layer) and its pointer attributes must have survived the purge untouched.
     let mid = conn
@@ -697,7 +697,7 @@ fn rebind_pointers_restores_hop_detached_without_uuid_change() {
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&alice).unwrap();
     conn.insert_entity(&bob).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let edge = cross_group::create_cross_group_edge(
         &conn,
@@ -730,7 +730,7 @@ fn rebind_pointers_restores_hop_detached_without_uuid_change() {
     );
 
     // New WAL activity on the source so the staleness gate lets rebind re-check this pointer.
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.checked, 1);
     assert_eq!(
@@ -794,7 +794,7 @@ fn rebind_pointers_is_idempotent_with_no_intervening_change() {
     )
     .unwrap();
 
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
     let (first, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(first.checked, 1);
     assert_eq!(first.bound, 1);
@@ -816,7 +816,7 @@ fn rebind_pointers_leaves_not_yet_hydrated_target_unbound() {
 
     let alice = make_entity("Alice", GROUP_LAYER, TS);
     conn.insert_entity(&alice).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let edge = cross_group::create_cross_group_edge(
         &conn,
@@ -846,7 +846,7 @@ fn rebind_pointers_leaves_not_yet_hydrated_target_unbound() {
 
     // Source is only partially rehydrated (Bob hasn't landed yet) — bump the position and
     // rebind anyway; must not corrupt state, must stay Unbound.
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.checked, 1);
     assert_eq!(counts.unbound, 1);
@@ -872,7 +872,7 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     let conn = db.connect().unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     // Both endpoints are foreign pointers into the *same* group, under the *same* name — that
     // name doesn't exist yet, so the edge starts fully Unbound on both sides (no self-loop is
@@ -913,7 +913,7 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
     // `merge_entities_inner`'s handling rather than a new policy.
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
 
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_self_loop, 1);
@@ -948,7 +948,7 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
 
     let alice = make_entity("Alice", GROUP_LAYER, TS);
     conn.insert_entity(&alice).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     // A second, currently-unbound edge (Bob doesn't exist yet) whose pointer will end up
     // resolving to the exact same entity a *stable* edge already connects to.
@@ -976,7 +976,7 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
     // will equal the position rebind runs at, so it's skipped regardless of row-scan order).
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let stable_edge = cross_group::create_cross_group_edge(
         &conn,
         CreateCrossGroupEdgeParams {
@@ -1075,7 +1075,7 @@ fn rebind_pointers_invalidates_duplicate_from_two_sided_resolve_with_no_orphaned
     let carol = make_entity("Carol", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
     conn.insert_entity(&carol).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
     let stable_edge = cross_group::create_cross_group_edge(
         &conn,
         CreateCrossGroupEdgeParams {
@@ -1378,7 +1378,7 @@ fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
 
     let alice = make_entity("Alice", GROUP_LAYER, TS);
     conn.insert_entity(&alice).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let edge = cross_group::create_cross_group_edge(
         &conn,
@@ -1404,7 +1404,7 @@ fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
 
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.bound, 1);
 
@@ -1427,7 +1427,7 @@ fn rebind_from_unbound_to_bound_creates_direct_compat_rel() {
 
     let alice = make_entity("Alice", GROUP_LAYER, TS);
     conn.insert_entity(&alice).unwrap();
-    conn.set_applied_seq(GROUP_A, 1).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None).unwrap();
 
     let edge = cross_group::create_cross_group_edge(
         &conn,
@@ -1463,7 +1463,7 @@ fn rebind_from_unbound_to_bound_creates_direct_compat_rel() {
 
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
-    conn.set_applied_seq(GROUP_A, 2).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None).unwrap();
     let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.bound, 1);
 

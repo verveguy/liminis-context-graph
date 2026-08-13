@@ -202,6 +202,11 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
             ..Default::default()
         })
         .unwrap();
+        // Group L's own applied position is set to a deliberately different, larger value than
+        // anything group B will reach — proves the rebind below keys off B's position, not L's
+        // (a bug that compared against the wrong group's position would still "work" here only
+        // by accident if it happened to use a smaller number).
+        conn.set_wal_position(GROUP_LAYER, 999, None).unwrap();
     }
 
     let wal_dir = TempDir::new().unwrap();
@@ -274,8 +279,8 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
         let db2 = state.db.load_full().unwrap();
         let conn = db2.connect().unwrap();
         (
-            conn.get_applied_seq(GROUP_LAYER).unwrap(),
-            conn.get_applied_seq(GROUP_B).unwrap(),
+            conn.get_wal_position(GROUP_LAYER).unwrap().applied_seq,
+            conn.get_wal_position(GROUP_B).unwrap().applied_seq,
         )
     };
     assert_eq!(
