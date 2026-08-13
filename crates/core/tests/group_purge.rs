@@ -436,7 +436,7 @@ async fn purge_preserves_foreign_relates_to_node_and_leaves_pointer_unbound() {
     // to zero unbound (SC-008's "returns to zero once the purged group is rehydrated").
     let bob_v2 = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob_v2).unwrap();
-    let rebind_counts = cross_group::rebind_pointers_forced(&conn, GROUP_A, TS).unwrap();
+    let (rebind_counts, _) = cross_group::rebind_pointers_forced(&conn, GROUP_A, TS).unwrap();
     assert_eq!(rebind_counts.bound, 1);
 
     let status_rehydrated =
@@ -846,7 +846,7 @@ fn purged_entity_name_no_longer_resolves_via_name_index() {
         "name index should resolve the entity before purge"
     );
 
-    let counts = group_purge::purge_groups(&conn, &[GROUP_A], TS, false).unwrap();
+    let (counts, _) = group_purge::purge_groups(&conn, &[GROUP_A], TS, false).unwrap();
     assert_eq!(counts.groups[0].entities, 1);
 
     assert!(

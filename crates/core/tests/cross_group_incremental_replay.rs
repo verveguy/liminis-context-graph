@@ -317,11 +317,11 @@ async fn rebind_after_incremental_replay_is_idempotent_on_second_pass() {
         let db2 = state.db.load_full().unwrap();
         let conn = db2.connect().unwrap();
         let ts = "2026-05-22T00:00:00Z";
-        let first = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
+        let (first, _) = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
         assert_eq!(first.checked, 1);
         assert_eq!(first.bound, 1);
 
-        let second = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
+        let (second, _) = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
         assert_eq!(
             second.checked, 0,
             "a second pass with no intervening WAL activity on group B must skip the \

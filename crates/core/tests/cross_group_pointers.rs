@@ -563,7 +563,7 @@ fn original_self_loop_layer_scenario_recovers_via_rebind_not_via_merge() {
     // to Y — producing a genuine self-loop, invalidated by rebind_pointers's own derived logic,
     // not by anything A's merge did.
     conn.set_applied_seq(GROUP_A, 2).unwrap();
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_self_loop, 1);
 
     // rebind_pointers's self-loop branch invalidates the row without touching its
@@ -655,7 +655,7 @@ fn rebind_pointers_follows_reextraction_to_new_uuid_generation() {
         "pointer's cached uuid is still stale until rebind runs"
     );
 
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.checked, 1);
     assert_eq!(counts.bound, 1);
 
@@ -731,7 +731,7 @@ fn rebind_pointers_restores_hop_detached_without_uuid_change() {
 
     // New WAL activity on the source so the staleness gate lets rebind re-check this pointer.
     conn.set_applied_seq(GROUP_A, 2).unwrap();
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.checked, 1);
     assert_eq!(
         counts.bound, 1,
@@ -795,13 +795,13 @@ fn rebind_pointers_is_idempotent_with_no_intervening_change() {
     .unwrap();
 
     conn.set_applied_seq(GROUP_A, 1).unwrap();
-    let first = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (first, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(first.checked, 1);
     assert_eq!(first.bound, 1);
 
     // No intervening WAL activity — applied_seq unchanged — so the staleness gate should
     // make this a true no-op.
-    let second = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (second, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(second.checked, 0);
     assert_eq!(second.bound, 0);
     assert_eq!(second.unbound, 0);
@@ -847,7 +847,7 @@ fn rebind_pointers_leaves_not_yet_hydrated_target_unbound() {
     // Source is only partially rehydrated (Bob hasn't landed yet) — bump the position and
     // rebind anyway; must not corrupt state, must stay Unbound.
     conn.set_applied_seq(GROUP_A, 2).unwrap();
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.checked, 1);
     assert_eq!(counts.unbound, 1);
 
@@ -915,7 +915,7 @@ fn rebind_pointers_invalidates_self_loop_reusing_merge_style_handling() {
     conn.insert_entity(&bob).unwrap();
     conn.set_applied_seq(GROUP_A, 2).unwrap();
 
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_self_loop, 1);
 
     assert!(conn.get_edge_by_uuid(&edge.uuid).unwrap().is_none());
@@ -1007,7 +1007,7 @@ fn rebind_pointers_invalidates_duplicate_reusing_has_directed_edge() {
     // bound_at_seq(2) >= current(2) skips it entirely — it cannot be touched by this pass,
     // regardless of candidate-scan order. dup_edge's bound_at_seq(1) < current(2) is
     // reprocessed and finds Bob now resolves, colliding with the still-intact stable_edge.
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_duplicate, 1);
 
     // The duplicate is invalidated, not left dangling with a wrong resolution.
@@ -1109,7 +1109,7 @@ fn rebind_pointers_invalidates_duplicate_from_two_sided_resolve_with_no_orphaned
     // bound_at_seq(1) >= current(1) skips it entirely. dup_edge's bound_at_seq is None, so it is
     // always reprocessed: both its Src and Dst pointers resolve to Bound (Bob, Carol) within
     // this single pass, colliding with stable_edge's already-real hops.
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.invalidated_duplicate, 1);
 
     assert!(conn.get_edge_by_uuid(&dup_edge.uuid).unwrap().is_none());
@@ -1405,7 +1405,7 @@ fn rebind_from_unbound_to_bound_makes_edge_reappear_in_traversal() {
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
     conn.set_applied_seq(GROUP_A, 2).unwrap();
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.bound, 1);
 
     // Now visible via the same repeated traversal query.
@@ -1464,7 +1464,7 @@ fn rebind_from_unbound_to_bound_creates_direct_compat_rel() {
     let bob = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob).unwrap();
     conn.set_applied_seq(GROUP_A, 2).unwrap();
-    let counts = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
     assert_eq!(counts.bound, 1);
 
     assert_eq!(

@@ -8,7 +8,12 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use crate::{cross_group, db::Conn, error::Error, pointer};
+use crate::{
+    cross_group,
+    db::{Conn, GroupedMutations},
+    error::Error,
+    pointer,
+};
 
 /// Per-group counts of what a purge removes (or, under `dry_run`, would remove).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -54,12 +59,22 @@ pub struct PurgeCounts {
 /// partway through rolls back the whole call, never leaving a partial purge). After commit, the
 /// `NameIndex` is rebuilt (FR-004); a rebuild failure is non-fatal and instead marks the index
 /// untrusted, matching the existing `[NAME INDEX]` fallback pattern used elsewhere.
+///
+/// Returns, alongside [`PurgeCounts`], a [`GroupedMutations`] bucketing every mutation this call
+/// issued by the `group_id` it actually modified (issue #385 FR-002): each purged group's own
+/// deletions under its own `group_id`, and any forced-rebind write under the *owning* group of
+/// the `RelatesToNode_` row it touched — never a shared default-group bucket. Draining happens at
+/// per-group boundaries *inside* this transaction, but that only moves data from `Conn`'s
+/// in-memory buffer into this in-memory map; nothing is flushed to disk here. The caller must
+/// flush each bucket to its own group's WAL stream only after this function returns `Ok` (i.e.
+/// strictly after `COMMIT`) — on `Err`, the accumulated map is simply dropped, mirroring the
+/// pre-#385 behavior where a rolled-back transaction's `executed_mutations` were never drained.
 pub fn purge_groups(
     conn: &Conn,
     group_ids: &[&str],
     ts: &str,
     dry_run: bool,
-) -> Result<PurgeCounts, Error> {
+) -> Result<(PurgeCounts, GroupedMutations), Error> {
     let groups = group_ids
         .iter()
         .map(|gid| -> Result<GroupPurgeCounts, Error> {
@@ -76,29 +91,47 @@ pub fn purge_groups(
     let unbound_impacts = compute_unbound_impacts(conn, group_ids)?;
 
     if dry_run {
-        return Ok(PurgeCounts {
-            dry_run: true,
-            groups,
-            unbound_impacts,
-        });
+        return Ok((
+            PurgeCounts {
+                dry_run: true,
+                groups,
+                unbound_impacts,
+            },
+            GroupedMutations::new(),
+        ));
     }
 
     conn.exec_transaction_control("BEGIN TRANSACTION")?;
+    let mut grouped: GroupedMutations = GroupedMutations::new();
     let mutate_result = (|| -> Result<(), Error> {
-        // Same-group edges first (deletes only RelatesToNode_ owned by a purged group — FR-008
-        // never touches a foreign group's RelatesToNode_, by construction of the WHERE clause).
-        conn.delete_relates_to_by_group_ids(group_ids)?;
-        // Entities next: DETACH DELETE destroys any hop into a *surviving* foreign
-        // RelatesToNode_ (another group's cross-group edge pointing into this group), which is
-        // exactly what leaves that edge in need of rebinding below.
-        conn.delete_entities_by_group_ids(group_ids)?;
-        conn.delete_episodics_by_group_ids(group_ids)?;
-        // Forced rebind per purged group: every pointer whose source_group_id matches is
-        // guaranteed to resolve Unbound now (the group is empty), which both drops the stale
-        // hop and records binding_state: Unbound so knowledge_status reflects it immediately
-        // (FR-009/FR-010/SC-008).
+        // Per-group delete loop (issue #385): each group_id gets its own singleton-slice calls,
+        // drained immediately after, so every DETACH DELETE line is attributable to exactly one
+        // group's stream (FR-001) — a single `WHERE group_id IN [...]` call spanning several
+        // purge targets can't be split back apart after the fact. Within one group's turn, the
+        // ordering is unchanged from the pre-#385 batched form and for the same reason: same-group
+        // edges first (deletes only RelatesToNode_ owned by this group — FR-008 never touches a
+        // foreign group's RelatesToNode_, by construction of the WHERE clause); entities next
+        // (DETACH DELETE destroys any hop into a *surviving* foreign RelatesToNode_, i.e. another
+        // group's cross-group edge pointing into this group, which is exactly what leaves that
+        // edge in need of rebinding below); episodics last.
         for gid in group_ids {
-            cross_group::rebind_pointers_forced(conn, gid, ts)?;
+            let single = [*gid];
+            conn.delete_relates_to_by_group_ids(&single)?;
+            conn.delete_entities_by_group_ids(&single)?;
+            conn.delete_episodics_by_group_ids(&single)?;
+            conn.drain_mutations_into(&mut grouped, gid);
+        }
+        // Forced rebind per purged group, as a separate pass (not interleaved with the delete
+        // loop above): every pointer whose source_group_id matches is guaranteed to resolve
+        // Unbound now (the group is empty), which both drops the stale hop and records
+        // binding_state: Unbound so knowledge_status reflects it immediately (FR-009/FR-010/
+        // SC-008). Each call's own GroupedMutations is merged in, keyed by the *owning* group of
+        // the RelatesToNode_ row it touched (issue #385 FR-002) — not necessarily `gid` itself.
+        for gid in group_ids {
+            let (_, rebind_grouped) = cross_group::rebind_pointers_forced(conn, gid, ts)?;
+            for (owning_gid, mutations) in rebind_grouped {
+                grouped.entry(owning_gid).or_default().extend(mutations);
+            }
         }
         Ok(())
     })();
@@ -119,11 +152,14 @@ pub fn purge_groups(
         conn.mark_name_index_untrusted();
     }
 
-    Ok(PurgeCounts {
-        dry_run: false,
-        groups,
-        unbound_impacts,
-    })
+    Ok((
+        PurgeCounts {
+            dry_run: false,
+            groups,
+            unbound_impacts,
+        },
+        grouped,
+    ))
 }
 
 /// Counts, per owning `group_id` (the `RelatesToNode_`'s own `rn.group_id`, i.e. the layer
