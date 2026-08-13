@@ -167,6 +167,29 @@ pub struct ExtractedEdge {
     pub original_relation_type: Option<String>,
 }
 
+/// A structurally valid (deserializes fine) item can still be semantically empty — e.g. a
+/// `String` field that is present but blank or whitespace-only. `salvage_items` (extractor.rs)
+/// checks this in addition to deserializability, per #347. The blankness test is `str::trim()
+/// .is_empty()`, matching `episode.rs`'s pre-existing empty-name `retain` exactly — no new
+/// whitespace semantics are introduced.
+pub trait RequiredFieldsPresent {
+    fn is_well_formed(&self) -> bool;
+}
+
+impl RequiredFieldsPresent for ExtractedEntity {
+    fn is_well_formed(&self) -> bool {
+        !self.name.trim().is_empty()
+    }
+}
+
+impl RequiredFieldsPresent for ExtractedEdge {
+    fn is_well_formed(&self) -> bool {
+        !self.source_name.trim().is_empty()
+            && !self.target_name.trim().is_empty()
+            && !self.fact.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PassageResult {
     pub uuid: String,
@@ -249,5 +272,102 @@ mod tests {
         let round_tripped: ExtractionOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.entities_dropped_malformed, 2);
         assert_eq!(round_tripped.edges_dropped_malformed, 1);
+    }
+
+    fn valid_entity() -> ExtractedEntity {
+        ExtractedEntity {
+            name: "Apollo 11".to_string(),
+            entity_type: "Mission".to_string(),
+            summary: String::new(),
+            original_entity_type: None,
+        }
+    }
+
+    fn valid_edge() -> ExtractedEdge {
+        ExtractedEdge {
+            source_name: "Apollo 11".to_string(),
+            target_name: "Moon".to_string(),
+            fact: "Apollo 11 landed on the Moon".to_string(),
+            relation_type: None,
+            valid_at: None,
+            invalid_at: None,
+            original_relation_type: None,
+        }
+    }
+
+    #[test]
+    fn well_formed_entity_passes() {
+        assert!(valid_entity().is_well_formed());
+    }
+
+    #[test]
+    fn entity_blank_name_fails() {
+        let entity = ExtractedEntity {
+            name: "".to_string(),
+            ..valid_entity()
+        };
+        assert!(!entity.is_well_formed());
+    }
+
+    #[test]
+    fn entity_whitespace_only_name_fails() {
+        let entity = ExtractedEntity {
+            name: "   \t\n".to_string(),
+            ..valid_entity()
+        };
+        assert!(!entity.is_well_formed());
+    }
+
+    #[test]
+    fn well_formed_edge_passes() {
+        assert!(valid_edge().is_well_formed());
+    }
+
+    #[test]
+    fn edge_blank_fact_fails() {
+        let edge = ExtractedEdge {
+            fact: "".to_string(),
+            ..valid_edge()
+        };
+        assert!(!edge.is_well_formed());
+    }
+
+    #[test]
+    fn edge_whitespace_only_fact_fails() {
+        let edge = ExtractedEdge {
+            fact: "   ".to_string(),
+            ..valid_edge()
+        };
+        assert!(!edge.is_well_formed());
+    }
+
+    #[test]
+    fn edge_blank_source_name_fails() {
+        let edge = ExtractedEdge {
+            source_name: "".to_string(),
+            ..valid_edge()
+        };
+        assert!(!edge.is_well_formed());
+    }
+
+    #[test]
+    fn edge_blank_target_name_fails() {
+        let edge = ExtractedEdge {
+            target_name: "".to_string(),
+            ..valid_edge()
+        };
+        assert!(!edge.is_well_formed());
+    }
+
+    #[test]
+    fn edge_two_blank_fields_still_single_false() {
+        // Both `fact` and `source_name` blank simultaneously — the predicate returns one
+        // bool, so the caller can only ever count this as a single drop, never two.
+        let edge = ExtractedEdge {
+            source_name: "".to_string(),
+            fact: "".to_string(),
+            ..valid_edge()
+        };
+        assert!(!edge.is_well_formed());
     }
 }
