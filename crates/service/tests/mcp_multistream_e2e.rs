@@ -379,20 +379,22 @@ fn multistream_layer_graph_composition() {
         );
     }
 
-    // ── Edge case (FR-003): B's and C's on-disk WAL directories are untouched by A's
+    // ── Edge case (FR-003): B's on-disk WAL directory is untouched by A's
     //    dry-run/purge/rebuild (#385) ─────────────────────────────────────────────────────────
+    // Only B qualifies as "not party to the operation" here (matching the spec's own edge-case
+    // example): C holds cross-group pointers *into* A, so purging A legitimately mutates C's own
+    // RelatesToNode_ records (flipping binding_state to unbound) — a correct write to C's own
+    // stream, not #385-style misattribution. B has no pointers into A, so its stream must be
+    // byte-identical before and after.
     let snapshot_after_rebuild = wal_snapshot(&wal_dir);
-    for group_id in ["B", "C"] {
-        assert_eq!(
-            snapshot_before_purge.get(group_id).map(|d| &d.jsonl_files),
-            snapshot_after_rebuild.get(group_id).map(|d| &d.jsonl_files),
-            "group {group_id}'s on-disk WAL stream must be byte-identical before and after \
-             A's dry-run/purge/rebuild sequence, since {group_id} was never party to any of \
-             those operations (#385): the bug this guards against is a mutation belonging to \
-             one group landing in another group's stream on disk, which is invisible from \
-             knowledge_status alone"
-        );
-    }
+    assert_eq!(
+        snapshot_before_purge.get("B").map(|d| &d.jsonl_files),
+        snapshot_after_rebuild.get("B").map(|d| &d.jsonl_files),
+        "group B's on-disk WAL stream must be byte-identical before and after A's \
+         dry-run/purge/rebuild sequence, since B was never party to any of those operations \
+         (#385): the bug this guards against is a mutation belonging to one group landing in \
+         another group's stream on disk, which is invisible from knowledge_status alone"
+    );
 
     // ── Assertion (i): A's entities are restored by replaying A's own WAL (#378) ────────────
     let nodes_a = client.call_tool("knowledge_get_nodes_by_group", json!({"group_ids": ["A"]}));
