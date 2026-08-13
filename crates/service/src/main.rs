@@ -511,11 +511,24 @@ async fn bootstrap_app_state(
         }
     };
 
-    // Derive wal_dir using the same env-var logic as AppState::from_env.
-    // Available before DB open so startup recovery can use it without AppState.
-    let startup_wal_dir = std::path::PathBuf::from(
+    // Derive the WAL root using the same env-var logic as AppState::from_env (issue #378:
+    // LCG_WAL_DIR now names a root containing one subdirectory per group_id, not a single
+    // shared stream). Available before DB open so startup recovery can use it without AppState.
+    let startup_wal_root = std::path::PathBuf::from(
         lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").unwrap_or_else(|_| ".lcg/wal".to_string()),
     );
+    if let Err(e) = lcg_core::wal_group::migrate_wal_root_if_needed(&startup_wal_root) {
+        eprintln!(
+            "liminis-context-graph: wal root migration failed for {startup_wal_root:?} \
+             (non-fatal, existing single-stream layout is left in place): {e}"
+        );
+    }
+    // Startup eagerly backfills/recovers only the default group (issue #378) — matching
+    // FR-009's "single-group instance unchanged" scope; other groups are backfilled lazily on
+    // first touch (e.g. via knowledge_status's per-group map).
+    let startup_wal_dir =
+        lcg_core::wal_group::group_wal_dir(&startup_wal_root, lcg_core::DEFAULT_GROUP_ID)
+            .unwrap_or_else(|_| startup_wal_root.join(lcg_core::DEFAULT_GROUP_ID));
 
     // Attempt to open database and initialize schema. Classify errors:
     //   - Recoverable (lbug WAL corruption, permission denied, missing file) → autonomous
@@ -542,9 +555,11 @@ async fn bootstrap_app_state(
                 // (every boot after the first). Non-fatal: a missed backfill just leaves
                 // knowledge_status reporting null (safe — the documented action is a full
                 // rebuild), not a reason to fail startup.
-                if let Err(e) =
-                    lcg_core::recovery::backfill_applied_seq_if_absent(&conn, &startup_wal_dir)
-                {
+                if let Err(e) = lcg_core::recovery::backfill_applied_seq_if_absent(
+                    &conn,
+                    lcg_core::DEFAULT_GROUP_ID,
+                    &startup_wal_dir,
+                ) {
                     eprintln!(
                         "liminis-context-graph: startup: applied_seq backfill failed (non-fatal): {e}"
                     );
@@ -576,6 +591,7 @@ async fn bootstrap_app_state(
                     let recovery_result = tokio::task::spawn_blocking(move || {
                         lcg_core::recovery::run_full_recovery_sequence(
                             &recovery_db_path,
+                            lcg_core::DEFAULT_GROUP_ID,
                             &recovery_wal_dir,
                             embedding_dim,
                             recovery_sink,

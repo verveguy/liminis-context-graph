@@ -220,8 +220,13 @@ pub(crate) fn group_has_no_content(conn: &crate::db::Conn<'_>, group_id: &str) -
 /// 2. Derive episode-cursor (`from_seq`) from the last episode in the DB.
 /// 3. Drop FTS indexes, replay WAL mutations at `seq >= from_seq`, rebuild indexes.
 /// 4. Return recovered `Db` with report.
+///
+/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root) — today this
+/// autonomous corruption self-heal only ever targets the default group (issue #378), matching
+/// the startup backfill's own scope.
 pub fn run_full_recovery_sequence(
     db_path: &str,
+    group_id: &str,
     wal_dir: &Path,
     embedding_dim: usize,
     sink: Arc<dyn TelemetrySink>,
@@ -279,7 +284,7 @@ pub fn run_full_recovery_sequence(
         (0u64, CursorReason::NoEpisodes)
     } else {
         let conn = db.connect()?;
-        let (seq, reason) = derive_episode_cursor(&conn, wal_dir)?;
+        let (seq, reason) = derive_episode_cursor(&conn, group_id, wal_dir)?;
         drop(conn);
         sink.emit(TelemetryEvent::WalAutoRecovery {
             ts_ms: now_ms(),
@@ -338,7 +343,7 @@ pub fn run_full_recovery_sequence(
         // every self-heal even though a better value was just computed. Non-fatal: a missed
         // write doesn't undo the recovery that just succeeded.
         if let Some(seq) = stats.last_committed_seq {
-            if let Err(e) = conn.set_applied_seq(seq) {
+            if let Err(e) = conn.set_applied_seq(group_id, seq) {
                 eprintln!(
                     "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} (non-fatal): {e}"
                 );
@@ -491,7 +496,7 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 0);
         assert_eq!(reason, CursorReason::NoEpisodes);
     }
@@ -518,7 +523,7 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 5, "ep-different-uuid");
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 0);
         assert_eq!(reason, CursorReason::UuidNotFound);
     }
@@ -546,7 +551,7 @@ mod tests {
         write_wal_mentions_line(&wal_dir, "0001.jsonl", 15, ep_uuid);
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         // Must take the minimum seq across all matches
         assert_eq!(seq, 10);
         assert_eq!(reason, CursorReason::UuidMatch);
@@ -574,7 +579,7 @@ mod tests {
         write_wal_line(&wal_dir, "0002.jsonl", 7, ep_uuid);
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 7);
         assert_eq!(reason, CursorReason::UuidMatch);
     }
@@ -591,9 +596,9 @@ mod tests {
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(0));
     }
 
     /// A DB with zero `Episodic` nodes but a surviving `Entity` (e.g. every episode was
@@ -613,10 +618,10 @@ mod tests {
         }
         let conn = db.connect().unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq().unwrap(),
+            conn.get_applied_seq("g").unwrap(),
             None,
             "an Entity-only DB (no episodes) must not be backfilled to 0 — its position is \
              genuinely unknown, not known-empty"
@@ -645,9 +650,9 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 41, ep_uuid);
 
         let conn = db.connect().unwrap();
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(41));
     }
 
     /// SC-007: a populated DB whose last episode's uuid is absent from the WAL leaves
@@ -672,9 +677,9 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 5, "ep-completely-different");
 
         let conn = db.connect().unwrap();
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), None);
+        assert_eq!(conn.get_applied_seq("g").unwrap(), None);
     }
 
     /// A DB that already has a persisted position must not be overwritten by backfill —
@@ -687,10 +692,83 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(99).unwrap();
+        conn.set_applied_seq("g", 99).unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(99));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(99));
+    }
+
+    /// FR-010 (issue #378): in a multi-group database, backfilling group A must never derive
+    /// its position from group B's episode, even when B's episode is the more recently created
+    /// one. A's backfill must degrade to `null` (its own episode set is empty), not silently
+    /// borrow B's cursor.
+    #[test]
+    fn backfill_does_not_borrow_a_different_groups_episode() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            // Only group B has an episode; group A has none.
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-group-b', name: 'Test', group_id: 'group-b', \
+                 created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 7, "ep-group-b");
+
+        let conn = db.connect().unwrap();
+        backfill_applied_seq_if_absent(&conn, "group-a", &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "group-b", &wal_dir).unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("group-a").unwrap(),
+            None,
+            "group-a has no episodes of its own and must not borrow group-b's cursor"
+        );
+        assert_eq!(
+            conn.get_applied_seq("group-b").unwrap(),
+            Some(7),
+            "group-b's own backfill must still derive its own cursor correctly"
+        );
+    }
+
+    /// FR-010: `derive_episode_cursor` itself, called directly for group A, must not pick up
+    /// group B's more-recently-created episode uuid.
+    #[test]
+    fn derive_episode_cursor_is_scoped_to_its_own_group() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-a', name: 'A', group_id: 'group-a', \
+                 created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+            // Created later than group-a's episode, so an unscoped lookup would prefer this one.
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-b', name: 'B', group_id: 'group-b', \
+                 created_at: timestamp('2026-06-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-06-01')})",
+            )
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 3, "ep-a");
+        write_wal_line(&wal_dir, "0001.jsonl", 9, "ep-b");
+
+        let conn = db.connect().unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "group-a", &wal_dir).unwrap();
+        assert_eq!(seq, 3, "must derive group-a's own episode's seq, not group-b's later one");
+        assert_eq!(reason, CursorReason::UuidMatch);
     }
 }

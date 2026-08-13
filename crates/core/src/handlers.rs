@@ -2270,6 +2270,9 @@ async fn handle_rebuild_from_wal(
         if !dry_run {
             ib.store(false, Ordering::Release);
         }
+        // bg_gid is moved into the spawn_blocking closure below; keep a clone for the
+        // post-completion job_result JSON.
+        let bg_gid_for_result = bg_gid.clone();
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
@@ -2396,7 +2399,7 @@ async fn handle_rebuild_from_wal(
                             duration_ms: replay_started_at.elapsed().as_millis() as u64,
                         });
                         let mut job_result = json!({
-                            "group_id": bg_gid,
+                            "group_id": bg_gid_for_result,
                             "from_seq": from_seq,
                             "to_seq": to_seq,
                             "mutations_replayed": stats.lines_replayed,
@@ -2862,8 +2865,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     };
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_wal = group_id.clone();
     let _guard = state.write_lock.write().await;
     let (entity_uuid_out, created) = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -2924,7 +2927,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3002,8 +3005,8 @@ async fn handle_assert_relationship(
     };
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_wal = group_id.clone();
     let _guard = state.write_lock.write().await;
     let (edge_uuid, created) = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -3059,7 +3062,7 @@ async fn handle_assert_relationship(
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3284,8 +3287,8 @@ async fn handle_reprocess_entity_types(
     {
         let batch = batch.to_vec();
         let db = load_db(&state)?;
-        let wal_writer_c = Arc::clone(&state.wal_writer);
-        let sink_c = Arc::clone(&state.sink);
+        let state_c = Arc::clone(&state);
+        let gid_c = group_id.clone();
         let ancestor_map_c = ancestor_map.clone();
         let _write_guard = state.write_lock.write().await;
 
@@ -3304,7 +3307,7 @@ async fn handle_reprocess_entity_types(
         let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
             Ok(count)
         })
         .await??;
@@ -3325,8 +3328,7 @@ async fn handle_reprocess_entity_types(
         }
 
         let db = load_db(&state)?;
-        let wal_writer_d = Arc::clone(&state.wal_writer);
-        let sink_d = Arc::clone(&state.sink);
+        let state_d = Arc::clone(&state);
         let group_id_d = group_id.clone();
         let ancestor_map_d = ancestor_map.clone();
         let progress_tx_d = progress_tx.clone();
@@ -3387,7 +3389,7 @@ async fn handle_reprocess_entity_types(
                     restamped_count += 1;
                 }
             }
-            wal_exec::wal_flush_ungrouped(&wal_writer_d, conn.drain_mutations(), &sink_d);
+            wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
             Ok(restamped_count)
         })
         .await??
@@ -3538,7 +3540,14 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    let wal_dir = state.wal_dir.clone();
+    // This whole-instance recovery path targets the default group's own WAL directory (issue
+    // #378) — matching the startup backfill's scope, and consistent with FR-009 single-group
+    // parity for the common case.
+    let wal_dir = state
+        .wal_root
+        .as_deref()
+        .map(|root| wal_group::group_wal_dir(root, DEFAULT_GROUP_ID))
+        .transpose()?;
     let embedding_dim = state.embedder.dim();
 
     let result = match strategy.as_str() {
@@ -3647,10 +3656,13 @@ async fn handle_knowledge_recover_full(
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    let wal_dir = state
-        .wal_dir
-        .clone()
+    // This autonomous corruption self-heal targets the default group's own WAL directory (issue
+    // #378), matching the startup backfill's scope (FR-009 single-group parity).
+    let wal_root = state
+        .wal_root
+        .as_deref()
         .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+    let wal_dir = wal_group::group_wal_dir(wal_root, DEFAULT_GROUP_ID)?;
     let embedding_dim = state.embedder.dim();
     let sink = Arc::clone(&state.sink);
 
@@ -3660,7 +3672,13 @@ async fn handle_knowledge_recover_full(
     state.indices_built.store(false, Ordering::Release);
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::recovery::run_full_recovery_sequence(&db_path, &wal_dir, embedding_dim, sink)
+        crate::recovery::run_full_recovery_sequence(
+            &db_path,
+            DEFAULT_GROUP_ID,
+            &wal_dir,
+            embedding_dim,
+            sink,
+        )
     })
     .await?;
 

@@ -24,6 +24,7 @@ use crate::{
     error::Error,
     ontology::{normalize_relation_type, Ontology},
     wal_exec,
+    wal_group::DEFAULT_GROUP_ID,
 };
 
 const DEFAULT_EMBEDDING_THRESHOLD: f32 = 0.7;
@@ -412,8 +413,7 @@ pub async fn canonicalize_relations(
             .collect();
 
         let db_d = Arc::clone(&db);
-        let wal_writer = Arc::clone(&state.wal_writer);
-        let sink = Arc::clone(&state.sink);
+        let state_c = Arc::clone(&state);
         let _write_guard = state.write_lock.write().await;
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let conn = db_d.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -465,7 +465,10 @@ pub async fn canonicalize_relations(
             }
             // Always flush whatever succeeded before any failure — the DB already committed
             // those mutations; skipping the WAL flush would leave DB/WAL out of sync.
-            wal_exec::wal_flush_ungrouped(&wal_writer, conn.drain_mutations(), &sink);
+            // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
+            // routes through the default group's writer, a documented limitation rather than
+            // mutation-level attribution.
+            wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
             exec_result
         })
         .await??;
