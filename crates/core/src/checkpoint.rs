@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Error;
 use crate::telemetry::now_ms;
 use crate::wal::{wal_max_seq, wal_min_seq};
+use crate::wal_generation;
 
 /// Subdirectory of the WAL directory holding the checkpoint store. Invisible to the WAL file
 /// scans in `wal.rs`/`replay.rs`/`recovery.rs`/`handlers.rs`, which are all non-recursive and
@@ -46,6 +47,15 @@ pub const CHECKPOINTS_DIR_NAME: &str = ".checkpoints";
 /// limitation, not a defect. `wal_min_seq`/`wal_max_seq` are included so an operator can diagnose
 /// *why* a checkpoint is unreachable (in particular, distinguish a missing prefix from simply
 /// being past the WAL's current tip).
+///
+/// Issue #387 adds a second, independent reachability condition: `wal_generation` records the
+/// WAL stream generation this checkpoint was taken against, and `reachable` is additionally
+/// `false` whenever that differs from the stream's current on-disk generation — a checkpoint
+/// against a generation that's since been reset is never restorable, regardless of where its
+/// `seq` falls relative to `wal_min_seq`/`wal_max_seq`. The field is named `wal_generation`
+/// (serialized as `"generation"`) rather than plain `generation` to avoid confusion with this
+/// module's own, unrelated per-name file-generation numbering (`g1.create.json`, `g2...`, see the
+/// module doc) used purely for retention bookkeeping.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointInfo {
     pub name: String,
@@ -53,6 +63,8 @@ pub struct CheckpointInfo {
     pub reachable: bool,
     pub wal_min_seq: Option<u64>,
     pub wal_max_seq: Option<u64>,
+    #[serde(rename = "generation")]
+    pub wal_generation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,6 +72,13 @@ struct CreateRecord {
     name: String,
     seq: Option<u64>,
     created_at_ms: u64,
+    /// The WAL stream generation (issue #387) this checkpoint was taken against, resolved by the
+    /// caller (`handle_wal_mark_create`) from `wal_generation::read_generation` at record time —
+    /// this module has no database access and does not derive it itself, matching `seq`'s
+    /// existing caller-resolved contract. `None` for a pre-#387 stream with no generation on
+    /// record yet (Story 5) — never treated as a mismatch by `list`'s reachability check.
+    #[serde(default)]
+    wal_generation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,8 +146,16 @@ fn parse_generation(file_name: &str) -> Option<u32> {
 /// [`Error::CheckpointDuplicateName`] if `name` currently identifies an active (non-deleted)
 /// checkpoint (FR-006). O(1) relative to WAL size — this function never lists or reads `.jsonl`
 /// files (FR-003). `seq` must already be resolved by the caller (`None`/`Some(n)` per FR-005);
-/// this module has no database access and does not decide that value itself.
-pub fn create(wal_dir: &Path, name: &str, seq: Option<u64>) -> Result<(), Error> {
+/// this module has no database access and does not decide that value itself. `wal_generation`
+/// (issue #387) is likewise caller-resolved (`handle_wal_mark_create` reads it via
+/// `wal_generation::read_generation`) — `None` is a legitimate value, not an error, for a
+/// pre-#387 stream with no generation recorded yet.
+pub fn create(
+    wal_dir: &Path,
+    name: &str,
+    seq: Option<u64>,
+    wal_generation: Option<&str>,
+) -> Result<(), Error> {
     validate_name(name)?;
     let dir = name_dir(wal_dir, name);
     fs::create_dir_all(&dir)?;
@@ -151,6 +178,7 @@ pub fn create(wal_dir: &Path, name: &str, seq: Option<u64>) -> Result<(), Error>
         name: name.to_string(),
         seq,
         created_at_ms: now_ms(),
+        wal_generation: wal_generation.map(str::to_string),
     };
     let json = serde_json::to_string(&record)?;
     let path = create_file_path(&dir, target);
@@ -236,6 +264,14 @@ fn sync_dir(dir: &Path) {
 /// still does not detect a gap in the *middle* of `[wal_min_seq, wal_max_seq]` (accepted,
 /// documented FR-009 limitation). Returns an empty list, not an error, if the store doesn't exist
 /// yet (no checkpoints ever created).
+///
+/// Issue #387 ANDs in a second, independent reachability condition: a checkpoint recorded against
+/// a `wal_generation` that differs from the stream's current on-disk generation is unreachable,
+/// regardless of where its `seq` falls in `[wal_min_seq, wal_max_seq]` — a reset can easily
+/// republish a longer stream whose bounds would otherwise look perfectly reachable. Either side
+/// being `None` (checkpoint predates #387, or the stream currently has no generation recorded) is
+/// never treated as a mismatch (FR-009) — only two genuinely different, both-known generations
+/// disqualify a checkpoint.
 pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
     let dir = checkpoints_dir(wal_dir);
     let entries = match fs::read_dir(&dir) {
@@ -245,6 +281,7 @@ pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
 
     let min = wal_min_seq(wal_dir)?;
     let max = wal_max_seq(wal_dir)?;
+    let current_generation = wal_generation::read_generation(wal_dir);
 
     let mut results = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
@@ -277,16 +314,21 @@ pub fn list(wal_dir: &Path) -> Result<Vec<CheckpointInfo>, Error> {
         else {
             continue;
         };
-        let reachable = match record.seq {
+        let bounds_reachable = match record.seq {
             None => true,
             Some(n) => matches!((min, max), (Some(0), Some(hi)) if n <= hi),
         };
+        let generation_mismatched = wal_generation::generation_mismatch(
+            record.wal_generation.as_deref(),
+            current_generation.as_deref(),
+        );
         results.push(CheckpointInfo {
             name,
             seq: record.seq,
-            reachable,
+            reachable: bounds_reachable && !generation_mismatched,
             wal_min_seq: min,
             wal_max_seq: max,
+            wal_generation: record.wal_generation,
         });
     }
     results.sort_by(|a, b| a.name.cmp(&b.name));
@@ -327,7 +369,7 @@ mod tests {
     #[test]
     fn create_then_list_reports_the_new_checkpoint() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "pre-migration", Some(42)).unwrap();
+        create(tmp.path(), "pre-migration", Some(42), None).unwrap();
 
         let checkpoints = list(tmp.path()).unwrap();
         assert_eq!(checkpoints.len(), 1);
@@ -338,7 +380,7 @@ mod tests {
     #[test]
     fn create_with_none_seq_is_always_reachable() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "fresh", None).unwrap();
+        create(tmp.path(), "fresh", None, None).unwrap();
 
         let checkpoints = list(tmp.path()).unwrap();
         assert_eq!(checkpoints.len(), 1);
@@ -349,9 +391,9 @@ mod tests {
     #[test]
     fn create_rejects_duplicate_active_name() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "pre-migration", Some(1)).unwrap();
+        create(tmp.path(), "pre-migration", Some(1), None).unwrap();
 
-        let err = create(tmp.path(), "pre-migration", Some(2)).unwrap_err();
+        let err = create(tmp.path(), "pre-migration", Some(2), None).unwrap_err();
         assert!(matches!(err, Error::CheckpointDuplicateName(n) if n == "pre-migration"));
 
         // The original record must be unmodified.
@@ -363,7 +405,7 @@ mod tests {
     #[test]
     fn create_rejects_invalid_name_without_touching_disk() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = create(tmp.path(), "bad name", Some(1)).unwrap_err();
+        let err = create(tmp.path(), "bad name", Some(1), None).unwrap_err();
         assert!(matches!(err, Error::CheckpointInvalidName(_)));
         assert!(list(tmp.path()).unwrap().is_empty());
     }
@@ -371,7 +413,7 @@ mod tests {
     #[test]
     fn delete_removes_from_list_and_never_rewrites_create_record() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "pre-migration", Some(5)).unwrap();
+        create(tmp.path(), "pre-migration", Some(5), None).unwrap();
         let name_d = name_dir(tmp.path(), "pre-migration");
         let create_contents_before = fs::read_to_string(create_file_path(&name_d, 1)).unwrap();
 
@@ -396,7 +438,7 @@ mod tests {
     #[test]
     fn delete_of_already_deleted_name_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "pre-migration", Some(1)).unwrap();
+        create(tmp.path(), "pre-migration", Some(1), None).unwrap();
         delete(tmp.path(), "pre-migration").unwrap();
 
         let err = delete(tmp.path(), "pre-migration").unwrap_err();
@@ -406,10 +448,10 @@ mod tests {
     #[test]
     fn create_after_delete_reuses_the_name_as_a_new_generation() {
         let tmp = tempfile::tempdir().unwrap();
-        create(tmp.path(), "pre-migration", Some(1)).unwrap();
+        create(tmp.path(), "pre-migration", Some(1), None).unwrap();
         delete(tmp.path(), "pre-migration").unwrap();
 
-        create(tmp.path(), "pre-migration", Some(99)).unwrap();
+        create(tmp.path(), "pre-migration", Some(99), None).unwrap();
 
         let checkpoints = list(tmp.path()).unwrap();
         assert_eq!(checkpoints.len(), 1);
@@ -469,8 +511,8 @@ mod tests {
         write_wal_line(wal_dir, "0000.jsonl", 0);
         write_wal_line(wal_dir, "0001.jsonl", 5);
 
-        create(wal_dir, "covered", Some(5)).unwrap();
-        create(wal_dir, "uncovered", Some(999)).unwrap();
+        create(wal_dir, "covered", Some(5), None).unwrap();
+        create(wal_dir, "uncovered", Some(999), None).unwrap();
 
         let checkpoints = list(wal_dir).unwrap();
         let covered = checkpoints.iter().find(|c| c.name == "covered").unwrap();
@@ -496,7 +538,7 @@ mod tests {
         write_wal_line(wal_dir, "0000.jsonl", 500);
         write_wal_line(wal_dir, "0001.jsonl", 1000);
 
-        create(wal_dir, "mid-range", Some(700)).unwrap();
+        create(wal_dir, "mid-range", Some(700), None).unwrap();
 
         let checkpoints = list(wal_dir).unwrap();
         assert_eq!(checkpoints.len(), 1);
@@ -526,7 +568,7 @@ mod tests {
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
-                    create(&wal_dir, "race", Some(i as u64))
+                    create(&wal_dir, "race", Some(i as u64), None)
                 })
             })
             .collect();
@@ -537,5 +579,84 @@ mod tests {
 
         let checkpoints = list(&wal_dir).unwrap();
         assert_eq!(checkpoints.len(), 1);
+    }
+
+    /// FR-007: a checkpoint recorded against generation `G1` must report unreachable once the
+    /// stream's current on-disk generation has moved to `G2` — even though its `seq` still falls
+    /// comfortably inside `[wal_min_seq, wal_max_seq]`, the exact "looks like forward progress,
+    /// isn't" scenario this issue exists to close.
+    #[test]
+    fn list_reports_unreachable_after_a_generation_mismatch_even_within_bounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal_dir = tmp.path();
+        write_wal_line(wal_dir, "0000.jsonl", 0);
+        write_wal_line(wal_dir, "0001.jsonl", 10);
+
+        create(wal_dir, "pre-reset", Some(5), Some("g1")).unwrap();
+
+        let checkpoints = list(wal_dir).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(
+            checkpoints[0].reachable,
+            "sanity: reachable while the stream has no current generation recorded yet"
+        );
+
+        // Simulate a reset: write the generation sidecar directly (independent of WalWriter) to a
+        // different value than what the checkpoint recorded.
+        std::fs::write(
+            wal_dir.join(".wal-generation.json"),
+            r#"{"generation":"g2"}"#,
+        )
+        .unwrap();
+
+        let checkpoints = list(wal_dir).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(
+            !checkpoints[0].reachable,
+            "a checkpoint whose recorded generation differs from the stream's current \
+             generation must be unreachable, regardless of seq bounds: {:?}",
+            checkpoints[0]
+        );
+        assert_eq!(checkpoints[0].wal_generation.as_deref(), Some("g1"));
+    }
+
+    /// FR-009 (Story 5): a checkpoint recorded with no generation (pre-#387) against a stream
+    /// that also currently has no generation recorded must stay reachable — the "unknown" state
+    /// is never treated as a mismatch on either side.
+    #[test]
+    fn list_does_not_treat_absent_generation_on_either_side_as_a_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal_dir = tmp.path();
+        write_wal_line(wal_dir, "0000.jsonl", 0);
+        write_wal_line(wal_dir, "0001.jsonl", 5);
+
+        // No generation sidecar on disk, and no generation supplied at create time.
+        create(wal_dir, "legacy", Some(3), None).unwrap();
+
+        let checkpoints = list(wal_dir).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(
+            checkpoints[0].reachable,
+            "absent generation on both sides must never be treated as a mismatch"
+        );
+        assert_eq!(checkpoints[0].wal_generation, None);
+    }
+
+    /// A checkpoint recorded with a generation, checked against a stream that currently has none
+    /// recorded (e.g. the sidecar was lost) must also not be treated as a mismatch — only two
+    /// genuinely known, differing values disqualify a checkpoint.
+    #[test]
+    fn list_does_not_treat_a_missing_current_generation_as_a_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal_dir = tmp.path();
+        write_wal_line(wal_dir, "0000.jsonl", 0);
+        write_wal_line(wal_dir, "0001.jsonl", 5);
+
+        create(wal_dir, "recorded", Some(3), Some("g1")).unwrap();
+        // No .wal-generation.json written — the stream currently reports no generation.
+
+        let checkpoints = list(wal_dir).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert!(checkpoints[0].reachable);
     }
 }

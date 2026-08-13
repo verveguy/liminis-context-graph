@@ -3399,7 +3399,9 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
+        let pos = conn.get_wal_position("liminis").unwrap();
+        assert_eq!(pos.applied_seq, None);
+        assert_eq!(pos.generation, None);
     }
 
     /// Basic write/read round-trip.
@@ -3410,12 +3412,12 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("liminis", 41).unwrap();
+        conn.set_wal_position("liminis", 41, None).unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(41));
+        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(41));
     }
 
-    /// `set_applied_seq` MERGEs onto that group's row rather than inserting a duplicate —
+    /// `set_wal_position` MERGEs onto that group's row rather than inserting a duplicate —
     /// repeated writes (the normal case, once per chunk) must overwrite, not accumulate.
     #[test]
     fn set_applied_seq_overwrites_existing_value() {
@@ -3424,10 +3426,10 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("liminis", 5).unwrap();
-        conn.set_applied_seq("liminis", 12).unwrap();
+        conn.set_wal_position("liminis", 5, None).unwrap();
+        conn.set_wal_position("liminis", 12, None).unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(12));
+        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(12));
         assert_eq!(
             conn.count_nodes("WalPosition").unwrap(),
             1,
@@ -3444,13 +3446,13 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("liminis", 0).unwrap();
+        conn.set_wal_position("liminis", 0, None).unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(0));
+        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(0));
     }
 
-    /// `get_applied_seq`/`set_applied_seq` must not themselves become a WAL line — using
-    /// `raw_query`/`exec_params` here would make `applied_seq` immediately stale by the write
+    /// `get_wal_position`/`set_wal_position` must not themselves become a WAL line — using
+    /// `raw_query`/`exec_params` here would make the position immediately stale by the write
     /// that just recorded it.
     #[test]
     fn set_applied_seq_does_not_record_into_executed_mutations() {
@@ -3460,11 +3462,11 @@ mod applied_seq_tests {
         conn.init_schema(4).unwrap();
         conn.drain_mutations(); // discard init_schema's own recorded DDL
 
-        conn.set_applied_seq("liminis", 7).unwrap();
+        conn.set_wal_position("liminis", 7, None).unwrap();
 
         assert!(
             conn.drain_mutations().is_empty(),
-            "set_applied_seq must never record into executed_mutations"
+            "set_wal_position must never record into executed_mutations"
         );
     }
 
@@ -3478,17 +3480,17 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("group-a", 10).unwrap();
-        conn.set_applied_seq("group-b", 0).unwrap();
+        conn.set_wal_position("group-a", 10, None).unwrap();
+        conn.set_wal_position("group-b", 0, None).unwrap();
 
-        assert_eq!(conn.get_applied_seq("group-a").unwrap(), Some(10));
+        assert_eq!(conn.get_wal_position("group-a").unwrap().applied_seq, Some(10));
         assert_eq!(
-            conn.get_applied_seq("group-b").unwrap(),
+            conn.get_wal_position("group-b").unwrap().applied_seq,
             Some(0),
             "group-b's own Some(0) must not be shadowed by group-a's higher seq"
         );
         assert_eq!(
-            conn.get_applied_seq("group-c").unwrap(),
+            conn.get_wal_position("group-c").unwrap().applied_seq,
             None,
             "a third, never-written group must still report unknown, not either sibling's value"
         );
@@ -3499,14 +3501,79 @@ mod applied_seq_tests {
         );
 
         // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
-        conn.set_applied_seq("group-a", 25).unwrap();
-        assert_eq!(conn.get_applied_seq("group-b").unwrap(), Some(0));
+        conn.set_wal_position("group-a", 25, None).unwrap();
+        assert_eq!(conn.get_wal_position("group-b").unwrap().applied_seq, Some(0));
+    }
+
+    /// issue #387 (FR-004): the generation persisted alongside `applied_seq` must round-trip
+    /// exactly, and a later write with a different generation must overwrite the prior one — the
+    /// same single-row MERGE semantics `applied_seq` itself already has, extended to the new
+    /// column.
+    #[test]
+    fn generation_round_trips_and_overwrites_with_applied_seq() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_wal_position("liminis", 5, Some("gen-a")).unwrap();
+        let pos = conn.get_wal_position("liminis").unwrap();
+        assert_eq!(pos.applied_seq, Some(5));
+        assert_eq!(pos.generation.as_deref(), Some("gen-a"));
+
+        conn.set_wal_position("liminis", 9, Some("gen-b")).unwrap();
+        let pos = conn.get_wal_position("liminis").unwrap();
+        assert_eq!(pos.applied_seq, Some(9));
+        assert_eq!(
+            pos.generation.as_deref(),
+            Some("gen-b"),
+            "a later write must overwrite the prior generation, not accumulate or ignore it"
+        );
+    }
+
+    /// Writing `generation: None` over a row that previously had `Some` must clear it, not leave
+    /// the prior value orphaned — `set_wal_position` always writes both fields together.
+    #[test]
+    fn generation_none_write_clears_a_previously_recorded_value() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_wal_position("liminis", 5, Some("gen-a")).unwrap();
+        conn.set_wal_position("liminis", 6, None).unwrap();
+
+        let pos = conn.get_wal_position("liminis").unwrap();
+        assert_eq!(pos.applied_seq, Some(6));
+        assert_eq!(pos.generation, None);
+    }
+
+    /// Two different groups' generations must be independent, matching `applied_seq`'s existing
+    /// per-group isolation (SC-008 groundwork).
+    #[test]
+    fn different_groups_have_independent_generations() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_wal_position("group-a", 10, Some("gen-a")).unwrap();
+        conn.set_wal_position("group-b", 10, Some("gen-b")).unwrap();
+
+        assert_eq!(
+            conn.get_wal_position("group-a").unwrap().generation.as_deref(),
+            Some("gen-a")
+        );
+        assert_eq!(
+            conn.get_wal_position("group-b").unwrap().generation.as_deref(),
+            Some("gen-b")
+        );
     }
 
     /// A genuine pre-378 database's `WalPosition {id: 'singleton'}` row (simulated here by
     /// writing under the literal "singleton" id, exactly as pre-378 `set_applied_seq` did) must
     /// be carried forward to the default group's own row, and the legacy row removed — otherwise
-    /// an upgraded binary's `get_applied_seq("liminis")` finds nothing and a known position
+    /// an upgraded binary's `get_wal_position("liminis")` finds nothing and a known position
     /// silently degrades to "unknown" (issue #378 FR-001/FR-009).
     #[test]
     fn migrate_legacy_singleton_wal_position_carries_value_forward_and_removes_legacy_row() {
@@ -3515,18 +3582,18 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("singleton", 41).unwrap();
+        conn.set_wal_position("singleton", 41, None).unwrap();
 
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("liminis").unwrap(),
+            conn.get_wal_position("liminis").unwrap().applied_seq,
             Some(41),
             "the legacy position must be visible under the default group's own id post-migration"
         );
         assert_eq!(
-            conn.get_applied_seq("singleton").unwrap(),
+            conn.get_wal_position("singleton").unwrap().applied_seq,
             None,
             "the legacy row itself must be gone, not merely superseded"
         );
@@ -3549,7 +3616,7 @@ mod applied_seq_tests {
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
+        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, None);
         assert_eq!(conn.count_nodes("WalPosition").unwrap(), 0);
     }
 
@@ -3563,18 +3630,18 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("singleton", 5).unwrap();
-        conn.set_applied_seq("liminis", 99).unwrap();
+        conn.set_wal_position("singleton", 5, None).unwrap();
+        conn.set_wal_position("liminis", 99, None).unwrap();
 
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("liminis").unwrap(),
+            conn.get_wal_position("liminis").unwrap().applied_seq,
             Some(99),
             "an already-present group row must win over the stale legacy value"
         );
-        assert_eq!(conn.get_applied_seq("singleton").unwrap(), None);
+        assert_eq!(conn.get_wal_position("singleton").unwrap().applied_seq, None);
     }
 
     /// A second call (e.g. a subsequent boot) after the legacy row has already been migrated
@@ -3586,13 +3653,13 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq("singleton", 7).unwrap();
+        conn.set_wal_position("singleton", 7, None).unwrap();
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
 
-        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(7));
+        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(7));
         assert_eq!(conn.count_nodes("WalPosition").unwrap(), 1);
     }
 }

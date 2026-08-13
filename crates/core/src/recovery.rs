@@ -660,7 +660,7 @@ mod tests {
 
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(0));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(0));
     }
 
     /// A DB with zero `Episodic` nodes but a surviving `Entity` (e.g. every episode was
@@ -683,7 +683,7 @@ mod tests {
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("g").unwrap(),
+            conn.get_wal_position("g").unwrap().applied_seq,
             None,
             "an Entity-only DB (no episodes) must not be backfilled to 0 — its position is \
              genuinely unknown, not known-empty"
@@ -714,7 +714,7 @@ mod tests {
         let conn = db.connect().unwrap();
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(41));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(41));
     }
 
     /// SC-007: a populated DB whose last episode's uuid is absent from the WAL leaves
@@ -741,7 +741,7 @@ mod tests {
         let conn = db.connect().unwrap();
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), None);
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, None);
     }
 
     /// A DB that already has a persisted position must not be overwritten by backfill —
@@ -754,11 +754,11 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        conn.set_applied_seq("g", 99).unwrap();
+        conn.set_wal_position("g", 99, None).unwrap();
 
         backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(99));
+        assert_eq!(conn.get_wal_position("g").unwrap().applied_seq, Some(99));
     }
 
     /// FR-010 (issue #378): in a multi-group database, backfilling group A must never derive
@@ -799,12 +799,12 @@ mod tests {
         backfill_applied_seq_if_absent(&conn, "group-b", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq("group-a").unwrap(),
+            conn.get_wal_position("group-a").unwrap().applied_seq,
             None,
             "group-a has no episodes of its own and must not borrow group-b's cursor"
         );
         assert_eq!(
-            conn.get_applied_seq("group-b").unwrap(),
+            conn.get_wal_position("group-b").unwrap().applied_seq,
             Some(7),
             "group-b's own backfill must still derive its own cursor correctly"
         );
