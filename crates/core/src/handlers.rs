@@ -2650,7 +2650,8 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
             // A corrections file can address entities across several groups in one call, with
             // no single group_id in scope here (FR-004). Routes through the default group's
             // writer, the same documented limitation as handle_delete_by_group.
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+            let seq =
+                wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
             wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
         }
         Ok::<_, Error>(apply_result)

@@ -424,8 +424,7 @@ mod tests {
         let state = test_state(Some(wal_root.path().to_path_buf()));
 
         let mutations = vec![mutation("a"), mutation("b"), mutation("c")];
-        let seq =
-            wal_flush_ungrouped(&state, "g1", mutations).expect("all 3 mutations must flush");
+        let seq = wal_flush_ungrouped(&state, "g1", mutations).expect("all 3 mutations must flush");
         assert_eq!(
             seq, 2,
             "3 mutations assigned seqs 0,1,2 — the returned value must be the highest, 2"
@@ -528,8 +527,7 @@ mod tests {
         // b, which failed.
         let contents = std::fs::read_to_string(&wal_file).unwrap();
         assert_eq!(
-            contents.matches("\"uuid\":\"a\"").count()
-                + contents.matches("\"uuid\":\"c\"").count(),
+            contents.matches("\"uuid\":\"a\"").count() + contents.matches("\"uuid\":\"c\"").count(),
             2,
             "only the two durably-flushed mutations should be on disk"
         );

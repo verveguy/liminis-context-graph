@@ -207,7 +207,8 @@ pub async fn backfill_relation_types(
             // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
             // routes through the default group's writer, a documented limitation rather than
             // mutation-level attribution.
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+            let seq =
+                wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
             wal_exec::advance_applied_seq(&conn, DEFAULT_GROUP_ID, seq);
             Ok(())
         })
