@@ -70,6 +70,12 @@ pub enum Error {
     /// active checkpoint — never created, or already deleted (issue #365, FR-008).
     #[error("checkpoint {0:?} not found")]
     CheckpointNotFound(String),
+
+    /// A `group_id` is empty, or its filesystem-directory-name mapping (`wal_group`, issue #378
+    /// FR-005) would be empty or exceed `checkpoint::validate_name`'s 200-char bound. Distinct
+    /// from `Error::Ipc` so callers can surface a specific, actionable message.
+    #[error("invalid group_id {0:?}: must be non-empty and map to a directory name of 1-200 chars")]
+    InvalidGroupId(String),
 }
 
 impl From<tokio::task::JoinError> for Error {
