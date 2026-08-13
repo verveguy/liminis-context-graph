@@ -39,7 +39,7 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 
 fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000, 0).ok();
+    let wal_writer = WalWriter::new(&wal_dir.join("liminis"), 10_000, 0).ok();
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
@@ -169,6 +169,7 @@ async fn test_prepare_checkpoint_no_wal_dir() {
 async fn test_prepare_checkpoint_empty_wal_dir() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
     let v = dispatch(2, "knowledge_prepare_checkpoint", json!({}), state).await;
 
@@ -182,10 +183,14 @@ async fn test_prepare_checkpoint_empty_wal_dir() {
 async fn test_prepare_checkpoint_idempotent() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     // Pre-seed a JSONL file so files_total is non-zero
     std::fs::write(
-        wal_dir.path().join("20260522_000000_aaa111_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_aaa111_0000.jsonl"),
         entity_wal_line(0, "pre-entity") + "\n",
     )
     .unwrap();
@@ -228,11 +233,15 @@ async fn test_rebuild_from_wal_no_wal_dir() {
 async fn test_rebuild_from_wal_dry_run() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     // Write 2 entity lines
     let content = [entity_wal_line(0, "dry-a"), entity_wal_line(1, "dry-b")].join("\n") + "\n";
     std::fs::write(
-        wal_dir.path().join("20260522_000000_aaa111_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_aaa111_0000.jsonl"),
         &content,
     )
     .unwrap();
@@ -268,9 +277,13 @@ async fn test_rebuild_from_wal_dry_run() {
 async fn test_rebuild_from_wal_non_streaming_returns_job_id() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_bbb222_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_bbb222_0000.jsonl"),
         entity_wal_line(0, "job-entity") + "\n",
     )
     .unwrap();
@@ -295,9 +308,13 @@ async fn test_rebuild_from_wal_non_streaming_returns_job_id() {
 async fn test_rebuild_from_wal_rejects_boolean_from_seq() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_ccc333_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_ccc333_0000.jsonl"),
         entity_wal_line(0, "bool-entity") + "\n",
     )
     .unwrap();
@@ -325,9 +342,13 @@ async fn test_rebuild_from_wal_rejects_boolean_from_seq() {
 async fn test_rebuild_from_wal_rejects_negative_from_seq() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_ddd444_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_ddd444_0000.jsonl"),
         entity_wal_line(0, "neg-entity") + "\n",
     )
     .unwrap();
@@ -353,9 +374,13 @@ async fn test_rebuild_from_wal_rejects_negative_from_seq() {
 async fn test_rebuild_from_wal_rejects_boolean_to_seq() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_eee666_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_eee666_0000.jsonl"),
         entity_wal_line(0, "bool-to-entity") + "\n",
     )
     .unwrap();
@@ -383,9 +408,13 @@ async fn test_rebuild_from_wal_rejects_boolean_to_seq() {
 async fn test_rebuild_from_wal_rejects_negative_to_seq() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_fff777_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_fff777_0000.jsonl"),
         entity_wal_line(0, "neg-to-entity") + "\n",
     )
     .unwrap();
@@ -417,9 +446,13 @@ async fn test_rebuild_from_wal_rejects_to_seq_less_than_from_seq() {
             .unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_ggg888_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_ggg888_0000.jsonl"),
         entity_wal_line(0, "order-entity") + "\n" + &entity_wal_line(1, "order-entity-2") + "\n",
     )
     .unwrap();
@@ -495,9 +528,13 @@ async fn test_rebuild_status_rejects_empty_job_id() {
 async fn test_rebuild_status_completed_after_background_job() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     std::fs::write(
-        wal_dir.path().join("20260522_000000_eee555_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_eee555_0000.jsonl"),
         entity_wal_line(0, "status-entity") + "\n",
     )
     .unwrap();
@@ -582,8 +619,12 @@ fn assert_has_stat_fields(v: &Value, label: &str) {
 async fn test_rebuild_from_wal_dry_run_has_stat_fields() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260522_000000_stat_dryrun.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_stat_dryrun.jsonl"),
         entity_wal_line(0, "stat-dry-a") + "\n" + &entity_wal_line(1, "stat-dry-b") + "\n",
     )
     .unwrap();
@@ -607,8 +648,12 @@ async fn test_rebuild_from_wal_dry_run_has_stat_fields() {
 async fn test_rebuild_from_wal_streaming_has_stat_fields() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260522_000000_stat_stream.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_stat_stream.jsonl"),
         entity_wal_line(0, "stat-stream-a") + "\n" + &entity_wal_line(1, "stat-stream-b") + "\n",
     )
     .unwrap();
@@ -638,8 +683,12 @@ async fn test_rebuild_from_wal_streaming_has_stat_fields() {
 async fn test_rebuild_status_result_has_stat_fields() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260522_000000_stat_bg.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_stat_bg.jsonl"),
         entity_wal_line(0, "stat-bg-a") + "\n",
     )
     .unwrap();
@@ -712,6 +761,7 @@ async fn test_rebuild_status_result_has_stat_fields() {
 async fn test_rebuild_from_wal_fidelity_warning_surfaced() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     // 11 lines referencing a non-existent table → each fails and increments failed_lines.
     // 1 valid Entity MERGE → lines_replayed. Ratio = 11/12 = 91.7% > 10%.
@@ -728,7 +778,10 @@ async fn test_rebuild_from_wal_fidelity_warning_surfaced() {
         .join("\n")
         + "\n";
     std::fs::write(
-        wal_dir.path().join("20260522_000000_fidelity_warn.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_fidelity_warn.jsonl"),
         &content,
     )
     .unwrap();
@@ -765,8 +818,12 @@ async fn test_rebuild_from_wal_fidelity_warning_surfaced() {
 async fn test_rebuild_from_wal_streaming_progress_has_new_fields() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260522_000000_progress_fields.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_progress_fields.jsonl"),
         entity_wal_line(0, "progress-field-a")
             + "\n"
             + &entity_wal_line(1, "progress-field-b")
@@ -776,6 +833,7 @@ async fn test_rebuild_from_wal_streaming_progress_has_new_fields() {
     std::fs::write(
         wal_dir
             .path()
+            .join("liminis")
             .join("20260522_000001_progress_fields2.jsonl"),
         entity_wal_line(2, "progress-field-c") + "\n",
     )
@@ -832,6 +890,7 @@ async fn test_rebuild_from_wal_streaming_progress_has_new_fields() {
 async fn test_reload_builds_all_indexes() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     // Write 3 entity mutations and 1 relationship mutation to the WAL.
     let content = [
@@ -843,7 +902,10 @@ async fn test_reload_builds_all_indexes() {
     .join("\n")
         + "\n";
     std::fs::write(
-        wal_dir.path().join("20260617_000000_reload_idx.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260617_000000_reload_idx.jsonl"),
         &content,
     )
     .unwrap();
@@ -1005,6 +1067,7 @@ async fn test_interrupted_reload_auto_heals() {
 async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     // Spread ~360 mutations (270 entities + 90 relationships) across 3 WAL files.
     let mut seq = 0u64;
@@ -1029,6 +1092,7 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
         std::fs::write(
             wal_dir
                 .path()
+                .join("liminis")
                 .join(format!("2026061{file_idx}_000000_scale.jsonl")),
             &content,
         )
@@ -1157,13 +1221,21 @@ async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
     }
 
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let content = [
         entity_wal_line(0, "sc003-entity-a"),
         entity_wal_line(1, "sc003-entity-b"),
     ]
     .join("\n")
         + "\n";
-    std::fs::write(wal_dir.path().join("20260618_000000_sc003.jsonl"), &content).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260618_000000_sc003.jsonl"),
+        &content,
+    )
+    .unwrap();
 
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 
@@ -1233,7 +1305,7 @@ fn make_state_with_wal_and_path(
     db_path: String,
 ) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000, 0).ok();
+    let wal_writer = WalWriter::new(&wal_dir.join("liminis"), 10_000, 0).ok();
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
@@ -1271,7 +1343,7 @@ async fn test_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
     let (db, _dir, db_path) = make_db_with_path(4);
     {
         let conn = db.connect().unwrap();
-        conn.run_cypher("CREATE (:Entity {uuid: 'pre-existing-entity'})")
+        conn.run_cypher("CREATE (:Entity {uuid: 'pre-existing-entity', group_id: 'liminis'})")
             .unwrap();
     }
     let entity_count_before = {
@@ -1280,8 +1352,12 @@ async fn test_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
     };
 
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260701_000000_fff666_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_fff666_0000.jsonl"),
         entity_wal_line(0, "fr005-entity") + "\n",
     )
     .unwrap();
@@ -1328,13 +1404,19 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
     let (db, _dir, db_path) = make_db_with_path(4);
     {
         let conn = db.connect().unwrap();
-        conn.run_cypher("CREATE (:Entity {uuid: 'stale-entity-to-be-cleared'})")
-            .unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'stale-entity-to-be-cleared', group_id: 'liminis'})",
+        )
+        .unwrap();
     }
 
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260701_000000_ggg777_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_ggg777_0000.jsonl"),
         entity_wal_line(0, "force-clear-entity") + "\n",
     )
     .unwrap();
@@ -1416,7 +1498,7 @@ async fn test_rebuild_from_wal_non_empty_db_dry_run_fails_fast_even_with_force_c
     let (db, _dir, db_path) = make_db_with_path(4);
     {
         let conn = db.connect().unwrap();
-        conn.run_cypher("CREATE (:Entity {uuid: 'dry-run-pre-existing'})")
+        conn.run_cypher("CREATE (:Entity {uuid: 'dry-run-pre-existing', group_id: 'liminis'})")
             .unwrap();
     }
     let entity_count_before = {
@@ -1425,8 +1507,12 @@ async fn test_rebuild_from_wal_non_empty_db_dry_run_fails_fast_even_with_force_c
     };
 
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260701_000000_hhh888_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_hhh888_0000.jsonl"),
         entity_wal_line(0, "dry-run-entity") + "\n",
     )
     .unwrap();
@@ -1469,6 +1555,7 @@ async fn test_rebuild_from_wal_non_empty_db_from_seq_gt_zero_unaffected() {
     }
 
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let content = [
         entity_wal_line(0, "resume-skip"),
         entity_wal_line(1, "resume-apply"),
@@ -1476,7 +1563,10 @@ async fn test_rebuild_from_wal_non_empty_db_from_seq_gt_zero_unaffected() {
     .join("\n")
         + "\n";
     std::fs::write(
-        wal_dir.path().join("20260701_000000_iii999_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_iii999_0000.jsonl"),
         &content,
     )
     .unwrap();
@@ -1759,12 +1849,16 @@ async fn process_a_chunk(id: i64, state: Arc<AppState>) -> Value {
 async fn test_global_seq_resync_after_rebuild_picks_up_externally_populated_wal() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     // Service starts against an EMPTY WAL dir — WalWriter::new derives global_seq = 0.
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 
     // WAL directory populated out-of-band after the service started; highest seq = 5.
     std::fs::write(
-        wal_dir.path().join("20260805_000000_ext001_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260805_000000_ext001_0000.jsonl"),
         format!(
             "{}\n{}\n",
             entity_wal_line(4, "external-entity-a"),
@@ -1778,7 +1872,7 @@ async fn test_global_seq_resync_after_rebuild_picks_up_externally_populated_wal(
     let chunk_v = process_a_chunk(410, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let max_seq_after = seqs.iter().copied().max().unwrap();
     assert!(
         max_seq_after > 5,
@@ -1806,10 +1900,14 @@ async fn test_global_seq_resync_after_force_clear_rebuild() {
             .unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
 
     std::fs::write(
-        wal_dir.path().join("20260805_000000_ext002_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260805_000000_ext002_0000.jsonl"),
         entity_wal_line(9, "force-clear-resync-entity") + "\n",
     )
     .unwrap();
@@ -1819,7 +1917,7 @@ async fn test_global_seq_resync_after_force_clear_rebuild() {
     let chunk_v = process_a_chunk(430, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let max_seq_after = seqs.iter().copied().max().unwrap();
     assert!(
         max_seq_after > 9,
@@ -1843,8 +1941,12 @@ async fn test_global_seq_resync_after_force_clear_rebuild() {
 async fn test_global_seq_unaffected_without_rebuild_no_regression() {
     let (db, _dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260805_000000_ext003_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260805_000000_ext003_0000.jsonl"),
         entity_wal_line(7, "preexisting-entity") + "\n",
     )
     .unwrap();
@@ -1855,7 +1957,7 @@ async fn test_global_seq_unaffected_without_rebuild_no_regression() {
     let chunk_v = process_a_chunk(440, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let first_new_seq = seqs.iter().copied().filter(|&s| s != 7).min();
     assert_eq!(
         first_new_seq,
@@ -1872,6 +1974,7 @@ async fn test_global_seq_unaffected_without_rebuild_no_regression() {
 async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_replay() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 
     // seq 10 (MERGE) replays and commits successfully, creating the entity. seq 20 is a plain
@@ -1879,7 +1982,10 @@ async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_rep
     // ReplayStats::last_committed_seq stops at 10, but the highest seq line on disk is 20
     // (scan_max_seq itself returns 21, the next seq to assign, not the raw max).
     std::fs::write(
-        wal_dir.path().join("20260805_000000_ext005_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260805_000000_ext005_0000.jsonl"),
         format!(
             "{}\n{}\n",
             entity_wal_line(10, "dup-entity-352"),
@@ -1904,7 +2010,7 @@ async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_rep
     let chunk_v = process_a_chunk(470, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let max_seq_after = seqs.iter().copied().max().unwrap();
     assert!(
         max_seq_after > 20,
@@ -1919,12 +2025,16 @@ async fn test_global_seq_resync_uses_on_disk_scan_when_highest_seq_failed_to_rep
 async fn test_dry_run_rebuild_does_not_resync_global_seq() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     // Empty WAL dir at startup — WalWriter::new derives global_seq = 0.
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
 
     // Populated after start with a much higher seq.
     std::fs::write(
-        wal_dir.path().join("20260805_000000_ext006_0000.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260805_000000_ext006_0000.jsonl"),
         entity_wal_line(99, "dry-run-entity") + "\n",
     )
     .unwrap();
@@ -1942,7 +2052,7 @@ async fn test_dry_run_rebuild_does_not_resync_global_seq() {
     let chunk_v = process_a_chunk(490, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let first_new_seq = seqs.iter().copied().filter(|&s| s != 99).min();
     assert_eq!(
         first_new_seq,
@@ -1960,6 +2070,7 @@ async fn test_dry_run_rebuild_does_not_resync_global_seq() {
 async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     let content = [
         entity_wal_line(0, "good-entity-a"),
@@ -1969,7 +2080,10 @@ async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
     .join("\n")
         + "\n";
     std::fs::write(
-        wal_dir.path().join("20260808_000000_stream362.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260808_000000_stream362.jsonl"),
         &content,
     )
     .unwrap();
@@ -2016,6 +2130,7 @@ async fn test_rebuild_from_wal_to_seq_excludes_bad_mutation_streaming() {
 async fn test_rebuild_from_wal_to_seq_dry_run_bounded_and_untouched() {
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
 
     let content = [
         entity_wal_line(0, "dry-good-a"),
@@ -2025,7 +2140,10 @@ async fn test_rebuild_from_wal_to_seq_dry_run_bounded_and_untouched() {
     .join("\n")
         + "\n";
     std::fs::write(
-        wal_dir.path().join("20260808_000000_dry362.jsonl"),
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260808_000000_dry362.jsonl"),
         &content,
     )
     .unwrap();
@@ -2075,6 +2193,7 @@ async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoi
             .unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
     let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
 
     let content = [
@@ -2084,7 +2203,14 @@ async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoi
     ]
     .join("\n")
         + "\n";
-    std::fs::write(wal_dir.path().join("20260808_000000_bg362.jsonl"), &content).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260808_000000_bg362.jsonl"),
+        &content,
+    )
+    .unwrap();
 
     // from_seq: 0, force_clear: true — the corrupted-mutation recovery scenario (Edge Cases).
     let job_status_v = rebuild_and_wait(
@@ -2122,7 +2248,7 @@ async fn test_rebuild_from_wal_to_seq_background_job_bounds_applied_seq_and_avoi
     let chunk_v = process_a_chunk(505, Arc::clone(&state)).await;
     assert_eq!(chunk_v["result"]["success"], true, "{chunk_v}");
 
-    let seqs = all_seqs_in_wal_dir(wal_dir.path());
+    let seqs = all_seqs_in_wal_dir(&wal_dir.path().join("liminis"));
     let max_seq_after = seqs.iter().copied().max().unwrap();
     assert!(
         max_seq_after > 2,

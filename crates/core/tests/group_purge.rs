@@ -893,23 +893,24 @@ async fn purge_then_rebuild_from_wal_restores_purged_group() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
     let db = Arc::new(open_db(&dir));
-    let wal_dir = TempDir::new().unwrap();
+    let wal_root = TempDir::new().unwrap();
 
-    let content = [
-        entity_wal_line(0, "11111111-1111-1111-1111-111111111111", "A-One", GROUP_A),
-        entity_wal_line(1, "22222222-2222-2222-2222-222222222222", "B-One", GROUP_B),
-    ]
-    .join("\n")
-        + "\n";
+    // knowledge_rebuild_from_wal is group-scoped (issue #378 FR-006): only group A's own WAL
+    // directory needs A's content — group B is never purged nor rebuilt here, so it has no WAL
+    // presence at all, which also proves the rebuild can't be borrowing anything from it.
+    let group_a_dir = wal_root.path().join(GROUP_A);
+    std::fs::create_dir_all(&group_a_dir).unwrap();
+    let content =
+        entity_wal_line(0, "11111111-1111-1111-1111-111111111111", "A-One", GROUP_A) + "\n";
     std::fs::write(
-        wal_dir.path().join("20260101_000000_aaa111_0000.jsonl"),
+        group_a_dir.join("20260101_000000_aaa111_0000.jsonl"),
         &content,
     )
     .unwrap();
 
     // No live wal_writer attached: the purge below runs against the DB directly and its own
-    // deletes are never appended to wal_dir, keeping the hand-written WAL a clean pre-purge
-    // snapshot to replay from.
+    // deletes are never appended to the WAL root, keeping the hand-written WAL a clean
+    // pre-purge snapshot to replay from.
     let state_no_writer = make_state_with_path(Arc::clone(&db), db_path.clone(), None);
 
     // Populate the DB directly (mirrors what replaying the WAL above would produce) so the
@@ -939,19 +940,20 @@ async fn purge_then_rebuild_from_wal_restores_purged_group() {
     let (a_ent_after_purge, _, _) = group_counts(&db, GROUP_A);
     assert_eq!(a_ent_after_purge, 0, "group A purged");
 
-    // Now replay the untouched pre-purge WAL with force_clear, using a state that has wal_dir
-    // configured (rebuild_from_wal only needs wal_dir, not a live writer). Must share db_path
-    // with state_no_writer above: force_clear reopens `Db::open(&state.db_path)` and swaps the
-    // result into `state.db`, so a mismatched path would silently operate on a different file.
+    // Now replay the untouched pre-purge WAL with force_clear, using a state that has wal_root
+    // configured (rebuild_from_wal only needs wal_root, not a live writer). Must share db_path
+    // with state_no_writer above: the group-scoped force_clear path operates against
+    // state.db_path's already-open Db (no reopen/swap, unlike knowledge_clear_all), so a
+    // mismatched path would silently operate on a different file.
     let state_with_wal_dir = make_state_with_path(
         Arc::clone(&db),
         db_path.clone(),
-        Some(wal_dir.path().to_path_buf()),
+        Some(wal_root.path().to_path_buf()),
     );
     let rebuild_v = dispatch_val(
         2,
         "knowledge_rebuild_from_wal",
-        json!({"force_clear": true}),
+        json!({"group_id": GROUP_A, "force_clear": true}),
         Arc::clone(&state_with_wal_dir),
     )
     .await;
@@ -983,15 +985,10 @@ async fn purge_then_rebuild_from_wal_restores_purged_group() {
         }
     }
 
-    // force_clear reopened the DB and swapped a new Db instance into state.db — the original
-    // `db` Arc from before the rebuild is now a stale handle to a deleted file, so post-rebuild
-    // assertions must go through the live, swapped instance.
-    let db_after_rebuild = state_with_wal_dir
-        .db
-        .load_full()
-        .expect("db must be loaded");
-    let (a_ent_restored, _, _) = group_counts(&db_after_rebuild, GROUP_A);
-    let (b_ent_restored, _, _) = group_counts(&db_after_rebuild, GROUP_B);
+    // The group-scoped force_clear path never swaps state.db (unlike knowledge_clear_all) —
+    // the original `db` Arc is still the live, correct handle after rebuild.
+    let (a_ent_restored, _, _) = group_counts(&db, GROUP_A);
+    let (b_ent_restored, _, _) = group_counts(&db, GROUP_B);
     assert_eq!(
         a_ent_restored, 1,
         "group A must be restored by replaying its pre-purge WAL"
