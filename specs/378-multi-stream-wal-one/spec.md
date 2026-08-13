@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-378`
 **Created**: 2026-08-12
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "Make the WAL a multi-stream structure: one logical graph, one group_id, one WAL directory. Supersedes #360, which was filed for the same topology but decided the opposite key (a source identifier explicitly not group_id) and rests on two assumptions that no longer hold. #360 never entered Specify, so it is closed rather than amended — a spec whose body argues against its own decision is a hazard for the stage that reads it."
 
 ## Background
