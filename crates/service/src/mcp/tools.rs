@@ -960,9 +960,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            — the foreign edge node survives, left `unbound` (issue #369's \
                            binding_state), so a later rehydration can re-bind it with \
                            knowledge_rebind_pointers. Purging a group_id with no data is a \
-                           no-op success, not an error. Does not reset the applied WAL position \
-                           (`applied_seq`), which is a DB-wide singleton, not per-group, until \
-                           #378 lands. Pass `dry_run: true` to preview per-group entity/edge/ \
+                           no-op success, not an error. Does not reset the purged group's own \
+                           applied WAL position (`applied_seq`, per-group since issue #378) — \
+                           it is left as-is (see ADR-0361); resolve it afterward with \
+                           knowledge_rebuild_from_wal targeting that group, with force_clear as \
+                           needed. Pass `dry_run: true` to preview per-group entity/edge/ \
                            episode counts and the cross-group pointers that would become \
                            `unbound` (broken out by owning group_id) without mutating anything \
                            — `dry_run` takes precedence over `confirm` when both are set.",

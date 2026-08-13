@@ -550,11 +550,25 @@ async fn bootstrap_app_state(
                 // before the socket accepts requests — mirrors the eager index-build posture
                 // above; a genuine failure propagates fatally via `?`.
                 conn.rebuild_name_index()?;
+                // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
+                // default group's own row (issue #378 FR-001/FR-009) *before* the backfill check
+                // below decides whether a position is already known — otherwise an upgraded
+                // binary would find no row under the new key, silently discard an
+                // already-durably-recorded position, and needlessly (or, in the worst case,
+                // unsuccessfully) re-derive it from a WAL scan. No-op after the first boot
+                // (idempotent) or on a fresh install (no legacy row to migrate).
+                if let Err(e) =
+                    conn.migrate_legacy_singleton_wal_position(lcg_core::DEFAULT_GROUP_ID)
+                {
+                    eprintln!(
+                        "liminis-context-graph: startup: legacy singleton WalPosition migration failed (non-fatal): {e}"
+                    );
+                }
                 // Backfill the applied-WAL-seq position (issue #353, FR-007) once at startup,
                 // before the socket accepts requests. No-op if a position is already recorded
-                // (every boot after the first). Non-fatal: a missed backfill just leaves
-                // knowledge_status reporting null (safe — the documented action is a full
-                // rebuild), not a reason to fail startup.
+                // (every boot after the first, or immediately after the migration above). Non-fatal: a
+                // missed backfill just leaves knowledge_status reporting null (safe — the
+                // documented action is a full rebuild), not a reason to fail startup.
                 if let Err(e) = lcg_core::recovery::backfill_applied_seq_if_absent(
                     &conn,
                     lcg_core::DEFAULT_GROUP_ID,

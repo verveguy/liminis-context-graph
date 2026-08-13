@@ -130,6 +130,17 @@ impl Db {
             // (no WAL to replay either) with no schema at all.
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
+            // default group's own row (issue #378 FR-001/FR-009) before the backfill check below
+            // decides whether a position is already known. No-op on a fresh DB (no legacy row)
+            // or after the first call (idempotent).
+            if let Err(e) =
+                conn.migrate_legacy_singleton_wal_position(crate::wal_group::DEFAULT_GROUP_ID)
+            {
+                eprintln!(
+                    "liminis-context-graph: open_or_rebuild: legacy singleton WalPosition migration failed (non-fatal): {e}"
+                );
+            }
             // Backfill applied_seq for a pre-existing populated DB that predates this feature
             // (FR-007), or set it to 0 for a genuinely fresh DB. Non-fatal: a missed backfill
             // just leaves the boot-time check reporting null (safe — the documented action is
@@ -1920,6 +1931,42 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
+    /// One-time migration (issue #378 FR-001/FR-009): carries a pre-378 database's
+    /// `WalPosition {id: 'singleton'}` row forward to `group_id`'s own row. Before this issue,
+    /// `get_applied_seq`/`set_applied_seq` hardcoded `'singleton'` as the row's primary key;
+    /// they now key on `group_id` instead, so an upgraded binary's `get_applied_seq(group_id)`
+    /// would otherwise find no row at all for a deployment that had a durably-recorded position
+    /// under the old key — silently degrading a known position to `None` ("unknown") and forcing
+    /// a WAL re-scan (`backfill_applied_seq_if_absent`) to reconstruct it, contradicting FR-009's
+    /// "behaves exactly as it does in 0.12.2" / "no operator action required" guarantee. Must run
+    /// before `backfill_applied_seq_if_absent` is given the chance to decide a backfill is
+    /// needed, or the legacy value is never consulted.
+    ///
+    /// No-op if no legacy row exists (fresh install, or a second boot after the first migration
+    /// already ran — idempotent). Never overwrites an already-present `group_id` row: if one
+    /// exists, the singleton row is stale leftover from before `group_id`'s own value was
+    /// established and is simply removed, not blended with it — `group_id`'s existing row is by
+    /// construction more recent than a not-yet-migrated legacy row could be.
+    pub fn migrate_legacy_singleton_wal_position(&self, group_id: &str) -> Result<(), Error> {
+        let legacy = self
+            .inner
+            .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
+        let Some(seq) = legacy
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_u64(&row[0]))
+        else {
+            return Ok(());
+        };
+        if self.get_applied_seq(group_id)?.is_none() {
+            self.set_applied_seq(group_id, seq)?;
+        }
+        let _ = self
+            .inner
+            .query("MATCH (w:WalPosition {id: 'singleton'}) DETACH DELETE w")?;
+        Ok(())
+    }
+
     /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
     pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
         let mut result = self
@@ -3367,6 +3414,99 @@ mod applied_seq_tests {
         // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
         conn.set_applied_seq("group-a", 25).unwrap();
         assert_eq!(conn.get_applied_seq("group-b").unwrap(), Some(0));
+    }
+
+    /// A genuine pre-378 database's `WalPosition {id: 'singleton'}` row (simulated here by
+    /// writing under the literal "singleton" id, exactly as pre-378 `set_applied_seq` did) must
+    /// be carried forward to the default group's own row, and the legacy row removed — otherwise
+    /// an upgraded binary's `get_applied_seq("liminis")` finds nothing and a known position
+    /// silently degrades to "unknown" (issue #378 FR-001/FR-009).
+    #[test]
+    fn migrate_legacy_singleton_wal_position_carries_value_forward_and_removes_legacy_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 41).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("liminis").unwrap(),
+            Some(41),
+            "the legacy position must be visible under the default group's own id post-migration"
+        );
+        assert_eq!(
+            conn.get_applied_seq("singleton").unwrap(),
+            None,
+            "the legacy row itself must be gone, not merely superseded"
+        );
+        assert_eq!(
+            conn.count_nodes("WalPosition").unwrap(),
+            1,
+            "migration must not leave both the old and new rows behind"
+        );
+    }
+
+    /// A fresh install (no legacy row) is a no-op — nothing to carry forward, and no spurious
+    /// `liminis` row is created where none was requested.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_is_noop_when_no_legacy_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
+        assert_eq!(conn.count_nodes("WalPosition").unwrap(), 0);
+    }
+
+    /// If the default group's own row already exists (e.g. a write already landed under the new
+    /// key before migration ran), the legacy row must not overwrite it — it is simply discarded
+    /// as stale leftover, never blended with or preferred over the current value.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_does_not_overwrite_existing_group_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 5).unwrap();
+        conn.set_applied_seq("liminis", 99).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("liminis").unwrap(),
+            Some(99),
+            "an already-present group row must win over the stale legacy value"
+        );
+        assert_eq!(conn.get_applied_seq("singleton").unwrap(), None);
+    }
+
+    /// A second call (e.g. a subsequent boot) after the legacy row has already been migrated
+    /// away must be a harmless no-op, not an error.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_is_idempotent_on_second_call() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 7).unwrap();
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(7));
+        assert_eq!(conn.count_nodes("WalPosition").unwrap(), 1);
     }
 }
 

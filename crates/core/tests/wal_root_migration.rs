@@ -128,9 +128,13 @@ async fn pre_378_flat_wal_dir_migrates_and_preserves_position_and_checkpoint_rea
     // A pre-existing named checkpoint (#365), also at the pre-378 top level.
     write_legacy_checkpoint(&wal_root, "before-upgrade", Some(1));
 
-    // The graph already has content and an applied position recorded under the default group —
-    // this is what "position unchanged" means: the DB row is untouched by the (purely
-    // filesystem) migration.
+    // The graph already has content and an applied position recorded under the pre-378
+    // hardcoded `WalPosition {id: 'singleton'}` key — set_applied_seq is generic over any id
+    // string, so seeding "singleton" directly here reproduces exactly what a genuine pre-378
+    // binary's set_applied_seq(1) call would have written. "Position unchanged" (SC-005) means
+    // this value survives to be visible under the default group's own id after migration, not
+    // that the underlying DB row is untouched (it can't be — post-378 code reads a different
+    // key).
     let (db, _db_dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
@@ -146,13 +150,22 @@ async fn pre_378_flat_wal_dir_migrates_and_preserves_position_and_checkpoint_rea
             ..Default::default()
         })
         .unwrap();
-        conn.set_applied_seq(wal_group::DEFAULT_GROUP_ID, 1)
-            .unwrap();
+        conn.set_applied_seq("singleton", 1).unwrap();
     }
 
     // This is what the upgraded binary's startup does before constructing AppState/any
     // WalWriter (see AppState::from_env / main.rs) — run it explicitly here to mirror that path.
     wal_group::migrate_wal_root_if_needed(&wal_root).unwrap();
+    {
+        let conn = db.connect().unwrap();
+        conn.migrate_legacy_singleton_wal_position(wal_group::DEFAULT_GROUP_ID)
+            .unwrap();
+        assert_eq!(
+            conn.get_applied_seq("singleton").unwrap(),
+            None,
+            "the legacy singleton row must be gone after migration"
+        );
+    }
 
     // The pre-378 top-level artifacts are gone; everything now lives under "liminis/".
     assert!(!wal_root.join("20260101_000000_aaaaaa_0000.jsonl").exists());

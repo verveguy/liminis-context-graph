@@ -109,6 +109,32 @@ fixture) through migration and then through real IPC dispatch (`knowledge_wal_ma
 shape: applied position unchanged, the pre-existing checkpoint's `reachable` flag preserved
 (SC-005).
 
+**The filesystem relocation above is only half of FR-001's "position unchanged" guarantee — the
+other half is a second, DB-side migration for the `WalPosition` row itself.** `wal_group`'s
+migration only ever touches files; a pre-378 database's persisted position lived in a
+`WalPosition {id: 'singleton'}` row (the hardcoded key `get_applied_seq`/`set_applied_seq` used
+before this issue). Post-378, those functions key on `group_id` instead, so on its own the
+filesystem migration would leave that row orphaned under a key nothing ever reads again —
+`get_applied_seq("liminis")` would find no row, silently degrading an already-known,
+durably-recorded position to `None` ("unknown") and forcing `backfill_applied_seq_if_absent` to
+re-derive it from a WAL scan (or, in the worst case such as a UUID mismatch, fail to re-derive it
+at all). Either outcome contradicts FR-009's "behaves exactly as it does in 0.12.2" and FR-001's
+"no operator action required."
+
+`Conn::migrate_legacy_singleton_wal_position(group_id)` (`db.rs`) closes this gap: reads the
+legacy row's `applied_seq` if present, writes it forward to `group_id`'s own row only if that row
+doesn't already exist (never overwriting a value already established under the new key), then
+deletes the legacy row. It is called once at startup — in `crates/service/src/main.rs`'s
+production boot path and in `Db::open_or_rebuild`'s library-API equivalent — immediately before
+`backfill_applied_seq_if_absent`, so the legacy value is available to be found rather than
+triggering a needless (or failing) re-derivation. No-op on a fresh install (no legacy row) or on
+any boot after the first (idempotent). Covered by four unit tests in `db.rs`'s
+`applied_seq_tests` module (value carried forward and legacy row removed; no-op with no legacy
+row; an already-present group row wins over stale legacy data; idempotent on a second call), and
+`wal_root_migration.rs`'s SC-005 test seeds the legacy `'singleton'` row directly (mirroring
+exactly what pre-378 `set_applied_seq` wrote) rather than the post-378 key, so it exercises this
+migration rather than assuming it away.
+
 ### Write-lock granularity stays global — no per-group DB lock
 
 `state.write_lock: Arc<RwLock<()>>` continues to serialize every Cypher execution against the
