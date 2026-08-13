@@ -1731,7 +1731,9 @@ mod tests {
     fn new_writer_on_empty_dir_mints_a_generation() {
         let tmp = tempfile::tempdir().unwrap();
         let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
-        let g = writer.generation().expect("fresh stream must mint a generation");
+        let g = writer
+            .generation()
+            .expect("fresh stream must mint a generation");
         assert_eq!(
             crate::wal_generation::read_generation(tmp.path()).as_deref(),
             Some(g)

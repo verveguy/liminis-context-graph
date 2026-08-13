@@ -145,9 +145,11 @@ impl Db {
                 // (issue #387) — `None` for a pre-#387 stream, matching FR-009's adopt-on-first-
                 // encounter semantics.
                 let generation = crate::wal_generation::read_generation(wal_dir_path);
-                if let Err(e) =
-                    conn.set_wal_position(crate::wal_group::DEFAULT_GROUP_ID, seq, generation.as_deref())
-                {
+                if let Err(e) = conn.set_wal_position(
+                    crate::wal_group::DEFAULT_GROUP_ID,
+                    seq,
+                    generation.as_deref(),
+                ) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
                     );
@@ -3414,7 +3416,10 @@ mod applied_seq_tests {
 
         conn.set_wal_position("liminis", 41, None).unwrap();
 
-        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(41));
+        assert_eq!(
+            conn.get_wal_position("liminis").unwrap().applied_seq,
+            Some(41)
+        );
     }
 
     /// `set_wal_position` MERGEs onto that group's row rather than inserting a duplicate —
@@ -3429,7 +3434,10 @@ mod applied_seq_tests {
         conn.set_wal_position("liminis", 5, None).unwrap();
         conn.set_wal_position("liminis", 12, None).unwrap();
 
-        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(12));
+        assert_eq!(
+            conn.get_wal_position("liminis").unwrap().applied_seq,
+            Some(12)
+        );
         assert_eq!(
             conn.count_nodes("WalPosition").unwrap(),
             1,
@@ -3448,7 +3456,10 @@ mod applied_seq_tests {
 
         conn.set_wal_position("liminis", 0, None).unwrap();
 
-        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(0));
+        assert_eq!(
+            conn.get_wal_position("liminis").unwrap().applied_seq,
+            Some(0)
+        );
     }
 
     /// `get_wal_position`/`set_wal_position` must not themselves become a WAL line — using
@@ -3483,7 +3494,10 @@ mod applied_seq_tests {
         conn.set_wal_position("group-a", 10, None).unwrap();
         conn.set_wal_position("group-b", 0, None).unwrap();
 
-        assert_eq!(conn.get_wal_position("group-a").unwrap().applied_seq, Some(10));
+        assert_eq!(
+            conn.get_wal_position("group-a").unwrap().applied_seq,
+            Some(10)
+        );
         assert_eq!(
             conn.get_wal_position("group-b").unwrap().applied_seq,
             Some(0),
@@ -3502,7 +3516,10 @@ mod applied_seq_tests {
 
         // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
         conn.set_wal_position("group-a", 25, None).unwrap();
-        assert_eq!(conn.get_wal_position("group-b").unwrap().applied_seq, Some(0));
+        assert_eq!(
+            conn.get_wal_position("group-b").unwrap().applied_seq,
+            Some(0)
+        );
     }
 
     /// issue #387 (FR-004): the generation persisted alongside `applied_seq` must round-trip
@@ -3561,11 +3578,17 @@ mod applied_seq_tests {
         conn.set_wal_position("group-b", 10, Some("gen-b")).unwrap();
 
         assert_eq!(
-            conn.get_wal_position("group-a").unwrap().generation.as_deref(),
+            conn.get_wal_position("group-a")
+                .unwrap()
+                .generation
+                .as_deref(),
             Some("gen-a")
         );
         assert_eq!(
-            conn.get_wal_position("group-b").unwrap().generation.as_deref(),
+            conn.get_wal_position("group-b")
+                .unwrap()
+                .generation
+                .as_deref(),
             Some("gen-b")
         );
     }
@@ -3641,7 +3664,10 @@ mod applied_seq_tests {
             Some(99),
             "an already-present group row must win over the stale legacy value"
         );
-        assert_eq!(conn.get_wal_position("singleton").unwrap().applied_seq, None);
+        assert_eq!(
+            conn.get_wal_position("singleton").unwrap().applied_seq,
+            None
+        );
     }
 
     /// A second call (e.g. a subsequent boot) after the legacy row has already been migrated
@@ -3659,7 +3685,10 @@ mod applied_seq_tests {
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
 
-        assert_eq!(conn.get_wal_position("liminis").unwrap().applied_seq, Some(7));
+        assert_eq!(
+            conn.get_wal_position("liminis").unwrap().applied_seq,
+            Some(7)
+        );
         assert_eq!(conn.count_nodes("WalPosition").unwrap(), 1);
     }
 }

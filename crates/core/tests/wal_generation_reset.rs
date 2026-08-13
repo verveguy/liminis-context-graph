@@ -184,8 +184,8 @@ async fn sc001_longer_reset_stream_is_detected_and_purges_old_generation() {
     let state = make_state_with_wal(db, wal_root.clone());
 
     // Bootstrap: ordinary first replay, no prior recorded position — must adopt, not reset.
-    let boot_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_ok_resp(&boot_v, 1);
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
     assert_ne!(
@@ -219,19 +219,18 @@ async fn sc001_longer_reset_stream_is_detected_and_purges_old_generation() {
 
     // The caller innocently asks for an incremental catch-up (from_seq: 3) — detection must
     // override this with a full purge-and-replay regardless (FR-005).
-    let reset_v = dispatch_rebuild_sync(
-        2,
-        json!({"group_id": G, "from_seq": 3}),
-        Arc::clone(&state),
-    )
-    .await;
+    let reset_v =
+        dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 3}), Arc::clone(&state)).await;
     assert_ok_resp(&reset_v, 2);
     assert_eq!(reset_v["result"]["success"], true, "{reset_v}");
     assert_eq!(
         reset_v["result"]["reset_detected"], true,
         "a longer republished stream under a new generation must be detected: {reset_v}"
     );
-    assert_eq!(reset_v["result"]["previous_generation"], "gen-1", "{reset_v}");
+    assert_eq!(
+        reset_v["result"]["previous_generation"], "gen-1",
+        "{reset_v}"
+    );
     assert_eq!(reset_v["result"]["generation"], "gen-2", "{reset_v}");
     assert_eq!(
         reset_v["result"]["from_seq"], 0,
@@ -277,8 +276,8 @@ async fn sc002_shorter_reset_stream_takes_same_detection_path_via_background_job
     set_group_generation(&wal_root, G, "gen-1");
 
     let state = make_state_with_wal(db, wal_root.clone());
-    let boot_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
 
     // Reset: a SHORTER replacement stream (the case a bare applied_seq > max_seq comparison
@@ -370,8 +369,8 @@ async fn sc003_forward_progress_on_unchanged_generation_is_not_flagged_as_reset(
     set_group_generation(&wal_root, G, "gen-1");
 
     let state = make_state_with_wal(db, wal_root.clone());
-    let boot_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
 
     // Ordinary continued ingest: append more lines to the SAME generation, no reset.
@@ -379,7 +378,10 @@ async fn sc003_forward_progress_on_unchanged_generation_is_not_flagged_as_reset(
         &wal_root,
         G,
         "0001.jsonl",
-        &[entity_wal_line(2, "e2", "e2", G), entity_wal_line(3, "e3", "e3", G)],
+        &[
+            entity_wal_line(2, "e2", "e2", G),
+            entity_wal_line(3, "e3", "e3", G),
+        ],
     );
     assert_eq!(
         read_group_generation(&wal_root, G).as_deref(),
@@ -387,8 +389,8 @@ async fn sc003_forward_progress_on_unchanged_generation_is_not_flagged_as_reset(
         "appending must never change the generation"
     );
 
-    let cont_v = dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state))
-        .await;
+    let cont_v =
+        dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state)).await;
     assert_ok_resp(&cont_v, 2);
     assert_eq!(cont_v["result"]["success"], true, "{cont_v}");
     assert_ne!(
@@ -424,15 +426,18 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
         &wal_root,
         G,
         "0000.jsonl",
-        &[entity_wal_line(0, "legacy-0", "legacy-0", G), entity_wal_line(1, "legacy-1", "legacy-1", G)],
+        &[
+            entity_wal_line(0, "legacy-0", "legacy-0", G),
+            entity_wal_line(1, "legacy-1", "legacy-1", G),
+        ],
     );
     assert_eq!(read_group_generation(&wal_root, G), None);
 
     let state = make_state_with_wal(db, wal_root.clone());
 
     // Boot 1: first-ever check. Must not report a reset (nothing to compare against).
-    let boot1_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot1_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_eq!(boot1_v["result"]["success"], true, "{boot1_v}");
     assert_ne!(boot1_v["result"]["reset_detected"], true, "{boot1_v}");
     {
@@ -447,8 +452,8 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
     }
 
     // Boot 2: a later boot, stream unchanged (still no generation) — must not force a rebuild.
-    let boot2_v = dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state))
-        .await;
+    let boot2_v =
+        dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state)).await;
     assert_eq!(boot2_v["result"]["success"], true, "{boot2_v}");
     assert_ne!(
         boot2_v["result"]["reset_detected"], true,
@@ -476,8 +481,8 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
         ],
         "gen-x",
     );
-    let boot3_v = dispatch_rebuild_sync(3, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state))
-        .await;
+    let boot3_v =
+        dispatch_rebuild_sync(3, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state)).await;
     assert_ok_resp(&boot3_v, 3);
     assert_eq!(boot3_v["result"]["success"], true, "{boot3_v}");
     assert_eq!(
@@ -485,7 +490,11 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
         "a stream that had no generation and is later genuinely reset — now carrying one for \
          the first time — must still be detected: {boot3_v}"
     );
-    assert_eq!(boot3_v["result"]["previous_generation"], Value::Null, "{boot3_v}");
+    assert_eq!(
+        boot3_v["result"]["previous_generation"],
+        Value::Null,
+        "{boot3_v}"
+    );
     assert_eq!(boot3_v["result"]["generation"], "gen-x", "{boot3_v}");
 
     let db3 = state.db.load_full().unwrap();
@@ -510,7 +519,12 @@ async fn sc008_multi_group_isolation_reset_of_a_leaves_b_and_c_untouched() {
             &wal_root,
             gid,
             "0000.jsonl",
-            &[entity_wal_line(0, &format!("{gid}-e0"), &format!("{gid}-e0"), gid)],
+            &[entity_wal_line(
+                0,
+                &format!("{gid}-e0"),
+                &format!("{gid}-e0"),
+                gid,
+            )],
         );
         set_group_generation(&wal_root, gid, gen);
     }
@@ -569,11 +583,15 @@ async fn sc008_multi_group_isolation_reset_of_a_leaves_b_and_c_untouched() {
         "group C's position must be byte-for-byte unchanged by A's reset and self-heal"
     );
     assert!(
-        conn.get_entity_by_uuid(&format!("{B}-e0")).unwrap().is_some(),
+        conn.get_entity_by_uuid(&format!("{B}-e0"))
+            .unwrap()
+            .is_some(),
         "group B's data must be untouched"
     );
     assert!(
-        conn.get_entity_by_uuid(&format!("{C}-e0")).unwrap().is_some(),
+        conn.get_entity_by_uuid(&format!("{C}-e0"))
+            .unwrap()
+            .is_some(),
         "group C's data must be untouched"
     );
 }
@@ -591,13 +609,16 @@ async fn story4_checkpoint_taken_before_reset_reports_unreachable_after() {
         &wal_root,
         G,
         "0000.jsonl",
-        &[entity_wal_line(0, "e0", "e0", G), entity_wal_line(1, "e1", "e1", G)],
+        &[
+            entity_wal_line(0, "e0", "e0", G),
+            entity_wal_line(1, "e1", "e1", G),
+        ],
     );
     set_group_generation(&wal_root, G, "gen-1");
 
     let state = make_state_with_wal(db, wal_root.clone());
-    let boot_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
 
     let checkpoint_v = dispatch_val(
@@ -608,7 +629,10 @@ async fn story4_checkpoint_taken_before_reset_reports_unreachable_after() {
     )
     .await;
     assert_ok_resp(&checkpoint_v, 2);
-    assert_eq!(checkpoint_v["result"]["generation"], "gen-1", "{checkpoint_v}");
+    assert_eq!(
+        checkpoint_v["result"]["generation"], "gen-1",
+        "{checkpoint_v}"
+    );
 
     // Reset: a longer stream so the checkpoint's seq would still fall inside the new
     // [wal_min_seq, wal_max_seq] bounds — proving the generation check, not the bounds check,
@@ -656,7 +680,10 @@ async fn story4_checkpoint_taken_before_reset_reports_unreachable_after() {
     )
     .await;
     assert_ok_resp(&checkpoint2_v, 4);
-    assert_eq!(checkpoint2_v["result"]["generation"], "gen-2", "{checkpoint2_v}");
+    assert_eq!(
+        checkpoint2_v["result"]["generation"], "gen-2",
+        "{checkpoint2_v}"
+    );
     let list2_v = dispatch_val(5, "knowledge_wal_mark_list", json!({"group_id": G}), state).await;
     let checkpoints2 = list2_v["result"]["checkpoints"].as_array().unwrap();
     let post_reset = checkpoints2
@@ -710,7 +737,10 @@ async fn story3_cross_group_pointer_rebinds_to_new_generation_after_reset() {
     .await;
     assert_ok_resp(&add_v, 1);
     let edge_uuid = add_v["result"]["uuid"].as_str().unwrap().to_string();
-    assert_eq!(add_v["result"]["cross_group_pointers"]["dst"]["binding_state"], "unbound");
+    assert_eq!(
+        add_v["result"]["cross_group_pointers"]["dst"]["binding_state"],
+        "unbound"
+    );
 
     // Target group's first content, generation g1.
     let widget_1 = uuid::Uuid::new_v4().to_string();
@@ -898,13 +928,16 @@ async fn dry_run_mismatch_is_report_only_and_does_not_mutate() {
         &wal_root,
         G,
         "0000.jsonl",
-        &[entity_wal_line(0, "e0", "e0", G), entity_wal_line(1, "e1", "e1", G)],
+        &[
+            entity_wal_line(0, "e0", "e0", G),
+            entity_wal_line(1, "e1", "e1", G),
+        ],
     );
     set_group_generation(&wal_root, G, "gen-1");
 
     let state = make_state_with_wal(db, wal_root.clone());
-    let boot_v = dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state))
-        .await;
+    let boot_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
 
     reset_group_stream(

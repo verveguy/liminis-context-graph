@@ -158,7 +158,9 @@ pub fn position_reset_detected(
     recorded_generation: Option<&str>,
     current_generation: Option<&str>,
 ) -> bool {
-    applied_seq.is_some() && current_generation.is_some() && recorded_generation != current_generation
+    applied_seq.is_some()
+        && current_generation.is_some()
+        && recorded_generation != current_generation
 }
 
 #[cfg(test)]

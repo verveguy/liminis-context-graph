@@ -218,6 +218,10 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task, for the healthy
 /// (graph queryable) case.
+/// One group's `(group_id, applied_seq, max_seq, generation)` in `knowledge_status`'s
+/// `wal_groups` breakdown (issue #378 FR-007; generation added by issue #387).
+type WalGroupPosition = (String, Option<u64>, Option<u64>, Option<String>);
+
 struct StatusFields {
     entity_count: u64,
     episode_count: u64,
@@ -235,7 +239,7 @@ struct StatusFields {
     /// directory (issue #378 FR-007; generation added by issue #387) — additive to the flat
     /// `wal_applied_seq`/`wal_max_seq`/`wal_generation` fields above, which stay pinned to the
     /// default group.
-    wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)>,
+    wal_group_positions: Vec<WalGroupPosition>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
     name_index_trusted: bool,
@@ -258,7 +262,7 @@ enum StatusOutcome {
         wal_applied_seq: Option<u64>,
         wal_max_seq: Option<u64>,
         wal_generation: Option<String>,
-        wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)>,
+        wal_group_positions: Vec<WalGroupPosition>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
     },
@@ -377,7 +381,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // never fatal to the rest of the status response. If the default group has no WAL
             // directory at all (e.g. a pure replica that only ever hydrated other groups), both
             // stay `null` — a documented signal of "no default group", not an error.
-            let wal_applied_seq = conn.get_wal_position(DEFAULT_GROUP_ID).unwrap_or_default().applied_seq;
+            let wal_applied_seq = conn
+                .get_wal_position(DEFAULT_GROUP_ID)
+                .unwrap_or_default()
+                .applied_seq;
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
@@ -391,7 +398,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // Backfilling already happened above under the write lock (Phase 0) — this is a pure
             // read of whatever that pass established, never a write, so it's safe under the
             // shared read lock this closure runs under.
-            let wal_group_positions: Vec<(String, Option<u64>, Option<u64>, Option<String>)> =
+            let wal_group_positions: Vec<WalGroupPosition> =
                 wal_root
                     .as_deref()
                     .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
@@ -588,7 +595,9 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
 /// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
 /// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
 /// JSON map.
-fn wal_group_positions_json(positions: &[(String, Option<u64>, Option<u64>, Option<String>)]) -> Value {
+fn wal_group_positions_json(
+    positions: &[WalGroupPosition],
+) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
         .map(|(gid, applied, max, generation)| {
