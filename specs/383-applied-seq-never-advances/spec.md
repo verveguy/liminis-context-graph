@@ -2,21 +2,24 @@
 
 **Feature Branch**: `fabrik/issue-383`
 **Created**: 2026-08-13
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "`applied_seq` never advances for writes made through `wal_exec::wal_flush_ungrouped`, which is every write path except episode ingest. With #379's assertion API and #378's per-group positions both landed, that gap now has consequences it did not have when it was knowingly deferred."
 
 ## Background
 
 `episode.rs` advances `applied_seq` after `wal_exec::wal_flush_chunk` (the episode-ingest path). `wal_exec::wal_flush_ungrouped` — the helper used by every other write path — never has. Its doc comment still claims three callers ("delete handlers, corrections, and `handle_query_cypher`"), but its actual callers today are far broader: at least `handle_assert_entity`, `handle_assert_relationship`, `handle_add_cross_group_edge`, `handle_rebind_pointers`, `handle_merge_entities`, `handle_apply_corrections`, `handle_delete_by_group`, `handle_delete_by_source`, `handle_delete_episode`, `handle_delete_chunk_episode`, `handle_clear_all`, `handle_query_cypher`, plus `backfill.rs`, `canonicalize.rs`, and `reprocess_relations.rs`.
 
-**Reproduced** against `main` at `27377a1` (pre-#378), driving a fresh instance over MCP stdio with no LLM in the loop — six entities and eight relationships written via `knowledge_assert_entity`, `knowledge_assert_relationship`, and `knowledge_add_cross_group_edge` across three groups:
+**Reproduced** against `main` at `d5a3e14` (post-#378, the current per-group architecture), driving three groups through the assertion API with no LLM in the loop:
 
 ```
-35 WAL lines written
-knowledge_status → "wal": { "file_count": 1, "applied_seq": 0, "max_seq": 34 }
+knowledge_status → "wal_groups": {
+  "A": { "applied_seq": null, "max_seq": 4 },
+  "C": { "applied_seq": null, "max_seq": 24 },
+  ...
+}
 ```
 
-The database is exactly current with its own WAL and reports itself 34 positions behind. Not lagging — never starting. (Harness: a standalone MCP-stdio driver with a stub embedder; no extraction, fully deterministic. Available on request, or reconstructible from `crates/service/tests/common/mod.rs`'s `spawn_stub_embedder` plus the `--mcp-stdio` launch pattern in `crates/service/tests/mcp_stdio.rs`.)
+Real, non-zero `max_seq` values are recorded for every group that received writes; `applied_seq` is `null` for every one of them, regardless of how much was written. (Originally reproduced against `main` at `27377a1`, pre-#378, against the single shared position that existed then: 35 WAL lines written, `applied_seq: 0` against `max_seq: 34` — the same bug, in the architecture that predated per-group positions.) Harness: a standalone MCP-stdio driver with a stub embedder; no extraction, fully deterministic. Available on request, or reconstructible from `crates/service/tests/common/mod.rs`'s `spawn_stub_embedder` plus the `--mcp-stdio` launch pattern in `crates/service/tests/mcp_stdio.rs`.
 
 ### This is a documented deferral whose stated condition has now been met
 
@@ -26,29 +29,29 @@ The database is exactly current with its own WAL and reports itself 34 positions
 
 That reasoning was sound when `wal_flush_ungrouped` meant occasional maintenance operations against a graph whose bulk arrived through ingest. Two changes since have invalidated the premise:
 
-1. **#379 (the direct assertion API) made `wal_flush_ungrouped` a primary write path**, not an occasional one. An agent-authored or layer graph is built entirely from `knowledge_assert_entity` / `knowledge_assert_relationship` / `knowledge_add_cross_group_edge` — every one of which flushes ungrouped. Such a graph's `applied_seq` is not "trailing"; it is permanently `0` no matter how much is written.
-2. **#378 (per-group WAL positions) makes the position load-bearing for correctness, not just observability.** Its FR-011 requires cross-group pointers into a group to be re-bindable after that group's stream advances, using *that group's own applied position* as the staleness signal. For a layer graph built entirely by assertion, that signal never moves — so re-binding would never trigger, for precisely the topology #369/#378 exist to serve.
+1. **#379 (the direct assertion API) made `wal_flush_ungrouped` a primary write path**, not an occasional one. An agent-authored or layer graph is built entirely from `knowledge_assert_entity` / `knowledge_assert_relationship` / `knowledge_add_cross_group_edge` — every one of which flushes ungrouped. Such a graph's `applied_seq` is not "trailing"; it is permanently unset no matter how much is written.
+2. **#378 (per-group WAL positions) made the position load-bearing for correctness, not just observability.** Its FR-011 requires cross-group pointers into a group to be re-bindable after that group's stream advances, using *that group's own applied position* as the staleness signal. For a layer graph built entirely by assertion, that signal never moves — so re-binding would never trigger, for precisely the topology #369/#378 exist to serve.
 
 The second point is why this is worth fixing rather than continuing to accept: it turns a cosmetic reporting inaccuracy into a silently-skipped correctness pass.
 
-### Dependency on #378
+### Current architecture (post-#378)
 
-As of this writing, #378 ("Multi-stream WAL: one WAL directory per group") is not yet merged to `main` — it has an open, mergeable, CI-green PR (#382). This spec is written against the shape #378 establishes: `get_applied_seq`/`set_applied_seq` keyed by `group_id`, and `wal_flush_ungrouped` already taking a `group_id` parameter. Direct inspection of #378's branch confirms `wal_flush_ungrouped` there still returns `()` and still never advances `applied_seq` — so this issue's fix is genuinely additive on top of #378, not redundant with it, regardless of which of the two lands first. If #378 has not merged into `main` by the time Research begins on this issue, Research should treat that as a sequencing dependency to flag rather than reimplement per-group position infrastructure from scratch.
+#378 ("Multi-stream WAL: one WAL directory per group") merged via PR #382; `main` is at `d5a3e14`. `Conn::get_applied_seq`/`set_applied_seq` are now keyed by `group_id` (one `WalPosition` row per group), and `wal_exec::wal_flush_ungrouped` already takes `state: &AppState, group_id: &str, mutations: Vec<(String, Value)>` — but, confirmed by direct inspection, still returns `()` and still never advances the position, for any group. `wal_exec::wal_flush_chunk` takes the seq it assigned and advances that group's persisted `applied_seq` directly, exactly as it did before #378 — just scoped per group now instead of to one singleton row. `knowledge_status` exposes this as a `wal_groups` map (one entry per group with WAL content) rather than the pre-#378 singleton `wal` object. This issue's fix targets that existing per-group model; it does not itself introduce per-group tracking.
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - `knowledge_status` reflects assertion-only writes (Priority: P1)
 
-An operator or agent builds a graph entirely through the assert API (`knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_add_cross_group_edge`) — the pattern #379 exists to serve, with no episode ingest involved at all. They call `knowledge_status` and expect `wal.applied_seq` for that group to reflect what has actually been written, not report `0` regardless of how much content exists.
+An operator or agent builds a graph entirely through the assert API (`knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_add_cross_group_edge`) — the pattern #379 exists to serve, with no episode ingest involved at all. They call `knowledge_status` and expect the `wal_groups` entry for that group to report an `applied_seq` reflecting what has actually been written, not `null` regardless of how much content exists.
 
-**Why this priority**: This is the exact reproduction in the issue: 35 WAL lines written, `applied_seq` permanently `0`. It is the direct, user-visible symptom the issue is filed against.
+**Why this priority**: This is the exact reproduction in this spec's Background: real `max_seq` values, `applied_seq: null` for every group. It is the direct, user-visible symptom the issue is filed against.
 
-**Independent Test**: Write N entities/relationships through the assert API alone into one group, call `knowledge_status`, and confirm the reported `applied_seq` for that group is consistent with (not necessarily identical to, if some writes are filtered — see Edge Cases) that group's WAL `max_seq`, not `0`.
+**Independent Test**: Write N entities/relationships through the assert API alone into one group, call `knowledge_status`, and confirm the reported `applied_seq` for that group's `wal_groups` entry is consistent with (not necessarily identical to, if some writes are filtered — see Edge Cases) that group's `max_seq`, not `null`.
 
 **Acceptance Scenarios**:
 
-1. **Given** a fresh group with no prior writes, **When** N entities and relationships are written via `knowledge_assert_entity`/`knowledge_assert_relationship`/`knowledge_add_cross_group_edge` and `knowledge_status` is then called, **Then** the reported `applied_seq` for that group is consistent with the group's WAL `max_seq` — not `0`.
-2. **Given** a group already at some non-zero `applied_seq`, **When** additional assert-API writes land in that group, **Then** `applied_seq` advances further, tracking the new writes.
+1. **Given** a fresh group with no prior writes, **When** N entities and relationships are written via `knowledge_assert_entity`/`knowledge_assert_relationship`/`knowledge_add_cross_group_edge` and `knowledge_status` is then called, **Then** the reported `applied_seq` for that group is consistent with the group's `max_seq` — not `null`.
+2. **Given** a group already at some known `applied_seq`, **When** additional assert-API writes land in that group, **Then** `applied_seq` advances further, tracking the new writes.
 
 ---
 
@@ -99,7 +102,7 @@ The existing safety property — `applied_seq` may trail reality but must never 
 - **Empty mutation batch**: a call to `wal_exec::wal_flush_ungrouped` with no mutations must not advance `applied_seq` at all (consistent with `wal_flush_chunk`'s existing behavior for an empty chunk).
 - **Partial failure mid-batch**: `wal_flush_ungrouped` flushes one `with_chunk` per mutation (not one atomic chunk for the whole batch), so a failure partway through a batch leaves some mutations durably written and others not — the advanced position must reflect exactly the durably-written prefix, not the whole attempted batch.
 - **Multi-group call sites that route through a single default group regardless of the mutations' actual group**: per ADR-0378 FR-004, four call sites (`backfill.rs`, `canonicalize.rs`, `handle_delete_by_group`'s forced rebind pass, and `handle_query_cypher`) flush through `DEFAULT_GROUP_ID`'s writer unconditionally, regardless of which group(s) the mutations logically touch. After this fix, those call sites will advance `DEFAULT_GROUP_ID`'s `applied_seq` specifically — this is inherited from #378's existing routing decision, not introduced by this issue, and is not a defect to fix here.
-- **`handle_query_cypher`'s treatment**: see Open Questions below.
+- **`handle_query_cypher`'s treatment**: resolved — it advances `applied_seq` uniformly with every other `wal_flush_ungrouped` caller (FR-006). See Notes for the rationale.
 - **Doc-comment and ADR-text corrections** (FR-004, FR-005): these are documentation-only changes with no runtime edge cases of their own.
 
 ## Requirements *(mandatory)*
@@ -107,10 +110,11 @@ The existing safety property — `applied_seq` may trail reality but must never 
 ### Functional Requirements
 
 - **FR-001**: Writes flushed via `wal_exec::wal_flush_ungrouped` MUST advance the target group's persisted `applied_seq`, in the same way `wal_flush_chunk` already does.
-- **FR-002**: The advance MUST be per-group, consistent with #378's per-group `WalPosition` rows — a write to group B MUST NOT advance group A's position.
+- **FR-002**: The advance MUST be per-group, using the existing `group_id`-keyed `get_applied_seq`/`set_applied_seq` and `wal_groups` status model #378 established — a write to group B MUST NOT advance group A's position.
 - **FR-003**: The existing safety property MUST be preserved: `applied_seq` may trail reality but MUST NEVER lead it. A failed or partial WAL write MUST NOT advance the position past what was durably recorded.
 - **FR-004**: `wal_flush_ungrouped`'s doc comment MUST be corrected to name its actual callers (or describe them accurately as a category), not the stale three-caller list.
 - **FR-005**: [ADR-0353](../../docs/adr/0353-persist-and-expose-applied-wal-seq.md)'s consequence entry recording the `wal_flush_ungrouped` deferral MUST be updated to record that its "if the lag proves to matter" condition was met, and why, so the history stays legible rather than looking like an unexplained reversal.
+- **FR-006**: `handle_query_cypher`'s mutations MUST advance `applied_seq` uniformly with every other `wal_flush_ungrouped` caller — no per-caller exception. `applied_seq` is a statement about WAL position, not about the trustworthiness of the content at that position; a deployment that wants to withhold raw-cypher writes has `Scope::Cypher` for that, not selective position accounting (see Notes).
 
 ### Key Entities *(if the feature involves data)*
 
@@ -120,20 +124,24 @@ The existing safety property — `applied_seq` may trail reality but must never 
 
 ### Measurable Outcomes
 
-- **SC-001**: After writing N entities/relationships through the assert API alone, `knowledge_status` reports an `applied_seq` consistent with the WAL's `max_seq` for that group — the reproduction in this spec's Background no longer shows `applied_seq: 0` against `max_seq: 34`.
+- **SC-001**: After writing N entities/relationships through the assert API alone, `knowledge_status`'s `wal_groups` entry for that group reports an `applied_seq` consistent with the group's `max_seq` — the reproduction in this spec's Background no longer shows `applied_seq: null` for a group with a non-zero `max_seq`.
 - **SC-002**: A write to one group leaves every other group's `applied_seq` byte-identical.
 - **SC-003**: #378's FR-011 re-bind staleness check fires for a layer graph built entirely through the assertion API — the case that motivated this issue.
 - **SC-004**: No path advances `applied_seq` beyond the highest durably-written seq, including when a WAL write fails mid-flush.
 
 ## Assumptions
 
-- #378 (per-group `WalPosition` rows, `group_id`-keyed `get_applied_seq`/`set_applied_seq`, and a `group_id`-parameterized `wal_flush_ungrouped`) is treated as a prerequisite this work builds on, per the Background's "Dependency on #378" note. It is not part of this issue's scope to implement.
 - The four `DEFAULT_GROUP_ID`-routed call sites established by ADR-0378 FR-004 keep that routing; this issue only makes the position-advance itself work, it does not revisit which group each call site attributes its writes to.
 - `wal_flush_ungrouped`'s current signature (returns `()`, swallows per-mutation write outcomes) will need to change to expose what was actually, durably written, the way `wal_flush_chunk` already returns `Option<u64>` — the exact shape is left to Research/Plan, not prescribed here.
 
 ## Out of Scope
 
-- Implementing #378 itself (per-group `WalPosition` infrastructure) — a prerequisite, not part of this issue.
+- Implementing #378 itself (per-group `WalPosition` infrastructure) — already merged, not part of this issue.
 - Changing which group any of `wal_flush_ungrouped`'s call sites attribute their mutations to (ADR-0378 FR-004's `DEFAULT_GROUP_ID` routing for the four multi-group call sites) — reused as-is.
 - Any change to `wal_flush_chunk`'s already-correct advancement behavior.
 - Backfill/upgrade semantics for pre-existing databases — ADR-0353's existing backfill mechanism is unaffected by this issue.
+- Changing `knowledge_query_cypher`'s scope gating or any other access-control mechanism — `Scope::Cypher` already exists and is the correct lever for withholding untrusted raw-cypher writes; this issue only makes its WAL position accounting consistent with every other caller.
+
+## Notes
+
+- **Decided (2026-08-13): `handle_query_cypher` advances `applied_seq` uniformly with every other `wal_flush_ungrouped` caller — no per-caller exception.** `applied_seq` answers "how far has this database been hydrated from its own WAL," not "how much of that WAL do we trust" — nothing else in the system distinguishes those two ideas, and carving out one caller would introduce a second, fuzzier concept every future reader has to learn. Excluding raw-cypher writes would not protect anything `knowledge_query_cypher`'s existing warning doesn't already cover — it bypasses the embedding/name-index invariants the structured tools maintain, a graph-content concern unrelated to WAL position. Excluding it would also create a hazard: raw-cypher statements are the WAL's least idempotent content (the native write path emits `CREATE`, not `MERGE` — ADR-0046), so an under-reported position would make them the ones most likely to be re-executed by a future incremental catch-up replay from `applied_seq + 1`, which fails on a duplicate primary key rather than being a safe no-op. The existing lever for withholding untrusted raw-cypher writes is `Scope::Cypher` — `knowledge_query_cypher`'s own dedicated permission bucket — not selective position accounting.
