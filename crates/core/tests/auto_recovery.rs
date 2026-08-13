@@ -142,7 +142,10 @@ fn write_episode_wal_line(wal_dir: &std::path::Path, filename: &str, seq: u64, u
             "params": {
                 "uuid": uuid,
                 "name": format!("Episode {uuid}"),
-                "group_id": "test-group",
+                // This whole-instance recovery path always targets the default group (issue
+                // #378) — episodes here must belong to it for derive_episode_cursor's
+                // group-scoped lookup to find them.
+                "group_id": "liminis",
                 "created_at": "2026-06-18 00:00:00",
                 "source": "text",
                 "source_description": "test",
