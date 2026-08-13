@@ -381,11 +381,15 @@ async fn test_knowledge_recover_full_idempotent_on_healthy_engine() {
 async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
     let dir = TempDir::new().unwrap();
     let wal_dir = dir.path().join("wal");
-    std::fs::create_dir_all(&wal_dir).unwrap();
+    // handle_knowledge_recover_full always targets the default group's own WAL directory
+    // (issue #378) — wal_dir here is the root, so the fixture content must live under its
+    // "liminis" subdirectory for wal_group::group_wal_dir to find it.
+    let default_group_dir = wal_dir.join("liminis");
+    std::fs::create_dir_all(&default_group_dir).unwrap();
 
     // Write WAL JSONL with 1 episode — this is the source of truth
     let ep_uuid = "ep-fallback-001";
-    write_episode_wal_line(&wal_dir, "0001.jsonl", 1, ep_uuid);
+    write_episode_wal_line(&default_group_dir, "0001.jsonl", 1, ep_uuid);
 
     // Use a db_path whose parent exists but whose DB file does NOT exist.
     // Db::open on a non-existent path would normally create a new DB — but if
