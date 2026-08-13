@@ -120,10 +120,16 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
 /// Like `make_state_with_wal`, but with a real, live `WalWriter` (issue #353's `applied_seq`
 /// tests need `knowledge_process_chunk` to actually append WAL lines through the normal
 /// write path, unlike `make_state_with_wal`'s callers, which write WAL files directly to
-/// disk and never go through `AppState.wal_writer`).
+/// disk and never go through `AppState.wal_writers`).
+///
+/// `wal_dir` is treated as `AppState.wal_root` (issue #378); the pre-seeded live writer is
+/// constructed at `wal_dir/liminis` — the same location `wal_group::group_wal_dir` would
+/// resolve for the default group — so independent readers (e.g. `handle_knowledge_status`'s
+/// `wal_max_seq` call) agree with the writer's own directory.
 fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_dir, 10_000, 5 * 1024 * 1024).ok();
+    let default_group_dir = wal_dir.join("liminis");
+    let wal_writer = WalWriter::new(&default_group_dir, 10_000, 5 * 1024 * 1024).ok();
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
@@ -2687,7 +2693,7 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
         // an absent position: every pointer is re-resolved on every pass rather than gated,
         // since there is no position to compare a cached bound_at_seq against). Without this,
         // the second dispatch below could never observe a gated no-op.
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("source-a", 1).unwrap();
     }
 
     let rebind = dispatch_val(
@@ -4549,15 +4555,23 @@ async fn parity_rebuild_from_wal_non_empty_db_fails_fast_by_default() {
     );
 
     let wal_dir = TempDir::new().unwrap();
+    let group_dir = wal_dir.path().join("g");
+    std::fs::create_dir_all(&group_dir).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260726_000000_parity.jsonl"),
+        group_dir.join("20260726_000000_parity.jsonl"),
         entity_wal_line(0, "parity-rebuild-001") + "\n",
     )
     .unwrap();
     let db_path = dir.path().join("parity.db").to_str().unwrap().to_string();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), db_path);
 
-    let v = dispatch_val(100, "knowledge_rebuild_from_wal", json!({}), state).await;
+    let v = dispatch_val(
+        100,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": "g"}),
+        state,
+    )
+    .await;
 
     assert_err_resp(&v, 100, -32000);
     let msg = v["error"]["message"].as_str().unwrap_or("");
@@ -4581,8 +4595,10 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
     );
 
     let wal_dir = TempDir::new().unwrap();
+    let group_dir = wal_dir.path().join("g");
+    std::fs::create_dir_all(&group_dir).unwrap();
     std::fs::write(
-        wal_dir.path().join("20260726_000000_parity.jsonl"),
+        group_dir.join("20260726_000000_parity.jsonl"),
         entity_wal_line(0, "parity-rebuild-002") + "\n",
     )
     .unwrap();
@@ -4596,7 +4612,7 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
         req(
             101,
             "knowledge_rebuild_from_wal",
-            json!({"force_clear": true}),
+            json!({"group_id": "g", "force_clear": true}),
         ),
         Arc::clone(&state),
         Some(tx),
@@ -4613,13 +4629,15 @@ async fn parity_rebuild_from_wal_force_clear_succeeds() {
         "force_clear must have removed the stale entity, leaving zero duplicate-key failures: {v}"
     );
 
-    // SC-002: after knowledge_rebuild_from_wal {force_clear: true} over a WAL whose max seq is
-    // N (here, the single line's seq 0), wal.applied_seq == N.
-    let status = dispatch_val(102, "knowledge_status", json!({}), state).await;
-    assert_ok_resp(&status, 102);
+    // SC-002: group "g"'s own WalPosition row (not the flat default-group field, which stays
+    // pinned to "liminis" and is untouched by this group-scoped rebuild) must equal the
+    // replay's last_committed_seq (the WAL's only line, seq 0) after force_clear.
+    let db_after = state.db.load_full().unwrap();
+    let conn_after = db_after.connect().unwrap();
     assert_eq!(
-        status["result"]["wal"]["applied_seq"], 0,
-        "applied_seq must equal the replay's last_committed_seq (the WAL's only line, seq 0): {status}"
+        conn_after.get_applied_seq("g").unwrap(),
+        Some(0),
+        "group g's applied_seq must equal the replay's last_committed_seq"
     );
 }
 
@@ -4651,7 +4669,7 @@ fn seed_entity(conn: &Conn<'_>, uuid: &str) {
 fn make_degraded_state_with_wal(reason: &str, wal_dir: PathBuf) -> Arc<AppState> {
     let base = make_degraded_state(reason);
     let mut state = Arc::try_unwrap(base).unwrap_or_else(|_| unreachable!("sole owner"));
-    state.wal_dir = Some(wal_dir);
+    state.wal_root = Some(wal_dir);
     Arc::new(state)
 }
 
@@ -4660,19 +4678,17 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(42).unwrap();
+        conn.set_applied_seq("liminis", 42).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
+    let group_dir = wal_dir.path().join("liminis");
+    std::fs::create_dir_all(&group_dir).unwrap();
     // Give the WAL directory content covering seq 0..42 (including the true prefix, seq 0), so
     // `reachable` reports true below — a WAL missing its prefix is unreachable regardless of
     // whether the checkpoint's own seq is covered (see the prefix-truncation regression test).
+    std::fs::write(group_dir.join("0000.jsonl"), entity_wal_line(0, "e0") + "\n").unwrap();
     std::fs::write(
-        wal_dir.path().join("0000.jsonl"),
-        entity_wal_line(0, "e0") + "\n",
-    )
-    .unwrap();
-    std::fs::write(
-        wal_dir.path().join("0001.jsonl"),
+        group_dir.join("0001.jsonl"),
         entity_wal_line(42, "e42") + "\n",
     )
     .unwrap();
@@ -4709,7 +4725,7 @@ async fn wal_mark_create_fails_when_applied_seq_is_null() {
     assert_err_resp(&v, 1, -32000);
 
     // No checkpoint record — not even a placeholder — must be written (FR-004).
-    assert!(!wal_dir.path().join(".checkpoints").exists());
+    assert!(!wal_dir.path().join("liminis").join(".checkpoints").exists());
 }
 
 #[tokio::test]
@@ -4717,7 +4733,7 @@ async fn wal_mark_create_rejects_duplicate_active_name() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("liminis", 1).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4754,7 +4770,7 @@ async fn wal_mark_create_applied_seq_zero_empty_graph_records_seq_none() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(0).unwrap();
+        conn.set_applied_seq("liminis", 0).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4787,7 +4803,7 @@ async fn wal_mark_create_applied_seq_zero_nonempty_graph_records_seq_some_zero()
     {
         let conn = db.connect().unwrap();
         seed_entity(&conn, "first-chunk-entity");
-        conn.set_applied_seq(0).unwrap();
+        conn.set_applied_seq("liminis", 0).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4821,14 +4837,12 @@ async fn wal_mark_list_on_empty_store_returns_empty_not_error() {
 async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     let (db, _dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
+    let group_dir = wal_dir.path().join("liminis");
+    std::fs::create_dir_all(&group_dir).unwrap();
     // Two WAL files: one covers seq 0, the other covers seq 10.
+    std::fs::write(group_dir.join("a_0000.jsonl"), entity_wal_line(0, "e0") + "\n").unwrap();
     std::fs::write(
-        wal_dir.path().join("a_0000.jsonl"),
-        entity_wal_line(0, "e0") + "\n",
-    )
-    .unwrap();
-    std::fs::write(
-        wal_dir.path().join("b_0000.jsonl"),
+        group_dir.join("b_0000.jsonl"),
         entity_wal_line(10, "e10") + "\n",
     )
     .unwrap();
@@ -4838,7 +4852,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
         seed_entity(&conn, "low-marker");
-        conn.set_applied_seq(0).unwrap();
+        conn.set_applied_seq("liminis", 0).unwrap();
     }
     let v_low = dispatch_val(
         1,
@@ -4852,7 +4866,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(10).unwrap();
+        conn.set_applied_seq("liminis", 10).unwrap();
     }
     let v_high = dispatch_val(
         2,
@@ -4878,7 +4892,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     // `knowledge_rebuild_from_wal {from_seq: 0, to_seq: 10}` would silently skip everything
     // before seq 10 rather than error — a restore to "high" would produce an incomplete graph
     // despite looking reachable by seq range alone (issue #365 review finding).
-    std::fs::remove_file(wal_dir.path().join("a_0000.jsonl")).unwrap();
+    std::fs::remove_file(wal_dir.path().join("liminis").join("a_0000.jsonl")).unwrap();
 
     let list_after = dispatch_val(4, "knowledge_wal_mark_list", json!({}), state).await;
     let cps_after = list_after["result"]["checkpoints"].as_array().unwrap();
@@ -4899,7 +4913,7 @@ async fn wal_mark_list_excludes_deleted_checkpoints() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(3).unwrap();
+        conn.set_applied_seq("liminis", 3).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4946,7 +4960,7 @@ async fn wal_mark_delete_of_already_deleted_name_fails() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("liminis", 1).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4975,7 +4989,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("liminis", 1).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -4989,7 +5003,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     .await;
     assert_ok_resp(&created, 1);
 
-    let name_dir = wal_dir.path().join(".checkpoints").join("reuse");
+    let name_dir = wal_dir.path().join("liminis").join(".checkpoints").join("reuse");
     let create_record_before = std::fs::read_to_string(name_dir.join("g1.create.json")).unwrap();
 
     let deleted = dispatch_val(
@@ -5015,7 +5029,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(77).unwrap();
+        conn.set_applied_seq("liminis", 77).unwrap();
     }
     let recreated = dispatch_val(
         3,
@@ -5046,7 +5060,7 @@ async fn wal_mark_list_and_delete_work_when_db_degraded_but_create_does_not() {
     let (db, _dbdir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("liminis", 1).unwrap();
     }
     let healthy_state =
         make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5098,7 +5112,7 @@ async fn wal_mark_create_concurrent_same_name_exactly_one_wins() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(1).unwrap();
+        conn.set_applied_seq("liminis", 1).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());

@@ -210,7 +210,7 @@ fn test_open_or_rebuild_from_wal() {
     // issue #353 (FR-004 extension): a fresh open_or_rebuild rebuild is exactly as
     // authoritative as knowledge_rebuild_from_wal's own post-replay write.
     assert_eq!(
-        conn.get_applied_seq().unwrap(),
+        conn.get_applied_seq("liminis").unwrap(),
         stats.last_committed_seq,
         "open_or_rebuild must persist applied_seq at the replay's last_committed_seq"
     );
@@ -281,7 +281,7 @@ fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
     // no-episodes DB backfills to 0 rather than leaving it null.
     let conn = db.connect().expect("connect");
     assert_eq!(
-        conn.get_applied_seq().unwrap(),
+        conn.get_applied_seq("liminis").unwrap(),
         Some(0),
         "an empty pre-existing DB with no episodes must backfill applied_seq to 0"
     );

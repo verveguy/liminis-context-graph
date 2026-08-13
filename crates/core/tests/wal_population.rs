@@ -18,7 +18,6 @@ use lcg_core::{
     ipc::IpcRequest,
     replay::WalReplayer,
     telemetry::{NoopSink, TelemetrySink},
-    WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;

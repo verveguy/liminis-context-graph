@@ -192,7 +192,7 @@ async fn test_run_full_recovery_sequence_torn_wal() {
     let result = tokio::task::spawn_blocking({
         let db_path = db_path.clone();
         let wal_dir = wal_dir.clone();
-        move || recovery::run_full_recovery_sequence(&db_path, &wal_dir, DIM, sink)
+        move || recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_dir, DIM, sink)
     })
     .await
     .unwrap();
