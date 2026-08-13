@@ -53,11 +53,16 @@ pub struct RecoveryReport {
 ///
 /// Scans ALL files to find the global minimum seq (episode uuid may appear in
 /// multiple files, e.g. as `params["ep"]` on MENTIONS edges).
+///
+/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root) — the caller
+/// resolves it via `wal_group::group_wal_dir` before calling. Scoped by `group_id` (issue #378
+/// FR-010) so a backfill for one group can never pick up another group's most recent episode.
 pub fn derive_episode_cursor(
     conn: &crate::db::Conn<'_>,
+    group_id: &str,
     wal_dir: &Path,
 ) -> Result<(u64, CursorReason), Error> {
-    let target_uuid = match conn.get_latest_episode_uuid()? {
+    let target_uuid = match conn.get_latest_episode_uuid(group_id)? {
         Some(u) => u,
         None => return Ok((0, CursorReason::NoEpisodes)),
     };
@@ -152,46 +157,54 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
 ///   documented action for that state is a full rebuild, the same fallback ADR-0026 already
 ///   defines for its own recovery path. `CursorReason::NoEpisodes` is unreachable here since
 ///   the episode-count guard above already ran.
+///
+/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root). Scoped by
+/// `group_id` throughout (issue #378 FR-010): both the emptiness check and the episode-cursor
+/// derivation only ever look at `group_id`'s own content, so a backfill for group A can never
+/// be derived from — or degrade because of — group B's episodes.
 pub fn backfill_applied_seq_if_absent(
     conn: &crate::db::Conn<'_>,
+    group_id: &str,
     wal_dir: &Path,
 ) -> Result<(), Error> {
-    if conn.get_applied_seq()?.is_some() {
+    if conn.get_applied_seq(group_id)?.is_some() {
         return Ok(());
     }
-    if conn.count_nodes("Episodic")? == 0 {
-        // Episodic count alone doesn't prove the graph is empty: `remove_episode` and
+    let gids = [group_id];
+    if conn.count_episodics_by_group_ids(&gids)? == 0 {
+        // Episodic count alone doesn't prove the group is empty: `remove_episode` and
         // `remove_episodes_by_source`/`_by_chunk_id` only `DETACH DELETE` the `Episodic`
-        // node, never the `Entity`/edge data it created (db.rs), so a DB that had all its
+        // node, never the `Entity`/edge data it created (db.rs), so a group that had all its
         // episodes deleted can still hold real, unrecorded content with zero episodes left
         // to anchor a position derivation on. Only collapse to the "genuinely fresh" `0`
         // case when there is truly nothing else either — otherwise leave the row absent
         // (`null`, the documented "unknown, full rebuild" signal) rather than falsely
-        // reporting "known, nothing applied" for a populated-but-episode-less graph.
-        if graph_has_no_content(conn)? {
-            return conn.set_applied_seq(0);
+        // reporting "known, nothing applied" for a populated-but-episode-less group.
+        if group_has_no_content(conn, group_id)? {
+            return conn.set_applied_seq(group_id, 0);
         }
         return Ok(());
     }
-    let (seq, reason) = derive_episode_cursor(conn, wal_dir)?;
+    let (seq, reason) = derive_episode_cursor(conn, group_id, wal_dir)?;
     if reason == CursorReason::UuidMatch {
-        conn.set_applied_seq(seq)?;
+        conn.set_applied_seq(group_id, seq)?;
     }
     // UuidNotFound (and the unreachable NoEpisodes): leave the row absent — null is the
     // correct, documented "backfill failed, full rebuild required" report (FR-008).
     Ok(())
 }
 
-/// True if the graph holds zero `Episodic` nodes, zero `Entity` nodes, and zero relationship
+/// True if `group_id` holds zero `Episodic` nodes, zero `Entity` nodes, and zero relationship
 /// edges — the same three-count emptiness check `backfill_applied_seq_if_absent` uses to tell
-/// "genuinely fresh" from "populated but episode-less" (issue #353). Reused by the WAL
-/// checkpoint feature (issue #365, FR-005) to disambiguate `applied_seq == 0`, which is
-/// otherwise ambiguous between "nothing applied" and "WAL line 0 applied". `&&`-short-circuits
-/// so the common non-empty case costs a single query.
-pub(crate) fn graph_has_no_content(conn: &crate::db::Conn<'_>) -> Result<bool, Error> {
-    Ok(conn.count_nodes("Episodic")? == 0
-        && conn.count_nodes("Entity")? == 0
-        && conn.count_relates_to_edges()? == 0)
+/// "genuinely fresh" from "populated but episode-less" (issue #353), scoped per group by issue
+/// #378. Reused by the WAL checkpoint feature (issue #365, FR-005) to disambiguate
+/// `applied_seq == 0`, which is otherwise ambiguous between "nothing applied" and "WAL line 0
+/// applied". `&&`-short-circuits so the common non-empty case costs a single query.
+pub(crate) fn group_has_no_content(conn: &crate::db::Conn<'_>, group_id: &str) -> Result<bool, Error> {
+    let gids = [group_id];
+    Ok(conn.count_episodics_by_group_ids(&gids)? == 0
+        && conn.count_entities_by_group_ids(&gids)? == 0
+        && conn.count_relates_to_by_group_ids(&gids)? == 0)
 }
 
 // ── Full recovery sequence ────────────────────────────────────────────────────
