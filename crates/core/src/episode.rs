@@ -37,15 +37,22 @@ pub struct AddEpisodeResult {
     /// lost.
     pub entities_reclassified_unclassified: usize,
     /// Entities dropped for failing required-field validation — either at parse time (the
-    /// extractor's per-item salvage, e.g. a missing `name`) or by the empty-name `retain` above
-    /// (e.g. an explicit `""` or whitespace-only `name`). Both layers feed this one counter so
-    /// missing/`null`/empty-string `name` all produce the same observable outcome (#342 FR-003,
-    /// FR-007).
+    /// extractor's per-item salvage, which since #347 rejects a missing `name` *and* a blank or
+    /// whitespace-only `name`) or by the empty-name `retain` below, in `add_episode`
+    /// (defense-in-depth for `Extractor` implementors that bypass parse-time salvage, e.g.
+    /// `ConfigurableExtractor`, `MockExtractor`). An item is only ever removed by one of the two
+    /// layers, never both, so they feed this one counter disjointly —
+    /// missing/`null`/empty-string/whitespace-only `name` all still produce a single observable
+    /// outcome (#342 FR-003, FR-007; #347 FR-004).
     pub entities_dropped_malformed: usize,
-    /// Edges dropped for failing required-field validation during extraction-response parsing
-    /// (e.g. a missing `source_name`/`target_name`) — distinct from `edges_dropped_unresolvable`,
-    /// which drops a structurally valid edge whose endpoint name couldn't be resolved against
-    /// either this batch or the persisted graph (#342 FR-003).
+    /// Edges dropped for failing required-field validation during extraction-response parsing —
+    /// a missing `source_name`/`target_name`/`fact` (#342), or, since #347, a `source_name`,
+    /// `target_name`, or `fact` that deserializes fine but is blank or whitespace-only (#347
+    /// FR-001/FR-002). A blank endpoint name is counted here rather than in
+    /// `edges_dropped_unresolvable` because it can never resolve in any graph, at any time — it
+    /// is an invalid item, not an unresolved reference, and a parse-time-rejected edge never
+    /// reaches the Phase C resolution code that populates `edges_dropped_unresolvable` anyway.
+    /// An edge with multiple blank fields is counted once, not once per field.
     pub edges_dropped_malformed: usize,
 }
 
@@ -234,10 +241,15 @@ pub async fn add_episode(
     // tally from what's actually persisted (review finding on issue #312).
     //
     // This drop is disjoint from the parse-time salvage folded into `entities_dropped_malformed`
-    // above: parse-time salvage only ever removes items that failed to deserialize (missing/
-    // `null` name), which never reach this point at all; this `retain` only removes items that
-    // deserialized fine but carry an empty-string name. Folding this count into the same counter
-    // (#342 FR-007) makes missing/`null`/empty-string `name` all produce one observable outcome.
+    // above: parse-time salvage removes items that failed to deserialize (missing/`null` name)
+    // and, since #347, items that deserialized fine but carry a blank/whitespace-only name too —
+    // for the two real providers (Anthropic, OAI-compatible), this `retain` is now a no-op in
+    // practice. It stays load-bearing as defense-in-depth for `Extractor` implementors that
+    // bypass parse-time salvage entirely (`ConfigurableExtractor`, `MockExtractor`, other test
+    // doubles that build `ExtractionResult` directly), which never call `salvage_items`. An item
+    // is only ever removed by one of the two layers, never both, so folding this count into the
+    // same counter (#342 FR-007, #347 FR-004) makes missing/`null`/empty-string/whitespace-only
+    // `name` all produce one observable outcome without double-counting.
     let before_empty_name_retain = extraction.entities.len();
     extraction.entities.retain(|e| !e.name.trim().is_empty());
     entities_dropped_malformed += before_empty_name_retain - extraction.entities.len();
