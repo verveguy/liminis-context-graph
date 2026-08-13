@@ -38,11 +38,12 @@ pub struct AddEpisodeResult {
     pub entities_reclassified_unclassified: usize,
     /// Entities dropped for failing required-field validation — either at parse time (the
     /// extractor's per-item salvage, which since #347 rejects a missing `name` *and* a blank or
-    /// whitespace-only `name`) or by the empty-name `retain` above (defense-in-depth for
-    /// `Extractor` implementors that bypass parse-time salvage, e.g. `ConfigurableExtractor`,
-    /// `MockExtractor`). An item is only ever removed by one of the two layers, never both, so
-    /// they feed this one counter disjointly — missing/`null`/empty-string/whitespace-only
-    /// `name` all still produce a single observable outcome (#342 FR-003, FR-007; #347 FR-004).
+    /// whitespace-only `name`) or by the empty-name `retain` below, in `add_episode`
+    /// (defense-in-depth for `Extractor` implementors that bypass parse-time salvage, e.g.
+    /// `ConfigurableExtractor`, `MockExtractor`). An item is only ever removed by one of the two
+    /// layers, never both, so they feed this one counter disjointly —
+    /// missing/`null`/empty-string/whitespace-only `name` all still produce a single observable
+    /// outcome (#342 FR-003, FR-007; #347 FR-004).
     pub entities_dropped_malformed: usize,
     /// Edges dropped for failing required-field validation during extraction-response parsing —
     /// a missing `source_name`/`target_name`/`fact` (#342), or, since #347, a `source_name`,

@@ -169,10 +169,10 @@ pub struct ExtractedEdge {
 
 /// A structurally valid (deserializes fine) item can still be semantically empty — e.g. a
 /// `String` field that is present but blank or whitespace-only. `salvage_items` (extractor.rs)
-/// checks this in addition to deserializability, per #347. The blankness test is `str::trim()
-/// .is_empty()`, matching `episode.rs`'s pre-existing empty-name `retain` exactly — no new
-/// whitespace semantics are introduced.
-pub trait RequiredFieldsPresent {
+/// checks this in addition to deserializability, per #347. The blankness test is
+/// `str::trim().is_empty()`, matching `episode.rs`'s pre-existing empty-name `retain` exactly —
+/// no new whitespace semantics are introduced.
+pub(crate) trait RequiredFieldsPresent {
     fn is_well_formed(&self) -> bool;
 }
 
