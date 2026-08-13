@@ -36,6 +36,7 @@ pub mod token_budget;
 pub mod types;
 pub mod wal;
 pub(crate) mod wal_exec;
+pub mod wal_generation;
 pub mod wal_group;
 
 pub use app_state::AppState;
