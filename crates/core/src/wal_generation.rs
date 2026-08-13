@@ -72,7 +72,20 @@ const ADOPT_RETRY_DELAY: Duration = Duration::from_millis(2);
 /// (Edge Cases) both call this. Exactly one wins an atomic `O_EXCL` create; the loser does not
 /// error — it re-reads the winner's file and adopts that value, so both processes agree on one
 /// generation for the stream.
+///
+/// Self-healing on a crashed winner: if the race winner is killed between `create_new` succeeding
+/// and `write_all`/`sync_all` landing, the file exists but never becomes readable — a live
+/// winner's write of a few dozen bytes finishes far inside the retry window, so exhausting
+/// `ADOPT_RETRY_ATTEMPTS` is treated as proof the file is stale wreckage, not a still-in-flight
+/// write. That stale file is removed and minting is retried exactly once more; without this, a
+/// mid-write crash would otherwise brick the stream permanently — every future call would keep
+/// hitting the same unreadable file, and `WalWriter::new` would fail forever until a human
+/// deleted it by hand.
 pub fn ensure_generation(wal_dir: &Path) -> Result<String, Error> {
+    ensure_generation_impl(wal_dir, true)
+}
+
+fn ensure_generation_impl(wal_dir: &Path, self_heal_on_stale_file: bool) -> Result<String, Error> {
     if let Some(existing) = read_generation(wal_dir) {
         return Ok(existing);
     }
@@ -97,6 +110,10 @@ pub fn ensure_generation(wal_dir: &Path) -> Result<String, Error> {
                     return Ok(winner);
                 }
                 thread::sleep(ADOPT_RETRY_DELAY);
+            }
+            if self_heal_on_stale_file {
+                let _ = fs::remove_file(&path);
+                return ensure_generation_impl(wal_dir, false);
             }
             Err(Error::WalIo(std::io::Error::other(
                 "generation file exists but could not be read after concurrent creation",
@@ -193,6 +210,20 @@ mod tests {
         let g1 = ensure_generation(tmp.path()).unwrap();
         assert!(!g1.is_empty());
         assert_eq!(read_generation(tmp.path()), Some(g1));
+    }
+
+    /// A file left behind by a winner that crashed between `create_new` succeeding and its
+    /// content ever landing (empty, in this simulation) must not permanently brick the stream:
+    /// after the adopt-retry window finds nothing readable, `ensure_generation` must self-heal
+    /// by removing the stale file and minting a fresh one, rather than erroring forever.
+    #[test]
+    fn ensure_generation_self_heals_a_stale_unreadable_file_from_a_crashed_winner() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(generation_file_path(tmp.path()), "").unwrap();
+
+        let g = ensure_generation(tmp.path()).unwrap();
+        assert!(!g.is_empty());
+        assert_eq!(read_generation(tmp.path()), Some(g));
     }
 
     #[test]

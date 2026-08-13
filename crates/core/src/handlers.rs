@@ -2452,6 +2452,16 @@ async fn handle_rebuild_from_wal(
             "last_committed_seq": stats.last_committed_seq,
             "transactions_committed": stats.transactions_committed,
             "transactions_rolled_back": stats.transactions_rolled_back,
+            // FR-005: reported unconditionally, mirroring the streaming path's tail (above) and
+            // the shared reset-detected early return — a caller previewing via the non-streaming
+            // dry-run path must be able to positively confirm "no reset was detected" from this
+            // response too, not just infer it from the fields' absence. `reset_detected` is
+            // always `false` here: a genuine mismatch is caught by the shared early return before
+            // this branch is ever reached.
+            "reset_detected": false,
+            "previous_generation": previous_generation,
+            "generation": current_generation,
+            "cross_group_rebind": Value::Null,
         }));
     }
 
