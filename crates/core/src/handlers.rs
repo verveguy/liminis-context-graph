@@ -1346,7 +1346,9 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
         // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
         // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's
-        // writer, never the default group's.
+        // writer, never the default group's. Each iteration's wal_flush_ungrouped call is its
+        // own independently best-effort, non-fatal flush (same tolerance the pre-#385 single
+        // call already had, now spanning N streams instead of 1 — see ADR-0385's residual risks).
         for (group_id, mutations) in grouped {
             wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
         }

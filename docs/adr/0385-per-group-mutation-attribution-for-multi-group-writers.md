@@ -179,6 +179,20 @@ whether flush order is meaningful; it isn't.
 - `GroupedMutations` adds a second return value to `purge_groups`/`rebind_pointers`/
   `rebind_pointers_forced`; every call site (including ~14 test call sites) had to be updated to
   destructure the new tuple. One-time churn, not an ongoing cost.
+- The per-group flush loop in `handlers.rs` (`for (group_id, mutations) in grouped { wal_exec::wal_flush_ungrouped(...) }`)
+  calls `wal_flush_ungrouped` once per attributed group, and each call is independently
+  best-effort — `wal_flush_ungrouped` already logs-and-continues on a write failure rather than
+  propagating it (see `wal_exec.rs`'s module doc: "WAL failures are non-fatal: the DB write
+  already committed; the WAL is a recovery artifact, not a write gate"). Before this ADR, one
+  purge/rebind call made one such fallible call touching one stream; after, it can make N,
+  touching N streams. A crash or write failure after an earlier group's flush succeeds but before
+  a later group's flush runs (or itself fails) leaves that later group's DB-committed mutations
+  durably applied but unrecorded in its own WAL — the same class of divergence
+  `wal_flush_ungrouped` already tolerated within a single group's mutation list, now possible
+  across groups within one call as well. Accepted for the same reason the existing per-mutation
+  tolerance is accepted: the WAL is a recovery aid, not the durability boundary (the DB commit
+  already happened before any flush in this loop runs), and a missed WAL entry is repaired by the
+  next successful write to that group or a WAL rebuild — it does not corrupt DB state.
 - This ADR does not fix [#383](https://github.com/verveguy/liminis-context-graph/issues/383)
   (`applied_seq` never advances for `wal_flush_ungrouped`-routed writes) — a related but
   independent defect on the same flush path, explicitly out of scope for this issue. The two
