@@ -239,6 +239,21 @@ skipping the full rebuild that state actually calls for.
   explicitly-safe "trailing" direction FR-003 already accepts, not a gap — extending it is
   unnecessary surface area for this issue and can be added later if the lag proves to matter in
   practice.
+
+  **Update (2026-08-13, issue #383): this condition was met, and the deferral is closed.** Two
+  changes after this ADR landed invalidated the "occasional maintenance operation" premise the
+  deferral relied on. First, #379's direct assertion API (`knowledge_assert_entity` /
+  `knowledge_assert_relationship` / `knowledge_add_cross_group_edge`) made `wal_flush_ungrouped`
+  a **primary** write path, not an occasional one — an agent-authored or layer graph built
+  entirely through it never had a "trailing" `applied_seq`; it had a permanently `null` one, no
+  matter how much was written. Second, #378's per-group `WalPosition` rows made the position
+  load-bearing for correctness, not just observability: FR-011's cross-group re-bind staleness
+  gate compares against a target group's own `applied_seq`, and a position that never moves means
+  that gate silently never fires — precisely for the layer-graph topology #369/#378 exist to
+  serve. Issue #383 wires `wal_flush_ungrouped` up the same way `wal_flush_chunk` already was
+  (returning the highest durably-flushed seq, credited via the same `Ok`-gated,
+  never-lead-what-was-actually-written discipline FR-003 established here), closing the gap this
+  entry originally, correctly, deferred.
 - **Cross-repo**: the Python-side `service_protocol.py`/`graphiti_service.py` consumer (the
   liminis app) and the orac/zen deployment described in #351 are downstream consumers of this
   response shape — out of scope for this repo's change, but the entire motivation for it.
