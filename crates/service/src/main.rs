@@ -511,11 +511,27 @@ async fn bootstrap_app_state(
         }
     };
 
-    // Derive wal_dir using the same env-var logic as AppState::from_env.
-    // Available before DB open so startup recovery can use it without AppState.
-    let startup_wal_dir = std::path::PathBuf::from(
+    // Derive the WAL root using the same env-var logic as AppState::from_env (issue #378:
+    // LCG_WAL_DIR now names a root containing one subdirectory per group_id, not a single
+    // shared stream). Available before DB open so startup recovery can use it without AppState.
+    let startup_wal_root = std::path::PathBuf::from(
         lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").unwrap_or_else(|_| ".lcg/wal".to_string()),
     );
+    if let Err(e) = lcg_core::wal_group::migrate_wal_root_if_needed(&startup_wal_root) {
+        eprintln!(
+            "liminis-context-graph: wal root migration failed for {startup_wal_root:?} \
+             (non-fatal to startup, but every per-group path below resolves under \
+             <wal_root>/<group_id> regardless — any pre-378 loose top-level WAL content at \
+             {startup_wal_root:?} stays on disk untouched but becomes invisible to this process \
+             until migration succeeds; it is not read as a fallback): {e}"
+        );
+    }
+    // Startup eagerly backfills/recovers only the default group (issue #378) — matching
+    // FR-009's "single-group instance unchanged" scope; other groups are backfilled lazily on
+    // first touch (e.g. via knowledge_status's per-group map).
+    let startup_wal_dir =
+        lcg_core::wal_group::group_wal_dir(&startup_wal_root, lcg_core::DEFAULT_GROUP_ID)
+            .unwrap_or_else(|_| startup_wal_root.join(lcg_core::DEFAULT_GROUP_ID));
 
     // Attempt to open database and initialize schema. Classify errors:
     //   - Recoverable (lbug WAL corruption, permission denied, missing file) → autonomous
@@ -537,14 +553,30 @@ async fn bootstrap_app_state(
                 // before the socket accepts requests — mirrors the eager index-build posture
                 // above; a genuine failure propagates fatally via `?`.
                 conn.rebuild_name_index()?;
+                // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
+                // default group's own row (issue #378 FR-001/FR-009) *before* the backfill check
+                // below decides whether a position is already known — otherwise an upgraded
+                // binary would find no row under the new key, silently discard an
+                // already-durably-recorded position, and needlessly (or, in the worst case,
+                // unsuccessfully) re-derive it from a WAL scan. No-op after the first boot
+                // (idempotent) or on a fresh install (no legacy row to migrate).
+                if let Err(e) =
+                    conn.migrate_legacy_singleton_wal_position(lcg_core::DEFAULT_GROUP_ID)
+                {
+                    eprintln!(
+                        "liminis-context-graph: startup: legacy singleton WalPosition migration failed (non-fatal): {e}"
+                    );
+                }
                 // Backfill the applied-WAL-seq position (issue #353, FR-007) once at startup,
                 // before the socket accepts requests. No-op if a position is already recorded
-                // (every boot after the first). Non-fatal: a missed backfill just leaves
-                // knowledge_status reporting null (safe — the documented action is a full
-                // rebuild), not a reason to fail startup.
-                if let Err(e) =
-                    lcg_core::recovery::backfill_applied_seq_if_absent(&conn, &startup_wal_dir)
-                {
+                // (every boot after the first, or immediately after the migration above). Non-fatal: a
+                // missed backfill just leaves knowledge_status reporting null (safe — the
+                // documented action is a full rebuild), not a reason to fail startup.
+                if let Err(e) = lcg_core::recovery::backfill_applied_seq_if_absent(
+                    &conn,
+                    lcg_core::DEFAULT_GROUP_ID,
+                    &startup_wal_dir,
+                ) {
                     eprintln!(
                         "liminis-context-graph: startup: applied_seq backfill failed (non-fatal): {e}"
                     );
@@ -570,13 +602,18 @@ async fn bootstrap_app_state(
 
                 if is_recoverable {
                     // Attempt autonomous self-recovery before entering degraded mode (FR-001).
+                    // Pass the WAL root, not the default group's own subdirectory: the fallback
+                    // full-rebuild path inside run_full_recovery_sequence wipes the entire
+                    // embedded DB (every group's data), so it must be able to replay every
+                    // group's WAL directory back in, not only the default group's (issue #378).
                     let recovery_db_path = db_path.clone();
-                    let recovery_wal_dir = startup_wal_dir.clone();
+                    let recovery_wal_root = startup_wal_root.clone();
                     let recovery_sink = Arc::clone(&telemetry_sink);
                     let recovery_result = tokio::task::spawn_blocking(move || {
                         lcg_core::recovery::run_full_recovery_sequence(
                             &recovery_db_path,
-                            &recovery_wal_dir,
+                            lcg_core::DEFAULT_GROUP_ID,
+                            &recovery_wal_root,
                             embedding_dim,
                             recovery_sink,
                         )

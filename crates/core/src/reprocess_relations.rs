@@ -262,8 +262,8 @@ pub async fn reprocess_relation_types(
     for (batch_idx, batch) in updates.chunks(WRITE_BATCH_SIZE).enumerate() {
         let batch = batch.to_vec();
         let db_c = Arc::clone(&db);
-        let wal_writer_c = Arc::clone(&state.wal_writer);
-        let sink_c = Arc::clone(&state.sink);
+        let state_c = Arc::clone(&state);
+        let gid_c = params.group_id.clone();
         let _write_guard = state.write_lock.write().await;
 
         let processed = batch_idx * WRITE_BATCH_SIZE;
@@ -286,7 +286,10 @@ pub async fn reprocess_relation_types(
                     json!({ "uuid": uuid, "rt": rt }),
                 )?;
             }
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            // Unlike backfill.rs/canonicalize.rs's genuinely database-wide passes, Phase A above
+            // already scoped every candidate edge to params.group_id via list_edges_for_scope —
+            // so this flush routes to that same group directly, not the default group's writer.
+            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
             Ok(batch.len())
         })
         .await??;

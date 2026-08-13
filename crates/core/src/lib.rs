@@ -36,6 +36,7 @@ pub mod token_budget;
 pub mod types;
 pub mod wal;
 pub(crate) mod wal_exec;
+pub mod wal_group;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
@@ -63,3 +64,4 @@ pub use types::{
     MentionsEdge, RelatesToEdge, SourceType,
 };
 pub use wal::{WalLine, WalRotationInfo, WalWriter};
+pub use wal_group::DEFAULT_GROUP_ID;

@@ -53,11 +53,16 @@ pub struct RecoveryReport {
 ///
 /// Scans ALL files to find the global minimum seq (episode uuid may appear in
 /// multiple files, e.g. as `params["ep"]` on MENTIONS edges).
+///
+/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root) — the caller
+/// resolves it via `wal_group::group_wal_dir` before calling. Scoped by `group_id` (issue #378
+/// FR-010) so a backfill for one group can never pick up another group's most recent episode.
 pub fn derive_episode_cursor(
     conn: &crate::db::Conn<'_>,
+    group_id: &str,
     wal_dir: &Path,
 ) -> Result<(u64, CursorReason), Error> {
-    let target_uuid = match conn.get_latest_episode_uuid()? {
+    let target_uuid = match conn.get_latest_episode_uuid(group_id)? {
         Some(u) => u,
         None => return Ok((0, CursorReason::NoEpisodes)),
     };
@@ -152,46 +157,57 @@ fn scan_file_for_uuid(path: &Path, target_uuid: &str) -> Result<Option<u64>, Err
 ///   documented action for that state is a full rebuild, the same fallback ADR-0026 already
 ///   defines for its own recovery path. `CursorReason::NoEpisodes` is unreachable here since
 ///   the episode-count guard above already ran.
+///
+/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root). Scoped by
+/// `group_id` throughout (issue #378 FR-010): both the emptiness check and the episode-cursor
+/// derivation only ever look at `group_id`'s own content, so a backfill for group A can never
+/// be derived from — or degrade because of — group B's episodes.
 pub fn backfill_applied_seq_if_absent(
     conn: &crate::db::Conn<'_>,
+    group_id: &str,
     wal_dir: &Path,
 ) -> Result<(), Error> {
-    if conn.get_applied_seq()?.is_some() {
+    if conn.get_applied_seq(group_id)?.is_some() {
         return Ok(());
     }
-    if conn.count_nodes("Episodic")? == 0 {
-        // Episodic count alone doesn't prove the graph is empty: `remove_episode` and
+    let gids = [group_id];
+    if conn.count_episodics_by_group_ids(&gids)? == 0 {
+        // Episodic count alone doesn't prove the group is empty: `remove_episode` and
         // `remove_episodes_by_source`/`_by_chunk_id` only `DETACH DELETE` the `Episodic`
-        // node, never the `Entity`/edge data it created (db.rs), so a DB that had all its
+        // node, never the `Entity`/edge data it created (db.rs), so a group that had all its
         // episodes deleted can still hold real, unrecorded content with zero episodes left
         // to anchor a position derivation on. Only collapse to the "genuinely fresh" `0`
         // case when there is truly nothing else either — otherwise leave the row absent
         // (`null`, the documented "unknown, full rebuild" signal) rather than falsely
-        // reporting "known, nothing applied" for a populated-but-episode-less graph.
-        if graph_has_no_content(conn)? {
-            return conn.set_applied_seq(0);
+        // reporting "known, nothing applied" for a populated-but-episode-less group.
+        if group_has_no_content(conn, group_id)? {
+            return conn.set_applied_seq(group_id, 0);
         }
         return Ok(());
     }
-    let (seq, reason) = derive_episode_cursor(conn, wal_dir)?;
+    let (seq, reason) = derive_episode_cursor(conn, group_id, wal_dir)?;
     if reason == CursorReason::UuidMatch {
-        conn.set_applied_seq(seq)?;
+        conn.set_applied_seq(group_id, seq)?;
     }
     // UuidNotFound (and the unreachable NoEpisodes): leave the row absent — null is the
     // correct, documented "backfill failed, full rebuild required" report (FR-008).
     Ok(())
 }
 
-/// True if the graph holds zero `Episodic` nodes, zero `Entity` nodes, and zero relationship
+/// True if `group_id` holds zero `Episodic` nodes, zero `Entity` nodes, and zero relationship
 /// edges — the same three-count emptiness check `backfill_applied_seq_if_absent` uses to tell
-/// "genuinely fresh" from "populated but episode-less" (issue #353). Reused by the WAL
-/// checkpoint feature (issue #365, FR-005) to disambiguate `applied_seq == 0`, which is
-/// otherwise ambiguous between "nothing applied" and "WAL line 0 applied". `&&`-short-circuits
-/// so the common non-empty case costs a single query.
-pub(crate) fn graph_has_no_content(conn: &crate::db::Conn<'_>) -> Result<bool, Error> {
-    Ok(conn.count_nodes("Episodic")? == 0
-        && conn.count_nodes("Entity")? == 0
-        && conn.count_relates_to_edges()? == 0)
+/// "genuinely fresh" from "populated but episode-less" (issue #353), scoped per group by issue
+/// #378. Reused by the WAL checkpoint feature (issue #365, FR-005) to disambiguate
+/// `applied_seq == 0`, which is otherwise ambiguous between "nothing applied" and "WAL line 0
+/// applied". `&&`-short-circuits so the common non-empty case costs a single query.
+pub(crate) fn group_has_no_content(
+    conn: &crate::db::Conn<'_>,
+    group_id: &str,
+) -> Result<bool, Error> {
+    let gids = [group_id];
+    Ok(conn.count_episodics_by_group_ids(&gids)? == 0
+        && conn.count_entities_by_group_ids(&gids)? == 0
+        && conn.count_relates_to_by_group_ids(&gids)? == 0)
 }
 
 // ── Full recovery sequence ────────────────────────────────────────────────────
@@ -207,12 +223,30 @@ pub(crate) fn graph_has_no_content(conn: &crate::db::Conn<'_>) -> Result<bool, E
 /// 2. Derive episode-cursor (`from_seq`) from the last episode in the DB.
 /// 3. Drop FTS indexes, replay WAL mutations at `seq >= from_seq`, rebuild indexes.
 /// 4. Return recovered `Db` with report.
+///
+/// `wal_root` is the WAL **root** (not one group's own directory). The non-fallback
+/// checkpoint-drop path (step 1 succeeds) only ever needs `group_id`'s own subdirectory —
+/// today always the default group, matching the startup backfill's scope — since that path
+/// never deletes the DB, only catches up a possible tail. The fallback path (`full_rebuild`,
+/// triggered when checkpoint-drop itself fails) **deletes the entire embedded DB file**, which
+/// holds every group's data, not just `group_id`'s — so replaying only `group_id`'s directory
+/// back in would silently drop every other group's data from the live graph (issue #378: FR-009
+/// requires this recovery path stay additive to the multi-group case, not a de facto
+/// single-group-only tool the moment a second group exists). The fallback branch therefore
+/// replays **every** group directory found under `wal_root` via `wal_group::list_group_wal_dirs`
+/// and persists each group's own `applied_seq`. No group's on-disk WAL files are ever deleted by
+/// this function, so a group's data remains recoverable via an explicit
+/// `knowledge_rebuild_from_wal` even if this function's own bookkeeping missed it — but silently
+/// vanishing from the live, queryable graph on an autonomous self-heal is a correctness bug this
+/// function must not have.
 pub fn run_full_recovery_sequence(
     db_path: &str,
-    wal_dir: &Path,
+    group_id: &str,
+    wal_root: &Path,
     embedding_dim: usize,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<(Db, RecoveryReport), Error> {
+    let wal_dir = crate::wal_group::group_wal_dir(wal_root, group_id)?;
     sink.emit(TelemetryEvent::WalAutoRecovery {
         ts_ms: now_ms(),
         phase: "corruption_detected".to_string(),
@@ -226,7 +260,7 @@ pub fn run_full_recovery_sequence(
     // ── Step 1: checkpoint-drop (rename WAL aside, reopen DB) ────────────────
     let drop_started = Instant::now();
     let (db, used_fallback, fallback_reason) =
-        match attempt_checkpoint_drop(db_path, wal_dir, embedding_dim, &sink) {
+        match attempt_checkpoint_drop(db_path, &wal_dir, embedding_dim, &sink) {
             Ok(db) => (db, false, None),
             Err(e) => {
                 let reason = format!("drop_lbug_wal failed: {e}");
@@ -261,12 +295,15 @@ pub fn run_full_recovery_sequence(
     }
 
     // ── Step 2: episode-cursor derivation ────────────────────────────────────
+    // Only meaningful for the non-fallback path: the fallback wipes the DB entirely and
+    // replays every group from scratch (step 3 below), so there is no single group's cursor
+    // to derive here.
     let (from_seq, cursor_reason) = if used_fallback {
         // Fresh DB — no episodes, replay everything
         (0u64, CursorReason::NoEpisodes)
     } else {
         let conn = db.connect()?;
-        let (seq, reason) = derive_episode_cursor(&conn, wal_dir)?;
+        let (seq, reason) = derive_episode_cursor(&conn, group_id, &wal_dir)?;
         drop(conn);
         sink.emit(TelemetryEvent::WalAutoRecovery {
             ts_ms: now_ms(),
@@ -286,18 +323,47 @@ pub fn run_full_recovery_sequence(
         conn.count_nodes("Episodic").unwrap_or(0)
     };
 
-    // ── Step 3: drop FTS, replay WAL mutations at seq >= from_seq ────────────
+    // ── Step 3: drop FTS, replay WAL mutations (position(s) persisted only after Step 4) ────
+    // Positions are collected here but deliberately NOT written yet — see Step 4's comment for
+    // why persisting before the index rebuild succeeds would defeat the `null` = "unknown, needs
+    // full rebuild" safety invariant the rest of this module relies on.
     let replay_started = Instant::now();
-    let stats = {
+    let (mutations_replayed, positions_to_persist) = if used_fallback {
+        // The DB was just wiped in its entirety — restore every group's data, not only
+        // `group_id`'s.
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
-        WalReplayer::new(wal_dir).replay_opts(
+        let mut total = 0u64;
+        let mut positions = Vec::new();
+        for (gid, dir) in crate::wal_group::list_group_wal_dirs(wal_root)? {
+            let group_stats = WalReplayer::new(&dir).replay_opts(
+                &conn,
+                ReplayOptions {
+                    from_seq: 0,
+                    ..Default::default()
+                },
+            )?;
+            total += group_stats.lines_replayed;
+            if let Some(seq) = group_stats.last_committed_seq {
+                positions.push((gid, seq));
+            }
+        }
+        (total, positions)
+    } else {
+        let conn = db.connect()?;
+        schema::drop_fts_indexes(&conn);
+        let stats = WalReplayer::new(&wal_dir).replay_opts(
             &conn,
             ReplayOptions {
                 from_seq,
                 ..Default::default()
             },
-        )?
+        )?;
+        let positions = stats
+            .last_committed_seq
+            .map(|seq| vec![(group_id.to_string(), seq)])
+            .unwrap_or_default();
+        (stats.lines_replayed, positions)
     };
     let replay_elapsed_ms = replay_started.elapsed().as_millis() as u64;
 
@@ -306,7 +372,7 @@ pub fn run_full_recovery_sequence(
         phase: "replay_complete".to_string(),
         from_seq: Some(from_seq),
         cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
+        mutations_replayed: Some(mutations_replayed),
         elapsed_ms: Some(replay_elapsed_ms),
         fallback_reason: fallback_reason.clone(),
     });
@@ -318,16 +384,20 @@ pub fn run_full_recovery_sequence(
         // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
         // a full rebuild is the only way the name index observes the replayed data.
         conn.rebuild_name_index()?;
-        // Persist the applied-WAL-seq position (issue #353) — a deliberate extension beyond
-        // FR-004's literal text (which names knowledge_rebuild_from_wal), since this
-        // autonomous WAL-corruption self-heal produces an equally-precise ReplayStats via the
-        // same replay path. Skipping this would leave applied_seq at null immediately after
-        // every self-heal even though a better value was just computed. Non-fatal: a missed
-        // write doesn't undo the recovery that just succeeded.
-        if let Some(seq) = stats.last_committed_seq {
-            if let Err(e) = conn.set_applied_seq(seq) {
+        // Persist the applied-WAL-seq position(s) (issue #353) — a deliberate extension beyond
+        // FR-004's literal text (which names knowledge_rebuild_from_wal), since this autonomous
+        // WAL-corruption self-heal produces an equally-precise ReplayStats via the same replay
+        // path. Deliberately placed *after* the index rebuild above succeeds (both calls are
+        // fatal via `?`, so this line is unreached on failure): persisting a "known" position
+        // for data whose indexes were never confirmed rebuilt would silently defeat the `null` =
+        // "unknown, needs full rebuild" safety invariant `backfill_applied_seq_if_absent`/
+        // `knowledge_status` rely on elsewhere — a caller reading a non-null `applied_seq` after
+        // a failed rebuild would wrongly skip re-deriving it. Each write is independently
+        // non-fatal: a missed write doesn't undo the recovery that already succeeded.
+        for (gid, seq) in &positions_to_persist {
+            if let Err(e) = conn.set_applied_seq(gid, *seq) {
                 eprintln!(
-                    "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} (non-fatal): {e}"
+                    "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
                 );
             }
         }
@@ -338,7 +408,7 @@ pub fn run_full_recovery_sequence(
         phase: "index_build_complete".to_string(),
         from_seq: Some(from_seq),
         cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
+        mutations_replayed: Some(mutations_replayed),
         elapsed_ms: None,
         fallback_reason: fallback_reason.clone(),
     });
@@ -353,7 +423,7 @@ pub fn run_full_recovery_sequence(
         phase: "recovery_complete".to_string(),
         from_seq: Some(from_seq),
         cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
+        mutations_replayed: Some(mutations_replayed),
         elapsed_ms: Some(drop_elapsed_ms + replay_elapsed_ms),
         fallback_reason,
     });
@@ -362,7 +432,7 @@ pub fn run_full_recovery_sequence(
         db,
         RecoveryReport {
             episodes_before,
-            mutations_replayed: stats.lines_replayed,
+            mutations_replayed,
             episodes_after,
             indexes_rebuilt: true,
             from_seq,
@@ -478,7 +548,7 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 0);
         assert_eq!(reason, CursorReason::NoEpisodes);
     }
@@ -505,7 +575,7 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 5, "ep-different-uuid");
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 0);
         assert_eq!(reason, CursorReason::UuidNotFound);
     }
@@ -533,7 +603,7 @@ mod tests {
         write_wal_mentions_line(&wal_dir, "0001.jsonl", 15, ep_uuid);
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         // Must take the minimum seq across all matches
         assert_eq!(seq, 10);
         assert_eq!(reason, CursorReason::UuidMatch);
@@ -561,7 +631,7 @@ mod tests {
         write_wal_line(&wal_dir, "0002.jsonl", 7, ep_uuid);
 
         let conn = db.connect().unwrap();
-        let (seq, reason) = derive_episode_cursor(&conn, &wal_dir).unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "g", &wal_dir).unwrap();
         assert_eq!(seq, 7);
         assert_eq!(reason, CursorReason::UuidMatch);
     }
@@ -578,9 +648,9 @@ mod tests {
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(0));
     }
 
     /// A DB with zero `Episodic` nodes but a surviving `Entity` (e.g. every episode was
@@ -595,15 +665,15 @@ mod tests {
         let db = make_db_with_schema(&dir);
         {
             let conn = db.connect().unwrap();
-            conn.raw_query("CREATE (:Entity {uuid: 'orphaned-entity'})")
+            conn.raw_query("CREATE (:Entity {uuid: 'orphaned-entity', group_id: 'g'})")
                 .unwrap();
         }
         let conn = db.connect().unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
         assert_eq!(
-            conn.get_applied_seq().unwrap(),
+            conn.get_applied_seq("g").unwrap(),
             None,
             "an Entity-only DB (no episodes) must not be backfilled to 0 — its position is \
              genuinely unknown, not known-empty"
@@ -632,9 +702,9 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 41, ep_uuid);
 
         let conn = db.connect().unwrap();
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(41));
     }
 
     /// SC-007: a populated DB whose last episode's uuid is absent from the WAL leaves
@@ -659,9 +729,9 @@ mod tests {
         write_wal_line(&wal_dir, "0001.jsonl", 5, "ep-completely-different");
 
         let conn = db.connect().unwrap();
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), None);
+        assert_eq!(conn.get_applied_seq("g").unwrap(), None);
     }
 
     /// A DB that already has a persisted position must not be overwritten by backfill —
@@ -674,10 +744,96 @@ mod tests {
 
         let db = make_db_with_schema(&dir);
         let conn = db.connect().unwrap();
-        conn.set_applied_seq(99).unwrap();
+        conn.set_applied_seq("g", 99).unwrap();
 
-        backfill_applied_seq_if_absent(&conn, &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "g", &wal_dir).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(99));
+        assert_eq!(conn.get_applied_seq("g").unwrap(), Some(99));
+    }
+
+    /// FR-010 (issue #378): in a multi-group database, backfilling group A must never derive
+    /// its position from group B's episode, even when B's episode is the more recently created
+    /// one. Group A here is "populated but episode-less" (an Entity of its own, but no episode)
+    /// — the same ambiguous state `backfill_entity_survives_episode_deletion_is_not_treated_as_fresh`
+    /// covers in the single-group case — so its backfill must degrade to `null`, not silently
+    /// borrow B's cursor (which an unscoped `count_episodics_by_group_ids`/`derive_episode_cursor`
+    /// would do, since B's episode is the only one in the database).
+    #[test]
+    fn backfill_does_not_borrow_a_different_groups_episode() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            // Group A has an Entity of its own but no episode — populated, not genuinely fresh.
+            conn.raw_query(
+                "CREATE (:Entity {uuid: 'entity-group-a', name: 'A', group_id: 'group-a', \
+                 labels: ['Entity'], created_at: timestamp('2026-01-01'), \
+                 name_embedding: [1.0, 0.0, 0.0, 0.0], summary: '', attributes: '{}'})",
+            )
+            .unwrap();
+            // Only group B has an episode.
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-group-b', name: 'Test', group_id: 'group-b', \
+                 created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 7, "ep-group-b");
+
+        let conn = db.connect().unwrap();
+        backfill_applied_seq_if_absent(&conn, "group-a", &wal_dir).unwrap();
+        backfill_applied_seq_if_absent(&conn, "group-b", &wal_dir).unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("group-a").unwrap(),
+            None,
+            "group-a has no episodes of its own and must not borrow group-b's cursor"
+        );
+        assert_eq!(
+            conn.get_applied_seq("group-b").unwrap(),
+            Some(7),
+            "group-b's own backfill must still derive its own cursor correctly"
+        );
+    }
+
+    /// FR-010: `derive_episode_cursor` itself, called directly for group A, must not pick up
+    /// group B's more-recently-created episode uuid.
+    #[test]
+    fn derive_episode_cursor_is_scoped_to_its_own_group() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        {
+            let conn = db.connect().unwrap();
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-a', name: 'A', group_id: 'group-a', \
+                 created_at: timestamp('2026-01-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-01-01')})",
+            )
+            .unwrap();
+            // Created later than group-a's episode, so an unscoped lookup would prefer this one.
+            conn.raw_query(
+                "CREATE (:Episodic {uuid: 'ep-b', name: 'B', group_id: 'group-b', \
+                 created_at: timestamp('2026-06-01'), source: 'text', \
+                 source_description: '', content: 'test', valid_at: timestamp('2026-06-01')})",
+            )
+            .unwrap();
+        }
+        write_wal_line(&wal_dir, "0001.jsonl", 3, "ep-a");
+        write_wal_line(&wal_dir, "0001.jsonl", 9, "ep-b");
+
+        let conn = db.connect().unwrap();
+        let (seq, reason) = derive_episode_cursor(&conn, "group-a", &wal_dir).unwrap();
+        assert_eq!(
+            seq, 3,
+            "must derive group-a's own episode's seq, not group-b's later one"
+        );
+        assert_eq!(reason, CursorReason::UuidMatch);
     }
 }

@@ -113,7 +113,10 @@ impl Db {
             // only means the boot-time check falls back to a rescan, not that the rebuild
             // itself is compromised.
             if let Some(seq) = stats.last_committed_seq {
-                if let Err(e) = conn.set_applied_seq(seq) {
+                // `open_or_rebuild` replays exactly one WAL directory into a fresh DB — there is
+                // no notion of multiple groups at this call site, so the position it persists is
+                // the default group's (issue #378 FR-009: single-group parity).
+                if let Err(e) = conn.set_applied_seq(crate::wal_group::DEFAULT_GROUP_ID, seq) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
                     );
@@ -127,11 +130,26 @@ impl Db {
             // (no WAL to replay either) with no schema at all.
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
+            // default group's own row (issue #378 FR-001/FR-009) before the backfill check below
+            // decides whether a position is already known. No-op on a fresh DB (no legacy row)
+            // or after the first call (idempotent).
+            if let Err(e) =
+                conn.migrate_legacy_singleton_wal_position(crate::wal_group::DEFAULT_GROUP_ID)
+            {
+                eprintln!(
+                    "liminis-context-graph: open_or_rebuild: legacy singleton WalPosition migration failed (non-fatal): {e}"
+                );
+            }
             // Backfill applied_seq for a pre-existing populated DB that predates this feature
             // (FR-007), or set it to 0 for a genuinely fresh DB. Non-fatal: a missed backfill
             // just leaves the boot-time check reporting null (safe — the documented action is
             // a full rebuild).
-            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(&conn, wal_dir_path) {
+            if let Err(e) = crate::recovery::backfill_applied_seq_if_absent(
+                &conn,
+                crate::wal_group::DEFAULT_GROUP_ID,
+                wal_dir_path,
+            ) {
                 eprintln!(
                     "liminis-context-graph: open_or_rebuild: applied_seq backfill failed (non-fatal): {e}"
                 );
@@ -770,6 +788,23 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
             serde_json::json!({ "uuid": episode_uuid }),
         )
+    }
+
+    /// Returns `episode_uuid`'s own `group_id`, or `None` if no such episode exists. Used by
+    /// `handle_delete_episode` (issue #378 FR-004) to route that single episode's DELETE
+    /// mutation to its *own* group's WAL writer rather than the default group's — unlike the
+    /// FR-004-documented default-group-fallback sites, this call targets exactly one episode in
+    /// exactly one group, and that group is knowable by reading it before the delete runs, so
+    /// misrouting here isn't an inherent limitation of the operation.
+    pub fn get_episode_group_id(&self, episode_uuid: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic {uuid: $uuid}) RETURN ep.group_id",
+            serde_json::json!({ "uuid": episode_uuid }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_string(&row[0])))
     }
 
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
@@ -1860,41 +1895,92 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_timestamp_str(&row[0])))
     }
 
-    /// Returns the uuid of the most-recently created Episodic node across all groups, or `None`
-    /// if there are no episodes yet. Used by episode-cursor derivation during WAL recovery.
-    pub fn get_latest_episode_uuid(&self) -> Result<Option<String>, Error> {
-        let result = self
-            .inner
-            .query("MATCH (ep:Episodic) RETURN ep.uuid ORDER BY ep.created_at DESC LIMIT 1")?;
-        Ok(result
+    /// Returns the uuid of the most-recently created Episodic node belonging to `group_id`, or
+    /// `None` if that group has no episodes yet. Used by episode-cursor derivation during WAL
+    /// recovery, scoped per group (issue #378 FR-010) so a backfill for one group can never pick
+    /// up another group's most recent episode.
+    pub fn get_latest_episode_uuid(&self, group_id: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic {group_id: $group_id}) RETURN ep.uuid \
+             ORDER BY ep.created_at DESC LIMIT 1",
+            serde_json::json!({ "group_id": group_id }),
+        )?;
+        Ok(rows
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
-    /// Returns the persisted applied-WAL-seq position (issue #353), or `None` if no position
-    /// has ever been recorded. Row-absence is the sole representation of "unknown" — both
-    /// "never written" (fresh DB, backfill not yet run) and "backfill failed" (FR-008) collapse
-    /// to this, distinct from a written `0` ("nothing applied yet, but known").
-    pub fn get_applied_seq(&self) -> Result<Option<u64>, Error> {
-        let result = self
-            .inner
-            .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
-        Ok(result
+    /// Returns the persisted applied-WAL-seq position for `group_id` (issue #353, made per-group
+    /// by issue #378), or `None` if no position has ever been recorded for that group.
+    /// Row-absence is the sole representation of "unknown" — both "never written" (fresh
+    /// group, backfill not yet run) and "backfill failed" (FR-008) collapse to this, distinct
+    /// from a written `0` ("nothing applied yet, but known"). A `seq` from one group's stream
+    /// must never be compared against another group's row (FR-008) — this always reads exactly
+    /// one group's `WalPosition` row, selected by its primary key.
+    pub fn get_applied_seq(&self, group_id: &str) -> Result<Option<u64>, Error> {
+        let rows = self.query_params(
+            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq",
+            serde_json::json!({ "group_id": group_id }),
+        )?;
+        Ok(rows
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_u64(&row[0])))
     }
 
-    /// Persists `seq` as the applied-WAL-seq position (issue #353). Uses `Connection::query`
-    /// directly rather than `raw_query`/`exec_params`, so this write is never itself recorded
-    /// into `executed_mutations` and re-logged to the WAL — that would make `applied_seq`
-    /// immediately stale by the write that just recorded it (a self-referential regress).
-    /// Same non-recording bypass as `exec_transaction_control`/`count_nodes`. `seq` is a `u64`
-    /// interpolated directly (not a string), so there is no injection surface.
-    pub fn set_applied_seq(&self, seq: u64) -> Result<(), Error> {
-        let sql = format!("MERGE (w:WalPosition {{id: 'singleton'}}) SET w.applied_seq = {seq}");
-        let _ = self.inner.query(&sql)?;
+    /// Persists `seq` as `group_id`'s applied-WAL-seq position (issue #353, made per-group by
+    /// issue #378). Uses `Connection::execute` via a prepared statement directly rather than
+    /// `raw_query`/`exec_params`, so this write is never itself recorded into
+    /// `executed_mutations` and re-logged to the WAL — that would make `applied_seq` immediately
+    /// stale by the write that just recorded it (a self-referential regress). Same non-recording
+    /// bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a parameter,
+    /// not interpolated, since it is caller-controlled (IPC-supplied).
+    pub fn set_applied_seq(&self, group_id: &str, seq: u64) -> Result<(), Error> {
+        let mut prepared = self
+            .inner
+            .prepare("MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq")?;
+        let bound: Vec<(&str, Value)> = vec![
+            ("group_id", Value::String(group_id.to_string())),
+            ("seq", Value::Int64(seq as i64)),
+        ];
+        self.inner.execute(&mut prepared, bound)?;
+        Ok(())
+    }
+
+    /// One-time migration (issue #378 FR-001/FR-009): carries a pre-378 database's
+    /// `WalPosition {id: 'singleton'}` row forward to `group_id`'s own row. Before this issue,
+    /// `get_applied_seq`/`set_applied_seq` hardcoded `'singleton'` as the row's primary key;
+    /// they now key on `group_id` instead, so an upgraded binary's `get_applied_seq(group_id)`
+    /// would otherwise find no row at all for a deployment that had a durably-recorded position
+    /// under the old key — silently degrading a known position to `None` ("unknown") and forcing
+    /// a WAL re-scan (`backfill_applied_seq_if_absent`) to reconstruct it, contradicting FR-009's
+    /// "behaves exactly as it does in 0.12.2" / "no operator action required" guarantee. Must run
+    /// before `backfill_applied_seq_if_absent` is given the chance to decide a backfill is
+    /// needed, or the legacy value is never consulted.
+    ///
+    /// No-op if no legacy row exists (fresh install, or a second boot after the first migration
+    /// already ran — idempotent). Never overwrites an already-present `group_id` row: if one
+    /// exists, the singleton row is stale leftover from before `group_id`'s own value was
+    /// established and is simply removed, not blended with it — `group_id`'s existing row is by
+    /// construction more recent than a not-yet-migrated legacy row could be.
+    pub fn migrate_legacy_singleton_wal_position(&self, group_id: &str) -> Result<(), Error> {
+        let legacy = self
+            .inner
+            .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
+        let Some(seq) = legacy
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_u64(&row[0]))
+        else {
+            return Ok(());
+        };
+        if self.get_applied_seq(group_id)?.is_none() {
+            self.set_applied_seq(group_id, seq)?;
+        }
+        let _ = self
+            .inner
+            .query("MATCH (w:WalPosition {id: 'singleton'}) DETACH DELETE w")?;
         Ok(())
     }
 
@@ -3243,7 +3329,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), None);
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
     }
 
     /// Basic write/read round-trip.
@@ -3254,12 +3340,12 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(41).unwrap();
+        conn.set_applied_seq("liminis", 41).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(41));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(41));
     }
 
-    /// `set_applied_seq` MERGEs onto the singleton row rather than inserting a duplicate —
+    /// `set_applied_seq` MERGEs onto that group's row rather than inserting a duplicate —
     /// repeated writes (the normal case, once per chunk) must overwrite, not accumulate.
     #[test]
     fn set_applied_seq_overwrites_existing_value() {
@@ -3268,10 +3354,10 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(5).unwrap();
-        conn.set_applied_seq(12).unwrap();
+        conn.set_applied_seq("liminis", 5).unwrap();
+        conn.set_applied_seq("liminis", 12).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(12));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(12));
         assert_eq!(
             conn.count_nodes("WalPosition").unwrap(),
             1,
@@ -3288,9 +3374,9 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_applied_seq(0).unwrap();
+        conn.set_applied_seq("liminis", 0).unwrap();
 
-        assert_eq!(conn.get_applied_seq().unwrap(), Some(0));
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(0));
     }
 
     /// `get_applied_seq`/`set_applied_seq` must not themselves become a WAL line — using
@@ -3304,12 +3390,140 @@ mod applied_seq_tests {
         conn.init_schema(4).unwrap();
         conn.drain_mutations(); // discard init_schema's own recorded DDL
 
-        conn.set_applied_seq(7).unwrap();
+        conn.set_applied_seq("liminis", 7).unwrap();
 
         assert!(
             conn.drain_mutations().is_empty(),
             "set_applied_seq must never record into executed_mutations"
         );
+    }
+
+    /// Two different `group_id`s must produce two independent `WalPosition` rows: writing one
+    /// group's position must never be visible from, or overwrite, another group's row (issue
+    /// #378 FR-002/FR-008 — SC-003 groundwork).
+    #[test]
+    fn different_groups_have_independent_applied_seq_rows() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("group-a", 10).unwrap();
+        conn.set_applied_seq("group-b", 0).unwrap();
+
+        assert_eq!(conn.get_applied_seq("group-a").unwrap(), Some(10));
+        assert_eq!(
+            conn.get_applied_seq("group-b").unwrap(),
+            Some(0),
+            "group-b's own Some(0) must not be shadowed by group-a's higher seq"
+        );
+        assert_eq!(
+            conn.get_applied_seq("group-c").unwrap(),
+            None,
+            "a third, never-written group must still report unknown, not either sibling's value"
+        );
+        assert_eq!(
+            conn.count_nodes("WalPosition").unwrap(),
+            2,
+            "each group must own exactly one WalPosition row"
+        );
+
+        // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
+        conn.set_applied_seq("group-a", 25).unwrap();
+        assert_eq!(conn.get_applied_seq("group-b").unwrap(), Some(0));
+    }
+
+    /// A genuine pre-378 database's `WalPosition {id: 'singleton'}` row (simulated here by
+    /// writing under the literal "singleton" id, exactly as pre-378 `set_applied_seq` did) must
+    /// be carried forward to the default group's own row, and the legacy row removed — otherwise
+    /// an upgraded binary's `get_applied_seq("liminis")` finds nothing and a known position
+    /// silently degrades to "unknown" (issue #378 FR-001/FR-009).
+    #[test]
+    fn migrate_legacy_singleton_wal_position_carries_value_forward_and_removes_legacy_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 41).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("liminis").unwrap(),
+            Some(41),
+            "the legacy position must be visible under the default group's own id post-migration"
+        );
+        assert_eq!(
+            conn.get_applied_seq("singleton").unwrap(),
+            None,
+            "the legacy row itself must be gone, not merely superseded"
+        );
+        assert_eq!(
+            conn.count_nodes("WalPosition").unwrap(),
+            1,
+            "migration must not leave both the old and new rows behind"
+        );
+    }
+
+    /// A fresh install (no legacy row) is a no-op — nothing to carry forward, and no spurious
+    /// `liminis` row is created where none was requested.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_is_noop_when_no_legacy_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), None);
+        assert_eq!(conn.count_nodes("WalPosition").unwrap(), 0);
+    }
+
+    /// If the default group's own row already exists (e.g. a write already landed under the new
+    /// key before migration ran), the legacy row must not overwrite it — it is simply discarded
+    /// as stale leftover, never blended with or preferred over the current value.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_does_not_overwrite_existing_group_row() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 5).unwrap();
+        conn.set_applied_seq("liminis", 99).unwrap();
+
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(
+            conn.get_applied_seq("liminis").unwrap(),
+            Some(99),
+            "an already-present group row must win over the stale legacy value"
+        );
+        assert_eq!(conn.get_applied_seq("singleton").unwrap(), None);
+    }
+
+    /// A second call (e.g. a subsequent boot) after the legacy row has already been migrated
+    /// away must be a harmless no-op, not an error.
+    #[test]
+    fn migrate_legacy_singleton_wal_position_is_idempotent_on_second_call() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_applied_seq("singleton", 7).unwrap();
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+        conn.migrate_legacy_singleton_wal_position("liminis")
+            .unwrap();
+
+        assert_eq!(conn.get_applied_seq("liminis").unwrap(), Some(7));
+        assert_eq!(conn.count_nodes("WalPosition").unwrap(), 1);
     }
 }
 

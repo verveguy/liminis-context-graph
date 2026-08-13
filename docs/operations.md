@@ -11,27 +11,44 @@ Everything the service manages lives under `.lcg/` in the workspace:
 
 ```text
 .lcg/
-├── wal/               # append-only JSONL mutation log — the durable record (git-friendly)
-├── db/liminis.db      # LadybugDB files — a derived index, rebuildable from the WAL
-├── ontology.yaml      # optional extraction vocabulary (yours to edit)
-└── service.sock       # JSON-RPC 2.0 endpoint while the service runs
+├── wal/                    # WAL root — one subdirectory per group_id (issue #378)
+│   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json
+├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL
+├── ontology.yaml           # optional extraction vocabulary (yours to edit)
+└── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
 **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended
-to plain JSONL files in `.lcg/wal/` before it touches the database. The WAL is human-readable,
-append-only, and git-friendly: check it into the same repository as your notes or documents,
-diff it, and carry it across machines. The database is a derived index — delete it and
+to plain JSONL files in `.lcg/wal/<group_id>/` before it touches the database. The WAL is
+human-readable, append-only, and git-friendly: check it into the same repository as your notes or
+documents, diff it, and carry it across machines. The database is a derived index — delete it and
 `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
+
+**`.lcg/wal/` is a WAL root, not a single stream (issue #378).** Each `group_id` gets its own
+subdirectory — its own `*.jsonl` files, its own `.checkpoints/` store, its own
+`.wal-bounds.json` manifest, and its own independent `seq` numbering starting at 0. A group's
+subdirectory is created lazily on that group's first write; a group that has never been written
+to simply has no subdirectory yet. A single-group deployment (the common case — everything under
+the default `"liminis"` group, no caller ever passing a different `group_id`) behaves exactly as
+a pre-378 deployment did: one subdirectory, one writer, one recorded position. An **existing**
+pre-378 `.lcg/wal/` (loose `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` directly under `wal/`, no
+`liminis/` subdirectory) is migrated automatically and idempotently on first boot under the
+upgraded binary — see [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the
+migration mechanics; no operator action is required.
 
 ## WAL administration
 
-- **Rebuild** the database from the log with `knowledge_rebuild_from_wal`. A `from_seq: 0`
-  (default) rebuild against a database that already has data in it fails fast with an explicit
-  error instead of silently producing a duplicate-key failure per node — pass
-  `force_clear: true` to clear it automatically first, or delete it yourself before calling
-  rebuild. A successful non-dry-run rebuild automatically rebuilds the entity/relationship
-  search indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately
-  queryable afterward — `knowledge_build_indices` is not normally required.
+- **Rebuild** one group's data from its own WAL directory with `knowledge_rebuild_from_wal
+  {group_id, ...}` (`group_id` defaults to `"liminis"`, so a single-group deployment needs no
+  change). A `from_seq: 0` (default) rebuild against a *group* that already has data in it fails
+  fast with an explicit error instead of silently producing a duplicate-key failure per node —
+  pass `force_clear: true` to clear that group's data automatically first (issue #378: this
+  clears only the target group via the same primitive `knowledge_delete_by_group` uses, not the
+  whole database file), or clear it yourself with `knowledge_delete_by_group` before calling
+  rebuild. Rebuilding one group never touches another group's `WalPosition`, WAL directory, or
+  data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
+  indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
+  afterward — `knowledge_build_indices` is not normally required.
 - **Bounded rebuild** with `to_seq`: pass an inclusive upper bound (`from_seq <= seq <= to_seq`)
   to exclude a known-bad mutation and everything after it — e.g. recovering from an operator
   mistake that is itself recorded in the WAL. `knowledge_rebuild_from_wal {from_seq: 0,
@@ -46,32 +63,41 @@ diff it, and carry it across machines. The database is a derived index — delet
   is forward-only. The output directory starts with no checkpoints: any WAL marks (below)
   recorded against the source directory are not carried forward, since dump_wal renumbers
   sequence numbers and a copied mark's `seq` would be meaningless against the new numbering.
-- **Name a known-good position** with `knowledge_wal_mark_create {name}` — a lightweight
-  alternative to a full `knowledge_dump_wal` snapshot when all you need is a durable pointer back
-  to "this graph was good here," not a materialized copy. A `name` must be 1-200 characters of
-  `[A-Za-z0-9_-]`, because it becomes a single directory name under `.checkpoints/`. It records
-  the database's current `applied_seq` under `<wal_dir>/.checkpoints/`, is O(1) (no WAL scan or
+- **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
+  defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
+  when all you need is a durable pointer back to "this group's stream was good here," not a
+  materialized copy. A `name` must be 1-200 characters of `[A-Za-z0-9_-]`, because it becomes a
+  single directory name under that group's own `.checkpoints/`. It records the target group's
+  current `applied_seq` under `<wal_root>/<group_id>/.checkpoints/`, is O(1) (no WAL scan or
   replay), and fails if the position is unknown (`applied_seq` is `null`) or the name is already
-  in use by an active mark. `knowledge_wal_mark_list` lists every active mark with its `seq`, its
-  `wal_min_seq`/`wal_max_seq` (the bounds of WAL content currently on disk), and whether it is
-  currently `reachable`: this requires both `wal_min_seq == 0` (the WAL's own prefix has not been
-  externally truncated, e.g. by routine retention deleting old WAL files) and `seq <=
+  in use by an active mark **within that group** — two different groups may each have an active
+  mark of the same name, since each group's checkpoint store is independent. `knowledge_wal_mark_list
+  {group_id}` (also defaulting to `"liminis"`, and always scoped to exactly one group — there is
+  no cross-group aggregate listing) lists every active mark in that group with its `seq`, its
+  `wal_min_seq`/`wal_max_seq` (the bounds of that group's WAL content currently on disk), and
+  whether it is currently `reachable`: this requires both `wal_min_seq == 0` (the WAL's own prefix
+  has not been externally truncated, e.g. by routine retention deleting old WAL files) and `seq <=
   wal_max_seq` — a mark whose `seq` merely falls inside `[wal_min_seq, wal_max_seq]` is still
   reported unreachable if `wal_min_seq > 0`, since a restore would silently omit everything before
-  it. This does not detect a gap in the *middle* of that range. `knowledge_wal_mark_delete {name}` removes a
-  mark (recording a tombstone, never rewriting the original record) and frees the name for reuse.
-  To restore: `knowledge_rebuild_from_wal {from_seq: 0, to_seq: <seq>, force_clear: true}` for a
-  mark with an integer `seq`, or `knowledge_clear_all` for a mark with `seq: null` (a genuinely
-  empty graph). These tools are unrelated to `knowledge_prepare_checkpoint` below — they name a
-  WAL position, not flush a writer — and their `.checkpoints/` store lives in its own
-  subdirectory precisely so it is invisible to the WAL file scans that discover `.jsonl` mutation
-  files (`knowledge_dump_wal` and the replayer among them), and so it travels with the WAL
+  it. This does not detect a gap in the *middle* of that range. `knowledge_wal_mark_delete {name,
+  group_id}` removes a mark from that group (recording a tombstone, never rewriting the original
+  record) and frees the name for reuse within that group. To restore: `knowledge_rebuild_from_wal
+  {group_id, from_seq: 0, to_seq: <seq>, force_clear: true}` for a mark with an integer `seq`, or
+  `knowledge_delete_by_group {group_ids: [group_id]}` for a mark with `seq: null` (a genuinely
+  empty group) — or `knowledge_clear_all` if you mean to reset every group, not just one. These
+  tools are unrelated to `knowledge_prepare_checkpoint` below — they name a WAL position, not
+  flush a writer — and each group's `.checkpoints/` store lives in its own subdirectory precisely
+  so it is invisible to the WAL file scans that discover `.jsonl` mutation files
+  (`knowledge_dump_wal` and the replayer among them), and so it travels with that group's WAL
   directory itself when checked into git. Exactly-one-wins under concurrent `create` for the same
-  name relies on exclusive file creation (`O_EXCL`), a local-filesystem guarantee — not reliable
-  on an NFS-mounted WAL directory (see [ADR-0365](adr/0365-wal-checkpoints-directory-per-name-store.md)).
+  name (within one group) relies on exclusive file creation (`O_EXCL`), a local-filesystem
+  guarantee — not reliable on an NFS-mounted WAL directory (see
+  [ADR-0365](adr/0365-wal-checkpoints-directory-per-name-store.md)).
 - **Checkpoint** before backups with `knowledge_prepare_checkpoint` — this rotates and flushes
-  the live WAL writer so pending mutations are on disk before an external filesystem backup. It
-  shares the word "checkpoint" with `knowledge_wal_mark_*` above by coincidence, not by relation.
+  every group's live WAL writer (issue #378: an instance-wide operation now spans however many
+  groups this process has written to, not one writer) so pending mutations are on disk before an
+  external filesystem backup. It shares the word "checkpoint" with `knowledge_wal_mark_*` above
+  by coincidence, not by relation, and takes no `group_id` — it is always whole-instance.
 - **Rotation.** `LCG_WAL_MAX_BYTES_PER_FILE` (default 5 MB) and `LCG_WAL_MAX_EVENTS_PER_FILE`
   (default 10000) bound each WAL file's size; rotation fires when either threshold is reached
   and emits a `wal_rotated` [telemetry event](telemetry.md#wal_rotated).
@@ -145,11 +171,25 @@ degraded (no connected database). A rising `name_index_fallback_scans` count, or
 investigating — see [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the
 mechanism.
 
-**`wal.applied_seq`** and **`wal.max_seq`** (issue #353) — let a caller decide, from a single
-`knowledge_status` call and an integer comparison, whether its local DB is already consistent
-with the WAL, needs an incremental resume, or needs a full rebuild. `wal.applied_seq` is read
-from a persisted DB row on every call — never cached in memory, so the value survives a service
-restart. `wal.max_seq` always reports the true highest `seq` actually present on disk (or
+**`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
+currently has a WAL directory, each entry shaped like the flat `wal` object below
+(`{applied_seq, max_seq}`). This is the multi-group view; the flat `wal.applied_seq`/`wal.max_seq`
+fields described next remain present and **pinned specifically to the default `"liminis"`
+group**, unchanged in meaning from a pre-378 single-group deployment — a caller that only reads
+the flat fields (e.g. an existing integration written before this issue) needs no change. If the
+default group has no WAL directory at all (e.g. a pure replica that has only ever hydrated
+non-default groups), the flat fields report `null`/absent rather than an error — a documented
+signal that this instance has no default group, not a broken or un-hydrated instance. Do not
+confuse "not in `wal_groups`" with "at position 0": a group present in the map with
+`applied_seq: 0` has a directory and a known position; a group absent from the map entirely has no
+WAL directory yet.
+
+**`wal.applied_seq`** and **`wal.max_seq`** (issue #353; scoped to the default group by issue
+#378) — let a caller decide, from a single `knowledge_status` call and an integer comparison,
+whether its local DB is already consistent with the default group's WAL, needs an incremental
+resume, or needs a full rebuild. `wal.applied_seq` is read from a persisted DB row on every call —
+never cached in memory, so the value survives a service restart. `wal.max_seq` always reports the
+true highest `seq` actually present on disk for the default group (or
 `None`/`null` if the WAL is empty or unconfigured); an externally-updated WAL (e.g. a distributed,
 git-published WAL pulled by another process) is observed on the very next call, at worst after one
 reconciling full scan (issue #375). In the common case it's computed from a small manifest sidecar

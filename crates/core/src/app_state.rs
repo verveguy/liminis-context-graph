@@ -42,11 +42,23 @@ pub struct AppState {
     pub write_lock: Arc<RwLock<()>>,
     pub sink: Arc<dyn TelemetrySink>,
     pub db_path: String,
-    pub wal_dir: Option<PathBuf>,
+    /// WAL **root** directory (issue #378): contains one subdirectory per `group_id`, each an
+    /// independent WAL stream. `LCG_WAL_DIR`'s pre-378 meaning (a single shared directory)
+    /// migrates automatically into `<wal_root>/liminis/` — see `wal_group::migrate_wal_root_if_needed`.
+    pub wal_root: Option<PathBuf>,
     pub wal_max_events_per_file: usize,
     pub wal_max_bytes_per_file: u64,
     pub embedding_model: String,
-    pub wal_writer: Arc<Mutex<Option<WalWriter>>>,
+    /// Per-group `WalWriter` map (issue #378 FR-003), keyed by `group_id`. A group's writer and
+    /// directory are created lazily on that group's first write — see [`AppState::with_wal_writer`].
+    /// That method holds this `Mutex` for its whole callback, including the WAL disk write, not
+    /// just the lookup-or-create step — but that never adds contention beyond what already
+    /// exists: every caller reaches `with_wal_writer` while already holding `write_lock`
+    /// exclusively (the single embedded DB is a single-writer store regardless of group count,
+    /// see `write_lock`'s own doc comment), so at most one write is ever in flight across the
+    /// whole instance anyway. This map exists to give each group its own `global_seq` and
+    /// directory, not to enable concurrent cross-group flushes.
+    pub wal_writers: Arc<Mutex<HashMap<String, WalWriter>>>,
     pub active_writes: Arc<AtomicUsize>,
     pub rebuild_jobs: Arc<Mutex<HashMap<String, RebuildJob>>>,
     /// Tracks whether HNSW vector indices have been built in this session.
@@ -103,10 +115,26 @@ impl AppState {
         // LCG_SOCKET_PATH and LCG_DB_PATH). Application WAL is essential for
         // the `knowledge_rebuild_from_wal` recovery path; without a default,
         // dropping the env var (per liminis#828) silently disabled WAL writes.
-        let wal_dir = Some(PathBuf::from(
+        //
+        // `LCG_WAL_DIR`'s meaning changed with issue #378: it now names a WAL **root**
+        // containing one subdirectory per `group_id`, not a single shared stream. A pre-378
+        // workspace's flat directory is migrated in place, once, before any per-group writer is
+        // constructed (FR-001, FR-009).
+        let wal_root = Some(PathBuf::from(
             lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
                 .unwrap_or_else(|_| ".lcg/wal".to_string()),
         ));
+        if let Some(root) = wal_root.as_deref() {
+            if let Err(e) = crate::wal_group::migrate_wal_root_if_needed(root) {
+                eprintln!(
+                    "liminis-context-graph: wal root migration failed for {root:?} (non-fatal to \
+                     startup, but every per-group path below resolves under <wal_root>/<group_id> \
+                     regardless — any pre-378 loose top-level WAL content at {root:?} stays on \
+                     disk untouched but becomes invisible to this process until migration \
+                     succeeds; it is not read as a fallback): {e}"
+                );
+            }
+        }
         let max_events_per_file: usize = std::env::var("LCG_WAL_MAX_EVENTS_PER_FILE")
             .ok()
             .and_then(|v| {
@@ -127,9 +155,8 @@ impl AppState {
                 }).ok()
             })
             .unwrap_or(5 * 1024 * 1024);
-        let wal_writer = wal_dir
-            .as_deref()
-            .and_then(|dir| WalWriter::new(dir, max_events_per_file, max_bytes_per_file).ok());
+        // Per-group writers are created lazily on first write (FR-003) — nothing is created
+        // eagerly here, unlike the pre-378 single-writer startup path.
         let workspace_root = std::env::var("LIMINIS_WORKSPACE_ROOT")
             .ok()
             .map(PathBuf::from);
@@ -177,11 +204,11 @@ impl AppState {
             write_lock: Arc::new(RwLock::new(())),
             sink,
             db_path,
-            wal_dir,
+            wal_root,
             wal_max_events_per_file: max_events_per_file,
             wal_max_bytes_per_file: max_bytes_per_file,
             embedding_model,
-            wal_writer: Arc::new(Mutex::new(wal_writer)),
+            wal_writers: Arc::new(Mutex::new(HashMap::new())),
             active_writes: Arc::new(AtomicUsize::new(0)),
             rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
             workspace_root,
@@ -191,6 +218,68 @@ impl AppState {
             ontology,
             ontology_drift,
         }
+    }
+
+    /// Locks `wal_writers`, lazily creating `group_id`'s writer (and its WAL directory) on
+    /// first use if it doesn't already exist (issue #378 FR-003), and hands the caller mutable
+    /// access to it via `f`.
+    ///
+    /// Returns `None` when no `wal_root` is configured, the lock is poisoned, or the writer or
+    /// its directory could not be created — WAL is a non-fatal recovery artifact (see
+    /// `wal_exec.rs`'s module doc), so every caller here already treats `None` the same as
+    /// "nothing to flush," not a hard error.
+    pub fn with_wal_writer<T>(
+        &self,
+        group_id: &str,
+        f: impl FnOnce(&mut WalWriter) -> T,
+    ) -> Option<T> {
+        let root = self.wal_root.as_deref()?;
+        let mut guard = match self.wal_writers.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!(
+                    "liminis-context-graph: wal_writers: lock poisoned for group {group_id:?}: {e}"
+                );
+                return None;
+            }
+        };
+        if !guard.contains_key(group_id) {
+            let dir_name = match crate::wal_group::encode_group_dir_name(group_id) {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!(
+                        "liminis-context-graph: wal_writers: cannot resolve directory for group {group_id:?}: {e}"
+                    );
+                    return None;
+                }
+            };
+            // Fail loudly rather than silently interleaving two groups into one physical
+            // directory on a case-insensitive filesystem (issue #378: encode_group_dir_name is
+            // bijective at the string level only, see check_no_case_insensitive_collision).
+            if let Err(e) = crate::wal_group::check_no_case_insensitive_collision(root, &dir_name) {
+                eprintln!(
+                    "liminis-context-graph: wal_writers: refusing to create directory for group {group_id:?}: {e}"
+                );
+                return None;
+            }
+            let dir = root.join(&dir_name);
+            match WalWriter::new(
+                &dir,
+                self.wal_max_events_per_file,
+                self.wal_max_bytes_per_file,
+            ) {
+                Ok(w) => {
+                    guard.insert(group_id.to_string(), w);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "liminis-context-graph: wal_writers: failed to create writer for group {group_id:?} at {dir:?}: {e}"
+                    );
+                    return None;
+                }
+            }
+        }
+        guard.get_mut(group_id).map(f)
     }
 }
 

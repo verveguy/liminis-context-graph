@@ -24,10 +24,9 @@ use crate::{
     telemetry::{now_ms, TelemetryEvent},
     types::{EntityRow, RelatesToEdge, SourceType},
     wal::WalWriter,
-    wal_exec,
+    wal_exec, wal_group,
+    wal_group::DEFAULT_GROUP_ID,
 };
-
-const DEFAULT_GROUP_ID: &str = "liminis";
 
 /// Interval (in processed items) between periodic progress sends for long-running
 /// reprocess passes. Mirrors `reprocess_relations::PROGRESS_EVERY`.
@@ -128,7 +127,7 @@ async fn handle(
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
         "knowledge_wal_mark_create" => handle_wal_mark_create(req, state).await,
-        "knowledge_wal_mark_list" => handle_wal_mark_list(state).await,
+        "knowledge_wal_mark_list" => handle_wal_mark_list(req, state).await,
         "knowledge_wal_mark_delete" => handle_wal_mark_delete(req, state).await,
         "knowledge_rebuild_from_wal" => handle_rebuild_from_wal(req, state, progress_tx).await,
         "knowledge_rebuild_status" => handle_rebuild_status(req, state).await,
@@ -228,6 +227,10 @@ struct StatusFields {
     wal_byte_size: u64,
     wal_applied_seq: Option<u64>,
     wal_max_seq: Option<u64>,
+    /// Per-group `(group_id, applied_seq, max_seq)` for every group that has a WAL directory
+    /// (issue #378 FR-007) — additive to the flat `wal_applied_seq`/`wal_max_seq` fields above,
+    /// which stay pinned to the default group.
+    wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
     name_index_trusted: bool,
@@ -249,6 +252,7 @@ enum StatusOutcome {
         wal_byte_size: u64,
         wal_applied_seq: Option<u64>,
         wal_max_seq: Option<u64>,
+        wal_group_positions: Vec<(String, Option<u64>, Option<u64>)>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
     },
@@ -292,10 +296,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             .ok()
             .and_then(|g| g.clone())
             .unwrap_or_else(|| "unknown".to_string());
-        // Only advertise rebuild_from_workspace_wal when a WAL dir is actually configured;
+        // Only advertise rebuild_from_workspace_wal when a WAL root is actually configured;
         // otherwise clients would offer an option that always fails immediately.
         let mut recovery_available = vec!["drop_lbug_wal"];
-        if state.wal_dir.is_some() {
+        if state.wal_root.is_some() {
             recovery_available.push("rebuild_from_workspace_wal");
         }
         return Ok(json!({
@@ -318,22 +322,74 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let db_path = state.db_path.clone();
     let embedding_model = state.embedding_model.clone();
     let embedding_dim = state.embedder.dim();
-    let wal_dir = state.wal_dir.clone();
+    let wal_root = state.wal_root.clone();
+    // The flat wal.* fields stay pinned to the default group's own WAL directory (issue #378
+    // FR-007), never the root itself — an existing consumer (e.g. orac) that only reads these
+    // flat fields must see exactly the default group's position, unchanged from a pre-378
+    // single-group instance.
+    let default_group_dir = wal_root
+        .as_deref()
+        .map(|root| crate::wal_group::group_wal_dir(root, DEFAULT_GROUP_ID))
+        .transpose()?;
+
+    // Phase 0 (write lock): backfill every group's applied_seq that isn't known yet, before the
+    // read-locked status computation below reads it (issue #378 Review finding). Every other
+    // write in this codebase goes through the exclusive write_lock; backfill_applied_seq_if_absent
+    // can issue a real MERGE...SET (set_applied_seq) once per group, the first time that group is
+    // ever queried, so it must not run under a shared read lock — otherwise two concurrent
+    // knowledge_status calls racing to backfill the same not-yet-backfilled group could issue
+    // concurrent write transactions against the single-writer embedded DB with no serialization.
+    // Held only for this narrow pass, not the whole handler, so status calls after the first one
+    // per group (the common case — backfill_applied_seq_if_absent's own early-return makes every
+    // later call a pure read) still mostly see read-lock-only contention below.
+    {
+        let db_c = Arc::clone(&db);
+        let wal_root_c = wal_root.clone();
+        let _write_guard = state.write_lock.write().await;
+        tokio::task::spawn_blocking(move || {
+            let conn = db_c.connect()?;
+            if let Some(root) = wal_root_c.as_deref() {
+                for (gid, dir) in crate::wal_group::list_group_wal_dirs(root).unwrap_or_default() {
+                    let _ = crate::recovery::backfill_applied_seq_if_absent(&conn, &gid, &dir);
+                }
+            }
+            Ok::<(), crate::error::Error>(())
+        })
+        .await??;
+    }
 
     let _guard = state.write_lock.read().await;
     let outcome =
         tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
             let conn = db.connect()?;
-            let (wal_exists, wal_file_count, wal_byte_size) = scan_wal_dir(wal_dir.as_deref());
+            let (wal_exists, wal_file_count, wal_byte_size) =
+                scan_wal_dir(default_group_dir.as_deref());
             // Read fresh on every call, never cached on AppState (FR-001, SC-001: must prove
             // persistence across restart, not memoisation). Each is best-effort: a read failure
             // (e.g. the WalPosition table or WAL dir is transiently unreadable) degrades to
             // `null`, the same "unknown position" value a genuine backfill failure reports —
-            // never fatal to the rest of the status response.
-            let wal_applied_seq = conn.get_applied_seq().unwrap_or(None);
-            let wal_max_seq = wal_dir
+            // never fatal to the rest of the status response. If the default group has no WAL
+            // directory at all (e.g. a pure replica that only ever hydrated other groups), both
+            // stay `null` — a documented signal of "no default group", not an error.
+            let wal_applied_seq = conn.get_applied_seq(DEFAULT_GROUP_ID).unwrap_or(None);
+            let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
+            // Per-group breakdown (FR-007): every group that currently has a WAL directory.
+            // Backfilling already happened above under the write lock (Phase 0) — this is a pure
+            // read of whatever that pass established, never a write, so it's safe under the
+            // shared read lock this closure runs under.
+            let wal_group_positions: Vec<(String, Option<u64>, Option<u64>)> = wal_root
+                .as_deref()
+                .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(gid, dir)| {
+                    let applied = conn.get_applied_seq(&gid).unwrap_or(None);
+                    let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
+                    (gid, applied, max)
+                })
+                .collect();
             let name_index_trusted = conn.name_index_trusted();
             let name_index_fallback_scans = conn.name_index_fallback_scan_count();
 
@@ -373,6 +429,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_group_positions,
                     last_index_time,
                     index_created_at,
                     name_index_trusted,
@@ -389,6 +446,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_byte_size,
                     wal_applied_seq,
                     wal_max_seq,
+                    wal_group_positions,
                     name_index_trusted,
                     name_index_fallback_scans,
                 }),
@@ -426,6 +484,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     "applied_seq": fields.wal_applied_seq,
                     "max_seq": fields.wal_max_seq,
                 },
+                // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
+                // each shaped like the flat "wal" object above. The flat fields above remain
+                // pinned to the default group specifically, so an existing consumer that only
+                // reads them (e.g. orac) requires no change.
+                "wal_groups": wal_group_positions_json(&fields.wal_group_positions),
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
@@ -447,6 +510,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_byte_size,
             wal_applied_seq,
             wal_max_seq,
+            wal_group_positions,
             name_index_trusted,
             name_index_fallback_scans,
         } => json!({
@@ -478,6 +542,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "applied_seq": wal_applied_seq,
                 "max_seq": wal_max_seq,
             },
+            "wal_groups": wal_group_positions_json(&wal_group_positions),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
             // missing, any index built against it is meaningless, regardless of whether a
             // `knowledge_build_indices` call has run since the table broke to store `false`
@@ -496,6 +561,21 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     };
     result["ontology"] = ontology_summary;
     Ok(result)
+}
+
+/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq)` tuples
+/// (issue #378 FR-007) into the additive `wal_groups` JSON map.
+fn wal_group_positions_json(positions: &[(String, Option<u64>, Option<u64>)]) -> Value {
+    let map: serde_json::Map<String, Value> = positions
+        .iter()
+        .map(|(gid, applied, max)| {
+            (
+                gid.clone(),
+                json!({ "applied_seq": applied, "max_seq": max }),
+            )
+        })
+        .collect();
+    Value::Object(map)
 }
 
 fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
@@ -724,13 +804,21 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
         .to_string();
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
+        // The request names no group_id, but this deletes exactly one episode in exactly one
+        // group — unlike the genuinely multi-group FR-004-exempt sites, that group is knowable
+        // by reading it before the delete runs, so the WAL flush below routes to it directly
+        // rather than the default group's writer. A missing episode (already deleted, or a
+        // bogus uuid) has no group to route to and no mutation to flush either — DEFAULT_GROUP_ID
+        // is used only as a harmless fallback for that no-op case.
+        let group_id = conn
+            .get_episode_group_id(&episode_uuid)?
+            .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
         Ok(())
     })
     .await??;
@@ -801,8 +889,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     let query = req.params["query"].as_str().unwrap_or("").to_string();
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     // Write lock required: this handler may execute mutations, and the WAL flush must
     // be serialized with all other write paths to preserve replay order.
     let _guard = state.write_lock.write().await;
@@ -812,7 +899,9 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // User-supplied strings are never rewritten, so this path has no type-coercion surface
         // and is explicitly out of scope per Issue #170 FR-008.
         let rows = conn.cypher_query(&query)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // Arbitrary Cypher carries no group attribution at all (FR-004): routes through the
+        // default group's writer, a documented limitation rather than mutation-level tracking.
+        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
         // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
         // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
         // an Entity row with the index never learning about it. Reuse the WAL's own
@@ -1112,8 +1201,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
@@ -1121,7 +1209,17 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // `group_ids` is optional and, when given, an array — a call with no filter or more
+        // than one group can genuinely span multiple groups, so per-operation attribution can't
+        // name one group there (FR-004), and it routes through the default group's writer, the
+        // same documented limitation as handle_delete_by_group. But a caller that named exactly
+        // one group is not ambiguous — route to that group directly rather than discarding
+        // information the request already gave us.
+        let target_group = match group_ids_owned.as_deref() {
+            Some([single]) => single.as_str(),
+            _ => DEFAULT_GROUP_ID,
+        };
+        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
         Ok(uuids)
     })
     .await??;
@@ -1155,8 +1253,7 @@ async fn handle_delete_chunk_episode(
     let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
@@ -1164,7 +1261,14 @@ async fn handle_delete_chunk_episode(
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // Same FR-004 rationale as handle_delete_by_source above: a single named group is
+        // routed there directly; no filter, or more than one group, falls back to the default
+        // group's writer as a genuinely multi-group call.
+        let target_group = match group_ids_owned.as_deref() {
+            Some([single]) => single.as_str(),
+            _ => DEFAULT_GROUP_ID,
+        };
+        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
         Ok(uuids)
     })
     .await??;
@@ -1232,15 +1336,18 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
     }
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let counts = tokio::task::spawn_blocking(move || -> Result<group_purge::PurgeCounts, Error> {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
         let counts = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // Purges an array of group_ids and its forced rebind can write into other, non-purged
+        // "owning" groups' RelatesToNode_ rows in the same drain_mutations call (ADR-0361) —
+        // genuinely multi-group, so per-operation attribution can't name one group (FR-004).
+        // Routes through the default group's writer, a documented limitation.
+        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
         Ok(counts)
     })
     .await??;
@@ -1276,7 +1383,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     let preserve_wal = req.params["preserve_wal"].as_bool().unwrap_or(false);
 
     let db_path = state.db_path.clone();
-    let wal_dir = state.wal_dir.clone();
+    let wal_root = state.wal_root.clone();
     let embedding_dim = state.embedder.dim();
 
     let _guard = state.write_lock.write().await;
@@ -1293,16 +1400,16 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     state.db.store(None);
 
     if !preserve_wal {
-        // Flush and drop the WalWriter before deleting the WAL directory to avoid
-        // writing to a path that no longer exists. The writer is re-initialized below
-        // after the DB is swapped in (#100 regression fix).
-        drop(
-            state
-                .wal_writer
-                .lock()
-                .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?
-                .take(),
-        );
+        // Flush and drop every group's WalWriter before deleting the WAL root to avoid writing
+        // to a path that no longer exists (issue #378: this now clears the whole per-group map,
+        // not one writer). Nothing is eagerly recreated below — lazy per-group creation (FR-003)
+        // means the next write to any group creates its writer and directory on demand, same as
+        // a fresh install.
+        state
+            .wal_writers
+            .lock()
+            .map_err(|_| Error::Ipc("wal_writers lock poisoned".to_string()))?
+            .clear();
     }
 
     // Phase 1: delete DB files (and optionally WAL directory) — point of no return
@@ -1325,10 +1432,13 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             }
         }
         if !preserve_wal {
-            if let Some(wal) = wal_dir {
-                if wal.exists() {
-                    std::fs::remove_dir_all(&wal).map_err(|e| {
-                        Error::Ipc(format!("failed to delete WAL dir '{}': {e}", wal.display()))
+            if let Some(root) = wal_root {
+                if root.exists() {
+                    std::fs::remove_dir_all(&root).map_err(|e| {
+                        Error::Ipc(format!(
+                            "failed to delete WAL root '{}': {e}",
+                            root.display()
+                        ))
                     })?;
                 }
             }
@@ -1351,10 +1461,13 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
-            // Reset the applied-WAL-seq position (issue #353, FR-005): this DB is freshly
-            // empty, so `0` ("known, nothing applied") is correct — not `null` ("unknown"),
-            // which would otherwise trigger an unnecessary backfill scan on next open.
-            conn.set_applied_seq(0)?;
+            // Reset the applied-WAL-seq position (issue #353, FR-005) for the default group:
+            // this DB is freshly empty, so `0` ("known, nothing applied") is correct — not
+            // `null` ("unknown"), which would otherwise trigger an unnecessary backfill scan on
+            // next open. Other groups' WalPosition rows are simply absent post-clear (correct:
+            // "unknown/no stream yet", not "known-empty" — issue #378 preserves FR-009 parity
+            // for the default group only, matching pre-378 single-group behavior exactly).
+            conn.set_applied_seq(DEFAULT_GROUP_ID, 0)?;
             // Fresh empty table — a no-op today, kept for uniformity with every other
             // Entity-population path (issue #219).
             conn.rebuild_name_index()?;
@@ -1386,37 +1499,10 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         .indices_built
         .store(false, std::sync::atomic::Ordering::Release);
 
-    // Re-initialize the WalWriter so post-Recreate writes are captured (regression fix for #100).
-    // The writer was taken to None before WAL dir deletion above; without this, every subsequent
-    // wal_flush_chunk/wal_flush_ungrouped call silently skips because the guard is None.
-    if !preserve_wal {
-        if let Some(ref wal_dir) = state.wal_dir {
-            match WalWriter::new(
-                wal_dir,
-                state.wal_max_events_per_file,
-                state.wal_max_bytes_per_file,
-            ) {
-                Ok(writer) => {
-                    let mut guard = match state.wal_writer.lock() {
-                        Ok(g) => g,
-                        Err(e) => {
-                            eprintln!(
-                                "liminis-context-graph: WAL writer mutex was poisoned — \
-                                 recovering for Recreate re-init"
-                            );
-                            e.into_inner()
-                        }
-                    };
-                    *guard = Some(writer);
-                }
-                Err(e) => eprintln!(
-                    "liminis-context-graph: WAL re-init failed after Recreate: {e} — \
-                     WAL writes disabled until restart"
-                ),
-            }
-        }
-    }
-
+    // No eager WAL writer re-init here (unlike the pre-378 regression fix for #100): lazy
+    // per-group creation (FR-003) means the next write to any group creates its writer and
+    // directory on demand, the same as a fresh install — `wal_writers` was already cleared
+    // above, so there is nothing stale left pointing at a deleted directory to guard against.
     drop(_guard);
 
     Ok(json!({"success": true, "message": "Graph cleared and reinitialized successfully"}))
@@ -1542,44 +1628,46 @@ fn count_jsonl_files_in_dir(dir: &std::path::Path) -> usize {
 }
 
 async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error> {
-    let wal_dir = state.wal_dir.clone();
-    let wal_writer = Arc::clone(&state.wal_writer);
+    let wal_root = state.wal_root.clone();
+    let state_c = Arc::clone(&state);
 
     // Serialize with in-flight writes (FR-006)
     let _write_guard = state.write_lock.write().await;
 
     let (files_flushed, files_total) =
         tokio::task::spawn_blocking(move || -> Result<(u32, u32), Error> {
-            let mut w = wal_writer
-                .lock()
-                .map_err(|_| Error::Ipc("wal_writer lock poisoned".to_string()))?;
-            if let Some(ref mut writer) = *w {
-                let (r, t) = writer.rotate();
-                Ok((r, t))
-            } else {
-                // No writer; count JSONL files in wal_dir if configured and present
-                let total = wal_dir
-                    .as_deref()
-                    .map(|d| {
-                        if d.exists() {
-                            std::fs::read_dir(d)
-                                .ok()
-                                .map(|rd| {
-                                    rd.filter_map(|e| e.ok())
-                                        .filter(|e| {
-                                            e.path().extension().and_then(|x| x.to_str())
-                                                == Some("jsonl")
-                                        })
-                                        .count() as u32
-                                })
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        }
-                    })
-                    .unwrap_or(0);
-                Ok((0, total))
+            let mut files_flushed = 0u32;
+            let mut files_total = 0u32;
+            // Rotate every group with a live writer in this process (issue #378: an instance-wide
+            // operation now spans N writers, not one).
+            let mut seen_groups: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            {
+                let mut writers = state_c
+                    .wal_writers
+                    .lock()
+                    .map_err(|_| Error::Ipc("wal_writers lock poisoned".to_string()))?;
+                for (gid, writer) in writers.iter_mut() {
+                    let (r, t) = writer.rotate();
+                    files_flushed += r;
+                    files_total += t;
+                    seen_groups.insert(gid.clone());
+                }
             }
+            // A group with a WAL directory on disk but no live writer in this process (e.g.
+            // right after a fresh clear, or written only by another process) still counts
+            // toward files_total, matching the pre-378 "no writer; count JSONL files" fallback.
+            if let Some(root) = wal_root.as_deref() {
+                if let Ok(dirs) = crate::wal_group::list_group_wal_dirs(root) {
+                    for (gid, dir) in dirs {
+                        if seen_groups.contains(&gid) {
+                            continue;
+                        }
+                        files_total += count_jsonl_files_in_dir(&dir) as u32;
+                    }
+                }
+            }
+            Ok((files_flushed, files_total))
         })
         .await??;
     drop(_write_guard);
@@ -1598,19 +1686,39 @@ async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error>
 // WAL position* — "this graph was known-good here" — for later bounded-replay recovery
 // (FR-014). The two features share the word "checkpoint" by coincidence, not by relation.
 
-/// Resolves `state.wal_dir` or fails with the same clear error `knowledge_rebuild_from_wal`
-/// uses for the same precondition.
-fn require_wal_dir(state: &AppState) -> Result<std::path::PathBuf, Error> {
-    state
-        .wal_dir
-        .clone()
-        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))
+/// Resolves `group_id`'s own WAL directory under `state.wal_root` (issue #378 FR-012),
+/// replacing the pre-378 single-directory `require_wal_dir`. Fails with the same clear error
+/// `knowledge_rebuild_from_wal` uses when no WAL root is configured at all.
+fn resolve_group_wal_dir(state: &AppState, group_id: &str) -> Result<std::path::PathBuf, Error> {
+    let root = state
+        .wal_root
+        .as_deref()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+    let dir_name = wal_group::encode_group_dir_name(group_id)?;
+    // Same case-insensitive-filesystem guard as `AppState::with_wal_writer` (issue #378) —
+    // required here too: `knowledge_wal_mark_create` can be the very first operation ever
+    // performed against a new group_id (checkpoint creation doesn't require a prior write), and
+    // `checkpoint::create`'s `fs::create_dir_all` would otherwise interleave two case-colliding
+    // groups' directories with no warning.
+    wal_group::check_no_case_insensitive_collision(root, &dir_name)?;
+    Ok(root.join(dir_name))
+}
+
+/// Reads an optional `group_id` param, defaulting to `DEFAULT_GROUP_ID` (issue #378 FR-012) —
+/// preserves every pre-378 caller's zero-change single-group behavior.
+fn group_id_param(params: &Value) -> String {
+    params["group_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string()
 }
 
 /// `knowledge_wal_mark_create` — records a new named checkpoint at the database's current
-/// `applied_seq` (FR-003). O(1) relative to WAL size: no WAL file scan or replay occurs here,
-/// only a DB read (`applied_seq`, and conditionally the FR-005 graph-emptiness check) and a
-/// single exclusive file create under `.checkpoints/`.
+/// `applied_seq` (FR-003), against `group_id`'s own WAL directory (default `"liminis"`, issue
+/// #378 FR-012). O(1) relative to WAL size: no WAL file scan or replay occurs here, only a DB
+/// read (`applied_seq`, and conditionally the FR-005 graph-emptiness check) and a single
+/// exclusive file create under that group's `.checkpoints/`.
 async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let name = req.params["name"]
         .as_str()
@@ -1621,16 +1729,18 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
     // rather than surfacing only once checkpoint::create is reached.
     crate::checkpoint::validate_name(&name)?;
 
-    let wal_dir = require_wal_dir(&state)?;
+    let group_id = group_id_param(&req.params);
+    let wal_dir = resolve_group_wal_dir(&state, &group_id)?;
 
     // Read lock only: this call never mutates the graph, but it must observe a consistent
     // applied_seq/content snapshot relative to any concurrently in-flight write.
     let _guard = state.write_lock.read().await;
     let db = load_db(&state)?;
 
+    let gid_c = group_id.clone();
     let seq = tokio::task::spawn_blocking(move || -> Result<Option<u64>, Error> {
         let conn = db.connect()?;
-        let applied_seq = conn.get_applied_seq()?.ok_or_else(|| {
+        let applied_seq = conn.get_applied_seq(&gid_c)?.ok_or_else(|| {
             Error::Ipc(
                 "knowledge_wal_mark_create: applied_seq is unknown (null) — the current \
                  position cannot be determined, so no checkpoint can be recorded. Resolve the \
@@ -1642,7 +1752,7 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
             // FR-005: applied_seq == 0 conflates "nothing applied" (a genuinely fresh/cleared
             // DB) with "WAL line 0 applied" (WalWriter's global_seq starts at 0) — disambiguate
             // via the same graph-emptiness check backfill_applied_seq_if_absent already uses.
-            if crate::recovery::graph_has_no_content(&conn)? {
+            if crate::recovery::group_has_no_content(&conn, &gid_c)? {
                 return Ok(None);
             }
             return Ok(Some(0));
@@ -1659,23 +1769,28 @@ async fn handle_wal_mark_create(req: &IpcRequest, state: Arc<AppState>) -> Resul
     Ok(json!({
         "success": true,
         "name": name,
+        "group_id": group_id,
         "seq": seq,
     }))
 }
 
 /// `knowledge_wal_mark_list` — lists every active checkpoint with its reachability against WAL
-/// content currently on disk (FR-009). Filesystem-only: does not require the database to be
-/// open (FR-011), so it is exempt from the degraded-mode guard in `handle`.
-async fn handle_wal_mark_list(state: Arc<AppState>) -> Result<Value, Error> {
-    let wal_dir = require_wal_dir(&state)?;
+/// content currently on disk (FR-009), for `group_id`'s own WAL directory (default `"liminis"`).
+/// Filesystem-only: does not require the database to be open (FR-011), so it is exempt from the
+/// degraded-mode guard in `handle`. With no explicit `group_id`, returns only the default
+/// group's checkpoints — matching pre-378 single-stream behavior exactly, never aggregating
+/// across every active group (FR-012).
+async fn handle_wal_mark_list(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let group_id = group_id_param(&req.params);
+    let wal_dir = resolve_group_wal_dir(&state, &group_id)?;
     let checkpoints =
         tokio::task::spawn_blocking(move || crate::checkpoint::list(&wal_dir)).await??;
-    Ok(json!({ "checkpoints": checkpoints }))
+    Ok(json!({ "group_id": group_id, "checkpoints": checkpoints }))
 }
 
-/// `knowledge_wal_mark_delete` — tombstones an active checkpoint (FR-007/FR-008). Filesystem-
-/// only: does not require the database to be open (FR-011), so it is exempt from the
-/// degraded-mode guard in `handle`.
+/// `knowledge_wal_mark_delete` — tombstones an active checkpoint (FR-007/FR-008) in `group_id`'s
+/// own WAL directory (default `"liminis"`). Filesystem-only: does not require the database to be
+/// open (FR-011), so it is exempt from the degraded-mode guard in `handle`.
 async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let name = req.params["name"]
         .as_str()
@@ -1683,11 +1798,12 @@ async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Resul
         .ok_or_else(|| Error::Ipc("name is required and must be a non-empty string".to_string()))?
         .to_string();
 
-    let wal_dir = require_wal_dir(&state)?;
+    let group_id = group_id_param(&req.params);
+    let wal_dir = resolve_group_wal_dir(&state, &group_id)?;
     let name_c = name.clone();
     tokio::task::spawn_blocking(move || crate::checkpoint::delete(&wal_dir, &name_c)).await??;
 
-    Ok(json!({ "success": true, "name": name }))
+    Ok(json!({ "success": true, "name": name, "group_id": group_id }))
 }
 
 /// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
@@ -1698,11 +1814,16 @@ async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Resul
 /// aid for operators, not a guard, since a caller may legitimately skip a known-bad or
 /// already-applied-elsewhere range. `from_seq == 0` is always a full rebuild (or a resume from
 /// scratch against an empty DB) and never warrants this warning.
-fn warn_on_rebuild_seq_gap(conn: &crate::db::Conn<'_>, from_seq: u64, context: &str) {
+fn warn_on_rebuild_seq_gap(
+    conn: &crate::db::Conn<'_>,
+    group_id: &str,
+    from_seq: u64,
+    context: &str,
+) {
     if from_seq == 0 {
         return;
     }
-    if let Ok(Some(prior)) = conn.get_applied_seq() {
+    if let Ok(Some(prior)) = conn.get_applied_seq(group_id) {
         if from_seq > prior + 1 {
             eprintln!(
                 "liminis-context-graph: {context}: knowledge_rebuild_from_wal called with \
@@ -1737,11 +1858,9 @@ async fn handle_rebuild_from_wal(
         }
     }
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+    let group_id = group_id_param(p);
 
-    let wal_dir = state
-        .wal_dir
-        .clone()
-        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+    let wal_dir = resolve_group_wal_dir(&state, &group_id)?;
 
     if !wal_dir.exists() || !has_jsonl_files(&wal_dir) {
         return Err(Error::Ipc(format!(
@@ -1750,25 +1869,29 @@ async fn handle_rebuild_from_wal(
         )));
     }
 
-    // FR-005: a `from_seq: 0` full rebuild against a database that already has data would emit
+    // FR-005: a `from_seq: 0` full rebuild against a group that already has data would emit
     // a native CREATE (Entity/Episodic/RelatesToNode_, see db.rs) for every existing row,
     // producing a duplicate-primary-key failure per node — a large, benign-looking failed_lines
     // count that (via FR-001's fix) still surfaces as noise, not the operator's real problem.
-    // A `from_seq > 0` incremental resume intentionally targets a non-empty database (e.g.
-    // resuming after a checkpoint) and must not be affected — see FR-006.
+    // A `from_seq > 0` incremental resume intentionally targets a non-empty group (e.g.
+    // resuming after a checkpoint) and must not be affected — see FR-006. Scoped to `group_id`
+    // alone (issue #378 FR-006): a full rebuild of one group must not be blocked by, nor collide
+    // with, another group's data.
     let force_clear = p["force_clear"].as_bool().unwrap_or(false);
     if from_seq == 0 {
         let db_for_check = load_db(&state)?;
+        let gid_check = group_id.clone();
         let non_empty = tokio::task::spawn_blocking(move || -> Result<bool, Error> {
             let conn = db_for_check.connect()?;
             // An unqueryable label (older/partially-initialised schema missing the table) is
             // treated as empty, not a hard error — this guard's only job is "is there data I
             // would collide with?", and erroring here would make the rebuild/recovery tool
             // unusable in exactly the degraded situation an operator reaches for it (mirrors
-            // recovery.rs's `count_nodes("Episodic").unwrap_or(0)` precedent).
-            let entity = conn.count_nodes("Entity").unwrap_or(0);
-            let episodic = conn.count_nodes("Episodic").unwrap_or(0);
-            let relates = conn.count_nodes("RelatesToNode_").unwrap_or(0);
+            // recovery.rs's group-scoped emptiness check precedent).
+            let gids = [gid_check.as_str()];
+            let entity = conn.count_entities_by_group_ids(&gids).unwrap_or(0);
+            let episodic = conn.count_episodics_by_group_ids(&gids).unwrap_or(0);
+            let relates = conn.count_relates_to_by_group_ids(&gids).unwrap_or(0);
             Ok(entity > 0 || episodic > 0 || relates > 0)
         })
         .await??;
@@ -1779,25 +1902,25 @@ async fn handle_rebuild_from_wal(
                 // duplicate-key failure either way — but dry-run is the primary way operators
                 // preview a rebuild before committing to one, so it must surface this problem
                 // rather than silently preview a "clean" run that would fail for real.
-                return Err(Error::Ipc(
-                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
-                     is a full rebuild. A dry run cannot preview this cleanly — replaying against \
-                     a populated database would fail with a duplicate-primary-key error for every \
-                     existing node. Clear the database first with knowledge_clear_all, or re-run \
-                     with force_clear: true (non-dry-run) to clear it automatically before replay."
-                        .to_string(),
-                ));
+                return Err(Error::Ipc(format!(
+                    "knowledge_rebuild_from_wal: group {group_id:?} already contains data and \
+                     from_seq: 0 is a full rebuild. A dry run cannot preview this cleanly — \
+                     replaying against a populated group would fail with a duplicate-primary-key \
+                     error for every existing node. Clear the group first with \
+                     knowledge_delete_by_group, or re-run with force_clear: true (non-dry-run) \
+                     to clear it automatically before replay."
+                )));
             }
             if !force_clear {
-                return Err(Error::Ipc(
-                    "knowledge_rebuild_from_wal: database already contains data and from_seq: 0 \
-                     is a full rebuild. Replaying now would fail with a duplicate-primary-key error \
-                     for every existing node. Pass force_clear: true to clear the database before \
-                     replaying, or clear it first with knowledge_clear_all."
-                        .to_string(),
-                ));
+                return Err(Error::Ipc(format!(
+                    "knowledge_rebuild_from_wal: group {group_id:?} already contains data and \
+                     from_seq: 0 is a full rebuild. Replaying now would fail with a \
+                     duplicate-primary-key error for every existing node. Pass force_clear: true \
+                     to clear the group before replaying, or clear it first with \
+                     knowledge_delete_by_group."
+                )));
             }
-            // Refuse to destructively clear the database while a write is in flight — checking
+            // Refuse to destructively clear the group while a write is in flight — checking
             // only in the later streaming/non-streaming branches would let the clear happen
             // before either of those checks ever runs, since this block executes first.
             let active = state.active_writes.load(Ordering::Relaxed);
@@ -1806,13 +1929,13 @@ async fn handle_rebuild_from_wal(
                     "Service is busy: {active} write operation(s) in progress — wait until they complete before rebuilding"
                 )));
             }
-            // Issue #352 (FR-002): clear_db_for_rebuild itself does not re-derive
+            // Issue #352 (FR-002): clear_group_for_rebuild itself does not re-derive
             // WalWriter::global_seq. This is only safe because execution always falls through
             // into one of the two real-replay paths below in this same function call, and both
-            // of those call resync_global_seq_after_rebuild on completion. If clear_db_for_rebuild
-            // ever grows a second caller that doesn't fall through to a replay, that caller needs
-            // its own re-derivation call.
-            clear_db_for_rebuild(&state).await?;
+            // of those call resync_global_seq_after_rebuild on completion. If
+            // clear_group_for_rebuild ever grows a second caller that doesn't fall through to a
+            // replay, that caller needs its own re-derivation call.
+            clear_group_for_rebuild(&state, &group_id).await?;
         }
     }
 
@@ -1866,7 +1989,8 @@ async fn handle_rebuild_from_wal(
             }
         }
         let bg_indices_built = Arc::clone(&state.indices_built);
-        let wal_writer_c = Arc::clone(&state.wal_writer);
+        let state_c = Arc::clone(&state);
+        let gid_c = group_id.clone();
         // Preset to false before the indexes are actually dropped below: if replay fails, is
         // cancelled, or the spawn_blocking join itself fails (panic), the early `?`/`??` returns
         // downstream must not leave a stale `true` in place after the indexes have already been
@@ -1882,8 +2006,8 @@ async fn handle_rebuild_from_wal(
                 // instead of only on the happy path. `mark_done()` below disarms it once the
                 // normal call site has already resynced with the more accurate
                 // `last_committed_seq`, so a clean run doesn't pay for a second directory scan.
-                let mut resync_guard =
-                    (!dry_run).then(|| wal_exec::GlobalSeqResyncGuard::new(&wal_writer_c));
+                let mut resync_guard = (!dry_run)
+                    .then(|| wal_exec::GlobalSeqResyncGuard::new(&state_c, &gid_c));
                 let conn = db.connect()?;
                 // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
                 // eliminated during bulk load, and so a stale pre-rebuild HNSW index (which
@@ -1953,7 +2077,8 @@ async fn handle_rebuild_from_wal(
                     // scan-only fallback gets a second chance instead of leaving `global_seq`
                     // stale.
                     let resynced = wal_exec::resync_global_seq_after_rebuild(
-                        &wal_writer_c,
+                        &state_c,
+                        &gid_c,
                         stats.last_committed_seq,
                     );
                     if resynced {
@@ -1961,12 +2086,12 @@ async fn handle_rebuild_from_wal(
                             g.mark_done();
                         }
                     }
-                    // Persist the applied-WAL-seq position at the replay's own
-                    // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
-                    // doesn't undo the rebuild that just succeeded.
+                    // Persist this group's applied-WAL-seq position at the replay's own
+                    // last_committed_seq (issue #353, FR-004; scoped per group by issue #378).
+                    // Non-fatal: a missed write doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
-                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload");
-                        if let Err(e) = conn.set_applied_seq(seq) {
+                        warn_on_rebuild_seq_gap(&conn, &gid_c, from_seq, "reload");
+                        if let Err(e) = conn.set_applied_seq(&gid_c, seq) {
                             eprintln!(
                                 "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
                             );
@@ -2040,6 +2165,7 @@ async fn handle_rebuild_from_wal(
 
         let mut result = json!({
             "success": true,
+            "group_id": group_id,
             "from_seq": from_seq,
             "to_seq": to_seq,
             "mutations_replayed": stats.lines_replayed,
@@ -2121,6 +2247,7 @@ async fn handle_rebuild_from_wal(
         });
         return Ok(json!({
             "success": true,
+            "group_id": group_id,
             "from_seq": from_seq,
             "to_seq": to_seq,
             "mutations_replayed": stats.lines_replayed,
@@ -2178,7 +2305,8 @@ async fn handle_rebuild_from_wal(
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
     let bg_sink = Arc::clone(&state.sink);
     let bg_indices_built = Arc::clone(&state.indices_built);
-    let bg_wal_writer = Arc::clone(&state.wal_writer);
+    let bg_state = Arc::clone(&state);
+    let bg_gid = group_id.clone();
 
     let spawn_handle = tokio::spawn(async move {
         // OwnedRwLockWriteGuard is 'static + Send — safe to hold in a spawned task
@@ -2199,6 +2327,9 @@ async fn handle_rebuild_from_wal(
         if !dry_run {
             ib.store(false, Ordering::Release);
         }
+        // bg_gid is moved into the spawn_blocking closure below; keep a clone for the
+        // post-completion job_result JSON.
+        let bg_gid_for_result = bg_gid.clone();
 
         let result = tokio::task::spawn_blocking(
             move || -> Result<(crate::replay::ReplayStats, bool), Error> {
@@ -2209,7 +2340,7 @@ async fn handle_rebuild_from_wal(
                 // normal call site has already resynced with the more accurate
                 // `last_committed_seq`, so a clean run doesn't pay for a second directory scan.
                 let mut resync_guard =
-                    (!dry_run).then(|| wal_exec::GlobalSeqResyncGuard::new(&bg_wal_writer));
+                    (!dry_run).then(|| wal_exec::GlobalSeqResyncGuard::new(&bg_state, &bg_gid));
                 let conn = db.connect()?;
                 // Drop FTS + HNSW vector indexes before replay so inline index maintenance is
                 // eliminated during bulk load, and so a stale pre-rebuild HNSW index doesn't
@@ -2271,7 +2402,8 @@ async fn handle_rebuild_from_wal(
                     // scan-only fallback gets a second chance instead of leaving `global_seq`
                     // stale.
                     let resynced = wal_exec::resync_global_seq_after_rebuild(
-                        &bg_wal_writer,
+                        &bg_state,
+                        &bg_gid,
                         stats.last_committed_seq,
                     );
                     if resynced {
@@ -2279,12 +2411,12 @@ async fn handle_rebuild_from_wal(
                             g.mark_done();
                         }
                     }
-                    // Persist the applied-WAL-seq position at the replay's own
-                    // last_committed_seq (issue #353, FR-004). Non-fatal: a missed write
-                    // doesn't undo the rebuild that just succeeded.
+                    // Persist this group's applied-WAL-seq position at the replay's own
+                    // last_committed_seq (issue #353, FR-004; scoped per group by issue #378).
+                    // Non-fatal: a missed write doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
-                        warn_on_rebuild_seq_gap(&conn, from_seq, "reload(bg)");
-                        if let Err(e) = conn.set_applied_seq(seq) {
+                        warn_on_rebuild_seq_gap(&conn, &bg_gid, from_seq, "reload(bg)");
+                        if let Err(e) = conn.set_applied_seq(&bg_gid, seq) {
                             eprintln!(
                                 "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"
                             );
@@ -2324,6 +2456,7 @@ async fn handle_rebuild_from_wal(
                             duration_ms: replay_started_at.elapsed().as_millis() as u64,
                         });
                         let mut job_result = json!({
+                            "group_id": bg_gid_for_result,
                             "from_seq": from_seq,
                             "to_seq": to_seq,
                             "mutations_replayed": stats.lines_replayed,
@@ -2397,48 +2530,36 @@ async fn handle_rebuild_from_wal(
 /// collisions (FR-005). Mirrors `recover_rebuild_from_workspace_wal`'s DB-file-delete + reopen +
 /// `state.db` ArcSwap hot-swap pattern (ADR-0003), scoped identically: only the lbug DB file/dir
 /// and its `.wal`/`.lock` sidecars are removed.
-async fn clear_db_for_rebuild(state: &Arc<AppState>) -> Result<(), Error> {
+/// Clears `group_id`'s own graph data (never any other group's, and never the WAL directory —
+/// the caller is about to replay it) so a `from_seq: 0` `knowledge_rebuild_from_wal` call can
+/// proceed without duplicate-primary-key collisions for that group (FR-005, scoped per group by
+/// issue #378 FR-006). Unlike the pre-378 whole-DB-file delete + reopen, this purges via
+/// `group_purge::purge_groups` against the already-open DB — group_purge already handles the
+/// forced rebind of any foreign pointer into the cleared group within the same transaction, so
+/// no `state.db` swap or file deletion is needed here.
+async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Result<(), Error> {
     let _guard = state.write_lock.write().await;
-    let db_path = state.db_path.clone();
-    let embedding_dim = state.embedder.dim();
-    // Drop the old handle before deleting its files — readers don't take write_lock (ADR-0002),
-    // so a concurrent read against the about-to-be-deleted DB directory could otherwise race
-    // the file removal below. load_db() already treats a None state.db as Error::DbUnavailable,
-    // so this briefly surfaces as the existing degraded-mode error rather than a file-not-found.
-    state.db.store(None);
-    let new_db = tokio::task::spawn_blocking(move || -> Result<Db, Error> {
-        let path = std::path::Path::new(&db_path);
-        if path.is_dir() {
-            std::fs::remove_dir_all(path)
-                .map_err(|e| Error::Ipc(format!("failed to delete DB dir '{}': {e}", db_path)))?;
-        } else if path.exists() {
-            std::fs::remove_file(path)
-                .map_err(|e| Error::Ipc(format!("failed to delete DB file '{}': {e}", db_path)))?;
-        }
-        for ext in &[".wal", ".lock"] {
-            let _ = std::fs::remove_file(format!("{}{}", db_path, ext));
-        }
-        if let Some(parent) = std::path::Path::new(&db_path).parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
-        }
-        let db = Db::open(&db_path)?;
-        {
-            let conn = db.connect()?;
-            conn.init_schema(embedding_dim)?;
-            // Reset the applied-WAL-seq position (issue #353, FR-005) — this DB is freshly
-            // empty. The subsequent from_seq: 0 rebuild this function exists to enable
-            // (see doc comment above) will overwrite this with the replay's precise
-            // last_committed_seq once it completes.
-            conn.set_applied_seq(0)?;
-            conn.rebuild_name_index()?;
-        }
-        Ok(db)
+    let db = load_db(state)?;
+    let state_c = Arc::clone(state);
+    let gid = group_id.to_string();
+    tokio::task::spawn_blocking(move || -> Result<(), Error> {
+        let conn = db.connect()?;
+        let ts = chrono::Utc::now().to_rfc3339();
+        group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
+        // The forced rebind inside purge_groups can touch a foreign, non-purged group's
+        // RelatesToNode_ rows in the same transaction (ADR-0361) — genuinely multi-group, so
+        // per-operation attribution can't name one group (FR-004). Routes through the default
+        // group's writer, the same documented limitation as handle_delete_by_group.
+        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // Reset this group's applied-WAL-seq position (issue #353 FR-005, scoped per group by
+        // issue #378) — its data is freshly empty. The from_seq: 0 rebuild this function exists
+        // to enable will overwrite this with the replay's precise last_committed_seq once it
+        // completes.
+        conn.set_applied_seq(&gid, 0)?;
+        Ok(())
     })
     .await??;
 
-    state.db.store(Some(Arc::new(new_db)));
     state.indices_built.store(false, Ordering::Release);
     Ok(())
 }
@@ -2509,14 +2630,16 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let apply_result = corrections::apply_corrections_file(&conn, &workspace_root, dry_run);
         if !dry_run {
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            // A corrections file can address entities across several groups in one call, with
+            // no single group_id in scope here (FR-004). Routes through the default group's
+            // writer, the same documented limitation as handle_delete_by_group.
+            wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
         }
         Ok::<_, Error>(apply_result)
     })
@@ -2568,15 +2691,18 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
     };
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_c = params.group_id.clone();
     let _guard = state.write_lock.write().await;
     let result = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let ts = chrono::Utc::now().to_rfc3339();
         let merge_result = corrections::merge_entities(&conn, &params, &ts);
         if !dry_run {
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            // Since #371, merge_entities_inner never writes into a group other than the one
+            // owning the merge — this call's mutations all belong to gid_c, so (unlike the
+            // FR-004-exempt sites) per-operation attribution names it directly.
+            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
         }
         Ok::<_, Error>(merge_result)
     })
@@ -2667,8 +2793,8 @@ async fn handle_add_cross_group_edge(
     let fact_embedding = state.embedder.embed(&fact).await?;
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_c = group_id.clone();
     let _guard = state.write_lock.write().await;
     let edge = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -2687,7 +2813,9 @@ async fn handle_add_cross_group_edge(
             },
             &ts,
         )?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // The new RelatesToNode_ edge is owned by gid_c alone — its two endpoints may point into
+        // other groups, but the mutation itself belongs to exactly one group (FR-004).
+        wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
         Ok::<_, Error>(edge)
     })
     .await??;
@@ -2715,14 +2843,16 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
         .to_string();
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let counts = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let ts = chrono::Utc::now().to_rfc3339();
         let counts = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        // Rebinds every pointer whose source_group_id matches, regardless of which group owns
+        // the RelatesToNode_ row carrying it — genuinely multi-group, so per-operation
+        // attribution can't name one group (FR-004). Routes through the default group's writer.
+        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
         Ok::<_, Error>(counts)
     })
     .await??;
@@ -2792,8 +2922,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     };
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_wal = group_id.clone();
     let _guard = state.write_lock.write().await;
     let (entity_uuid_out, created) = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -2854,7 +2984,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -2932,8 +3062,8 @@ async fn handle_assert_relationship(
     };
 
     let db = load_db(&state)?;
-    let wal_writer_c = Arc::clone(&state.wal_writer);
-    let sink_c = Arc::clone(&state.sink);
+    let state_c = Arc::clone(&state);
+    let gid_wal = group_id.clone();
     let _guard = state.write_lock.write().await;
     let (edge_uuid, created) = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -2989,7 +3119,7 @@ async fn handle_assert_relationship(
             }
         };
 
-        wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+        wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3214,8 +3344,8 @@ async fn handle_reprocess_entity_types(
     {
         let batch = batch.to_vec();
         let db = load_db(&state)?;
-        let wal_writer_c = Arc::clone(&state.wal_writer);
-        let sink_c = Arc::clone(&state.sink);
+        let state_c = Arc::clone(&state);
+        let gid_c = group_id.clone();
         let ancestor_map_c = ancestor_map.clone();
         let _write_guard = state.write_lock.write().await;
 
@@ -3234,7 +3364,7 @@ async fn handle_reprocess_entity_types(
         let count = tokio::task::spawn_blocking(move || -> Result<usize, Error> {
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
-            wal_exec::wal_flush_ungrouped(&wal_writer_c, conn.drain_mutations(), &sink_c);
+            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
             Ok(count)
         })
         .await??;
@@ -3255,8 +3385,7 @@ async fn handle_reprocess_entity_types(
         }
 
         let db = load_db(&state)?;
-        let wal_writer_d = Arc::clone(&state.wal_writer);
-        let sink_d = Arc::clone(&state.sink);
+        let state_d = Arc::clone(&state);
         let group_id_d = group_id.clone();
         let ancestor_map_d = ancestor_map.clone();
         let progress_tx_d = progress_tx.clone();
@@ -3317,7 +3446,7 @@ async fn handle_reprocess_entity_types(
                     restamped_count += 1;
                 }
             }
-            wal_exec::wal_flush_ungrouped(&wal_writer_d, conn.drain_mutations(), &sink_d);
+            wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
             Ok(restamped_count)
         })
         .await??
@@ -3468,13 +3597,19 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    let wal_dir = state.wal_dir.clone();
+    // "rebuild_from_workspace_wal" wipes and replays the *entire* embedded DB (every group's
+    // data), so it needs the WAL root, not one group's own subdirectory — every group found
+    // under it is replayed back in (issue #378: FR-009's single-group-parity guarantee must not
+    // become "every non-default group's data silently vanishes" the moment a second group
+    // exists).
+    let wal_root = state.wal_root.clone();
     let embedding_dim = state.embedder.dim();
 
     let result = match strategy.as_str() {
         "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
         "rebuild_from_workspace_wal" => {
-            let wal_dir = wal_dir.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+            let wal_root =
+                wal_root.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
             // Preset to false before attempting the rebuild: this strategy actively drops and
             // rebuilds the indices, and build_indices_and_constraints() below is fatal via `?`,
             // so there is no later success-path hook to store `false` from on failure. Scoped to
@@ -3483,7 +3618,7 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             state.indices_built.store(false, Ordering::Release);
             recover_rebuild_from_workspace_wal(
                 &db_path,
-                &wal_dir,
+                &wal_root,
                 embedding_dim,
                 Arc::clone(&state.sink),
             )
@@ -3577,8 +3712,14 @@ async fn handle_knowledge_recover_full(
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    let wal_dir = state
-        .wal_dir
+    // The default group's own WAL directory is run_full_recovery_sequence's target for its
+    // non-destructive checkpoint-drop path (issue #378, matching the startup backfill's scope,
+    // FR-009 single-group parity) — but its fallback (used when checkpoint-drop itself fails)
+    // wipes the *entire* embedded DB, every group's data, not just the default group's. Pass the
+    // WAL root, not just the default group's subdirectory, so that fallback can replay every
+    // group back in rather than silently losing every non-default group's data.
+    let wal_root = state
+        .wal_root
         .clone()
         .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
     let embedding_dim = state.embedder.dim();
@@ -3590,7 +3731,13 @@ async fn handle_knowledge_recover_full(
     state.indices_built.store(false, Ordering::Release);
 
     let result = tokio::task::spawn_blocking(move || {
-        crate::recovery::run_full_recovery_sequence(&db_path, &wal_dir, embedding_dim, sink)
+        crate::recovery::run_full_recovery_sequence(
+            &db_path,
+            DEFAULT_GROUP_ID,
+            &wal_root,
+            embedding_dim,
+            sink,
+        )
     })
     .await?;
 
@@ -3681,14 +3828,21 @@ async fn recover_drop_lbug_wal(
     .await?
 }
 
+/// Wipes and rebuilds the entire embedded DB from `wal_root`'s WAL content. `wal_root` is the
+/// WAL **root**, not one group's own subdirectory (issue #378): the DB this function deletes and
+/// reopens holds every group's data, so it must replay **every** group directory found under
+/// `wal_root`, not only the default group's — otherwise every non-default group's data would
+/// vanish from the live graph the moment this strategy runs on a multi-group instance, even
+/// though its own WAL files were never touched (silently unavailable, not deleted, but a
+/// correctness bug either way; FR-009's "additive, not a replacement" guarantee extends here).
 async fn recover_rebuild_from_workspace_wal(
     db_path: &str,
-    wal_dir: &std::path::Path,
+    wal_root: &std::path::Path,
     embedding_dim: usize,
     sink: std::sync::Arc<dyn crate::telemetry::TelemetrySink>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
-    let wal_dir = wal_dir.to_path_buf();
+    let wal_root = wal_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
         // Remove existing DB and siblings
         let path = std::path::Path::new(&db_path);
@@ -3714,14 +3868,31 @@ async fn recover_rebuild_from_workspace_wal(
             // TODO(follow-up): recover_rebuild_from_workspace_wal does not yet surface
             // fidelity_warning in RecoverOutcome — a high failure rate here is still silent.
             // See #128 for context; address in a follow-up issue.
-            let stats = crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
+            let (mut lines_replayed, mut unrecognised_lines) = (0u64, 0u64);
+            let (mut failed_lines, mut unparseable_lines, mut legacy_skipped_lines) =
+                (0u64, 0u64, 0u64);
+            for (gid, dir) in wal_group::list_group_wal_dirs(&wal_root)? {
+                let stats = crate::replay::WalReplayer::new(&dir).replay(&conn)?;
+                if let Some(seq) = stats.last_committed_seq {
+                    if let Err(e) = conn.set_applied_seq(&gid, seq) {
+                        eprintln!(
+                            "liminis-context-graph: rebuild_from_workspace_wal: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
+                        );
+                    }
+                }
+                lines_replayed += stats.lines_replayed;
+                unrecognised_lines += stats.unrecognised_lines;
+                failed_lines += stats.failed_lines;
+                unparseable_lines += stats.unparseable_lines;
+                legacy_skipped_lines += stats.legacy_skipped_lines;
+            }
             sink.emit(TelemetryEvent::WalReplayComplete {
                 ts_ms: now_ms(),
-                mutations_replayed: stats.lines_replayed,
-                unrecognised_lines: stats.unrecognised_lines,
-                failed_lines: stats.failed_lines,
-                unparseable_lines: stats.unparseable_lines,
-                legacy_skipped_lines: stats.legacy_skipped_lines,
+                mutations_replayed: lines_replayed,
+                unrecognised_lines,
+                failed_lines,
+                unparseable_lines,
+                legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
             conn.build_indices_and_constraints()?;

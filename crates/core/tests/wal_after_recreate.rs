@@ -19,7 +19,6 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
-    WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -88,7 +87,6 @@ async fn wal_repopulated_after_recreate() {
     }
 
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer = WalWriter::new(&wal_path, 10_000, 5 * 1024 * 1024).ok();
 
     let state = Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
@@ -99,11 +97,13 @@ async fn wal_repopulated_after_recreate() {
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: db_path.to_str().unwrap().to_string(),
-        wal_dir: Some(wal_path.clone()),
+        wal_root: Some(wal_path.clone()),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        // Per-group writers are created lazily on first write (FR-003, issue #378) — nothing is
+        // pre-seeded here.
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -131,19 +131,14 @@ async fn wal_repopulated_after_recreate() {
         "clear_all success must be true: {clear_resp}"
     );
 
-    // FR-001: WalWriter must be re-initialized (not None) after Recreate.
+    // Issue #378: wal_writers is cleared (empty), not re-initialized, after Recreate — lazy
+    // per-group creation (FR-003) means nothing is created eagerly.
     assert!(
-        state.wal_writer.lock().unwrap().is_some(),
-        "WalWriter must be re-initialized after Recreate (FR-001)"
+        state.wal_writers.lock().unwrap().is_empty(),
+        "wal_writers must be empty immediately after Recreate (lazy per-group creation)"
     );
 
-    // WAL directory must exist (created by WalWriter::new during re-init).
-    assert!(
-        wal_path.exists(),
-        "WAL directory must exist after Recreate re-init"
-    );
-
-    // Step 2: Ingest an episode — goes through wal_flush_chunk.
+    // Step 2: Ingest an episode under the default group — goes through wal_flush_chunk.
     // Uses MockExtractor so no real LLM is needed.
     let write_resp = dispatch(
         2,
@@ -154,7 +149,7 @@ async fn wal_repopulated_after_recreate() {
             "source": "test",
             "source_description": "test/wal_after_recreate",
             "reference_time": "2026-01-01 00:00:00",
-            "group_id": "wal_after_recreate_test"
+            "group_id": "liminis"
         }),
         Arc::clone(&state),
     )
@@ -164,12 +159,20 @@ async fn wal_repopulated_after_recreate() {
         "knowledge_add_episode must succeed after Recreate: {write_resp}"
     );
 
-    // SC-001 / FR-002: WAL directory must contain JSONL file(s) with content.
+    // FR-001/FR-003: the write must have lazily created the default group's writer/directory.
     assert!(
-        has_wal_files(&wal_path),
+        state.wal_writers.lock().unwrap().contains_key("liminis"),
+        "wal_writers must contain a lazily-created 'liminis' writer after the post-Recreate write"
+    );
+    let liminis_dir = wal_path.join("liminis");
+
+    // SC-001 / FR-002: the default group's own WAL directory must contain JSONL file(s) with
+    // content.
+    assert!(
+        has_wal_files(&liminis_dir),
         "WAL directory must contain at least one JSONL file after post-Recreate write (SC-001)"
     );
-    let total_bytes = wal_byte_total(&wal_path);
+    let total_bytes = wal_byte_total(&liminis_dir);
     assert!(
         total_bytes > 0,
         "WAL files must be non-empty after post-Recreate write (FR-002)"

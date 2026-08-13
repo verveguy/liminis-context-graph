@@ -51,11 +51,16 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: &std::path::Path) -> Arc<AppState> 
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: Some(wal_dir.to_path_buf()),
+        wal_root: Some(wal_dir.to_path_buf()),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -183,8 +188,8 @@ async fn test_backfill_wal_round_trip() {
         // Write seed mutations to WAL through the same WalWriter session as canonicalize,
         // so file-sequence ordering is deterministic on replay.
         let seed_mutations = conn.drain_mutations();
-        let mut wal_guard = state.wal_writer.lock().unwrap();
-        if let Some(ref mut writer) = *wal_guard {
+        let mut wal_guard = state.wal_writers.lock().unwrap();
+        if let Some(writer) = wal_guard.get_mut("liminis") {
             writer
                 .with_chunk(|w| {
                     for (cypher, params) in &seed_mutations {
@@ -292,8 +297,8 @@ async fn test_backfill_idempotency_wal() {
             .unwrap();
         }
         let seed_mutations = conn.drain_mutations();
-        let mut wal_guard = state.wal_writer.lock().unwrap();
-        if let Some(ref mut writer) = *wal_guard {
+        let mut wal_guard = state.wal_writers.lock().unwrap();
+        if let Some(writer) = wal_guard.get_mut("liminis") {
             writer
                 .with_chunk(|w| {
                     for (cypher, params) in &seed_mutations {

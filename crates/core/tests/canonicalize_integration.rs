@@ -86,11 +86,11 @@ fn make_state(db: Arc<Db>, ontology: Option<Arc<Ontology>>) -> Arc<AppState> {
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: None,
+        wal_root: None,
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(None)),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -118,11 +118,16 @@ fn make_state_with_wal(
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: Some(wal_dir.to_path_buf()),
+        wal_root: Some(wal_dir.to_path_buf()),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -151,11 +156,16 @@ fn make_state_with_name_map_embedder(
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: Some(wal_dir.to_path_buf()),
+        wal_root: Some(wal_dir.to_path_buf()),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -632,8 +642,8 @@ async fn test_wal_round_trip_fidelity() {
         ))
         .unwrap();
         let seed_mutations = conn.drain_mutations();
-        let mut wal_guard = state.wal_writer.lock().unwrap();
-        if let Some(ref mut writer) = *wal_guard {
+        let mut wal_guard = state.wal_writers.lock().unwrap();
+        if let Some(writer) = wal_guard.get_mut("liminis") {
             writer
                 .with_chunk(|w| {
                     for (cypher, params) in &seed_mutations {

@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app_state::AppState, db::value_as_string, error::Error, ontology::normalize_relation_type,
-    wal_exec,
+    wal_exec, wal_group::DEFAULT_GROUP_ID,
 };
 
 const PAGE_SIZE: usize = 500;
@@ -176,8 +176,7 @@ pub async fn backfill_relation_types(
             .collect();
 
         let db_c = Arc::clone(&db);
-        let wal_writer = Arc::clone(&state.wal_writer);
-        let sink = Arc::clone(&state.sink);
+        let state_c = Arc::clone(&state);
         let _write_guard = state.write_lock.write().await;
 
         let processed = batch_idx * WRITE_BATCH_SIZE;
@@ -205,7 +204,10 @@ pub async fn backfill_relation_types(
                     json!({ "uuid": uuid, "rt": rt }),
                 )?;
             }
-            wal_exec::wal_flush_ungrouped(&wal_writer, conn.drain_mutations(), &sink);
+            // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
+            // routes through the default group's writer, a documented limitation rather than
+            // mutation-level attribution.
+            wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
             Ok(())
         })
         .await??;

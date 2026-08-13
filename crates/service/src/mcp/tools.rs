@@ -714,21 +714,23 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_wal_mark_create",
             description: "Record a new named, retained WAL position — 'this graph was \
-                           known-good here' — at the database's current applied_seq. Distinct \
-                           from knowledge_prepare_checkpoint (a WAL flush/rotate operation, not \
-                           a named position). O(1): does not scan or replay the WAL. Fails if \
-                           the current position is unknown (applied_seq is null — resolve with \
-                           a full knowledge_rebuild_from_wal first) or if `name` already \
-                           identifies an active checkpoint. `name` must be 1-200 characters of \
-                           [A-Za-z0-9_-], since it becomes a single directory name under \
-                           .checkpoints/. The recorded `seq` is `null` for a genuinely \
-                           fresh/empty graph, or an integer (WAL line, inclusive) otherwise — \
-                           restore a `null` checkpoint with knowledge_clear_all, or an integer \
-                           checkpoint with knowledge_rebuild_from_wal \
-                           {from_seq: 0, to_seq: <seq>, force_clear: true}. Exactly-one-wins \
-                           under concurrent create for the same name relies on exclusive file \
-                           creation, which is a local-filesystem guarantee — not reliable on an \
-                           NFS-mounted WAL directory.",
+                           known-good here' — at the database's current applied_seq for \
+                           `group_id`'s own WAL directory (default \"liminis\", issue #378). \
+                           Distinct from knowledge_prepare_checkpoint (a WAL flush/rotate \
+                           operation, not a named position). O(1): does not scan or replay the \
+                           WAL. Fails if the current position is unknown (applied_seq is null — \
+                           resolve with a full knowledge_rebuild_from_wal first) or if `name` \
+                           already identifies an active checkpoint in that group. `name` must be \
+                           1-200 characters of [A-Za-z0-9_-], since it becomes a single \
+                           directory name under that group's .checkpoints/. The recorded `seq` \
+                           is `null` for a genuinely fresh/empty group, or an integer (WAL line, \
+                           inclusive) otherwise — restore a `null` checkpoint with \
+                           knowledge_clear_all, or an integer checkpoint with \
+                           knowledge_rebuild_from_wal \
+                           {group_id, from_seq: 0, to_seq: <seq>, force_clear: true}. \
+                           Exactly-one-wins under concurrent create for the same name relies on \
+                           exclusive file creation, which is a local-filesystem guarantee — not \
+                           reliable on an NFS-mounted WAL directory.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -737,7 +739,14 @@ pub fn registry() -> Vec<ToolSpec> {
                         "name": {
                             "type": "string",
                             "description": "Checkpoint name (1-200 chars of [A-Za-z0-9_-]). \
-                                             Must not already identify an active checkpoint."
+                                             Must not already identify an active checkpoint in \
+                                             this group_id's stream."
+                        },
+                        "group_id": {
+                            "type": "string", "default": "liminis",
+                            "description": "Resolves and operates against this group's own WAL \
+                                             directory (issue #378). Defaults to \"liminis\", \
+                                             matching a pre-378 single-stream deployment."
                         }
                     },
                     "required": ["name"]
@@ -746,31 +755,48 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_wal_mark_list",
-            description: "List every active (non-deleted) named WAL checkpoint, each with its \
-                           `seq`, whether it is currently `reachable`, and the `wal_min_seq`/ \
-                           `wal_max_seq` bounds of WAL content presently on disk. `reachable` \
-                           requires BOTH `wal_min_seq == 0` (the WAL's own prefix has not been \
-                           externally truncated, e.g. by routine retention deleting old WAL \
-                           files) AND `seq <= wal_max_seq` — a checkpoint whose seq merely falls \
-                           inside `[wal_min_seq, wal_max_seq]` is still reported unreachable if \
-                           `wal_min_seq > 0`, since restoring it would silently omit everything \
-                           before `wal_min_seq`. This does NOT detect a gap in the middle of \
-                           that range, so `reachable: true` is a necessary, not sufficient, \
-                           signal that a restore will succeed; use `wal_min_seq`/`wal_max_seq` \
-                           to diagnose an unreachable checkpoint. Works even when the database \
-                           is degraded or unavailable, since it only reads the WAL-directory \
-                           checkpoint store.",
+            description: "List every active (non-deleted) named WAL checkpoint in `group_id`'s \
+                           own WAL directory (default \"liminis\" when omitted — this does NOT \
+                           aggregate checkpoints across every active group, issue #378 FR-012), \
+                           each with its `seq`, whether it is currently `reachable`, and the \
+                           `wal_min_seq`/`wal_max_seq` bounds of WAL content presently on disk \
+                           for that group. `reachable` requires BOTH `wal_min_seq == 0` (the \
+                           WAL's own prefix has not been externally truncated, e.g. by routine \
+                           retention deleting old WAL files) AND `seq <= wal_max_seq` — a \
+                           checkpoint whose seq merely falls inside `[wal_min_seq, wal_max_seq]` \
+                           is still reported unreachable if `wal_min_seq > 0`, since restoring \
+                           it would silently omit everything before `wal_min_seq`. This does NOT \
+                           detect a gap in the middle of that range, so `reachable: true` is a \
+                           necessary, not sufficient, signal that a restore will succeed; use \
+                           `wal_min_seq`/`wal_max_seq` to diagnose an unreachable checkpoint. \
+                           Works even when the database is degraded or unavailable, since it \
+                           only reads the WAL-directory checkpoint store.",
             scope: Scope::Admin,
-            input_schema: empty_schema,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string", "default": "liminis",
+                            "description": "Lists this group's own checkpoints only (issue \
+                                             #378). Defaults to \"liminis\", matching a pre-378 \
+                                             single-stream deployment; never aggregates across \
+                                             every active group."
+                        }
+                    }
+                })
+            },
         },
         ToolSpec {
             name: "knowledge_wal_mark_delete",
-            description: "Delete an active named WAL checkpoint, freeing its name for reuse by \
-                           a later knowledge_wal_mark_create. Records a tombstone rather than \
-                           rewriting history. Fails if `name` does not currently identify an \
-                           active checkpoint (never created, or already deleted). Works even \
-                           when the database is degraded or unavailable, since it only touches \
-                           the WAL-directory checkpoint store.",
+            description: "Delete an active named WAL checkpoint in `group_id`'s own WAL \
+                           directory (default \"liminis\"), freeing its name for reuse by a \
+                           later knowledge_wal_mark_create against that same group. Records a \
+                           tombstone rather than rewriting history. Fails if `name` does not \
+                           currently identify an active checkpoint in that group (never created, \
+                           or already deleted). Works even when the database is degraded or \
+                           unavailable, since it only touches the WAL-directory checkpoint \
+                           store.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
@@ -779,6 +805,12 @@ pub fn registry() -> Vec<ToolSpec> {
                         "name": {
                             "type": "string",
                             "description": "Name of the active checkpoint to delete."
+                        },
+                        "group_id": {
+                            "type": "string", "default": "liminis",
+                            "description": "Resolves and operates against this group's own WAL \
+                                             directory (issue #378). Defaults to \"liminis\", \
+                                             matching a pre-378 single-stream deployment."
                         }
                     },
                     "required": ["name"]
@@ -787,24 +819,35 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_rebuild_from_wal",
-            description: "Rebuild the graph by replaying application WAL files, optionally \
-                           from a given sequence number and/or up to a given sequence number. \
-                           Supports MCP progress notifications when called with a progress \
-                           token. A `from_seq: 0` (default) full rebuild fails fast with an \
-                           explicit error if the database already contains data, rather than \
-                           silently producing a duplicate-primary-key failure per node — pass \
-                           `force_clear: true` to clear the database automatically before \
-                           replaying, or clear it first with `knowledge_clear_all`. This check \
-                           does not apply to `from_seq > 0` (incremental resume against an \
-                           intentionally non-empty database). A bounded rebuild (`to_seq` set) \
-                           is NOT durable: WAL entries beyond `to_seq` remain on disk, unapplied \
-                           — a later unbounded rebuild, or a `from_seq` resume that covers the \
-                           excluded range, will reapply everything that was excluded.",
+            description: "Rebuild `group_id`'s own subgraph (default \"liminis\") by replaying \
+                           that group's WAL files, optionally from a given sequence number \
+                           and/or up to a given sequence number — never disturbing any other \
+                           group's WalPosition row (issue #378 FR-006). Supports MCP progress \
+                           notifications when called with a progress token. A `from_seq: 0` \
+                           (default) full rebuild fails fast with an explicit error if that \
+                           group already contains data, rather than silently producing a \
+                           duplicate-primary-key failure per node — pass `force_clear: true` to \
+                           clear that group's data automatically before replaying (via a \
+                           group-scoped purge, not a whole-database wipe), or clear it first \
+                           with `knowledge_delete_by_group`. This check does not apply to \
+                           `from_seq > 0` (incremental resume against an intentionally \
+                           non-empty group). A bounded rebuild (`to_seq` set) is NOT durable: \
+                           WAL entries beyond `to_seq` remain on disk, unapplied — a later \
+                           unbounded rebuild, or a `from_seq` resume that covers the excluded \
+                           range, will reapply everything that was excluded.",
             scope: Scope::Admin,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
+                        "group_id": {
+                            "type": "string", "default": "liminis",
+                            "description": "Targets this group's own WAL directory and \
+                                             WalPosition row (issue #378) — no other group's \
+                                             position is read or written. Defaults to \
+                                             \"liminis\", matching a pre-378 single-stream \
+                                             deployment."
+                        },
                         "from_seq": {
                             "type": "integer", "minimum": 0, "default": 0,
                             "description": "Replay starting from this WAL sequence number."
@@ -822,16 +865,16 @@ pub fn registry() -> Vec<ToolSpec> {
                         "dry_run": {
                             "type": "boolean", "default": false,
                             "description": "Compute replay statistics without writing or touching indices. \
-                                             Still fails fast against a non-empty database on a from_seq: 0 \
+                                             Still fails fast against a non-empty group on a from_seq: 0 \
                                              request, regardless of force_clear, since a dry run must never \
                                              mutate the database."
                         },
                         "force_clear": {
                             "type": "boolean", "default": false,
-                            "description": "When true and from_seq is 0, clear the database before \
-                                             replaying if it already contains data, instead of failing fast. \
-                                             Ignored for from_seq > 0 and for dry_run (which always fails \
-                                             fast on a non-empty database)."
+                            "description": "When true and from_seq is 0, clear group_id's own data before \
+                                             replaying if it already contains data, instead of failing fast \
+                                             — never touches any other group's data. Ignored for from_seq > 0 \
+                                             and for dry_run (which always fails fast on a non-empty group)."
                         }
                     }
                 })
@@ -917,9 +960,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            — the foreign edge node survives, left `unbound` (issue #369's \
                            binding_state), so a later rehydration can re-bind it with \
                            knowledge_rebind_pointers. Purging a group_id with no data is a \
-                           no-op success, not an error. Does not reset the applied WAL position \
-                           (`applied_seq`), which is a DB-wide singleton, not per-group, until \
-                           #378 lands. Pass `dry_run: true` to preview per-group entity/edge/ \
+                           no-op success, not an error. Does not reset the purged group's own \
+                           applied WAL position (`applied_seq`, per-group since issue #378) — \
+                           it is left as-is (see ADR-0361); resolve it afterward with \
+                           knowledge_rebuild_from_wal targeting that group, with force_clear as \
+                           needed. Pass `dry_run: true` to preview per-group entity/edge/ \
                            episode counts and the cross-group pointers that would become \
                            `unbound` (broken out by owning group_id) without mutating anything \
                            — `dry_run` takes precedence over `confirm` when both are set.",

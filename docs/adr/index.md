@@ -95,6 +95,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0369](0369-resolvable-cross-group-pointers.md) | Resolvable Semantic Pointers for Cross-Group Edges | 2026-08-11 |
 | [0371](0371-merge-never-writes-foreign-group-data.md) | Merge Skips Foreign-Group Edges Entirely; `merged_into` Forwarding Closes the Rename Gap | 2026-08-12 |
 | [0375](0375-wal-max-seq-bounds-manifest.md) | WAL Seq Bounds Manifest | 2026-08-12 |
+| [0378](0378-multi-stream-wal-per-group-directory.md) | Multi-Stream WAL — One WAL Directory Per Group | 2026-08-13 |
 | [0379](0379-direct-assertion-conventions.md) | Direct Assertion API Conventions | 2026-08-12 |
 
 ## Historical numbering

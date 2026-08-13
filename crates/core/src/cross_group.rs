@@ -145,7 +145,6 @@ fn resolve_side(
     conn: &Conn,
     spec: &EndpointSpec,
     edge_group_id: &str,
-    applied_seq: Option<u64>,
 ) -> Result<(Option<String>, Option<CrossGroupPointer>), Error> {
     match spec {
         EndpointSpec::Uuid(uuid) => {
@@ -175,6 +174,10 @@ fn resolve_side(
             }
             let normalized_name = normalize_name(endpoint_name);
             let (state, resolved_uuid) = resolve_endpoint(conn, source_group_id, &normalized_name)?;
+            // The staleness signal is source_group_id's own applied position (issue #378
+            // FR-011) — a single edge's two endpoints can point into two different foreign
+            // groups, so this must be looked up per endpoint, not shared across both.
+            let applied_seq = conn.get_applied_seq(source_group_id)?;
             let ptr = CrossGroupPointer {
                 source_group_id: source_group_id.clone(),
                 endpoint_name: normalized_name,
@@ -198,12 +201,8 @@ pub fn create_cross_group_edge(
     params: CreateCrossGroupEdgeParams,
     ts: &str,
 ) -> Result<RelatesToEdge, Error> {
-    let applied_seq = conn.get_applied_seq()?;
-
-    let (source_uuid, src_pointer) =
-        resolve_side(conn, &params.source, &params.group_id, applied_seq)?;
-    let (target_uuid, dst_pointer) =
-        resolve_side(conn, &params.target, &params.group_id, applied_seq)?;
+    let (source_uuid, src_pointer) = resolve_side(conn, &params.source, &params.group_id)?;
+    let (target_uuid, dst_pointer) = resolve_side(conn, &params.target, &params.group_id)?;
 
     let mut pointers = CrossGroupPointers::default();
     if let Some(p) = src_pointer {
@@ -291,8 +290,9 @@ pub fn rebind_pointers(
 }
 
 /// Like [`rebind_pointers`], but bypasses the `bound_at_seq` staleness gate entirely — every
-/// pointer whose `source_group_id` matches is unconditionally re-resolved, regardless of the
-/// DB-wide `WalPosition.applied_seq` cursor.
+/// pointer whose `source_group_id` matches is unconditionally re-resolved, regardless of
+/// `source_group_id`'s own `WalPosition.applied_seq` cursor (issue #378: per-group, not
+/// DB-wide, since #378 landed).
 ///
 /// Used by `crate::group_purge` (issue #361), for a reason specific to that caller: a
 /// group-scoped purge's deletes go through `wal_exec::wal_flush_ungrouped`, which never
@@ -317,7 +317,10 @@ fn rebind_pointers_impl(
     ts: &str,
     force: bool,
 ) -> Result<RebindCounts, Error> {
-    let current_seq = conn.get_applied_seq()?;
+    // The staleness signal is source_group_id's own applied position (issue #378 FR-011) — the
+    // group being pointed *into*, and whose replay is what should drive re-binding (User Story
+    // 4), not any other group's (or the pre-378 DB-wide singleton's).
+    let current_seq = conn.get_applied_seq(source_group_id)?;
     let mut counts = RebindCounts::default();
 
     for (rn_uuid, rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {

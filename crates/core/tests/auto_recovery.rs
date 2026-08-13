@@ -58,11 +58,16 @@ fn make_degraded_state(
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: db_path.to_string(),
-        wal_dir: Some(wal_dir),
+        wal_root: Some(wal_dir),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -86,11 +91,16 @@ fn make_healthy_state(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState>
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
-        wal_dir: Some(wal_dir),
+        wal_root: Some(wal_dir),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -132,7 +142,10 @@ fn write_episode_wal_line(wal_dir: &std::path::Path, filename: &str, seq: u64, u
             "params": {
                 "uuid": uuid,
                 "name": format!("Episode {uuid}"),
-                "group_id": "test-group",
+                // This whole-instance recovery path always targets the default group (issue
+                // #378) — episodes here must belong to it for derive_episode_cursor's
+                // group-scoped lookup to find them.
+                "group_id": "liminis",
                 "created_at": "2026-06-18 00:00:00",
                 "source": "text",
                 "source_description": "test",
@@ -168,7 +181,10 @@ fn corrupt_lbug_wal(db_path: &str) {
 #[tokio::test]
 async fn test_run_full_recovery_sequence_torn_wal() {
     let dir = TempDir::new().unwrap();
-    let wal_dir = dir.path().join("wal");
+    // run_full_recovery_sequence now takes the WAL root, not the default group's own
+    // subdirectory (issue #378) — the actual WAL content lives under <wal_root>/liminis/.
+    let wal_root = dir.path().join("wal");
+    let wal_dir = wal_root.join("liminis");
     std::fs::create_dir_all(&wal_dir).unwrap();
 
     let ep_uuid = "ep-recovery-test-001";
@@ -191,8 +207,8 @@ async fn test_run_full_recovery_sequence_torn_wal() {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     let result = tokio::task::spawn_blocking({
         let db_path = db_path.clone();
-        let wal_dir = wal_dir.clone();
-        move || recovery::run_full_recovery_sequence(&db_path, &wal_dir, DIM, sink)
+        let wal_root = wal_root.clone();
+        move || recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink)
     })
     .await
     .unwrap();
@@ -368,11 +384,15 @@ async fn test_knowledge_recover_full_idempotent_on_healthy_engine() {
 async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
     let dir = TempDir::new().unwrap();
     let wal_dir = dir.path().join("wal");
-    std::fs::create_dir_all(&wal_dir).unwrap();
+    // handle_knowledge_recover_full always targets the default group's own WAL directory
+    // (issue #378) — wal_dir here is the root, so the fixture content must live under its
+    // "liminis" subdirectory for wal_group::group_wal_dir to find it.
+    let default_group_dir = wal_dir.join("liminis");
+    std::fs::create_dir_all(&default_group_dir).unwrap();
 
     // Write WAL JSONL with 1 episode — this is the source of truth
     let ep_uuid = "ep-fallback-001";
-    write_episode_wal_line(&wal_dir, "0001.jsonl", 1, ep_uuid);
+    write_episode_wal_line(&default_group_dir, "0001.jsonl", 1, ep_uuid);
 
     // Use a db_path whose parent exists but whose DB file does NOT exist.
     // Db::open on a non-existent path would normally create a new DB — but if
@@ -430,6 +450,10 @@ async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
 /// SC-002: run_full_recovery_sequence's index build can genuinely fail (not merely an
 /// "already exists" no-op) — e.g. a required column is missing from a prior schema drift.
 /// indices_built must land on `false`, proving the fix isn't an unconditional store(true).
+/// Also covers the applied_seq-ordering fix found in Review: a WAL replay that succeeds but is
+/// followed by a genuine index-build failure must leave applied_seq at `null` ("unknown"), never
+/// persist the replay's computed seq — persisting it would defeat the documented "null = needs
+/// full rebuild" signal for data whose indexes were never confirmed built.
 ///
 /// Technique mirrors handlers_wal_admin.rs's test_rebuild_reports_indices_built_false_on_genuine_build_failure:
 /// drop the existing vector/FTS indexes, then drop the `fact_embedding` column from
@@ -439,7 +463,11 @@ async fn test_knowledge_recover_full_fallback_on_corrupt_db() {
 #[tokio::test]
 async fn test_knowledge_recover_full_indices_built_false_on_build_failure() {
     let dir = TempDir::new().unwrap();
-    let wal_dir = dir.path().join("wal");
+    let wal_root = dir.path().join("wal");
+    // run_full_recovery_sequence takes the WAL root, not the default group's own subdirectory
+    // (issue #378) — the checkpoint-drop path it takes here resolves the default group's tail
+    // under <wal_root>/liminis/.
+    let wal_dir = wal_root.join("liminis");
     std::fs::create_dir_all(&wal_dir).unwrap();
 
     let (db, db_path) = make_db(&dir);
@@ -463,7 +491,7 @@ async fn test_knowledge_recover_full_indices_built_false_on_build_failure() {
     let capture_sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
     let state = make_degraded_state(
         &db_path,
-        wal_dir.clone(),
+        wal_root.clone(),
         Arc::clone(&capture_sink) as Arc<dyn TelemetrySink>,
     );
     // Preset a stale prior `true` so the test only passes if the failure path actively forces
@@ -492,5 +520,14 @@ async fn test_knowledge_recover_full_indices_built_false_on_build_failure() {
     assert_eq!(
         status_v["result"]["indices_built"], false,
         "knowledge_status must report indices_built: false after the failed recovery: {status_v}"
+    );
+    // The replay itself succeeded (it computed seq=1 from the entity mutation above) before the
+    // index build failed — applied_seq must still be null, not the replay's computed value.
+    assert_eq!(
+        status_v["result"]["wal"]["applied_seq"],
+        Value::Null,
+        "applied_seq must stay null after a successful replay followed by a failed index \
+         build — persisting the replayed seq here would falsely signal this data's indexes are \
+         known-good: {status_v}"
     );
 }

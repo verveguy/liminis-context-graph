@@ -18,7 +18,6 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
-    WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -49,11 +48,11 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: db_path.to_string(),
-        wal_dir: None,
+        wal_root: None,
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(None)),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -65,10 +64,11 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
     })
 }
 
-fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf, db_path: &str) -> Arc<AppState> {
+/// `wal_root` becomes `AppState.wal_root` (issue #378): a WAL root containing one subdirectory
+/// per group_id. `wal_writers` starts empty — per-group writers are created lazily on first
+/// write (FR-003), matching a fresh install.
+fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf, db_path: &str) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let wal_writer =
-        Some(WalWriter::new(&wal_dir, 10_000, 0).expect("failed to initialize WalWriter for test"));
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
@@ -78,11 +78,11 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: std::path::PathBuf, db_path: &str) 
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: db_path.to_string(),
-        wal_dir: Some(wal_dir),
+        wal_root: Some(wal_root),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writer: Arc::new(Mutex::new(wal_writer)),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -395,20 +395,16 @@ async fn clear_all_followed_by_process_chunk() {
 
 #[tokio::test]
 async fn clear_all_reinits_wal_writer() {
-    // Regression test for #100: after clear_all, the WalWriter must be
-    // eagerly re-initialized (not left as None) when wal_dir is configured.
-    // The previous "lazy re-init" approach was broken: wal_flush_chunk and
-    // wal_flush_ungrouped silently skipped on None, so WAL writes were lost.
+    // Regression test for #100, updated for issue #378's per-group writer map: post-Recreate
+    // writes must still be captured in the WAL. Unlike the pre-378 eager re-init, the fix is now
+    // lazy per-group creation (FR-003) — clear_all clears the whole wal_writers map and creates
+    // nothing eagerly, but the very next write to any group must still create its writer and
+    // capture the mutation, exactly as it would on a fresh install.
     let (db, dir) = make_db(4);
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
-    let wal_dir = dir.path().join("wal");
-    std::fs::create_dir_all(&wal_dir).unwrap();
-    let state = make_state_with_wal(db, wal_dir, &db_path);
-
-    assert!(
-        state.wal_writer.lock().unwrap().is_some(),
-        "wal_writer should be Some before clear_all"
-    );
+    let wal_root = dir.path().join("wal");
+    std::fs::create_dir_all(&wal_root).unwrap();
+    let state = make_state_with_wal(db, wal_root.clone(), &db_path);
 
     let v = dispatch_val(
         1,
@@ -419,10 +415,43 @@ async fn clear_all_reinits_wal_writer() {
     .await;
     assert_ok(&v, 1);
 
-    // After clear_all with wal_dir configured, the writer must be re-initialized
-    // so that post-Recreate writes are captured in the WAL (FR-001, #100 fix).
+    // clear_all clears the whole map — nothing is eagerly recreated (issue #378).
     assert!(
-        state.wal_writer.lock().unwrap().is_some(),
-        "wal_writer must be re-initialized (Some) after clear_all when wal_dir is configured"
+        state.wal_writers.lock().unwrap().is_empty(),
+        "wal_writers must be empty immediately after clear_all — lazy creation handles the rest"
+    );
+
+    // The next write must still lazily create a writer and capture the mutation (the #100 fix,
+    // preserved under lazy per-group creation).
+    let ingest = dispatch_val(
+        2,
+        "knowledge_add_episode",
+        json!({
+            "name": "post-clear-chunk",
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "test",
+            "source_description": "test/source",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "liminis"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&ingest, 2);
+
+    assert!(
+        state.wal_writers.lock().unwrap().contains_key("liminis"),
+        "wal_writers must contain a lazily-created 'liminis' writer after the post-clear write"
+    );
+    let liminis_dir = wal_root.join("liminis");
+    let has_jsonl = std::fs::read_dir(&liminis_dir)
+        .map(|rd| {
+            rd.flatten()
+                .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        })
+        .unwrap_or(false);
+    assert!(
+        has_jsonl,
+        "post-clear write must land on disk under the group's own WAL directory (#100 fix)"
     );
 }
