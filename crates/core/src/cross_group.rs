@@ -290,8 +290,9 @@ pub fn rebind_pointers(
 }
 
 /// Like [`rebind_pointers`], but bypasses the `bound_at_seq` staleness gate entirely — every
-/// pointer whose `source_group_id` matches is unconditionally re-resolved, regardless of the
-/// DB-wide `WalPosition.applied_seq` cursor.
+/// pointer whose `source_group_id` matches is unconditionally re-resolved, regardless of
+/// `source_group_id`'s own `WalPosition.applied_seq` cursor (issue #378: per-group, not
+/// DB-wide, since #378 landed).
 ///
 /// Used by `crate::group_purge` (issue #361), for a reason specific to that caller: a
 /// group-scoped purge's deletes go through `wal_exec::wal_flush_ungrouped`, which never
