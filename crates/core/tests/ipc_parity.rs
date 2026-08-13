@@ -4656,7 +4656,7 @@ fn seed_entity(conn: &Conn<'_>, uuid: &str) {
     conn.insert_entity(&EntityRow {
         uuid: uuid.to_string(),
         name: uuid.to_string(),
-        group_id: "g".to_string(),
+        group_id: "liminis".to_string(),
         labels: vec!["Entity".to_string()],
         created_at: "2026-05-22 00:00:00".to_string(),
         name_embedding: vec![1.0, 0.0, 0.0, 0.0],
