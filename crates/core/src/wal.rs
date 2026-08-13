@@ -44,6 +44,12 @@ pub struct WalWriter {
     pending_lines: Vec<WalLine>,
     current_file: Option<PathBuf>,
     last_rotation: Option<WalRotationInfo>,
+    /// This stream's generation identity (issue #387), read once at construction time and
+    /// cached for the life of this writer — never re-read per chunk, so the highest-frequency
+    /// write path in the system (`with_chunk`/`flush_pending`) pays no extra filesystem I/O.
+    /// `None` only for a pre-existing, pre-#387 populated stream that has never had a
+    /// generation minted into it (Story 5) — never retroactively backfilled here.
+    generation: Option<String>,
 }
 
 impl WalWriter {
@@ -51,6 +57,14 @@ impl WalWriter {
     /// starting global sequence number.
     ///
     /// `max_bytes_per_file = 0` disables byte-size rotation (only event-count applies).
+    ///
+    /// Also establishes this stream's generation identity (issue #387): if a generation is
+    /// already recorded, it's read as-is; if the directory has no prior `.jsonl` content
+    /// (`global_seq == 0`) and no generation record yet, a fresh one is minted here — the same
+    /// "no existing content" branch that creates the directory in the first place, which is why
+    /// `knowledge_dump_wal`'s always-fresh `target_dir` automatically gets a new generation with
+    /// no dump-specific code (FR-006). A pre-existing populated directory with no generation
+    /// record is left as `None` — this issue does not retroactively mint one for legacy streams.
     pub fn new(
         wal_dir: impl Into<PathBuf>,
         max_events_per_file: usize,
@@ -67,6 +81,12 @@ impl WalWriter {
             .take(6)
             .collect::<String>();
 
+        let generation = match crate::wal_generation::read_generation(&wal_dir) {
+            Some(g) => Some(g),
+            None if global_seq == 0 => Some(crate::wal_generation::ensure_generation(&wal_dir)?),
+            None => None,
+        };
+
         Ok(Self {
             wal_dir,
             global_seq,
@@ -79,7 +99,14 @@ impl WalWriter {
             pending_lines: Vec::new(),
             current_file: None,
             last_rotation: None,
+            generation,
         })
+    }
+
+    /// This stream's generation identity (issue #387), cached at construction time. `None` only
+    /// for a pre-existing stream that predates this feature and has never had one recorded.
+    pub fn generation(&self) -> Option<&str> {
+        self.generation.as_deref()
     }
 
     /// Buffers a mutation. Filters out reads and index DDL; must be called inside `with_chunk`.
@@ -1698,5 +1725,51 @@ mod tests {
             "a shrink on the tracked min-seq file must trigger a full-scan fallback (visiting \
              every file), not silently keep serving the stale cached min"
         );
+    }
+
+    #[test]
+    fn new_writer_on_empty_dir_mints_a_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        let g = writer.generation().expect("fresh stream must mint a generation");
+        assert_eq!(
+            crate::wal_generation::read_generation(tmp.path()).as_deref(),
+            Some(g)
+        );
+    }
+
+    #[test]
+    fn reopening_writer_reads_the_same_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writer1 = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        let g1 = writer1.generation().unwrap().to_string();
+        drop(writer1);
+
+        let writer2 = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        assert_eq!(writer2.generation(), Some(g1.as_str()));
+    }
+
+    #[test]
+    fn writer_over_pre_existing_content_with_no_generation_stays_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate a pre-#387 populated stream: content on disk, no generation sidecar.
+        write_wal_line(tmp.path(), "0000.jsonl", 0);
+
+        let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        assert_eq!(
+            writer.generation(),
+            None,
+            "a legacy populated stream must not have a generation retroactively minted"
+        );
+        assert_eq!(crate::wal_generation::read_generation(tmp.path()), None);
+    }
+
+    #[test]
+    fn writer_over_pre_existing_generation_adopts_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected = crate::wal_generation::ensure_generation(tmp.path()).unwrap();
+
+        let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        assert_eq!(writer.generation(), Some(expected.as_str()));
     }
 }
