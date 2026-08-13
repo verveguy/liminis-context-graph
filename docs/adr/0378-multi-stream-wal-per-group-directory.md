@@ -276,6 +276,25 @@ loop (FR-007) runs the same group-scoped backfill for each group directory it di
 one place a non-default group's position gets backfilled, lazily, on the read path that actually
 needs the value, rather than an up-front cost that scales with however many groups exist.
 
+**The backfill pass runs under the write lock, in a phase separate from the rest of the status
+computation.** Found during Review: `backfill_applied_seq_if_absent` can issue a real
+`set_applied_seq` write (a `MERGE ... SET`) the first time a group is queried, but
+`handle_knowledge_status` otherwise only ever takes `state.write_lock.read()` — a shared lock every
+other write in this codebase deliberately avoids taking a write under. Two concurrent
+`knowledge_status` calls racing to backfill the same not-yet-backfilled group could therefore issue
+concurrent write transactions against the single-writer embedded DB with no application-level
+serialization — a real regression `knowledge_status` never risked pre-378, since its old singleton
+backfill ran once, single-threaded, at `Db::open` time before request serving began. The fix splits
+the handler into a short **Phase 0** (write lock: backfill every discoverable group whose position
+isn't known yet) followed by the existing **read-locked** phase (every other field, including
+reading — never writing — each group's now-guaranteed-backfilled `applied_seq`). Phase 0 is a
+no-op read-then-skip for every group after its first-ever backfill (matching
+`backfill_applied_seq_if_absent`'s own early return), so only the first status call per group pays
+the write-lock cost; every later call is read-lock-only, same as before this fix. Regression-tested
+by firing several concurrent `knowledge_status` calls at a freshly-seeded, never-yet-queried group
+(`ipc_parity.rs::knowledge_status_concurrent_first_backfill_does_not_race`) and asserting every
+call reports the same, correctly-backfilled position.
+
 ## Consequences
 
 ### Positive

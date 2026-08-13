@@ -332,6 +332,32 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         .map(|root| crate::wal_group::group_wal_dir(root, DEFAULT_GROUP_ID))
         .transpose()?;
 
+    // Phase 0 (write lock): backfill every group's applied_seq that isn't known yet, before the
+    // read-locked status computation below reads it (issue #378 Review finding). Every other
+    // write in this codebase goes through the exclusive write_lock; backfill_applied_seq_if_absent
+    // can issue a real MERGE...SET (set_applied_seq) once per group, the first time that group is
+    // ever queried, so it must not run under a shared read lock — otherwise two concurrent
+    // knowledge_status calls racing to backfill the same not-yet-backfilled group could issue
+    // concurrent write transactions against the single-writer embedded DB with no serialization.
+    // Held only for this narrow pass, not the whole handler, so status calls after the first one
+    // per group (the common case — backfill_applied_seq_if_absent's own early-return makes every
+    // later call a pure read) still mostly see read-lock-only contention below.
+    {
+        let db_c = Arc::clone(&db);
+        let wal_root_c = wal_root.clone();
+        let _write_guard = state.write_lock.write().await;
+        tokio::task::spawn_blocking(move || {
+            let conn = db_c.connect()?;
+            if let Some(root) = wal_root_c.as_deref() {
+                for (gid, dir) in crate::wal_group::list_group_wal_dirs(root).unwrap_or_default() {
+                    let _ = crate::recovery::backfill_applied_seq_if_absent(&conn, &gid, &dir);
+                }
+            }
+            Ok::<(), crate::error::Error>(())
+        })
+        .await??;
+    }
+
     let _guard = state.write_lock.read().await;
     let outcome =
         tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
@@ -349,17 +375,16 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
-            // Per-group breakdown (FR-007): every group that currently has a WAL directory,
-            // lazily backfilled here (the read path that actually needs the value) rather than
-            // up front at startup, so this cost scales with active groups queried, not with
-            // every group that has ever existed.
+            // Per-group breakdown (FR-007): every group that currently has a WAL directory.
+            // Backfilling already happened above under the write lock (Phase 0) — this is a pure
+            // read of whatever that pass established, never a write, so it's safe under the
+            // shared read lock this closure runs under.
             let wal_group_positions: Vec<(String, Option<u64>, Option<u64>)> = wal_root
                 .as_deref()
                 .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(gid, dir)| {
-                    let _ = crate::recovery::backfill_applied_seq_if_absent(&conn, &gid, &dir);
                     let applied = conn.get_applied_seq(&gid).unwrap_or(None);
                     let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
                     (gid, applied, max)

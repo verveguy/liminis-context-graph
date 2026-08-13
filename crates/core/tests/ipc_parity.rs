@@ -4773,6 +4773,124 @@ async fn wal_mark_create_rejects_case_insensitive_collision_with_existing_group_
     assert!(!wal_dir.path().join("Acme").join(".checkpoints").exists());
 }
 
+/// FR-007: `knowledge_status`'s additive `wal_groups` map reports every group that has a WAL
+/// directory, each with its own `applied_seq`/`max_seq` — distinct from the flat `wal.*` fields,
+/// which stay pinned to the default group only.
+#[tokio::test]
+async fn knowledge_status_reports_per_group_wal_positions() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    for (id, group_id, body) in [
+        (1, "group-a", "Alice works at Acme."),
+        (2, "group-b", "Bob leads the design team."),
+    ] {
+        let v = dispatch_val(
+            id,
+            "knowledge_add_episode",
+            json!({
+                "name": format!("{group_id}-chunk"),
+                "episode_body": body,
+                "source": "test",
+                "source_description": format!("test/{group_id}"),
+                "reference_time": "2026-01-01 00:00:00",
+                "group_id": group_id
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_ok_resp(&v, id);
+    }
+
+    let status_v = dispatch_val(3, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status_v, 3);
+    let wal_groups = status_v["result"]["wal_groups"]
+        .as_object()
+        .expect("wal_groups must be an object");
+    assert_eq!(
+        wal_groups.len(),
+        2,
+        "both active groups must be reported: {status_v}"
+    );
+    for group_id in ["group-a", "group-b"] {
+        let entry = &wal_groups[group_id];
+        assert!(
+            entry["applied_seq"].is_u64(),
+            "{group_id} must report a known applied_seq: {status_v}"
+        );
+        assert!(
+            entry["max_seq"].is_u64(),
+            "{group_id} must report a known max_seq: {status_v}"
+        );
+    }
+
+    // The flat fields stay pinned to the default group ("liminis"), which never received a
+    // write in this test — reporting null/absent, not either non-default group's position.
+    assert_eq!(status_v["result"]["wal"]["applied_seq"], Value::Null);
+}
+
+/// issue #378 Review finding: `handle_knowledge_status`'s per-group backfill must not run under
+/// only a shared read lock — two concurrent first-time status calls for the same not-yet-
+/// backfilled group must not race on `set_applied_seq`. Exercised by firing several concurrent
+/// `knowledge_status` calls at a freshly-seeded, never-yet-queried group and asserting every
+/// call succeeds and reports the same, correct position.
+#[tokio::test]
+async fn knowledge_status_concurrent_first_backfill_does_not_race() {
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_add_episode",
+        json!({
+            "name": "race-chunk",
+            "episode_body": "Carol reviews the design.",
+            "source": "test",
+            "source_description": "test/race",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "race-group"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 1);
+
+    // Fire several concurrent status calls — the first time "race-group" (and the never-written
+    // default group) get backfilled, each must complete without error, and every call must
+    // report the same position, not a torn or partially-applied one.
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let state = Arc::clone(&state);
+            tokio::spawn(
+                async move { dispatch_val(10 + i, "knowledge_status", json!({}), state).await },
+            )
+        })
+        .collect();
+    let results: Vec<Value> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|r| r.unwrap())
+        .collect();
+
+    let mut seen: Option<u64> = None;
+    for v in &results {
+        assert!(v.get("error").is_none(), "unexpected error: {v}");
+        let applied = v["result"]["wal_groups"]["race-group"]["applied_seq"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("race-group applied_seq must be a known integer: {v}"));
+        match seen {
+            None => seen = Some(applied),
+            Some(expected) => assert_eq!(
+                applied, expected,
+                "every concurrent status call must report the same, correctly-backfilled \
+                 position for race-group — a mismatch indicates the backfill raced: {v}"
+            ),
+        }
+    }
+}
+
 #[tokio::test]
 async fn wal_mark_create_rejects_duplicate_active_name() {
     let (db, _dir) = make_db(4);
