@@ -32,7 +32,7 @@ retried — `extractor.rs:375-385` (entities) and `:549` (edges) call `emit_extr
 and then `return Err(e)`, which surfaces to the caller as `-32000`.
 
 **This behaviour is already inconsistent, which is the strongest argument that it's a defect.**
-`crates/core/src/episode.rs:253` already drops empty-name entities without complaint:
+`crates/core/src/episode.rs:254` already drops empty-name entities without complaint:
 
 ```rust
 extraction.entities.retain(|e| !e.name.trim().is_empty());
@@ -51,7 +51,7 @@ because deserialization fails before `episode.rs` runs.
 `crates/core/src/types.rs:109-112` states the principle: *"losing an entire chunk's entities over
 one missing string field is a disproportionate trade."* That fix defaulted a value. `name` cannot
 be defaulted — a nameless entity has no identity and no downstream meaning — so the equivalent
-remedy here is to **drop the item**, matching what `episode.rs:253` already does for the
+remedy here is to **drop the item**, matching what `episode.rs:254` already does for the
 empty-string case.
 
 This ships as a 0.12.1 patch release: it costs users data on a released version, and the fix is
@@ -236,7 +236,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   sites.
 - `crates/core/src/extractor.rs:375-385`, `:549` — where `ParseError` currently surfaces as a hard
   chunk failure.
-- `crates/core/src/episode.rs:253` — existing silent empty-name drop (the precedent-tolerant
+- `crates/core/src/episode.rs:254` — existing silent empty-name drop (the precedent-tolerant
   behavior this spec extends and makes consistent).
 - `crates/core/src/types.rs:95-118` — `ExtractedEntity`, and the `deserialize_summary_or_default`
   precedent from #314.
