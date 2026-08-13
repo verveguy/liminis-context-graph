@@ -107,7 +107,9 @@ pub(crate) fn wal_flush_chunk(
 /// helpers (backfill, canonicalize, reprocess).
 ///
 /// Returns the highest `seq` actually, durably flushed across the batch (issue #383), or `None`
-/// if nothing was — an empty `mutations` list, or every mutation's `with_chunk` call failing.
+/// if nothing was — an empty `mutations` list, every mutation's `with_chunk` call failing, or
+/// every mutation being filtered out by `WalWriter::log_mutation` (reads / index DDL) despite
+/// each call returning `Ok`.
 /// Unlike `wal_flush_chunk`'s all-or-nothing chunk, this loop does not abort on a per-mutation
 /// failure, so a later mutation's success after an earlier one's failure is still credited: the
 /// returned seq is a running max over every successfully-flushed mutation's seq (diffed

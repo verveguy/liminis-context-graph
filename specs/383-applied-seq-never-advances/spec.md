@@ -11,7 +11,7 @@
 
 **Reproduced** against `main` at `d5a3e14` (post-#378, the current per-group architecture), driving three groups through the assertion API with no LLM in the loop:
 
-```
+```text
 knowledge_status → "wal_groups": {
   "A": { "applied_seq": null, "max_seq": 4 },
   "C": { "applied_seq": null, "max_seq": 24 },
@@ -36,7 +36,7 @@ The second point is why this is worth fixing rather than continuing to accept: i
 
 ### Current architecture (post-#378)
 
-#378 ("Multi-stream WAL: one WAL directory per group") merged via PR #382; `main` is at `d5a3e14`. `Conn::get_applied_seq`/`set_applied_seq` are now keyed by `group_id` (one `WalPosition` row per group), and `wal_exec::wal_flush_ungrouped` already takes `state: &AppState, group_id: &str, mutations: Vec<(String, Value)>` — but, confirmed by direct inspection, still returns `()` and still never advances the position, for any group. `wal_exec::wal_flush_chunk` takes the seq it assigned and advances that group's persisted `applied_seq` directly, exactly as it did before #378 — just scoped per group now instead of to one singleton row. `knowledge_status` exposes this as a `wal_groups` map (one entry per group with WAL content) rather than the pre-#378 singleton `wal` object. This issue's fix targets that existing per-group model; it does not itself introduce per-group tracking.
+Issue `#378` ("Multi-stream WAL: one WAL directory per group") merged via PR #382; `main` is at `d5a3e14`. `Conn::get_applied_seq`/`set_applied_seq` are now keyed by `group_id` (one `WalPosition` row per group), and `wal_exec::wal_flush_ungrouped` already takes `state: &AppState, group_id: &str, mutations: Vec<(String, Value)>` — but, confirmed by direct inspection, still returns `()` and still never advances the position, for any group. `wal_exec::wal_flush_chunk` takes the seq it assigned and advances that group's persisted `applied_seq` directly, exactly as it did before #378 — just scoped per group now instead of to one singleton row. `knowledge_status` exposes this as a `wal_groups` map (one entry per group with WAL content) rather than the pre-#378 singleton `wal` object. This issue's fix targets that existing per-group model; it does not itself introduce per-group tracking.
 
 ## User Scenarios & Testing *(mandatory)*
 
