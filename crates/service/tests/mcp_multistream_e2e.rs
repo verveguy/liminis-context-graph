@@ -259,6 +259,13 @@ fn multistream_layer_graph_composition() {
         "checkpoint lists must not aggregate across groups (#365/#378): A={names_a:?} C={names_c:?}"
     );
 
+    // Snapshot B's and C's on-disk WAL directories now, before A's dry-run/purge/rebuild
+    // sequence (phases 6-8) — none of those phases touch B or C, so their `.jsonl` streams must
+    // come out byte-identical at the far end (FR-003's edge case: "groups not touched by a given
+    // operation ... must be asserted unchanged", checked on disk, not only via `wal_groups`
+    // positions).
+    let snapshot_before_purge = wal_snapshot(&wal_dir);
+
     // ── Phase 6: delete_by_group(A) dry-run (#361) ───────────────────────────────────────────
     let dry_run = client.call_tool(
         "knowledge_delete_by_group",
@@ -369,6 +376,21 @@ fn multistream_layer_graph_composition() {
              byte-identical (#378): before={:?} after={:?}",
             positions_before_rebuild.get(group_id),
             positions_after_rebuild.get(group_id)
+        );
+    }
+
+    // ── Edge case (FR-003): B's and C's on-disk WAL directories are untouched by A's
+    //    dry-run/purge/rebuild (#385) ─────────────────────────────────────────────────────────
+    let snapshot_after_rebuild = wal_snapshot(&wal_dir);
+    for group_id in ["B", "C"] {
+        assert_eq!(
+            snapshot_before_purge.get(group_id).map(|d| &d.jsonl_files),
+            snapshot_after_rebuild.get(group_id).map(|d| &d.jsonl_files),
+            "group {group_id}'s on-disk WAL stream must be byte-identical before and after \
+             A's dry-run/purge/rebuild sequence, since {group_id} was never party to any of \
+             those operations (#385): the bug this guards against is a mutation belonging to \
+             one group landing in another group's stream on disk, which is invisible from \
+             knowledge_status alone"
         );
     }
 
