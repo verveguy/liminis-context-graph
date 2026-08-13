@@ -124,29 +124,35 @@ only this MCP process's own DB connection. In **attached** mode, calling it woul
 `--allow-remote-close` only when you specifically intend this MCP connection to be able to stop
 the remote service.
 
-**Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild the graph from
-the WAL), `knowledge_dump_wal` (snapshot/export the graph into a fresh compacted WAL directory),
-`knowledge_wal_mark_create` / `_list` / `_delete` (name a retained WAL position without a full
-snapshot), and `knowledge_recover` / `knowledge_recover_full` are all `admin`-scope tools — an
-attached client only sees them when launched with `--scope=admin` (or `all`). If a mutation goes
-wrong, this is the recovery path. See [Operations](operations.md) for the recovery model in full.
-Note the WAL replays **forward-only**, so take periodic `knowledge_dump_wal` snapshots, or a
-lighter-weight `knowledge_wal_mark_create` named position, if you want restore points before large
-or destructive operations — a mark does not survive `knowledge_dump_wal`, since dump_wal
-renumbers sequence numbers and a copied mark's `seq` would be meaningless against the new
-numbering.
+**Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild one group's data
+from its own WAL directory — `group_id`, default `"liminis"`), `knowledge_dump_wal`
+(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_wal_mark_create` /
+`_list` / `_delete` (name a retained WAL position within one group's stream, without a full
+snapshot — each also takes `group_id`, default `"liminis"`, and `_list` reports only that one
+group's marks, never an aggregate across groups), and `knowledge_recover` / `knowledge_recover_full`
+are all `admin`-scope tools — an attached client only sees them when launched with `--scope=admin`
+(or `all`). If a mutation goes wrong, this is the recovery path. See [Operations](operations.md)
+for the recovery model in full. Note the WAL replays **forward-only**, so take periodic
+`knowledge_dump_wal` snapshots, or a lighter-weight `knowledge_wal_mark_create` named position, if
+you want restore points before large or destructive operations — a mark does not survive
+`knowledge_dump_wal`, since dump_wal renumbers sequence numbers and a copied mark's `seq` would be
+meaningless against the new numbering.
 
-**`knowledge_rebuild_from_wal` refuses to run against a non-empty database, unless you ask it
-not to.** A `from_seq: 0` (default) full rebuild against a database that already contains data
-fails fast with an explicit error rather than silently emitting a duplicate-primary-key failure
-for every existing `Entity`/`Episodic`/`RelatesToNode_` row — the native write path uses `CREATE`,
-not `MERGE`, for those labels. Pass `force_clear: true` to have the call clear the database itself
-before replaying (the same DB-file-delete-and-reopen behavior `knowledge_recover`'s
-`rebuild_from_workspace_wal` strategy uses), or clear it yourself first with `knowledge_clear_all`.
-`dry_run: true` always fails fast on a non-empty database regardless of `force_clear`, since a dry
-run must never mutate the database — this lets a preview surface the problem before you commit to
-a real rebuild. None of this applies to an incremental `from_seq > 0` resume, which intentionally
-targets a database that already has state.
+**`knowledge_rebuild_from_wal` refuses to run against a non-empty group, unless you ask it not
+to.** Since issue #378, one instance holds an independent WAL directory and applied position per
+`group_id`; `knowledge_rebuild_from_wal {group_id, ...}` targets exactly one of them and never
+disturbs another group's data or position. A `from_seq: 0` (default) full rebuild against a group
+that already contains data fails fast with an explicit error rather than silently emitting a
+duplicate-primary-key failure for every existing `Entity`/`Episodic`/`RelatesToNode_` row in that
+group — the native write path uses `CREATE`, not `MERGE`, for those labels. Pass `force_clear:
+true` to have the call clear *that group's* data automatically before replaying (the same
+group-scoped purge `knowledge_delete_by_group` uses — this does **not** delete or reopen the
+database file, unlike the pre-378 whole-database `force_clear` behavior), or clear it yourself
+first with `knowledge_delete_by_group {group_ids: [group_id]}`. `dry_run: true` always fails fast
+on a non-empty group regardless of `force_clear`, since a dry run must never mutate the database —
+this lets a preview surface the problem before you commit to a real rebuild. None of this applies
+to an incremental `from_seq > 0` resume, which intentionally targets a group that already has
+state.
 
 **`to_seq` bounds replay from the other end: `from_seq <= seq <= to_seq`.** Pass an inclusive
 upper bound to exclude a mutation (and everything after it) from a rebuild — e.g. a WAL-recorded
