@@ -312,7 +312,11 @@ async fn test_delete_episode_appends_to_wal() {
         .as_str()
         .expect("expected episode_uuid");
 
-    let lines_before = count_wal_lines(wal_dir.path());
+    // knowledge_delete_episode deletes by UUID with no group_id in the request, so it routes
+    // through the default group's writer (FR-004) rather than "test" (the episode's own group)
+    // — the delete mutation lands in "liminis", not "test".
+    let default_group_dir = group_wal_dir(wal_dir.path(), "liminis");
+    let lines_before = count_wal_lines(&default_group_dir);
 
     // Delete the episode.
     let del_v = dispatch(
@@ -324,14 +328,14 @@ async fn test_delete_episode_appends_to_wal() {
     .await;
     assert_eq!(del_v["result"]["status"], "deleted", "{del_v}");
 
-    let lines_after = count_wal_lines(wal_dir.path());
+    let lines_after = count_wal_lines(&default_group_dir);
     assert!(
         lines_after > lines_before,
         "WAL must grow after delete_episode (before={lines_before}, after={lines_after})"
     );
 
     // At least one WAL line must contain a DELETE or DETACH keyword.
-    let all_content: String = std::fs::read_dir(wal_dir.path())
+    let all_content: String = std::fs::read_dir(&default_group_dir)
         .unwrap()
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
@@ -403,9 +407,11 @@ async fn test_wal_rebuild_reproduces_counts() {
         "original DB must have RELATES_TO edges"
     );
 
+    let group_dir = group_wal_dir(wal_dir.path(), "rebuild_test");
+
     // WAL must be populated before attempting rebuild.
     assert!(
-        has_wal_files(wal_dir.path()),
+        has_wal_files(&group_dir),
         "WAL must be populated before rebuild test"
     );
 
@@ -419,7 +425,7 @@ async fn test_wal_rebuild_reproduces_counts() {
     }
 
     // Replay the WAL into the fresh DB.
-    let replayer = WalReplayer::new(wal_dir.path());
+    let replayer = WalReplayer::new(&group_dir);
     let conn = rebuild_db.connect().unwrap();
     let stats = replayer.replay(&conn).unwrap();
 
@@ -504,9 +510,11 @@ async fn relation_type_survives_wal_round_trip() {
         );
     }
 
+    let group_dir = group_wal_dir(wal_dir.path(), "rt_group");
+
     // WAL must be populated before attempting rebuild.
     assert!(
-        has_wal_files(wal_dir.path()),
+        has_wal_files(&group_dir),
         "WAL must be populated before round-trip test"
     );
 
@@ -519,7 +527,7 @@ async fn relation_type_survives_wal_round_trip() {
         conn.init_schema(EMB_DIM).unwrap();
     }
 
-    let replayer = WalReplayer::new(wal_dir.path());
+    let replayer = WalReplayer::new(&group_dir);
     let conn = rebuild_db.connect().unwrap();
     let stats = replayer.replay(&conn).unwrap();
     assert!(
@@ -544,6 +552,127 @@ async fn relation_type_survives_wal_round_trip() {
             Some("WORKS_AT"),
             "replayed edge must have relation_type=WORKS_AT; got {:?}",
             e.relation_type
+        );
+    }
+}
+
+// ── Issue #378, User Story 1 / SC-004: writes to two groups never cross streams ────────────────
+
+/// SC-004 / US1 AS1-3: episodes interleaved between two groups land in two independent WAL
+/// directories, and every line in each directory names only its own group — inspected via WAL
+/// file content directly, not just graph state. Also covers AS1/AS2: neither group's directory
+/// or writer exists until that group's first write, and creating B's writer never disturbs A's
+/// already-flushed content.
+#[tokio::test]
+async fn add_episode_to_two_groups_never_crosses_wal_streams() {
+    let (db, _db_dir) = make_db();
+    let wal_root = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_root.path().to_path_buf());
+
+    let group_a_dir = group_wal_dir(wal_root.path(), "group-a");
+    let group_b_dir = group_wal_dir(wal_root.path(), "group-b");
+
+    // AS1: neither group has a directory yet.
+    assert!(
+        !group_a_dir.exists() && !group_b_dir.exists(),
+        "no group directory should exist before any write"
+    );
+
+    async fn add(id: i64, group_id: &str, body: &str, state: Arc<AppState>) -> Value {
+        dispatch(
+            id,
+            "knowledge_add_episode",
+            json!({
+                "name": format!("{group_id}-chunk-{id}"),
+                "episode_body": body,
+                "source": "test",
+                "source_description": format!("test/{group_id}"),
+                "reference_time": "2026-01-01 00:00:00",
+                "group_id": group_id,
+            }),
+            state,
+        )
+        .await
+    }
+
+    // AS1: the first write to group A creates only A's directory and writer.
+    let a1 = add(
+        1,
+        "group-a",
+        "Alice works at Acme Corp.",
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(a1.get("result").is_some(), "group-a write 1 failed: {a1}");
+    assert!(group_a_dir.exists(), "group-a's directory must now exist");
+    assert!(
+        !group_b_dir.exists(),
+        "group-b must remain untouched by group-a's first write"
+    );
+
+    // AS2: writing to a new group B creates a second, independent writer/directory; A is
+    // unaffected (its file content, checked below, must not change).
+    let a_lines_after_first_write = count_wal_lines(&group_a_dir);
+    let b1 = add(
+        2,
+        "group-b",
+        "Carol leads the design team.",
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(b1.get("result").is_some(), "group-b write 1 failed: {b1}");
+    assert!(group_b_dir.exists(), "group-b's directory must now exist");
+    assert_eq!(
+        count_wal_lines(&group_a_dir),
+        a_lines_after_first_write,
+        "group-a's WAL content must be unaffected by group-b's writer being created"
+    );
+
+    // Interleave further writes across both groups.
+    let a2 = add(3, "group-a", "Bob manages the project.", Arc::clone(&state)).await;
+    assert!(a2.get("result").is_some(), "group-a write 2 failed: {a2}");
+    let b2 = add(4, "group-b", "Dave reviews the design.", Arc::clone(&state)).await;
+    assert!(b2.get("result").is_some(), "group-b write 2 failed: {b2}");
+
+    // AS3/SC-004: every line under group A's directory names group A, and every line under
+    // group B's directory names group B — inspected via raw WAL file content.
+    for (dir, expected_group, other_group) in [
+        (&group_a_dir, "group-a", "group-b"),
+        (&group_b_dir, "group-b", "group-a"),
+    ] {
+        assert!(
+            has_wal_files(dir),
+            "{expected_group}'s directory must contain WAL files"
+        );
+        let mut saw_a_mutation_line = false;
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let content = std::fs::read_to_string(&path).unwrap();
+            for line in content.lines().filter(|l| !l.trim().is_empty()) {
+                let v: Value = serde_json::from_str(line).unwrap();
+                // Every mutation line's params carry the episode/entity's own group_id
+                // somewhere in the recorded Cypher params (e.g. "group_id":"group-a"). A line
+                // that mentions the *other* group's id anywhere would indicate a cross-stream
+                // leak; a line naming neither (e.g. an index-DDL/no-param line, which
+                // log_mutation filters out already) is not expected here since every recorded
+                // line comes from an actual mutation with group_id bound.
+                let text = line.to_string();
+                if text.contains(&format!("\"{expected_group}\"")) {
+                    saw_a_mutation_line = true;
+                }
+                assert!(
+                    !text.contains(&format!("\"{other_group}\"")),
+                    "{expected_group}'s WAL directory must never contain a line naming \
+                     {other_group} — no mutation may cross a stream boundary (SC-004): {v}"
+                );
+            }
+        }
+        assert!(
+            saw_a_mutation_line,
+            "{expected_group}'s directory must contain at least one line naming its own group"
         );
     }
 }
