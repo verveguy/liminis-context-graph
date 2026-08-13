@@ -1,4 +1,4 @@
-# Feature Specification: Multi-stream WAL: one logical graph, one group_id, one WAL directory
+# Feature Specification: Multi-stream WAL: one WAL directory per group
 
 **Feature Branch**: `fabrik/issue-378`
 **Created**: 2026-08-12
@@ -7,23 +7,34 @@
 
 ## Background
 
-Today an `lcg` instance has exactly one WAL directory and one `WalWriter`, and `WalPosition` is a hardcoded singleton row (`id: 'singleton'`) — see `crates/core/src/db.rs:1755` (`get_applied_seq`) and `:1768` (`set_applied_seq`). `group_id` already exists as a free-form partition label on every node and edge, defaulting to `"liminis"` when a caller doesn't supply one (`crates/core/src/handlers.rs`), but it carries no filesystem or WAL-stream meaning — every group's mutations are interleaved into the same single WAL directory and tracked by the same single position.
+**Today**, an `lcg` instance has exactly **one** WAL directory shared by every group, **one** `WalWriter`, and a hardcoded singleton `WalPosition` row (`id: 'singleton'`) — see `crates/core/src/db.rs:1755` (`get_applied_seq`) and `:1768` (`set_applied_seq`). `group_id` already exists as a free-form partition label on every node and edge, defaulting to `"liminis"` when a caller doesn't supply one (`crates/core/src/handlers.rs`), but it carries no filesystem or WAL-stream meaning — every group's mutations interleave into that one shared directory, under one shared `global_seq` numberline, tracked by that one shared position.
 
-This issue makes `group_id` mean something more specific: a **stream identity**. One logical graph, one `group_id`, one WAL directory, one `WalPosition` row. A single instance may still write to several groups — it just holds N independent writers instead of one, each with its own directory, its own `global_seq` counter, and its own applied position. Two prerequisites now make this coherent where they didn't before:
+**After this issue**, a WAL **root** directory contains **one subdirectory per `group_id`** — N independent streams in place of the single shared one:
+
+```
+<wal_root>/
+  liminis/     *.jsonl   .checkpoints/   .wal-bounds.json
+  group-a/     *.jsonl   .checkpoints/   .wal-bounds.json
+  group-b/     *.jsonl   .checkpoints/   .wal-bounds.json
+```
+
+A single instance holds **N** `WalWriter`s, one per group, each deriving its own `global_seq` from its own subdirectory. There is **one `WalPosition` row per group**, keyed by `group_id`. `group_id` becomes a **stream identity** — a filesystem path component, not merely a free-form graph-data label. This is additive to the single-group case, not a replacement for it: a deployment with only the default `liminis` subdirectory behaves exactly as it does today (FR-009).
+
+Two prerequisites make this coherent where it wouldn't have been before:
 
 - **#369 (merged)** introduced resolvable semantic pointers for cross-group edges (`binding_state`: `bound`/`unbound`/`ambiguous`), so a cross-group reference is no longer a frozen UUID FK — it can be re-resolved after one group's stream replays independently of another's.
 - **#371 (merged, PR #377)** stopped `corrections::merge_entities_inner` from writing to a group other than the one owning the merge. Before #371, a single `drain_mutations` call could carry mutations belonging to more than one group through a path (`Conn::executed_mutations` → `drain_mutations` → `wal_exec::wal_flush_*`) that carries no group information at all — which would have forced this issue into mutation-level attribution instead of the much simpler per-operation attribution FR-004 relies on. With #371 landed, every write handler already names exactly one group at its flush site (e.g. `episode.rs`'s `add_episode` has `gid_owned` in scope — `crates/core/src/episode.rs:538`), so routing a mutation to its writer is a lookup, not a new tracking mechanism.
 
 This issue **supersedes #360**, which proposed the same directory-per-source topology but keyed it on a separate "source identifier" rather than `group_id`, and rested on two assumptions #369 has since retired: that groups are disjoint (no cross-group edges) and that only one source is ever a write master (replicas are read-only). #360 never reached the Specify stage, so it was closed outright rather than carried forward — a spec that argues against its own conclusion is exactly the kind of artifact a downstream stage should never have to untangle.
 
-Two structural blockers, both still accurate as of this writing (verified against the current `main` branch):
+Two structural blockers stand between today's single-directory state and after's per-group state, both still accurate as of this writing (verified against the current `main` branch):
 
-1. **`WalPosition` is a hardcoded singleton.** Two Cypher queries (`db.rs:1758` reads, `db.rs:1772` writes) address `{id: 'singleton'}` explicitly. `WalPosition.id` is already `STRING PRIMARY KEY`, so the table itself already supports N distinct rows — only these two call sites need to stop hardcoding the key.
-2. **One WAL directory and one writer per instance.** `crates/core/src/app_state.rs:45` (`pub wal_dir: Option<PathBuf>`) and `:49` (`pub wal_writer: Arc<Mutex<Option<WalWriter>>>`) are both singular. Making this multi-stream is a structural change to `AppState`, not a config toggle.
+1. **`WalPosition` is a hardcoded singleton today.** Two Cypher queries (`db.rs:1758` reads, `db.rs:1772` writes) address `{id: 'singleton'}` explicitly. `WalPosition.id` is already `STRING PRIMARY KEY`, so the table itself already supports N distinct rows — only these two call sites need to stop hardcoding the key.
+2. **There is one shared WAL directory and one shared writer per instance today.** `crates/core/src/app_state.rs:45` (`pub wal_dir: Option<PathBuf>`) and `:49` (`pub wal_writer: Arc<Mutex<Option<WalWriter>>>`) are both singular — one directory, one writer, for every group at once. Making this multi-stream (N directories, N writers) is a structural change to `AppState`, not a config toggle.
 
-A single WAL directory today also holds more than WAL files: `.checkpoints/` (#365, merged) and `.wal-bounds.json` (#375, merged) live alongside the `*.jsonl` files, and the three checkpoint IPC methods (`knowledge_wal_mark_create`/`_list`/`_delete`, `crates/core/src/handlers.rs:1525`/`:1580`/`:1590`) currently resolve their target via `require_wal_dir(&state)` (`handlers.rs:1514`) — a single directory, with no notion of which stream it belongs to.
+Today's single, shared WAL directory also holds more than WAL files: `.checkpoints/` (#365, merged) and `.wal-bounds.json` (#375, merged) live alongside the `*.jsonl` files, and the three checkpoint IPC methods (`knowledge_wal_mark_create`/`_list`/`_delete`, `crates/core/src/handlers.rs:1525`/`:1580`/`:1590`) currently resolve their one shared target via `require_wal_dir(&state)` (`handlers.rs:1514`) — with no notion of which group's stream it belongs to, because today there is only one.
 
-**Why seq spaces must never cross streams.** Every `WalWriter` derives `global_seq` from its own directory via `scan_max_seq` and counts up from there, so two independently-published WAL streams both legitimately contain `seq: 1, 2, 3…`. Comparing or writing a seq from one stream against another group's `WalPosition` is a category error, not just a bug — with one directory per group, this is enforced by construction (there is no shared numberline to collide on) rather than left to code-review discipline.
+**Why seq spaces must never cross streams, once there are several.** Every `WalWriter` derives `global_seq` from its own subdirectory via `scan_max_seq` and counts up from there, so two independently-published WAL streams both legitimately contain `seq: 1, 2, 3…`. Comparing or writing a seq from one group's stream against a different group's `WalPosition` row is a category error, not just a bug — with one subdirectory per group, this is enforced by construction (there is no shared numberline left to collide on) rather than left to code-review discipline.
 
 ## User Scenarios & Testing *(mandatory)*
 
