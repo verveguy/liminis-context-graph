@@ -186,8 +186,12 @@ are themselves multi-group by design or take arbitrary input:
 - `handle_delete_by_group` (#361/ADR-0361) — its forced rebind pass can write into a *foreign,
   non-purged* owning group's `RelatesToNode_` rows in the same `drain_mutations()` call.
   ADR-0361 itself flagged this and deferred the resolution to this issue.
-- `backfill.rs`, `canonicalize.rs`, `reprocess_relations.rs` — three maintenance passes that
-  select `RelatesToNode_` candidates database-wide, with no `group_id` filter.
+- `backfill.rs`, `canonicalize.rs` — two maintenance passes that select `RelatesToNode_`
+  candidates database-wide, with no `group_id` filter. (`reprocess_relations.rs`'s
+  `reprocess_relation_types` was originally implemented alongside these two, copying their
+  rationale — but its own Phase A already scopes candidate selection to `params.group_id` via
+  `list_edges_for_scope`, so it does *not* belong here; Review corrected it to route to that group
+  directly instead. It was never one of the four.)
 - `handle_query_cypher` — an arbitrary-Cypher escape hatch with no group attribution at all by
   design.
 
@@ -292,12 +296,39 @@ needs the value, rather than an up-front cost that scales with however many grou
 
 ### Negative / Residual risks
 
-- The four FR-004-exempted call sites (group-scoped purge's foreign-group rebind,
-  `backfill.rs`/`canonicalize.rs`/`reprocess_relations.rs`, raw Cypher) have WAL-replay coverage
+- The FR-004-exempted call sites (group-scoped purge's foreign-group rebind, `backfill.rs`'s and
+  `canonicalize.rs`'s database-wide `RelatesToNode_` passes, raw Cypher) have WAL-replay coverage
   that doesn't match their actual data's group. This is a deliberate, documented gap (the DB write
   itself is never affected), but it means a full rebuild of a non-default group from its own WAL
   directory alone will not reproduce a maintenance-pass mutation that happened to touch that
-  group's data — only a rebuild that includes the default group's stream will.
+  group's data — only a rebuild that includes the default group's stream will. Found during
+  Review: `reprocess_relation_types` (`reprocess_relations.rs`) was originally routed through
+  `DEFAULT_GROUP_ID` alongside these three, but unlike them it is genuinely single-group scoped —
+  its Phase A candidate selection already filters by `params.group_id` via
+  `list_edges_for_scope` — so it was corrected to route to that group directly; it does not belong
+  on this list.
+- The non-fallback ("checkpoint-drop") branch of `run_full_recovery_sequence` only catches up the
+  default group's own app-WAL tail. `attempt_checkpoint_drop` renames aside lbug's own
+  engine-level `.wal` file, which is shared across every group's not-yet-durable writes, not just
+  the default group's — if that discarded engine WAL held a pending write for a non-default group
+  at the moment of corruption, this path never replays it back in. That data is still recoverable
+  via an explicit per-group `knowledge_rebuild_from_wal` (the group's own `*.jsonl` files are
+  untouched), but the live graph can silently diverge from the WAL in the meantime, with no error
+  surfaced. Fixing this fully would require deriving a per-group cursor and replaying every
+  group's tail on this path too, not only the fallback's full-rebuild branch (which this PR's
+  Review did fix, see the multi-group recovery section above) — flagged here as a known,
+  accepted gap rather than expanded scope for this issue.
+- `migrate_wal_root_if_needed`'s per-entry `if dest.exists() { continue }` check (used for
+  `.checkpoints/`'s single-rename relocation) cannot distinguish "a prior partial migration run
+  already moved this" from "the default group's own directory now legitimately has its own
+  `.checkpoints/` for an unrelated reason." Both callers treat a migration failure as non-fatal,
+  so if migration fails after relocating the `*.jsonl` files but before `.checkpoints/`, and the
+  service starts up and creates a checkpoint under the (now correctly-resolving) default group
+  before migration is retried, the retry will see `<root>/liminis/.checkpoints/` already exists
+  and skip merging in the true legacy history — which then stays orphaned at the WAL root's top
+  level forever (never migrated, never surfaced as a group by `list_group_wal_dirs`'s round-trip
+  filter either). A full fix would need to merge two `.checkpoints/` trees rather than skip
+  wholesale; accepted as a narrow, compound-failure-required edge case rather than expanded scope.
 - The bijective percent-encoding for unsafe `group_id`s is new surface area with no prior
   precedent in this codebase (unlike `checkpoint::validate_name`, which #365 already established).
   A `group_id` that needs encoding produces a directory name a human can't read at a glance

@@ -1669,7 +1669,14 @@ fn resolve_group_wal_dir(state: &AppState, group_id: &str) -> Result<std::path::
         .wal_root
         .as_deref()
         .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
-    wal_group::group_wal_dir(root, group_id)
+    let dir_name = wal_group::encode_group_dir_name(group_id)?;
+    // Same case-insensitive-filesystem guard as `AppState::with_wal_writer` (issue #378) —
+    // required here too: `knowledge_wal_mark_create` can be the very first operation ever
+    // performed against a new group_id (checkpoint creation doesn't require a prior write), and
+    // `checkpoint::create`'s `fs::create_dir_all` would otherwise interleave two case-colliding
+    // groups' directories with no warning.
+    wal_group::check_no_case_insensitive_collision(root, &dir_name)?;
+    Ok(root.join(dir_name))
 }
 
 /// Reads an optional `group_id` param, defaulting to `DEFAULT_GROUP_ID` (issue #378 FR-012) —

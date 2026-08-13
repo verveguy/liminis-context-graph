@@ -323,14 +323,18 @@ pub fn run_full_recovery_sequence(
         conn.count_nodes("Episodic").unwrap_or(0)
     };
 
-    // ── Step 3: drop FTS, replay WAL mutations, rebuild indexes, persist position(s) ────
+    // ── Step 3: drop FTS, replay WAL mutations (position(s) persisted only after Step 4) ────
+    // Positions are collected here but deliberately NOT written yet — see Step 4's comment for
+    // why persisting before the index rebuild succeeds would defeat the `null` = "unknown, needs
+    // full rebuild" safety invariant the rest of this module relies on.
     let replay_started = Instant::now();
-    let mutations_replayed = if used_fallback {
+    let (mutations_replayed, positions_to_persist) = if used_fallback {
         // The DB was just wiped in its entirety — restore every group's data, not only
-        // `group_id`'s, and persist each group's own applied_seq as it's replayed.
+        // `group_id`'s.
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
         let mut total = 0u64;
+        let mut positions = Vec::new();
         for (gid, dir) in crate::wal_group::list_group_wal_dirs(wal_root)? {
             let group_stats = WalReplayer::new(&dir).replay_opts(
                 &conn,
@@ -341,14 +345,10 @@ pub fn run_full_recovery_sequence(
             )?;
             total += group_stats.lines_replayed;
             if let Some(seq) = group_stats.last_committed_seq {
-                if let Err(e) = conn.set_applied_seq(&gid, seq) {
-                    eprintln!(
-                        "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
-                    );
-                }
+                positions.push((gid, seq));
             }
         }
-        total
+        (total, positions)
     } else {
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
@@ -359,20 +359,11 @@ pub fn run_full_recovery_sequence(
                 ..Default::default()
             },
         )?;
-        // Persist the applied-WAL-seq position (issue #353) — a deliberate extension beyond
-        // FR-004's literal text (which names knowledge_rebuild_from_wal), since this
-        // autonomous WAL-corruption self-heal produces an equally-precise ReplayStats via the
-        // same replay path. Skipping this would leave applied_seq at null immediately after
-        // every self-heal even though a better value was just computed. Non-fatal: a missed
-        // write doesn't undo the recovery that just succeeded.
-        if let Some(seq) = stats.last_committed_seq {
-            if let Err(e) = conn.set_applied_seq(group_id, seq) {
-                eprintln!(
-                    "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} (non-fatal): {e}"
-                );
-            }
-        }
-        stats.lines_replayed
+        let positions = stats
+            .last_committed_seq
+            .map(|seq| vec![(group_id.to_string(), seq)])
+            .unwrap_or_default();
+        (stats.lines_replayed, positions)
     };
     let replay_elapsed_ms = replay_started.elapsed().as_millis() as u64;
 
@@ -393,6 +384,23 @@ pub fn run_full_recovery_sequence(
         // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
         // a full rebuild is the only way the name index observes the replayed data.
         conn.rebuild_name_index()?;
+        // Persist the applied-WAL-seq position(s) (issue #353) — a deliberate extension beyond
+        // FR-004's literal text (which names knowledge_rebuild_from_wal), since this autonomous
+        // WAL-corruption self-heal produces an equally-precise ReplayStats via the same replay
+        // path. Deliberately placed *after* the index rebuild above succeeds (both calls are
+        // fatal via `?`, so this line is unreached on failure): persisting a "known" position
+        // for data whose indexes were never confirmed rebuilt would silently defeat the `null` =
+        // "unknown, needs full rebuild" safety invariant `backfill_applied_seq_if_absent`/
+        // `knowledge_status` rely on elsewhere — a caller reading a non-null `applied_seq` after
+        // a failed rebuild would wrongly skip re-deriving it. Each write is independently
+        // non-fatal: a missed write doesn't undo the recovery that already succeeded.
+        for (gid, seq) in &positions_to_persist {
+            if let Err(e) = conn.set_applied_seq(gid, *seq) {
+                eprintln!(
+                    "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
+                );
+            }
+        }
     }
 
     sink.emit(TelemetryEvent::WalAutoRecovery {

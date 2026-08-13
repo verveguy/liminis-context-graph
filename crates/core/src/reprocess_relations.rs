@@ -19,7 +19,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app_state::AppState, corrections, db::value_as_string, error::Error, ontology::Ontology,
-    wal_exec, wal_group::DEFAULT_GROUP_ID,
+    wal_exec,
 };
 
 const PAGE_SIZE: usize = 500;
@@ -263,6 +263,7 @@ pub async fn reprocess_relation_types(
         let batch = batch.to_vec();
         let db_c = Arc::clone(&db);
         let state_c = Arc::clone(&state);
+        let gid_c = params.group_id.clone();
         let _write_guard = state.write_lock.write().await;
 
         let processed = batch_idx * WRITE_BATCH_SIZE;
@@ -285,10 +286,10 @@ pub async fn reprocess_relation_types(
                     json!({ "uuid": uuid, "rt": rt }),
                 )?;
             }
-            // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
-            // routes through the default group's writer, a documented limitation rather than
-            // mutation-level attribution.
-            wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+            // Unlike backfill.rs/canonicalize.rs's genuinely database-wide passes, Phase A above
+            // already scoped every candidate edge to params.group_id via list_edges_for_scope —
+            // so this flush routes to that same group directly, not the default group's writer.
+            wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
             Ok(batch.len())
         })
         .await??;

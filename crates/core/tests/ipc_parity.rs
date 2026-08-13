@@ -4737,6 +4737,42 @@ async fn wal_mark_create_fails_when_applied_seq_is_null() {
     assert!(!wal_dir.path().join("liminis").join(".checkpoints").exists());
 }
 
+/// issue #378 (Review finding): `knowledge_wal_mark_create` can be the very first operation
+/// against a brand-new `group_id` (checkpoint creation doesn't require a prior write), so its
+/// directory resolution must apply the same case-insensitive-filesystem collision guard
+/// `AppState::with_wal_writer` uses for the write path — otherwise a checkpoint call for
+/// `"acme"` would silently create/reuse the same physical directory as an existing `"Acme"` on
+/// a case-insensitive filesystem, bypassing the guard entirely.
+#[tokio::test]
+async fn wal_mark_create_rejects_case_insensitive_collision_with_existing_group_dir() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.set_applied_seq("acme", 0).unwrap();
+    }
+    let wal_dir = TempDir::new().unwrap();
+    // "Acme" already has a directory on disk (e.g. from an earlier write to that group), but no
+    // write to "acme" has ever gone through with_wal_writer — knowledge_wal_mark_create is the
+    // very first operation to touch "acme"'s directory.
+    std::fs::create_dir_all(wal_dir.path().join("Acme")).unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+
+    let v = dispatch_val(
+        1,
+        "knowledge_wal_mark_create",
+        json!({"name": "x", "group_id": "acme"}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 1, -32000);
+
+    // Confirms the rejection happened before checkpoint::create ever ran — on a case-insensitive
+    // filesystem `wal_dir.join("acme")` itself would resolve to the pre-existing "Acme" (so
+    // `.exists()` alone can't distinguish "rejected" from "silently wrote into the collision"),
+    // but no `.checkpoints/` must have been created inside it either way.
+    assert!(!wal_dir.path().join("Acme").join(".checkpoints").exists());
+}
+
 #[tokio::test]
 async fn wal_mark_create_rejects_duplicate_active_name() {
     let (db, _dir) = make_db(4);
