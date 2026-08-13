@@ -256,11 +256,14 @@ completely unaffected: pointers only ever exist on edges created through this to
   rejected** before any write happens — this is what keeps a cross-group edge from silently
   losing its pointer fields the first time a caller passes a UUID instead of a name.
 - **`knowledge_rebind_pointers`** (`{"source_group_id": "..."}`, required) re-resolves every
-  pointer whose `source_group_id` matches, after that source group's own hydration or refresh
-  cycle. It skips any pointer whose `bound_at_seq` is already at or past the current applied WAL
-  position — this is both the staleness gate and what makes a second call with no intervening
-  source-side change a true no-op. A resolution that would create a self-loop or duplicate an
-  existing directed edge invalidates the edge instead of writing a broken or redundant one,
+  pointer whose `source_group_id` matches, after that source group's own hydration, incremental
+  replay, or refresh cycle — including an ordinary `knowledge_rebuild_from_wal` targeting that one
+  group, not only a full purge-and-rehydrate (issue #378). It skips any pointer whose
+  `bound_at_seq` is already at or past `source_group_id`'s **own** applied WAL position — never
+  any other group's, even when the edge carrying the pointer lives in a third, different group —
+  this is both the staleness gate and what makes a second call with no intervening change to
+  `source_group_id`'s stream a true no-op. A resolution that would create a self-loop or duplicate
+  an existing directed edge invalidates the edge instead of writing a broken or redundant one,
   reusing `knowledge_merge_entities`'s own self-loop/dedup handling rather than a new policy.
   Returns `{checked, bound, unbound, ambiguous, invalidated_self_loop, invalidated_duplicate}`.
 - **Unbound and ambiguous edges are excluded from normal reads.** Every existing two-hop
