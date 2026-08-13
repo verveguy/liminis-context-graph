@@ -119,7 +119,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   present-but-`""` currently produce three different outcomes (hard failure, hard failure, and
   silent drop, respectively — see Background). All three MUST reach the same outcome: item
   dropped, drop counted, chunk succeeds. This includes the empty-string case that
-  `episode.rs:218` already handles silently today — it must now also be counted (see FR-007).
+  `episode.rs:254` already handles silently today — it must now also be counted (see FR-007).
 - **Edge with missing `source_name`/`target_name`**: same bare-`String`, no-default shape as
   `name`, so the same per-item drop logic applies. Post-#281 the tool schema constrains these
   fields to an enum of already-extracted entity names, so a well-behaved model shouldn't emit a
@@ -173,7 +173,7 @@ parse path; assert both still return the existing hard error, unchanged from cur
   say so in the ADR" — but the outcome MUST NOT be reported as `clean`, and MUST be visibly
   different from both `recovered` and `malformed` so the two signals aren't conflated.
 - **FR-007**: The drop counters in FR-003 MUST count every item dropped for being malformed,
-  regardless of which layer performs the drop. Today, `episode.rs:218` already silently drops
+  regardless of which layer performs the drop. Today, `episode.rs:254` already silently drops
   empty-name entities post-parse without incrementing any counter; per the Edge Cases section,
   that silent case must now also be counted so that missing/`null`/empty-string `name` all produce
   the same observable outcome, including in telemetry. This may mean the counting responsibility

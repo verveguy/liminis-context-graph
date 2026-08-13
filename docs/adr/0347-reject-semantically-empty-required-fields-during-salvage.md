@@ -31,7 +31,7 @@ would ever persist.
 
 ```rust
 // crates/core/src/types.rs
-pub trait RequiredFieldsPresent {
+pub(crate) trait RequiredFieldsPresent {
     fn is_well_formed(&self) -> bool;
 }
 
