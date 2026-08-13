@@ -616,7 +616,7 @@ mod tests {
         let db = make_db_with_schema(&dir);
         {
             let conn = db.connect().unwrap();
-            conn.raw_query("CREATE (:Entity {uuid: 'orphaned-entity'})")
+            conn.raw_query("CREATE (:Entity {uuid: 'orphaned-entity', group_id: 'g'})")
                 .unwrap();
         }
         let conn = db.connect().unwrap();
@@ -704,8 +704,11 @@ mod tests {
 
     /// FR-010 (issue #378): in a multi-group database, backfilling group A must never derive
     /// its position from group B's episode, even when B's episode is the more recently created
-    /// one. A's backfill must degrade to `null` (its own episode set is empty), not silently
-    /// borrow B's cursor.
+    /// one. Group A here is "populated but episode-less" (an Entity of its own, but no episode)
+    /// — the same ambiguous state `backfill_entity_survives_episode_deletion_is_not_treated_as_fresh`
+    /// covers in the single-group case — so its backfill must degrade to `null`, not silently
+    /// borrow B's cursor (which an unscoped `count_episodics_by_group_ids`/`derive_episode_cursor`
+    /// would do, since B's episode is the only one in the database).
     #[test]
     fn backfill_does_not_borrow_a_different_groups_episode() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -715,7 +718,14 @@ mod tests {
         let db = make_db_with_schema(&dir);
         {
             let conn = db.connect().unwrap();
-            // Only group B has an episode; group A has none.
+            // Group A has an Entity of its own but no episode — populated, not genuinely fresh.
+            conn.raw_query(
+                "CREATE (:Entity {uuid: 'entity-group-a', name: 'A', group_id: 'group-a', \
+                 labels: ['Entity'], created_at: timestamp('2026-01-01'), \
+                 name_embedding: [1.0, 0.0, 0.0, 0.0], summary: '', attributes: '{}'})",
+            )
+            .unwrap();
+            // Only group B has an episode.
             conn.raw_query(
                 "CREATE (:Episodic {uuid: 'ep-group-b', name: 'Test', group_id: 'group-b', \
                  created_at: timestamp('2026-01-01'), source: 'text', \
