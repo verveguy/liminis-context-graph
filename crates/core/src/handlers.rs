@@ -783,12 +783,17 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
     let _guard = state.write_lock.write().await;
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
+        // The request names no group_id, but this deletes exactly one episode in exactly one
+        // group — unlike the genuinely multi-group FR-004-exempt sites, that group is knowable
+        // by reading it before the delete runs, so the WAL flush below routes to it directly
+        // rather than the default group's writer. A missing episode (already deleted, or a
+        // bogus uuid) has no group to route to and no mutation to flush either — DEFAULT_GROUP_ID
+        // is used only as a harmless fallback for that no-op case.
+        let group_id = conn
+            .get_episode_group_id(&episode_uuid)?
+            .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
-        // Deletes by UUID with no group_id in the request (FR-004): the target episode's own
-        // group isn't looked up ahead of the delete, so — mirroring handle_delete_by_group's
-        // documented limitation — this routes through the default group's writer rather than
-        // inventing mutation-level attribution.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
         Ok(())
     })
     .await??;
@@ -1179,11 +1184,17 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
-        // `group_ids` is optional and, when given, an array — a single call can span multiple
-        // groups (or none/all), so per-operation attribution can't name one group (FR-004).
-        // Routes through the default group's writer, the same documented limitation as
-        // handle_delete_by_group.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // `group_ids` is optional and, when given, an array — a call with no filter or more
+        // than one group can genuinely span multiple groups, so per-operation attribution can't
+        // name one group there (FR-004), and it routes through the default group's writer, the
+        // same documented limitation as handle_delete_by_group. But a caller that named exactly
+        // one group is not ambiguous — route to that group directly rather than discarding
+        // information the request already gave us.
+        let target_group = match group_ids_owned.as_deref() {
+            Some([single]) => single.as_str(),
+            _ => DEFAULT_GROUP_ID,
+        };
+        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
         Ok(uuids)
     })
     .await??;
@@ -1225,8 +1236,14 @@ async fn handle_delete_chunk_episode(
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
         let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
-        // Same FR-004 rationale as handle_delete_by_source above.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // Same FR-004 rationale as handle_delete_by_source above: a single named group is
+        // routed there directly; no filter, or more than one group, falls back to the default
+        // group's writer as a genuinely multi-group call.
+        let target_group = match group_ids_owned.as_deref() {
+            Some([single]) => single.as_str(),
+            _ => DEFAULT_GROUP_ID,
+        };
+        wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
         Ok(uuids)
     })
     .await??;
@@ -3548,20 +3565,19 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    // This whole-instance recovery path targets the default group's own WAL directory (issue
-    // #378) — matching the startup backfill's scope, and consistent with FR-009 single-group
-    // parity for the common case.
-    let wal_dir = state
-        .wal_root
-        .as_deref()
-        .map(|root| wal_group::group_wal_dir(root, DEFAULT_GROUP_ID))
-        .transpose()?;
+    // "rebuild_from_workspace_wal" wipes and replays the *entire* embedded DB (every group's
+    // data), so it needs the WAL root, not one group's own subdirectory — every group found
+    // under it is replayed back in (issue #378: FR-009's single-group-parity guarantee must not
+    // become "every non-default group's data silently vanishes" the moment a second group
+    // exists).
+    let wal_root = state.wal_root.clone();
     let embedding_dim = state.embedder.dim();
 
     let result = match strategy.as_str() {
         "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
         "rebuild_from_workspace_wal" => {
-            let wal_dir = wal_dir.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
+            let wal_root =
+                wal_root.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
             // Preset to false before attempting the rebuild: this strategy actively drops and
             // rebuilds the indices, and build_indices_and_constraints() below is fatal via `?`,
             // so there is no later success-path hook to store `false` from on failure. Scoped to
@@ -3570,7 +3586,7 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             state.indices_built.store(false, Ordering::Release);
             recover_rebuild_from_workspace_wal(
                 &db_path,
-                &wal_dir,
+                &wal_root,
                 embedding_dim,
                 Arc::clone(&state.sink),
             )
@@ -3664,13 +3680,16 @@ async fn handle_knowledge_recover_full(
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
 
     let db_path = state.db_path.clone();
-    // This autonomous corruption self-heal targets the default group's own WAL directory (issue
-    // #378), matching the startup backfill's scope (FR-009 single-group parity).
+    // The default group's own WAL directory is run_full_recovery_sequence's target for its
+    // non-destructive checkpoint-drop path (issue #378, matching the startup backfill's scope,
+    // FR-009 single-group parity) — but its fallback (used when checkpoint-drop itself fails)
+    // wipes the *entire* embedded DB, every group's data, not just the default group's. Pass the
+    // WAL root, not just the default group's subdirectory, so that fallback can replay every
+    // group back in rather than silently losing every non-default group's data.
     let wal_root = state
         .wal_root
-        .as_deref()
+        .clone()
         .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
-    let wal_dir = wal_group::group_wal_dir(wal_root, DEFAULT_GROUP_ID)?;
     let embedding_dim = state.embedder.dim();
     let sink = Arc::clone(&state.sink);
 
@@ -3683,7 +3702,7 @@ async fn handle_knowledge_recover_full(
         crate::recovery::run_full_recovery_sequence(
             &db_path,
             DEFAULT_GROUP_ID,
-            &wal_dir,
+            &wal_root,
             embedding_dim,
             sink,
         )
@@ -3777,14 +3796,21 @@ async fn recover_drop_lbug_wal(
     .await?
 }
 
+/// Wipes and rebuilds the entire embedded DB from `wal_root`'s WAL content. `wal_root` is the
+/// WAL **root**, not one group's own subdirectory (issue #378): the DB this function deletes and
+/// reopens holds every group's data, so it must replay **every** group directory found under
+/// `wal_root`, not only the default group's — otherwise every non-default group's data would
+/// vanish from the live graph the moment this strategy runs on a multi-group instance, even
+/// though its own WAL files were never touched (silently unavailable, not deleted, but a
+/// correctness bug either way; FR-009's "additive, not a replacement" guarantee extends here).
 async fn recover_rebuild_from_workspace_wal(
     db_path: &str,
-    wal_dir: &std::path::Path,
+    wal_root: &std::path::Path,
     embedding_dim: usize,
     sink: std::sync::Arc<dyn crate::telemetry::TelemetrySink>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
-    let wal_dir = wal_dir.to_path_buf();
+    let wal_root = wal_root.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
         // Remove existing DB and siblings
         let path = std::path::Path::new(&db_path);
@@ -3810,14 +3836,31 @@ async fn recover_rebuild_from_workspace_wal(
             // TODO(follow-up): recover_rebuild_from_workspace_wal does not yet surface
             // fidelity_warning in RecoverOutcome — a high failure rate here is still silent.
             // See #128 for context; address in a follow-up issue.
-            let stats = crate::replay::WalReplayer::new(&wal_dir).replay(&conn)?;
+            let (mut lines_replayed, mut unrecognised_lines) = (0u64, 0u64);
+            let (mut failed_lines, mut unparseable_lines, mut legacy_skipped_lines) =
+                (0u64, 0u64, 0u64);
+            for (gid, dir) in wal_group::list_group_wal_dirs(&wal_root)? {
+                let stats = crate::replay::WalReplayer::new(&dir).replay(&conn)?;
+                if let Some(seq) = stats.last_committed_seq {
+                    if let Err(e) = conn.set_applied_seq(&gid, seq) {
+                        eprintln!(
+                            "liminis-context-graph: rebuild_from_workspace_wal: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
+                        );
+                    }
+                }
+                lines_replayed += stats.lines_replayed;
+                unrecognised_lines += stats.unrecognised_lines;
+                failed_lines += stats.failed_lines;
+                unparseable_lines += stats.unparseable_lines;
+                legacy_skipped_lines += stats.legacy_skipped_lines;
+            }
             sink.emit(TelemetryEvent::WalReplayComplete {
                 ts_ms: now_ms(),
-                mutations_replayed: stats.lines_replayed,
-                unrecognised_lines: stats.unrecognised_lines,
-                failed_lines: stats.failed_lines,
-                unparseable_lines: stats.unparseable_lines,
-                legacy_skipped_lines: stats.legacy_skipped_lines,
+                mutations_replayed: lines_replayed,
+                unrecognised_lines,
+                failed_lines,
+                unparseable_lines,
+                legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
             conn.build_indices_and_constraints()?;

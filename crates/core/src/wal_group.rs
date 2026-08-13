@@ -111,14 +111,71 @@ pub fn group_wal_dir(wal_root: &Path, group_id: &str) -> Result<PathBuf, Error> 
     Ok(wal_root.join(encode_group_dir_name(group_id)?))
 }
 
+/// Defends against a collision `encode_group_dir_name` cannot see: it is bijective at the
+/// **string** level (FR-005), but on a case-insensitive filesystem (the default for macOS APFS
+/// and Windows NTFS — both plausible dev/deployment targets), two distinct `group_id`s that
+/// already satisfy `checkpoint::validate_name` and differ only by case (e.g. `"Acme"` and
+/// `"acme"`) both pass through unchanged and resolve to the *same physical directory*,
+/// interleaving both groups' `*.jsonl` files, `.checkpoints/`, and `.wal-bounds.json` and
+/// corrupting both streams' `global_seq` numbering. FR-005 mandates that an already-safe
+/// `group_id` use itself as the directory name unchanged, so this cannot be closed by changing
+/// the encoding scheme without a spec amendment — instead, called once, the first time
+/// `dir_name` would be created (see `AppState::with_wal_writer`), it fails loudly if an
+/// existing, differently-cased sibling directory would collide, rather than letting both groups
+/// silently share one directory.
+///
+/// A no-op when `dir_name`'s own directory already exists (the ordinary "reopen an existing
+/// group's writer" case, not a fresh collision) or when `wal_root` doesn't exist yet.
+pub fn check_no_case_insensitive_collision(wal_root: &Path, dir_name: &str) -> Result<(), Error> {
+    if !wal_root.exists() {
+        return Ok(());
+    }
+    // Deliberately does not short-circuit via `wal_root.join(dir_name).exists()`: on a
+    // case-insensitive filesystem that check itself resolves "acme" to an existing "Acme"
+    // directory, so it would wrongly treat every collision as "already exists, this is just a
+    // reopen" and never reach the mismatch below. Scanning entries and comparing byte-for-byte
+    // instead makes this function's own behavior correct regardless of the host filesystem's
+    // case sensitivity — the whole point of the check.
+    for entry in fs::read_dir(wal_root)? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(existing_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if existing_name == dir_name {
+            return Ok(()); // Exact match — reopening this group's own existing directory.
+        }
+        if existing_name.eq_ignore_ascii_case(dir_name) {
+            return Err(Error::Ipc(format!(
+                "cannot create WAL directory {dir_name:?} under {wal_root:?}: it would collide \
+                 case-insensitively with the existing directory {existing_name:?} on a \
+                 case-insensitive filesystem (e.g. macOS APFS, Windows NTFS) — both group_ids \
+                 would silently interleave into one physical directory. Choose a group_id that \
+                 doesn't differ from an existing one only by letter case."
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Enumerates every group that currently has a WAL directory under `wal_root` — used by
 /// `knowledge_status`'s per-group `applied_seq`/`max_seq` map (FR-007). Returns an empty list
 /// (not an error) when `wal_root` doesn't exist yet, matching "no stream" being a normal state
 /// (see Edge Cases: "A group with no writes yet has no directory").
 ///
-/// A subdirectory whose name doesn't decode cleanly (foreign/corrupt content placed directly
-/// under the WAL root) is silently skipped rather than failing the whole enumeration — one bad
-/// entry must not hide every legitimate group's status.
+/// A subdirectory whose name doesn't decode cleanly, or doesn't round-trip back through
+/// [`encode_group_dir_name`] to the exact same directory name, is silently skipped rather than
+/// failing the whole enumeration — one bad entry must not hide every legitimate group's status.
+/// The round-trip check is what excludes housekeeping directories that can legitimately sit at
+/// the WAL root's top level but are never themselves a group's directory — most notably a
+/// pre-378 `.checkpoints/` left behind by a migration that hasn't run yet or failed
+/// (`migrate_wal_root_if_needed` is non-fatal on error, per `AppState::from_env`): `.checkpoints`
+/// decodes to itself (it contains no `%`), but `encode_group_dir_name(".checkpoints")` would
+/// percent-encode the leading `.` into a different string, so the round-trip fails and the entry
+/// is correctly excluded rather than misreported as a real `group_id` in `knowledge_status`'s
+/// `wal_groups` map.
 pub fn list_group_wal_dirs(wal_root: &Path) -> Result<Vec<(String, PathBuf)>, Error> {
     if !wal_root.exists() {
         return Ok(Vec::new());
@@ -134,7 +191,9 @@ pub fn list_group_wal_dirs(wal_root: &Path) -> Result<Vec<(String, PathBuf)>, Er
             continue;
         };
         if let Ok(group_id) = decode_group_dir_name(name) {
-            out.push((group_id, path));
+            if matches!(encode_group_dir_name(&group_id), Ok(re_encoded) if re_encoded == name) {
+                out.push((group_id, path));
+            }
         }
     }
     Ok(out)
@@ -304,6 +363,28 @@ mod tests {
         assert_eq!(groups, vec!["group.b".to_string(), "liminis".to_string()]);
     }
 
+    /// A pre-378 `.checkpoints/` directory left loose at the WAL root's top level (migration
+    /// hasn't run yet, or failed and was left in place non-fatally) must never be misreported as
+    /// a real `group_id` in `knowledge_status`'s per-group map — it decodes to itself (no `%`),
+    /// but fails the round-trip re-encode check since a leading `.` is outside the safe charset.
+    #[test]
+    fn list_group_wal_dirs_excludes_a_loose_legacy_checkpoints_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("liminis")).unwrap();
+        fs::create_dir_all(tmp.path().join(CHECKPOINTS_DIR_NAME)).unwrap();
+
+        let groups: Vec<String> = list_group_wal_dirs(tmp.path())
+            .unwrap()
+            .into_iter()
+            .map(|(g, _)| g)
+            .collect();
+        assert_eq!(
+            groups,
+            vec!["liminis".to_string()],
+            "a loose .checkpoints/ directory must never appear as a reported group"
+        );
+    }
+
     #[test]
     fn migrate_is_noop_for_missing_root() {
         let tmp = tempfile::tempdir().unwrap();
@@ -423,5 +504,43 @@ mod tests {
             .join("group-a")
             .join("stray.jsonl")
             .exists());
+    }
+
+    #[test]
+    fn collision_check_rejects_a_differently_cased_existing_sibling() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("Acme")).unwrap();
+
+        let err = check_no_case_insensitive_collision(tmp.path(), "acme").unwrap_err();
+        assert!(
+            err.to_string().contains("collide"),
+            "error must explain the case-insensitive collision: {err}"
+        );
+    }
+
+    #[test]
+    fn collision_check_allows_reopening_its_own_existing_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("acme")).unwrap();
+
+        // Same name, byte-identical — this is the ordinary "writer already exists" case, not a
+        // fresh collision, and must not be rejected.
+        check_no_case_insensitive_collision(tmp.path(), "acme").unwrap();
+    }
+
+    #[test]
+    fn collision_check_allows_unrelated_sibling_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("group-a")).unwrap();
+
+        check_no_case_insensitive_collision(tmp.path(), "group-b").unwrap();
+    }
+
+    #[test]
+    fn collision_check_is_a_noop_for_missing_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+
+        check_no_case_insensitive_collision(&missing, "acme").unwrap();
     }
 }

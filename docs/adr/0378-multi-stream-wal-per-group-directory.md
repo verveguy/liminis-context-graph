@@ -79,6 +79,27 @@ recover every group's identity for `knowledge_status`'s per-group map (FR-007) w
 table. Only an empty `group_id`, or one whose encoded name would exceed the 200-char bound, fails
 loudly at first use — there is no meaningful directory name for those.
 
+**Residual risk: the encoding is bijective at the string level only, not at the filesystem
+level, on a case-insensitive filesystem.** `checkpoint::validate_name`'s charset — which FR-005
+mandates an already-safe `group_id` pass through unchanged — is case-sensitive at the string
+level (`is_ascii_alphanumeric()` accepts both cases), so two distinct `group_id`s differing only
+by case (e.g. `"Acme"` and `"acme"`) both pass through unchanged. On a case-sensitive filesystem
+(the Linux default this codebase mostly targets in production) that's fine — they resolve to two
+distinct directories. On a case-insensitive one (the *default* for macOS APFS and Windows NTFS,
+both plausible dev/deployment targets), they resolve to the *same* physical directory, silently
+interleaving both groups' `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` and corrupting both
+streams' `global_seq` numbering. Changing the encoding to close this (e.g. always percent-encoding
+uppercase letters) would contradict FR-005's explicit text, which is a Specify-stage decision, not
+one this issue's Implement/Review stages can silently override. Instead,
+`wal_group::check_no_case_insensitive_collision`, called from `AppState::with_wal_writer` the
+first time a group's directory would be created, fails loudly if an existing sibling directory
+matches case-insensitively but not byte-for-byte, rather than letting the two groups silently
+share one directory. This closes the *silent data corruption* failure mode without touching
+FR-005's naming rule; it does not make the encoding collision-free on such a filesystem in the way
+FR-005's prose otherwise implies — that would require a Specify-stage amendment weighing
+readability (the whole point of the "already-safe passes through unchanged" case) against
+filesystem-level portability.
+
 ### FR-001: migration relocates the WAL directory's entire contents as a unit, crash-safely, with no marker file
 
 `wal_group::migrate_wal_root_if_needed(wal_root)` runs before any per-group `WalWriter` is
@@ -192,6 +213,34 @@ correspondingly group-scoped, via `count_entities_by_group_ids`/`count_episodics
 `count_relates_to_by_group_ids` (the same primitives `group_purge.rs` already used) instead of a
 whole-DB `count_nodes`. `clear_db_for_rebuild` itself is kept, unchanged, for `knowledge_clear_all`
 — which is intentionally DB-wide and out of scope for this narrowing.
+
+### The whole-instance recovery paths (`knowledge_recover`, `knowledge_recover_full`, startup self-heal) must restore every group, not only the default one
+
+`knowledge_recover {strategy: "rebuild_from_workspace_wal"}`
+(`recover_rebuild_from_workspace_wal`) and the autonomous corruption self-heal
+(`recovery::run_full_recovery_sequence`'s fallback branch, reached both from
+`knowledge_recover_full` and from startup when the initial DB open fails recoverably) both delete
+and reopen the *entire* embedded DB file — which holds every group's graph data, not just one
+group's. Before per-group WAL directories existed this was safe: the single shared WAL directory
+covered every group, so a whole-DB wipe-and-replay reconstructed everything. Found during Review:
+an earlier version of this PR passed these functions only the default group's own resolved WAL
+directory, so on a multi-group instance the DB wipe destroyed every non-default group's data from
+the live graph while only ever replaying the default group's back in — a correctness regression
+introduced specifically by the per-group split, not present pre-378. (The non-default groups' own
+`*.jsonl` files were never deleted by this bug, so the data was recoverable via an explicit
+`knowledge_rebuild_from_wal` per group — but silently vanishing from the live, queryable graph on
+an autonomous self-heal, with no indication anything was lost, is a correctness bug regardless of
+whether the underlying bytes survive on disk.)
+
+Both functions now take the WAL **root**, not one group's own subdirectory, and — specifically in
+the branches that actually wipe the DB (`recover_rebuild_from_workspace_wal` always; 
+`run_full_recovery_sequence` only in its `full_rebuild` fallback, not its non-destructive
+checkpoint-drop primary path, which never deletes anything and only needs the default group's own
+tail) — enumerate every group via `wal_group::list_group_wal_dirs(wal_root)` and replay each one
+back in, persisting each group's own `applied_seq` as it goes. The checkpoint-drop primary path
+(step 1 of `run_full_recovery_sequence`) is left scoped to the default group, since it never
+deletes existing data and only catches up a possible tail after a torn-WAL reopen — a narrower,
+lower-severity gap than the DB-wipe case, and not part of what Review found.
 
 ### FR-011: the re-bind staleness gate uses the *target* group's own applied position
 

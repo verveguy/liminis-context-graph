@@ -312,11 +312,11 @@ async fn test_delete_episode_appends_to_wal() {
         .as_str()
         .expect("expected episode_uuid");
 
-    // knowledge_delete_episode deletes by UUID with no group_id in the request, so it routes
-    // through the default group's writer (FR-004) rather than "test" (the episode's own group)
-    // — the delete mutation lands in "liminis", not "test".
-    let default_group_dir = group_wal_dir(wal_dir.path(), "liminis");
-    let lines_before = count_wal_lines(&default_group_dir);
+    // knowledge_delete_episode deletes by UUID with no group_id in the request, but the target
+    // episode's own group is looked up before the delete runs — the delete mutation lands in
+    // "test" (the episode's own group), not the default "liminis" group.
+    let owning_group_dir = group_wal_dir(wal_dir.path(), "test");
+    let lines_before = count_wal_lines(&owning_group_dir);
 
     // Delete the episode.
     let del_v = dispatch(
@@ -328,14 +328,14 @@ async fn test_delete_episode_appends_to_wal() {
     .await;
     assert_eq!(del_v["result"]["status"], "deleted", "{del_v}");
 
-    let lines_after = count_wal_lines(&default_group_dir);
+    let lines_after = count_wal_lines(&owning_group_dir);
     assert!(
         lines_after > lines_before,
         "WAL must grow after delete_episode (before={lines_before}, after={lines_after})"
     );
 
     // At least one WAL line must contain a DELETE or DETACH keyword.
-    let all_content: String = std::fs::read_dir(&default_group_dir)
+    let all_content: String = std::fs::read_dir(&owning_group_dir)
         .unwrap()
         .flatten()
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))

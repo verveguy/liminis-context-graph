@@ -520,7 +520,10 @@ async fn bootstrap_app_state(
     if let Err(e) = lcg_core::wal_group::migrate_wal_root_if_needed(&startup_wal_root) {
         eprintln!(
             "liminis-context-graph: wal root migration failed for {startup_wal_root:?} \
-             (non-fatal, existing single-stream layout is left in place): {e}"
+             (non-fatal to startup, but every per-group path below resolves under \
+             <wal_root>/<group_id> regardless — any pre-378 loose top-level WAL content at \
+             {startup_wal_root:?} stays on disk untouched but becomes invisible to this process \
+             until migration succeeds; it is not read as a fallback): {e}"
         );
     }
     // Startup eagerly backfills/recovers only the default group (issue #378) — matching
@@ -599,14 +602,18 @@ async fn bootstrap_app_state(
 
                 if is_recoverable {
                     // Attempt autonomous self-recovery before entering degraded mode (FR-001).
+                    // Pass the WAL root, not the default group's own subdirectory: the fallback
+                    // full-rebuild path inside run_full_recovery_sequence wipes the entire
+                    // embedded DB (every group's data), so it must be able to replay every
+                    // group's WAL directory back in, not only the default group's (issue #378).
                     let recovery_db_path = db_path.clone();
-                    let recovery_wal_dir = startup_wal_dir.clone();
+                    let recovery_wal_root = startup_wal_root.clone();
                     let recovery_sink = Arc::clone(&telemetry_sink);
                     let recovery_result = tokio::task::spawn_blocking(move || {
                         lcg_core::recovery::run_full_recovery_sequence(
                             &recovery_db_path,
                             lcg_core::DEFAULT_GROUP_ID,
-                            &recovery_wal_dir,
+                            &recovery_wal_root,
                             embedding_dim,
                             recovery_sink,
                         )

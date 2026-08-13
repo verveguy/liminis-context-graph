@@ -181,7 +181,10 @@ fn corrupt_lbug_wal(db_path: &str) {
 #[tokio::test]
 async fn test_run_full_recovery_sequence_torn_wal() {
     let dir = TempDir::new().unwrap();
-    let wal_dir = dir.path().join("wal");
+    // run_full_recovery_sequence now takes the WAL root, not the default group's own
+    // subdirectory (issue #378) — the actual WAL content lives under <wal_root>/liminis/.
+    let wal_root = dir.path().join("wal");
+    let wal_dir = wal_root.join("liminis");
     std::fs::create_dir_all(&wal_dir).unwrap();
 
     let ep_uuid = "ep-recovery-test-001";
@@ -204,8 +207,8 @@ async fn test_run_full_recovery_sequence_torn_wal() {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     let result = tokio::task::spawn_blocking({
         let db_path = db_path.clone();
-        let wal_dir = wal_dir.clone();
-        move || recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_dir, DIM, sink)
+        let wal_root = wal_root.clone();
+        move || recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink)
     })
     .await
     .unwrap();

@@ -790,6 +790,23 @@ impl<'db> Conn<'db> {
         )
     }
 
+    /// Returns `episode_uuid`'s own `group_id`, or `None` if no such episode exists. Used by
+    /// `handle_delete_episode` (issue #378 FR-004) to route that single episode's DELETE
+    /// mutation to its *own* group's WAL writer rather than the default group's — unlike the
+    /// FR-004-documented default-group-fallback sites, this call targets exactly one episode in
+    /// exactly one group, and that group is knowable by reading it before the delete runs, so
+    /// misrouting here isn't an inherent limitation of the operation.
+    pub fn get_episode_group_id(&self, episode_uuid: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic {uuid: $uuid}) RETURN ep.group_id",
+            serde_json::json!({ "uuid": episode_uuid }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .and_then(|row| value_as_optional_string(&row[0])))
+    }
+
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
     /// source_file + ":". Returns the UUIDs of deleted episodes.
     ///

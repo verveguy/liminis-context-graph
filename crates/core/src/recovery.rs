@@ -224,16 +224,29 @@ pub(crate) fn group_has_no_content(
 /// 3. Drop FTS indexes, replay WAL mutations at `seq >= from_seq`, rebuild indexes.
 /// 4. Return recovered `Db` with report.
 ///
-/// `wal_dir` is `group_id`'s own resolved WAL directory (not the WAL root) — today this
-/// autonomous corruption self-heal only ever targets the default group (issue #378), matching
-/// the startup backfill's own scope.
+/// `wal_root` is the WAL **root** (not one group's own directory). The non-fallback
+/// checkpoint-drop path (step 1 succeeds) only ever needs `group_id`'s own subdirectory —
+/// today always the default group, matching the startup backfill's scope — since that path
+/// never deletes the DB, only catches up a possible tail. The fallback path (`full_rebuild`,
+/// triggered when checkpoint-drop itself fails) **deletes the entire embedded DB file**, which
+/// holds every group's data, not just `group_id`'s — so replaying only `group_id`'s directory
+/// back in would silently drop every other group's data from the live graph (issue #378: FR-009
+/// requires this recovery path stay additive to the multi-group case, not a de facto
+/// single-group-only tool the moment a second group exists). The fallback branch therefore
+/// replays **every** group directory found under `wal_root` via `wal_group::list_group_wal_dirs`
+/// and persists each group's own `applied_seq`. No group's on-disk WAL files are ever deleted by
+/// this function, so a group's data remains recoverable via an explicit
+/// `knowledge_rebuild_from_wal` even if this function's own bookkeeping missed it — but silently
+/// vanishing from the live, queryable graph on an autonomous self-heal is a correctness bug this
+/// function must not have.
 pub fn run_full_recovery_sequence(
     db_path: &str,
     group_id: &str,
-    wal_dir: &Path,
+    wal_root: &Path,
     embedding_dim: usize,
     sink: Arc<dyn TelemetrySink>,
 ) -> Result<(Db, RecoveryReport), Error> {
+    let wal_dir = crate::wal_group::group_wal_dir(wal_root, group_id)?;
     sink.emit(TelemetryEvent::WalAutoRecovery {
         ts_ms: now_ms(),
         phase: "corruption_detected".to_string(),
@@ -247,7 +260,7 @@ pub fn run_full_recovery_sequence(
     // ── Step 1: checkpoint-drop (rename WAL aside, reopen DB) ────────────────
     let drop_started = Instant::now();
     let (db, used_fallback, fallback_reason) =
-        match attempt_checkpoint_drop(db_path, wal_dir, embedding_dim, &sink) {
+        match attempt_checkpoint_drop(db_path, &wal_dir, embedding_dim, &sink) {
             Ok(db) => (db, false, None),
             Err(e) => {
                 let reason = format!("drop_lbug_wal failed: {e}");
@@ -282,12 +295,15 @@ pub fn run_full_recovery_sequence(
     }
 
     // ── Step 2: episode-cursor derivation ────────────────────────────────────
+    // Only meaningful for the non-fallback path: the fallback wipes the DB entirely and
+    // replays every group from scratch (step 3 below), so there is no single group's cursor
+    // to derive here.
     let (from_seq, cursor_reason) = if used_fallback {
         // Fresh DB — no episodes, replay everything
         (0u64, CursorReason::NoEpisodes)
     } else {
         let conn = db.connect()?;
-        let (seq, reason) = derive_episode_cursor(&conn, group_id, wal_dir)?;
+        let (seq, reason) = derive_episode_cursor(&conn, group_id, &wal_dir)?;
         drop(conn);
         sink.emit(TelemetryEvent::WalAutoRecovery {
             ts_ms: now_ms(),
@@ -307,38 +323,42 @@ pub fn run_full_recovery_sequence(
         conn.count_nodes("Episodic").unwrap_or(0)
     };
 
-    // ── Step 3: drop FTS, replay WAL mutations at seq >= from_seq ────────────
+    // ── Step 3: drop FTS, replay WAL mutations, rebuild indexes, persist position(s) ────
     let replay_started = Instant::now();
-    let stats = {
+    let mutations_replayed = if used_fallback {
+        // The DB was just wiped in its entirety — restore every group's data, not only
+        // `group_id`'s, and persist each group's own applied_seq as it's replayed.
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
-        WalReplayer::new(wal_dir).replay_opts(
+        let mut total = 0u64;
+        for (gid, dir) in crate::wal_group::list_group_wal_dirs(wal_root)? {
+            let group_stats = WalReplayer::new(&dir).replay_opts(
+                &conn,
+                ReplayOptions {
+                    from_seq: 0,
+                    ..Default::default()
+                },
+            )?;
+            total += group_stats.lines_replayed;
+            if let Some(seq) = group_stats.last_committed_seq {
+                if let Err(e) = conn.set_applied_seq(&gid, seq) {
+                    eprintln!(
+                        "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
+                    );
+                }
+            }
+        }
+        total
+    } else {
+        let conn = db.connect()?;
+        schema::drop_fts_indexes(&conn);
+        let stats = WalReplayer::new(&wal_dir).replay_opts(
             &conn,
             ReplayOptions {
                 from_seq,
                 ..Default::default()
             },
-        )?
-    };
-    let replay_elapsed_ms = replay_started.elapsed().as_millis() as u64;
-
-    sink.emit(TelemetryEvent::WalAutoRecovery {
-        ts_ms: now_ms(),
-        phase: "replay_complete".to_string(),
-        from_seq: Some(from_seq),
-        cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
-        elapsed_ms: Some(replay_elapsed_ms),
-        fallback_reason: fallback_reason.clone(),
-    });
-
-    // ── Step 4: rebuild FTS + HNSW indexes, and the in-process name index ────
-    {
-        let conn = db.connect()?;
-        conn.build_indices_and_constraints()?;
-        // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
-        // a full rebuild is the only way the name index observes the replayed data.
-        conn.rebuild_name_index()?;
+        )?;
         // Persist the applied-WAL-seq position (issue #353) — a deliberate extension beyond
         // FR-004's literal text (which names knowledge_rebuild_from_wal), since this
         // autonomous WAL-corruption self-heal produces an equally-precise ReplayStats via the
@@ -352,6 +372,27 @@ pub fn run_full_recovery_sequence(
                 );
             }
         }
+        stats.lines_replayed
+    };
+    let replay_elapsed_ms = replay_started.elapsed().as_millis() as u64;
+
+    sink.emit(TelemetryEvent::WalAutoRecovery {
+        ts_ms: now_ms(),
+        phase: "replay_complete".to_string(),
+        from_seq: Some(from_seq),
+        cursor_reason: Some(cursor_reason.as_str().to_string()),
+        mutations_replayed: Some(mutations_replayed),
+        elapsed_ms: Some(replay_elapsed_ms),
+        fallback_reason: fallback_reason.clone(),
+    });
+
+    // ── Step 4: rebuild FTS + HNSW indexes, and the in-process name index ────
+    {
+        let conn = db.connect()?;
+        conn.build_indices_and_constraints()?;
+        // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
+        // a full rebuild is the only way the name index observes the replayed data.
+        conn.rebuild_name_index()?;
     }
 
     sink.emit(TelemetryEvent::WalAutoRecovery {
@@ -359,7 +400,7 @@ pub fn run_full_recovery_sequence(
         phase: "index_build_complete".to_string(),
         from_seq: Some(from_seq),
         cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
+        mutations_replayed: Some(mutations_replayed),
         elapsed_ms: None,
         fallback_reason: fallback_reason.clone(),
     });
@@ -374,7 +415,7 @@ pub fn run_full_recovery_sequence(
         phase: "recovery_complete".to_string(),
         from_seq: Some(from_seq),
         cursor_reason: Some(cursor_reason.as_str().to_string()),
-        mutations_replayed: Some(stats.lines_replayed),
+        mutations_replayed: Some(mutations_replayed),
         elapsed_ms: Some(drop_elapsed_ms + replay_elapsed_ms),
         fallback_reason,
     });
@@ -383,7 +424,7 @@ pub fn run_full_recovery_sequence(
         db,
         RecoveryReport {
             episodes_before,
-            mutations_replayed: stats.lines_replayed,
+            mutations_replayed,
             episodes_after,
             indexes_rebuilt: true,
             from_seq,
