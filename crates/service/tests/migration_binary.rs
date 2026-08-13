@@ -155,9 +155,17 @@ mod migration_binary_tests {
             new_dir.join("wal").is_dir(),
             ".lcg/wal/ must be a directory"
         );
+        // .lcg/wal/ is a WAL root with one subdirectory per group_id (issue #378): the legacy
+        // .graphiti/->.lcg/ migration above lands 001.jsonl loose at .lcg/wal/'s top level,
+        // which the #378 root migration then relocates into the default group's subdirectory
+        // on the same startup, before the socket is ready.
         assert!(
-            new_dir.join("wal").join("001.jsonl").exists(),
-            "WAL files must be migrated to .lcg/wal/"
+            new_dir
+                .join("wal")
+                .join("liminis")
+                .join("001.jsonl")
+                .exists(),
+            "WAL files must be migrated to .lcg/wal/liminis/ (issue #378 WAL-root layout)"
         );
         assert!(
             new_dir.join("ontology.yaml").exists(),
