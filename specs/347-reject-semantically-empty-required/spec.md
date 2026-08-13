@@ -98,19 +98,18 @@ blankness (as opposed to the existing "does this name resolve to a known entity"
 
 **Why this priority**: Related to User Story 1 but lower priority because a blank endpoint name is
 more likely to already be caught incidentally by existing entity-resolution logic than a blank
-`fact` is by anything. It still needs an explicit, deliberate check and a decision about which
-counter it belongs in.
+`fact` is by anything. It still needs an explicit, deliberate check.
 
 **Independent Test**: Feed a synthetic extraction response containing one edge with a blank
 `source_name` or `target_name` alongside N valid edges through `knowledge_process_chunk`. Verify
-the chunk succeeds, the edge is absent from storage, and it is reflected in a drop counter (either
-`edges_dropped_malformed` or `edges_dropped_unresolvable`, per the Assumptions section below).
+the chunk succeeds, the edge is absent from storage, and it is reflected in
+`edges_dropped_malformed`.
 
 **Acceptance Scenarios**:
 
 1. **Given** an extraction response with an edge whose `source_name` is `""` or whitespace-only,
    **When** the chunk is processed, **Then** the chunk succeeds, the edge is not persisted, and it
-   is counted in exactly one drop counter.
+   is counted in `edges_dropped_malformed`.
 2. **Given** the same for `target_name`, **When** the chunk is processed, **Then** the same
    outcome as Scenario 1 applies.
 
@@ -165,10 +164,13 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   semantics, consistent with the existing entity-name check) MUST be dropped before it reaches
   storage and MUST be counted in `edges_dropped_malformed`.
 - **FR-002**: An edge whose `source_name` or `target_name` is empty or whitespace-only MUST be
-  dropped before it reaches storage and MUST be counted in exactly one drop counter. Whether that
-  counter is `edges_dropped_malformed` (malformed at the item level, alongside FR-001) or the
-  existing `edges_dropped_unresolvable` (episode.rs:27) is explicitly left to the implementer to
-  decide and justify in the PR description — see Assumptions.
+  dropped before it reaches storage and MUST be counted in `edges_dropped_malformed` — not
+  `edges_dropped_unresolvable`. `edges_dropped_unresolvable` (episode.rs:27) reports a
+  graph-state-dependent outcome (an edge whose endpoints did not resolve against the *current*
+  graph, but might resolve later or elsewhere); a blank endpoint name can never resolve in any
+  graph, at any time, so it is an invalid item, not an unresolved one. This also keeps FR-002
+  consistent with FR-001, which routes a blank `fact` to `edges_dropped_malformed` on identical
+  reasoning — see Assumptions.
 - **FR-003**: The validation added for FR-001 and FR-002 MUST apply uniformly at all four
   extraction-response parse sites — Anthropic entities, Anthropic edges, OAI-compatible entities,
   OAI-compatible edges (`salvage_items` call sites, `crates/core/src/extractor.rs:1022`, `:1061`,
@@ -179,11 +181,22 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   the same condition — specifically `episode.rs`'s empty-name `retain` (episode.rs:242) — MUST be
   adjusted (e.g. reduced to a defensive no-op, or removed and its invariant re-verified by test)
   so the two layers remain disjoint by construction, re-establishing the invariant documented at
-  episode.rs:236-240.
+  episode.rs:236-240. Once this move happens, a blank-name entity MUST still be counted exactly
+  once in `entities_dropped_malformed` — the counter itself does not change, only the layer that
+  populates it (episode.rs:242's `retain` today; parse time after this issue) — preserving #342
+  FR-007's guarantee that missing, `null`, and empty-string `name` all produce a single observable
+  outcome at the `knowledge_process_chunk` result.
 - **FR-005**: The eval path (`crates/eval/src/runner.rs`) MUST score the same filtered item set
   that the ingest path would persist for the same extraction response — i.e., blank-name entities
   and blank-fact/blank-endpoint edges MUST be excluded from eval scoring exactly as they would be
-  dropped from storage.
+  dropped from storage. This is a direct consequence of FR-004's placement choice, not independent
+  work: `runner.rs:312` consumes the extractor's output (`outcome.result`) directly, upstream of
+  `episode.rs`'s `retain`, which is exactly why blank-name entities reach eval today. Placing the
+  blank-field check at parse time (inside `salvage_items`, per FR-004) puts it upstream of *both*
+  `episode.rs` and `runner.rs`, so eval and ingest see the same filtered set with no `runner.rs`
+  change required. If an implementation instead keeps the check downstream in `episode.rs`, FR-005
+  still holds, but only by duplicating the same logic in `runner.rs` — which is the outcome parse-
+  time placement is meant to avoid.
 - **FR-006**: `specs/342-salvage-malformed-extracted-items/spec.md:29` MUST be corrected: it
   states "`ExtractedEntity.name` and `ExtractedEdge.name` are bare `String`", but `ExtractedEdge`
   has no `name` field — it has `source_name`, `target_name`, and `fact` (all bare, non-defaulted
@@ -216,7 +229,7 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
 - **SC-001**: An extraction response containing an edge with `fact: ""` yields a chunk that
   succeeds, does not persist that edge, and reports it in a drop counter.
 - **SC-002**: An extraction response containing an edge with a blank `source_name` or
-  `target_name` yields the same outcome as SC-001, counted in whichever counter FR-002 selects.
+  `target_name` yields the same outcome as SC-001, counted in `edges_dropped_malformed`.
 - **SC-003**: An extraction response containing an entity with a blank `name` is counted exactly
   once in `entities_dropped_malformed`, never twice, after this issue's changes.
 - **SC-004**: SC-001 through SC-003 hold identically on both the Anthropic and OAI-compatible
@@ -226,13 +239,15 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
 
 ## Assumptions
 
-- **FR-002's counter choice is deliberately left open by this spec**, per the issue's explicit
-  instruction that the decision be made and justified in the PR rather than settled here. Both
-  options are defensible: `edges_dropped_malformed` groups it with other item-level parse defects
-  (consistent with how `fact` is handled under FR-001), while `edges_dropped_unresolvable` groups
-  it with the existing "this edge's endpoints don't resolve" semantics, since an empty endpoint
-  name can never resolve to an entity. Research/Plan may recommend a choice; Implement makes the
-  final call and states its reasoning in the PR description.
+- **FR-002's counter is settled as `edges_dropped_malformed`, not left to the implementer.**
+  `edges_dropped_unresolvable` is a graph-state-dependent signal (episode.rs:27, per #281
+  FR-004/FR-005) — an operator reads it as "my extraction is naming entities my graph does not yet
+  know about," a condition that can change with more data or resolution tuning. A blank endpoint
+  name can never resolve, in any graph, at any time — it is an invalid item, not an unresolved
+  reference, and counting it as unresolvable would point operators at a remedy that cannot work.
+  This is also the only choice compatible with FR-003/FR-004's placement of the check at parse
+  time: resolution runs later, in `episode.rs`, so an edge rejected at parse time never reaches the
+  code path that populates `edges_dropped_unresolvable` in the first place.
 - **The concrete implementation shape (e.g. the `is_valid` predicate signature proposed in the
   issue, exact call-site wiring, whether `episode.rs`'s `retain` is deleted or kept as a defensive
   no-op) is a Plan/Implement-stage decision, not fixed by this spec.** The issue's suggested
@@ -240,8 +255,8 @@ scored matches what `knowledge_process_chunk` would have persisted for the same 
   one mechanism — is a reasonable default and satisfies FR-001 through FR-005 in one pass (moving
   validation to parse time means both `episode.rs` and `runner.rs`, which both consume the same
   parsed result, automatically see the same filtered set — resolving FR-005 as a side effect
-  rather than requiring separate `runner.rs` changes). Research should confirm this before Plan
-  commits to it.
+  rather than requiring separate `runner.rs` changes, per FR-005's own text). Research should
+  confirm this before Plan commits to it.
 - `str::trim().is_empty()` is the intended blankness test, matching the existing entity-name check
   at episode.rs:242 exactly (no new whitespace-detection semantics are introduced).
 - This issue does not change entity-side *behavior* (blank names were already dropped and counted
