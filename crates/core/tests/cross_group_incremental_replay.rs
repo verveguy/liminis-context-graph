@@ -137,11 +137,6 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
             ..Default::default()
         })
         .unwrap();
-        // Group L's own applied position is set to a deliberately different, larger value than
-        // anything group B will reach — proves the rebind below keys off B's position, not L's
-        // (a bug that compared against the wrong group's position would still "work" here only
-        // by accident if it happened to use a smaller number).
-        conn.set_applied_seq(GROUP_LAYER, 999).unwrap();
     }
 
     let wal_dir = TempDir::new().unwrap();
@@ -170,6 +165,20 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
         "target must be unresolved before group B has any content: {add_v}"
     );
     assert_eq!(add_v["result"]["target_node_uuid"], "");
+
+    // Group L's own applied position is set to a deliberately different, larger value than
+    // anything group B will reach — proves the rebind below keys off B's position, not L's (a
+    // bug that compared against the wrong group's position would still "work" here only by
+    // accident if it happened to use a smaller number). Set *after* the dispatch above rather
+    // than before it (issue #383): that call now legitimately advances GROUP_LAYER's own
+    // applied_seq via `wal_flush_ungrouped`, so seeding the sentinel any earlier would just be
+    // overwritten by the real value the fix now produces, rather than surviving as a no-op the
+    // way it did while the bug this issue fixes was still present.
+    {
+        let db1 = state.db.load_full().unwrap();
+        let conn = db1.connect().unwrap();
+        conn.set_applied_seq(GROUP_LAYER, 999).unwrap();
+    }
 
     // Group B now receives its first WAL content — a genuinely incremental replay (from_seq: 0
     // against a group that is currently empty in the DB, not a purge-and-rehydrate cycle).
@@ -251,6 +260,137 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
         Some(0),
         "bound_at_seq must reflect group B's own applied position, not any other group's"
     );
+}
+
+/// Issue #383 User Story 2 / SC-003: a target group built *entirely* through the assertion API
+/// (`knowledge_assert_entity`, no episode ingest, no raw WAL replay at all) must still make
+/// FR-011's re-bind staleness gate fire when it receives further assert-API content — this is
+/// the motivating correctness case for the issue, not just `knowledge_status`'s cosmetic
+/// `applied_seq` reporting (that's `assert.rs`'s `knowledge_status_reflects_assert_only_writes`).
+/// Before this fix, `wal_flush_ungrouped` never advanced `applied_seq`, so a target group's
+/// position would stay permanently `null` no matter how much assert-API content it received —
+/// the staleness gate would never observe an advance and would never fire.
+#[tokio::test]
+async fn rebind_staleness_gate_fires_for_target_group_built_entirely_via_assert_api() {
+    const GROUP_LAYER2: &str = "layer-l2";
+    const GROUP_TARGET: &str = "target-g";
+
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+    let state = make_state_with_wal(db, wal_root);
+
+    // Source entity, itself created purely via the assert API.
+    let hub_v = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "layer-hub", "group_id": GROUP_LAYER2}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&hub_v, 1);
+    let hub_uuid = hub_v["result"]["entity_uuid"].as_str().unwrap().to_string();
+
+    // Cross-group pointer into GROUP_TARGET, created before that group has any content at all —
+    // Foreign-by-name, starts Unbound.
+    let add_v = dispatch_val(
+        2,
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "REFERENCES",
+            "group_id": GROUP_LAYER2,
+            "source": {"uuid": hub_uuid},
+            "target": {"source_group_id": GROUP_TARGET, "endpoint_name": "widget"},
+            "fact": "layer-hub references widget",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&add_v, 2);
+    let edge_uuid = add_v["result"]["uuid"].as_str().unwrap().to_string();
+    assert_eq!(
+        add_v["result"]["cross_group_pointers"]["dst"]["binding_state"], "unbound",
+        "target must be unresolved before group target has any content: {add_v}"
+    );
+
+    // GROUP_TARGET has received no writes of its own yet — its applied_seq must be null (SC-001's
+    // reproduction baseline), confirming the staleness gate has nothing to observe yet.
+    let status_before = dispatch_val(3, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status_before, 3);
+    assert!(
+        status_before["result"]["wal_groups"]
+            .get(GROUP_TARGET)
+            .is_none()
+            || status_before["result"]["wal_groups"][GROUP_TARGET]["applied_seq"].is_null(),
+        "group target must report no applied_seq before it has received any writes: \
+         {status_before}"
+    );
+
+    // Further content asserted into the target group — entirely through the assert API, the
+    // pattern issue #379 exists to serve.
+    let widget_v = dispatch_val(
+        4,
+        "knowledge_assert_entity",
+        json!({"name": "widget", "group_id": GROUP_TARGET}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&widget_v, 4);
+    let widget_uuid = widget_v["result"]["entity_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // SC-001: group target's applied_seq must now be non-null and consistent with its content —
+    // this is the fix itself, exercised on the group the FR-011 gate is about to read from.
+    let target_applied_seq = {
+        let db2 = state.db.load_full().unwrap();
+        let conn = db2.connect().unwrap();
+        conn.get_applied_seq(GROUP_TARGET).unwrap()
+    };
+    assert!(
+        target_applied_seq.is_some(),
+        "group target's applied_seq must have advanced after an assert-API write, not stay null"
+    );
+
+    // SC-003: the FR-011 staleness gate must observe group target's advance and fire, resolving
+    // the previously-unbound pointer.
+    let rebind_v = dispatch_val(
+        5,
+        "knowledge_rebind_pointers",
+        json!({"source_group_id": GROUP_TARGET}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rebind_v, 5);
+    assert_eq!(
+        rebind_v["result"]["checked"], 1,
+        "the staleness gate must have observed group target's advanced applied_seq and \
+         checked the pointer: {rebind_v}"
+    );
+    assert_eq!(rebind_v["result"]["bound"], 1, "{rebind_v}");
+
+    let (final_target, final_attrs) = {
+        let db3 = state.db.load_full().unwrap();
+        let conn = db3.connect().unwrap();
+        let edge = conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&edge_uuid))
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        (edge.target_node_uuid.clone(), edge.attributes.clone())
+    };
+    assert_eq!(
+        final_target, widget_uuid,
+        "the pointer must resolve to the entity created via the assert API"
+    );
+    let dst_ptr = pointer::read_pointers(&final_attrs)
+        .get(EndpointSide::Dst)
+        .cloned()
+        .unwrap();
+    assert_eq!(dst_ptr.binding_state, BindingState::Bound);
+    assert_eq!(dst_ptr.bound_at_seq, target_applied_seq);
 }
 
 /// A second rebind pass with no further WAL activity on group B is a true no-op — confirms the

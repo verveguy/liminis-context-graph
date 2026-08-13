@@ -863,3 +863,158 @@ async fn structural_determinism_across_independent_instances() {
         "Bob's name/attributes must be identical across instances"
     );
 }
+
+// ── Issue #383: applied_seq advances for assert-API-only writes ─────────────────
+
+/// User Story 1 / SC-001: writing entities and relationships purely through the assert API (no
+/// episode ingest at all) must make `knowledge_status`'s `wal_groups` entry for that group
+/// report a real, non-null `applied_seq` consistent with `max_seq` — the exact reproduction in
+/// issue #383's Background (`applied_seq: null` against a real, non-zero `max_seq`).
+#[tokio::test]
+async fn knowledge_status_reflects_assert_only_writes() {
+    const GROUP: &str = "assert-only-a";
+    let (db, dir) = make_db(DIM);
+    let wal_dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("assert.db").to_str().unwrap().to_string();
+    let state = make_state_with_live_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    // Fresh group with no prior writes: must not appear in wal_groups at all yet.
+    let status0 = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status0, 1);
+    assert!(
+        status0["result"]["wal_groups"].get(GROUP).is_none(),
+        "group must not appear in wal_groups before it has received any writes: {status0}"
+    );
+
+    let alice = dispatch_val(
+        2,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": GROUP, "summary": "engineer"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&alice, 2);
+    let bob = dispatch_val(
+        3,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": GROUP, "summary": "designer"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&bob, 3);
+    let rel = dispatch_val(
+        4,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice", "target_name": "Bob", "predicate": "KNOWS",
+            "group_id": GROUP,
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&rel, 4);
+
+    let status1 = dispatch_val(5, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status1, 5);
+    let applied1 = status1["result"]["wal_groups"][GROUP]["applied_seq"].as_u64();
+    let max1 = status1["result"]["wal_groups"][GROUP]["max_seq"].as_u64();
+    assert!(
+        applied1.is_some(),
+        "SC-001: applied_seq must be non-null after assert-API-only writes, not null \
+         regardless of max_seq: {status1}"
+    );
+    assert!(
+        max1.is_some(),
+        "max_seq must reflect the real WAL content: {status1}"
+    );
+    assert_eq!(
+        applied1, max1,
+        "applied_seq must be consistent with max_seq (every mutation here succeeded, \
+         nothing filtered)"
+    );
+
+    // Further assert-API writes must advance applied_seq further still.
+    let carol = dispatch_val(
+        6,
+        "knowledge_assert_entity",
+        json!({"name": "Carol", "group_id": GROUP, "summary": "manager"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&carol, 6);
+
+    let status2 = dispatch_val(7, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status2, 7);
+    let applied2 = status2["result"]["wal_groups"][GROUP]["applied_seq"].as_u64();
+    assert!(
+        applied2.unwrap() > applied1.unwrap(),
+        "additional assert-API writes must advance applied_seq further: {status1} -> {status2}"
+    );
+}
+
+/// User Story 3 / SC-002: a write to one group must never move another group's reported
+/// `applied_seq` — the per-group isolation issue #378 established, which this fix must preserve
+/// rather than regress back to a single shared counter.
+#[tokio::test]
+async fn assert_api_write_to_one_group_leaves_another_groups_applied_seq_untouched() {
+    const GROUP_A: &str = "iso-a";
+    const GROUP_B: &str = "iso-b";
+    let (db, dir) = make_db(DIM);
+    let wal_dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("assert.db").to_str().unwrap().to_string();
+    let state = make_state_with_live_wal(db, wal_dir.path().to_path_buf(), db_path);
+
+    // Establish group B's baseline position first.
+    let b_seed = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "B-Seed", "group_id": GROUP_B}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&b_seed, 1);
+
+    let status_before = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status_before, 2);
+    let b_before = status_before["result"]["wal_groups"][GROUP_B].clone();
+    assert!(
+        b_before["applied_seq"].as_u64().is_some(),
+        "group B's baseline write must have set a real applied_seq: {status_before}"
+    );
+
+    // Write only to group A.
+    let a1 = dispatch_val(
+        3,
+        "knowledge_assert_entity",
+        json!({"name": "A-One", "group_id": GROUP_A}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&a1, 3);
+    let a2 = dispatch_val(
+        4,
+        "knowledge_assert_entity",
+        json!({"name": "A-Two", "group_id": GROUP_A}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&a2, 4);
+
+    let status_after = dispatch_val(5, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status_after, 5);
+    let b_after = status_after["result"]["wal_groups"][GROUP_B].clone();
+    assert_eq!(
+        b_before, b_after,
+        "group B's wal_groups entry must be byte-identical after a write to group A only \
+         (SC-002): before={b_before} after={b_after}"
+    );
+
+    // Sanity: group A's own position did actually advance, so this isn't vacuously true.
+    let a_applied = status_after["result"]["wal_groups"][GROUP_A]["applied_seq"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        a_applied > 0,
+        "group A must show real progress from its 2 writes: {status_after}"
+    );
+}
