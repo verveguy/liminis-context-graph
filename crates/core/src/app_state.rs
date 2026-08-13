@@ -245,7 +245,11 @@ impl AppState {
                     return None;
                 }
             };
-            match WalWriter::new(&dir, self.wal_max_events_per_file, self.wal_max_bytes_per_file) {
+            match WalWriter::new(
+                &dir,
+                self.wal_max_events_per_file,
+                self.wal_max_bytes_per_file,
+            ) {
                 Ok(w) => {
                     guard.insert(group_id.to_string(), w);
                 }

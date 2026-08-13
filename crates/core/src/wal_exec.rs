@@ -67,7 +67,9 @@ pub(crate) fn wal_flush_chunk(
                     (after > before).then(|| after - 1)
                 }
                 Err(e) => {
-                    eprintln!("liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}");
+                    eprintln!(
+                        "liminis-context-graph: wal_flush_chunk: write failed (non-fatal): {e}"
+                    );
                     None
                 }
             }

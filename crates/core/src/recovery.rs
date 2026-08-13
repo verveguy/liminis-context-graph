@@ -200,7 +200,10 @@ pub fn backfill_applied_seq_if_absent(
 /// #378. Reused by the WAL checkpoint feature (issue #365, FR-005) to disambiguate
 /// `applied_seq == 0`, which is otherwise ambiguous between "nothing applied" and "WAL line 0
 /// applied". `&&`-short-circuits so the common non-empty case costs a single query.
-pub(crate) fn group_has_no_content(conn: &crate::db::Conn<'_>, group_id: &str) -> Result<bool, Error> {
+pub(crate) fn group_has_no_content(
+    conn: &crate::db::Conn<'_>,
+    group_id: &str,
+) -> Result<bool, Error> {
     let gids = [group_id];
     Ok(conn.count_episodics_by_group_ids(&gids)? == 0
         && conn.count_entities_by_group_ids(&gids)? == 0
@@ -768,7 +771,10 @@ mod tests {
 
         let conn = db.connect().unwrap();
         let (seq, reason) = derive_episode_cursor(&conn, "group-a", &wal_dir).unwrap();
-        assert_eq!(seq, 3, "must derive group-a's own episode's seq, not group-b's later one");
+        assert_eq!(
+            seq, 3,
+            "must derive group-a's own episode's seq, not group-b's later one"
+        );
         assert_eq!(reason, CursorReason::UuidMatch);
     }
 }

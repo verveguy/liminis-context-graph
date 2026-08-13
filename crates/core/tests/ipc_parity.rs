@@ -143,7 +143,12 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writers: Arc::new(Mutex::new(wal_writer.into_iter().map(|w| ("liminis".to_string(), w)).collect())),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -4686,7 +4691,11 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
     // Give the WAL directory content covering seq 0..42 (including the true prefix, seq 0), so
     // `reachable` reports true below — a WAL missing its prefix is unreachable regardless of
     // whether the checkpoint's own seq is covered (see the prefix-truncation regression test).
-    std::fs::write(group_dir.join("0000.jsonl"), entity_wal_line(0, "e0") + "\n").unwrap();
+    std::fs::write(
+        group_dir.join("0000.jsonl"),
+        entity_wal_line(0, "e0") + "\n",
+    )
+    .unwrap();
     std::fs::write(
         group_dir.join("0001.jsonl"),
         entity_wal_line(42, "e42") + "\n",
@@ -4840,7 +4849,11 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     let group_dir = wal_dir.path().join("liminis");
     std::fs::create_dir_all(&group_dir).unwrap();
     // Two WAL files: one covers seq 0, the other covers seq 10.
-    std::fs::write(group_dir.join("a_0000.jsonl"), entity_wal_line(0, "e0") + "\n").unwrap();
+    std::fs::write(
+        group_dir.join("a_0000.jsonl"),
+        entity_wal_line(0, "e0") + "\n",
+    )
+    .unwrap();
     std::fs::write(
         group_dir.join("b_0000.jsonl"),
         entity_wal_line(10, "e10") + "\n",
@@ -5003,7 +5016,11 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     .await;
     assert_ok_resp(&created, 1);
 
-    let name_dir = wal_dir.path().join("liminis").join(".checkpoints").join("reuse");
+    let name_dir = wal_dir
+        .path()
+        .join("liminis")
+        .join(".checkpoints")
+        .join("reuse");
     let create_record_before = std::fs::read_to_string(name_dir.join("g1.create.json")).unwrap();
 
     let deleted = dispatch_val(

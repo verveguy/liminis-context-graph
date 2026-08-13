@@ -74,7 +74,9 @@ pub enum Error {
     /// A `group_id` is empty, or its filesystem-directory-name mapping (`wal_group`, issue #378
     /// FR-005) would be empty or exceed `checkpoint::validate_name`'s 200-char bound. Distinct
     /// from `Error::Ipc` so callers can surface a specific, actionable message.
-    #[error("invalid group_id {0:?}: must be non-empty and map to a directory name of 1-200 chars")]
+    #[error(
+        "invalid group_id {0:?}: must be non-empty and map to a directory name of 1-200 chars"
+    )]
     InvalidGroupId(String),
 }
 

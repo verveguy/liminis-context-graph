@@ -122,7 +122,12 @@ fn make_state_with_wal(
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writers: Arc::new(Mutex::new(wal_writer.into_iter().map(|w| ("liminis".to_string(), w)).collect())),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,
@@ -155,7 +160,12 @@ fn make_state_with_name_map_embedder(
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
-        wal_writers: Arc::new(Mutex::new(wal_writer.into_iter().map(|w| ("liminis".to_string(), w)).collect())),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
         workspace_root: None,

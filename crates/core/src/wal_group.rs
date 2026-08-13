@@ -329,10 +329,17 @@ mod tests {
     #[test]
     fn migrate_relocates_jsonl_checkpoints_and_bounds_manifest_as_a_unit() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("20260101_000000_abcdef_0000.jsonl"), b"{}\n").unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
         fs::create_dir_all(tmp.path().join(".checkpoints").join("pre-migration")).unwrap();
         fs::write(
-            tmp.path().join(".checkpoints").join("pre-migration").join("meta.json"),
+            tmp.path()
+                .join(".checkpoints")
+                .join("pre-migration")
+                .join("meta.json"),
             b"{}",
         )
         .unwrap();
@@ -341,7 +348,9 @@ mod tests {
         migrate_wal_root_if_needed(tmp.path()).unwrap();
 
         let default_dir = tmp.path().join("liminis");
-        assert!(default_dir.join("20260101_000000_abcdef_0000.jsonl").is_file());
+        assert!(default_dir
+            .join("20260101_000000_abcdef_0000.jsonl")
+            .is_file());
         assert!(default_dir
             .join(".checkpoints")
             .join("pre-migration")
@@ -349,7 +358,10 @@ mod tests {
             .is_file());
         assert!(default_dir.join(".wal-bounds.json").is_file());
         // The root itself no longer holds any loose top-level artifact.
-        assert!(!tmp.path().join("20260101_000000_abcdef_0000.jsonl").exists());
+        assert!(!tmp
+            .path()
+            .join("20260101_000000_abcdef_0000.jsonl")
+            .exists());
         assert!(!tmp.path().join(".checkpoints").exists());
         assert!(!tmp.path().join(".wal-bounds.json").exists());
     }
@@ -357,13 +369,19 @@ mod tests {
     #[test]
     fn migrate_is_idempotent_when_run_twice() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("20260101_000000_abcdef_0000.jsonl"), b"{}\n").unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
 
         migrate_wal_root_if_needed(tmp.path()).unwrap();
         migrate_wal_root_if_needed(tmp.path()).unwrap();
 
         let default_dir = tmp.path().join("liminis");
-        assert!(default_dir.join("20260101_000000_abcdef_0000.jsonl").is_file());
+        assert!(default_dir
+            .join("20260101_000000_abcdef_0000.jsonl")
+            .is_file());
     }
 
     /// Simulates a crash between creating `liminis/` and finishing every rename: one entry made

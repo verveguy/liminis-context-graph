@@ -1393,7 +1393,10 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             if let Some(root) = wal_root {
                 if root.exists() {
                     std::fs::remove_dir_all(&root).map_err(|e| {
-                        Error::Ipc(format!("failed to delete WAL root '{}': {e}", root.display()))
+                        Error::Ipc(format!(
+                            "failed to delete WAL root '{}': {e}",
+                            root.display()
+                        ))
                     })?;
                 }
             }
@@ -1762,7 +1765,12 @@ async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Resul
 /// aid for operators, not a guard, since a caller may legitimately skip a known-bad or
 /// already-applied-elsewhere range. `from_seq == 0` is always a full rebuild (or a resume from
 /// scratch against an empty DB) and never warrants this warning.
-fn warn_on_rebuild_seq_gap(conn: &crate::db::Conn<'_>, group_id: &str, from_seq: u64, context: &str) {
+fn warn_on_rebuild_seq_gap(
+    conn: &crate::db::Conn<'_>,
+    group_id: &str,
+    from_seq: u64,
+    context: &str,
+) {
     if from_seq == 0 {
         return;
     }
