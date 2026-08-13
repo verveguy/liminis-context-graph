@@ -130,7 +130,8 @@ entities that belonged to the generation that was just replaced.
 describes (`ambiguous`/mis-bound cross-group pointers). Detecting a reset (Story 1) only closes
 the corruption path if the recovery that follows also clears out stale cross-group bindings — a
 half-fixed reset (new generation's entities added, old generation's pointers still dangling) is
-not meaningfully better than the undetected case.
+not meaningfully better than the undetected case. This re-bind is a required part of the
+reset-triggered self-heal itself (FR-010), not a separate, operator-triggered follow-up step.
 
 **Independent Test**: Set up a layer-graph edge whose cross-group pointer resolves into group
 `A`. Trigger a detected reset and full recovery of `A`. Confirm the pointer re-binds to an entity
@@ -286,6 +287,13 @@ dumped output's generation differs from the source stream's generation.
   condition on every subsequent boot. Once a generation has been adopted for a stream/consumer
   pair, later changes to that stream's generation are still detected normally (Story 5, Scenario
   3).
+- **FR-010**: The reset-triggered self-heal in FR-005 MUST also re-bind cross-group pointers whose
+  `source_group_id` is the reset group, as part of the same recovery operation, immediately after
+  the full replay completes — not left as a separate, operator-triggered step. Without this, a
+  purge-and-replay can satisfy FR-005 while still leaving a layer graph bound to entities from the
+  generation that was just discarded, which is the exact silent-mis-binding failure this issue's
+  Background section describes. The set of affected groups requires no new discovery mechanism:
+  #361's dry-run already computes exactly this set as its `unbound_impacts`.
 
 ### Key Entities
 
@@ -320,6 +328,9 @@ dumped output's generation differs from the source stream's generation.
   particular, it does not force a full rebuild on every boot.
 - **SC-007**: Reporting a group's generation via `knowledge_status` does not add a full WAL
   directory scan beyond what the existing `applied_seq`/`max_seq` fields already cost.
+- **SC-008**: On a multi-group instance holding groups `A`, `B`, and `C`, a detected reset and
+  recovery of `A` alone leaves `B` and `C` entirely unaffected — their positions, graph data, and
+  cross-group bindings are byte-for-byte unchanged by `A`'s detection and self-heal.
 
 ## Assumptions
 
@@ -341,10 +352,33 @@ dumped output's generation differs from the source stream's generation.
   fail-loud alternative is addressed without requiring manual recovery.
 - This mechanism is per-group, matching #378's per-group WAL directories — there is no
   instance-wide or cross-group generation concept.
+- **FR-004's generation scoping extends the existing `WalPosition` table**, which ADR-0353 already
+  records as a deliberate, one-time divergence from this repo's graphiti schema-parity rule. This
+  spec treats that extension as an explicit, acknowledged continuation of the existing divergence
+  — not a second, independent one — and requires it to be recorded as such in this issue's own
+  ADR, together with why the alternatives were not taken: a separate table would split
+  `applied_seq` and its generation across two reads/writes that must in fact be evaluated
+  together for FR-004's mismatch check, reintroducing a coordination problem the single-row design
+  ADR-0353 chose was built to avoid; storing the generation outside the database (a sidecar file,
+  as #365 chose for checkpoints) was rejected here because a checkpoint describes the WAL stream
+  and must outlive the database, per ADR-0365's own reasoning, but `applied_seq` and its
+  generation both describe *this database's* recorded position and are meaningless without it —
+  the same distinction ADR-0365 draws between itself and ADR-0353 already argues for keeping this
+  one DB-resident.
 - #383 and #385 are open, unimplemented issues at the time of this spec. They are named in the
   original issue as prerequisites "in practice" (without them, the position signal this issue
   extends is inert or misrouted for some write paths) but this spec does not require their
   completion to be written; downstream Research/Plan should confirm sequencing before Implement.
+  This sequencing carries more urgency than a typical prerequisite note: orac's current
+  merged-path hydration decides `up_to_date`/`full` from a file-set signature alone, never
+  incrementally, and is safe against resets today only because it over-approximates — it never
+  trusts a per-stream cursor, precisely because it has never had one. #378 gives it one. The
+  moment orac adopts per-stream incremental hydration — the purpose #378 exists to enable — it
+  drops that over-approximation, and its own single-stream reset tell ("a cursor ahead of
+  `max_seq`") catches only a shorter republish, missing a longer one exactly as described in this
+  issue's Background. This issue is therefore the fourth leg of one continuous change
+  (#378 → #383 → #385 → #387): what makes per-stream incremental hydration safe, not an optional
+  follow-on to it.
 
 ## Out of Scope
 
