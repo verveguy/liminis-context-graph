@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod real_corpus;
+pub mod wal_inspect;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
