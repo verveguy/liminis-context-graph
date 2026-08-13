@@ -1342,12 +1342,16 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
-        let counts = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
-        // Purges an array of group_ids and its forced rebind can write into other, non-purged
-        // "owning" groups' RelatesToNode_ rows in the same drain_mutations call (ADR-0361) —
-        // genuinely multi-group, so per-operation attribution can't name one group (FR-004).
-        // Routes through the default group's writer, a documented limitation.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        let (counts, grouped) = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
+        // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
+        // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's
+        // writer, never the default group's. Each iteration's wal_flush_ungrouped call is its
+        // own independently best-effort, non-fatal flush (same tolerance the pre-#385 single
+        // call already had, now spanning N streams instead of 1 — see ADR-0385's residual risks).
+        for (group_id, mutations) in grouped {
+            wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+        }
         Ok(counts)
     })
     .await??;
@@ -2545,12 +2549,22 @@ async fn clear_group_for_rebuild(state: &Arc<AppState>, group_id: &str) -> Resul
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         let ts = chrono::Utc::now().to_rfc3339();
-        group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
-        // The forced rebind inside purge_groups can touch a foreign, non-purged group's
-        // RelatesToNode_ rows in the same transaction (ADR-0361) — genuinely multi-group, so
-        // per-operation attribution can't name one group (FR-004). Routes through the default
-        // group's writer, the same documented limitation as handle_delete_by_group.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        let (_, mut grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
+        // gid's own bucket (its own deletions, and any forced-rebind write that happened to
+        // land back on gid's own edges) is deliberately dropped, never flushed — this purge
+        // exists solely to clear room for the from_seq: 0 replay that immediately follows in
+        // the same knowledge_rebuild_from_wal call (below, in the caller), and that replay
+        // re-derives gid's entire state from gid's own WAL directory. Flushing these mutations
+        // into that same directory would inject them into the very history about to be
+        // replayed — turning a "recreate then re-delete" sequence into gid's own stream and
+        // silently discarding whatever the replay was supposed to reconstruct. Any mutation
+        // attributed to a *foreign* owning group is real, independent history for that group
+        // and is unaffected by gid's own replay — it must still be flushed to its own stream
+        // (issue #385 / ADR-0385).
+        grouped.remove(gid.as_str());
+        for (group_id, mutations) in grouped {
+            wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+        }
         // Reset this group's applied-WAL-seq position (issue #353 FR-005, scoped per group by
         // issue #378) — its data is freshly empty. The from_seq: 0 rebuild this function exists
         // to enable will overwrite this with the replay's precise last_committed_seq once it
@@ -2848,11 +2862,14 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let counts = tokio::task::spawn_blocking(move || {
         let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let ts = chrono::Utc::now().to_rfc3339();
-        let counts = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
+        let (counts, grouped) = cross_group::rebind_pointers(&conn, &source_group_id, &ts)?;
         // Rebinds every pointer whose source_group_id matches, regardless of which group owns
-        // the RelatesToNode_ row carrying it — genuinely multi-group, so per-operation
-        // attribution can't name one group (FR-004). Routes through the default group's writer.
-        wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
+        // the RelatesToNode_ row carrying it — `grouped` already attributes each mutation to
+        // that owning group (issue #385 / ADR-0385), never source_group_id itself and never the
+        // default group. Flush each bucket to its own group's writer.
+        for (group_id, mutations) in grouped {
+            wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+        }
         Ok::<_, Error>(counts)
     })
     .await??;

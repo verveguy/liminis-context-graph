@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,6 +14,12 @@ use crate::{
 
 /// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
 type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
+
+/// Mutations drained from a `Conn` and bucketed by the `group_id` whose data they modify
+/// (issue #385). Used by the two handlers that are multi-group by design — `group_purge` and
+/// `cross_group::rebind_pointers_impl` — so each group's mutations can be flushed to that
+/// group's own WAL stream instead of all landing on one caller-named group (FR-001).
+pub type GroupedMutations = BTreeMap<String, Vec<(String, serde_json::Value)>>;
 
 pub struct Db {
     inner: lbug::Database,
@@ -327,6 +333,21 @@ impl<'db> Conn<'db> {
     /// `WalWriter::log_mutation`.
     pub fn drain_mutations(&self) -> Vec<(String, serde_json::Value)> {
         std::mem::take(&mut *self.executed_mutations.borrow_mut())
+    }
+
+    /// Drains mutations recorded since the last drain and merges them into `grouped`'s
+    /// `group_id` bucket (issue #385: per-group mutation attribution for `group_purge` and
+    /// `cross_group::rebind_pointers_impl`, the two handlers that are multi-group by design).
+    /// A no-op if nothing was recorded — an empty bucket is never created, matching
+    /// `wal_exec::wal_flush_ungrouped`'s own "empty mutations ⇒ no WAL directory" behavior.
+    pub fn drain_mutations_into(&self, grouped: &mut GroupedMutations, group_id: &str) {
+        let drained = self.drain_mutations();
+        if !drained.is_empty() {
+            grouped
+                .entry(group_id.to_string())
+                .or_default()
+                .extend(drained);
+        }
     }
 
     /// Creates the Entity and Episodic node tables. Call once after connecting.

@@ -2465,6 +2465,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0375](0375-wal-max-seq-bounds-manifest.md) | WAL Seq Bounds Manifest | 2026-08-12 |
 | [0378](0378-multi-stream-wal-per-group-directory.md) | Multi-Stream WAL — One WAL Directory Per Group | 2026-08-13 |
 | [0379](0379-direct-assertion-conventions.md) | Direct Assertion API Conventions | 2026-08-12 |
+| [0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) | Per-Group Mutation Attribution for `delete_by_group` and `rebind_pointers` | 2026-08-13 |
 
 ## Historical numbering
 

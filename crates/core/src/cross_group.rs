@@ -10,7 +10,7 @@
 use uuid::Uuid;
 
 use crate::{
-    db::Conn,
+    db::{Conn, GroupedMutations},
     error::Error,
     pointer::{self, BindingState, CrossGroupPointer, CrossGroupPointers, EndpointSide},
     prompts::normalize_name,
@@ -281,11 +281,16 @@ pub struct RebindCounts {
 ///
 /// Safe to call against a partially-hydrated source: an endpoint that hasn't arrived yet simply
 /// resolves `Unbound` again and is left with no hop (FR-009's mid-hydration safety).
+///
+/// Returns, alongside [`RebindCounts`], a [`GroupedMutations`] bucketing every mutation this
+/// call issued by the `group_id` that actually owns the `RelatesToNode_` row it modified — never
+/// `source_group_id` merely because it was named in the call (issue #385 FR-003). The caller is
+/// responsible for flushing each bucket to its own group's WAL stream.
 pub fn rebind_pointers(
     conn: &Conn,
     source_group_id: &str,
     ts: &str,
-) -> Result<RebindCounts, Error> {
+) -> Result<(RebindCounts, GroupedMutations), Error> {
     rebind_pointers_impl(conn, source_group_id, ts, false)
 }
 
@@ -307,7 +312,7 @@ pub fn rebind_pointers_forced(
     conn: &Conn,
     source_group_id: &str,
     ts: &str,
-) -> Result<RebindCounts, Error> {
+) -> Result<(RebindCounts, GroupedMutations), Error> {
     rebind_pointers_impl(conn, source_group_id, ts, true)
 }
 
@@ -316,12 +321,17 @@ fn rebind_pointers_impl(
     source_group_id: &str,
     ts: &str,
     force: bool,
-) -> Result<RebindCounts, Error> {
+) -> Result<(RebindCounts, GroupedMutations), Error> {
     // The staleness signal is source_group_id's own applied position (issue #378 FR-011) — the
     // group being pointed *into*, and whose replay is what should drive re-binding (User Story
     // 4), not any other group's (or the pre-378 DB-wide singleton's).
     let current_seq = conn.get_applied_seq(source_group_id)?;
     let mut counts = RebindCounts::default();
+    // Bucketed by rn_group_id — the owning group of the RelatesToNode_ row each candidate's
+    // writes actually land on (issue #385 FR-003) — never source_group_id itself. Drained after
+    // each candidate's writes complete (all three exit points below), so Phase 1's read-only
+    // resolution work never mixes one candidate's mutations into another's bucket.
+    let mut grouped: GroupedMutations = GroupedMutations::new();
 
     for (rn_uuid, rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
         let mut pointers = pointer::read_pointers(&attrs);
@@ -407,6 +417,7 @@ fn rebind_pointers_impl(
         if any_changed && both_resolved && prospective_src == prospective_dst {
             conn.invalidate_edge(&rn_uuid, ts)?;
             counts.invalidated_self_loop += 1;
+            conn.drain_mutations_into(&mut grouped, &rn_group_id);
             continue;
         }
         if any_changed
@@ -415,6 +426,7 @@ fn rebind_pointers_impl(
         {
             conn.invalidate_edge(&rn_uuid, ts)?;
             counts.invalidated_duplicate += 1;
+            conn.drain_mutations_into(&mut grouped, &rn_group_id);
             continue;
         }
 
@@ -485,7 +497,9 @@ fn rebind_pointers_impl(
                 }
             }
         }
+
+        conn.drain_mutations_into(&mut grouped, &rn_group_id);
     }
 
-    Ok(counts)
+    Ok((counts, grouped))
 }

@@ -24,7 +24,7 @@ use lcg_core::{
     pointer::{self, BindingState, EndpointSide},
     telemetry::{NoopSink, TelemetrySink},
     types::EntityRow,
-    WalWriter,
+    WalWriter, DEFAULT_GROUP_ID,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -138,6 +138,33 @@ fn assert_err(v: &Value, id: i64) {
     assert!(v.get("error").is_some(), "expected error field: {v}");
 }
 
+/// Polls `knowledge_rebuild_status` for `job_id` until it reports `completed`, panicking on
+/// `failed` or a 10s timeout. Shared by every test that drives a background rebuild job via
+/// `knowledge_rebuild_from_wal`.
+async fn wait_for_rebuild(id: i64, job_id: &str, state: &Arc<AppState>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch_val(
+            id,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id}),
+            Arc::clone(state),
+        )
+        .await;
+        match status_v["result"]["status"].as_str().unwrap_or("?") {
+            "completed" => break,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 10s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    }
+}
+
 /// Direct-count entities/episodes/edges for a single group_id, bypassing the IPC layer, for
 /// assertions that need per-group (not DB-wide) figures.
 fn group_counts(db: &Db, group_id: &str) -> (u64, u64, u64) {
@@ -148,6 +175,39 @@ fn group_counts(db: &Db, group_id: &str) -> (u64, u64, u64) {
         conn.count_episodics_by_group_ids(&single).unwrap(),
         conn.count_relates_to_by_group_ids(&single).unwrap(),
     )
+}
+
+/// Reads every WAL line's `cypher` field under `wal_root/group_id`, in file-name (and therefore
+/// chronological) order — for issue #385's assertions, which need to know not just *how many*
+/// mutations landed in a group's stream but *which* ones (a purge's `DETACH DELETE`s vs. a
+/// forced rebind's `SET rn.attributes` / hop `MERGE`/`DELETE`). Every `group_id` used by this
+/// module's tests is already a safe, unencoded directory name (see
+/// `wal_group::encode_group_dir_name`), so the group_id is used as the subdirectory name
+/// directly. Returns an empty vec (not an error) when the group's directory doesn't exist at
+/// all — the FR-004 "no directory" case is itself the thing several tests assert on.
+fn read_wal_cyphers(wal_root: &std::path::Path, group_id: &str) -> Vec<String> {
+    let dir = wal_root.join(group_id);
+    if !dir.exists() {
+        return Vec::new();
+    }
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
+        .collect();
+    files.sort();
+    let mut out = Vec::new();
+    for f in files {
+        for line in std::fs::read_to_string(&f).unwrap().lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let v: Value = serde_json::from_str(line).unwrap();
+            out.push(v["cypher"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    out
 }
 
 // ── HNSW/FTS self-maintenance probe (Plan task 1) ───────────────────────────────
@@ -436,7 +496,7 @@ async fn purge_preserves_foreign_relates_to_node_and_leaves_pointer_unbound() {
     // to zero unbound (SC-008's "returns to zero once the purged group is rehydrated").
     let bob_v2 = make_entity("Bob", GROUP_A, TS);
     conn.insert_entity(&bob_v2).unwrap();
-    let rebind_counts = cross_group::rebind_pointers_forced(&conn, GROUP_A, TS).unwrap();
+    let (rebind_counts, _) = cross_group::rebind_pointers_forced(&conn, GROUP_A, TS).unwrap();
     assert_eq!(rebind_counts.bound, 1);
 
     let status_rehydrated =
@@ -846,7 +906,7 @@ fn purged_entity_name_no_longer_resolves_via_name_index() {
         "name index should resolve the entity before purge"
     );
 
-    let counts = group_purge::purge_groups(&conn, &[GROUP_A], TS, false).unwrap();
+    let (counts, _) = group_purge::purge_groups(&conn, &[GROUP_A], TS, false).unwrap();
     assert_eq!(counts.groups[0].entities, 1);
 
     assert!(
@@ -963,27 +1023,7 @@ async fn purge_then_rebuild_from_wal_restores_purged_group() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let status_v = dispatch_val(
-            3,
-            "knowledge_rebuild_status",
-            json!({"job_id": job_id.as_str()}),
-            Arc::clone(&state_with_wal_dir),
-        )
-        .await;
-        match status_v["result"]["status"].as_str().unwrap_or("?") {
-            "completed" => break,
-            "failed" => panic!("rebuild job failed: {status_v}"),
-            "running" => {
-                if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 10s: {status_v}");
-                }
-            }
-            other => panic!("unexpected status: {other}: {status_v}"),
-        }
-    }
+    wait_for_rebuild(3, &job_id, &state_with_wal_dir).await;
 
     // The group-scoped force_clear path never swaps state.db (unlike knowledge_clear_all) —
     // the original `db` Arc is still the live, correct handle after rebuild.
@@ -996,5 +1036,389 @@ async fn purge_then_rebuild_from_wal_restores_purged_group() {
     assert_eq!(
         b_ent_restored, 1,
         "group B was never purged, unaffected by replay"
+    );
+}
+
+// ── Issue #385: delete_by_group / rebind_pointers WAL attribution ───────────────────────────
+//
+// The scenario reproduced in the issue: groups A, B, C where C (the layer group) holds a
+// cross-group edge into A. Before #385, `knowledge_delete_by_group(["A"])` routed *both* A's
+// own deletions and C's forced-rebind writes through the default group's ("liminis") WAL
+// stream — a group that was never otherwise written to. After #385, each mutation lands in the
+// stream of the group whose data it actually modifies.
+
+/// User Story 1 / SC-001 / AC1: A's deletions land in `A/`, C's (the layer group's)
+/// forced-rebind mutations land in `C/`, B is completely untouched, and no `liminis/`
+/// directory is created — matching the issue's reproduction exactly (A/B/C, C holding a
+/// cross-group edge into A).
+#[tokio::test]
+async fn delete_by_group_attributes_deletions_and_forced_rebind_to_their_own_groups() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    {
+        let conn = db.connect().unwrap();
+        let alice = make_entity("Alice", GROUP_LAYER, TS); // C — owns the cross-group edge
+        let bob = make_entity("Bob", GROUP_A, TS); // A — about to be purged
+        let carol = make_entity("Carol", GROUP_B, TS); // B — must be left untouched
+        conn.insert_entity(&alice).unwrap();
+        conn.insert_entity(&bob).unwrap();
+        conn.insert_entity(&carol).unwrap();
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(alice.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_A.to_string(),
+                    endpoint_name: "Bob".to_string(),
+                },
+                group_id: GROUP_LAYER.to_string(),
+                fact: "Alice knows Bob".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+    }
+
+    let wal_root = TempDir::new().unwrap();
+    let state = make_state(Arc::clone(&db), Some(wal_root.path().to_path_buf()));
+
+    let v = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 1);
+
+    // No liminis/ directory: nothing was ever attributed to the default group (FR-004).
+    assert!(
+        !wal_root.path().join(DEFAULT_GROUP_ID).exists(),
+        "delete_by_group must never create the default group's WAL directory"
+    );
+
+    // A/ contains exactly A's own purge deletions.
+    let a_cyphers = read_wal_cyphers(wal_root.path(), GROUP_A);
+    assert!(
+        !a_cyphers.is_empty(),
+        "group A's own WAL stream must contain its purge's deletions"
+    );
+    assert!(
+        a_cyphers
+            .iter()
+            .all(|c| c.contains("DETACH DELETE") || c.contains("MATCH")),
+        "A's stream must contain only its own purge's DETACH DELETE mutations: {a_cyphers:?}"
+    );
+    assert!(
+        a_cyphers.iter().any(|c| c.contains("(e:Entity)")),
+        "A's stream must contain its own entity deletion: {a_cyphers:?}"
+    );
+    assert!(
+        !a_cyphers.iter().any(|c| c.contains("rn.attributes")),
+        "A's stream must not contain C's forced-rebind attribute write: {a_cyphers:?}"
+    );
+
+    // C/ (the layer group) contains the forced-rebind pointer mutations, not A's deletions.
+    let layer_cyphers = read_wal_cyphers(wal_root.path(), GROUP_LAYER);
+    assert!(
+        !layer_cyphers.is_empty(),
+        "the owning group's WAL stream must contain the forced-rebind mutations"
+    );
+    assert!(
+        layer_cyphers.iter().any(|c| c.contains("rn.attributes")),
+        "layer group's stream must contain the pointer attribute rewrite: {layer_cyphers:?}"
+    );
+    assert!(
+        !layer_cyphers
+            .iter()
+            .any(|c| c.contains("(e:Entity)") && c.contains("DETACH DELETE")),
+        "layer group's stream must not contain A's entity deletion: {layer_cyphers:?}"
+    );
+
+    // B/ was never touched by this call — it must have no WAL directory at all.
+    assert!(
+        !wal_root.path().join(GROUP_B).exists(),
+        "group B must gain no WAL directory as a side effect of purging A (FR-004)"
+    );
+}
+
+/// SC-003 / User Story 1 AC2: replaying A's own WAL stream in isolation reproduces A's purge —
+/// its deletions are recorded on A's own stream, not merely applied to the live DB, so a fresh
+/// database built only from `A/`'s replay ends up purged too, never resurrecting what was
+/// deleted.
+#[tokio::test]
+async fn purge_deletions_are_present_in_own_groups_wal_and_survive_isolated_replay() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = Arc::new(open_db(&dir));
+    let wal_root = TempDir::new().unwrap();
+    let state = make_state_with_path(
+        Arc::clone(&db),
+        db_path,
+        Some(wal_root.path().to_path_buf()),
+    );
+
+    // Create A's entity through the real IPC write path so its creation is recorded on A's own
+    // WAL stream exactly as it would be in production.
+    let create_v = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "A-One", "group_id": GROUP_A}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&create_v, 1);
+    let (a_ent_before, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(a_ent_before, 1, "A-One must exist before the purge");
+
+    // Purge A — with #385's fix, the deletion is recorded on A's own WAL stream (previously it
+    // would have gone to liminis/, leaving A's stream containing only the creation).
+    let purge_v = dispatch_val(
+        2,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&purge_v, 2);
+    let (a_ent_after_purge, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(a_ent_after_purge, 0, "A-One must be gone after the purge");
+
+    let a_cyphers = read_wal_cyphers(wal_root.path(), GROUP_A);
+    assert!(
+        a_cyphers
+            .iter()
+            .any(|c| c.contains("CREATE") || c.contains("MERGE")),
+        "A's stream must contain its own creation: {a_cyphers:?}"
+    );
+    assert!(
+        a_cyphers.iter().any(|c| c.contains("DETACH DELETE")),
+        "A's stream must also contain its own purge's deletion: {a_cyphers:?}"
+    );
+
+    // Replay A's own stream from scratch (from_seq: 0, via force_clear) — if the deletion above
+    // had landed anywhere other than A's own stream, this replay would resurrect A-One.
+    let rebuild_v = dispatch_val(
+        3,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": GROUP_A, "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&rebuild_v, 3);
+    let job_id = rebuild_v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+    wait_for_rebuild(4, &job_id, &state).await;
+
+    let (a_ent_replayed, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(
+        a_ent_replayed, 0,
+        "replaying A's own WAL stream in isolation must not resurrect a purged entity (SC-003)"
+    );
+}
+
+/// Edge Cases / FR-003: purging `["A", "B"]` where A owns an edge referencing B (a fellow purge
+/// target) via a cross-group pointer. The edge is `DETACH DELETE`d outright as part of A's own
+/// purge (it's owned by A) — the mutation is attributed to A's stream, not B's, and it never
+/// reaches the `unbound`/forced-rebind path (B's own purge doesn't need to rebind anything for
+/// an edge that no longer exists).
+#[tokio::test]
+async fn purge_multi_group_attributes_owner_purged_edge_to_owning_groups_stream() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    {
+        let conn = db.connect().unwrap();
+        let owner = make_entity("Owner", GROUP_A, TS);
+        let bob = make_entity("Bob", GROUP_B, TS);
+        conn.insert_entity(&owner).unwrap();
+        conn.insert_entity(&bob).unwrap();
+        // Edge owned by A (about to be purged), pointing at a foreign entity in B (also about
+        // to be purged in the same call).
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(owner.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_B.to_string(),
+                    endpoint_name: "Bob".to_string(),
+                },
+                group_id: GROUP_A.to_string(),
+                fact: "Owner knows Bob".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+    }
+
+    let wal_root = TempDir::new().unwrap();
+    let state = make_state(Arc::clone(&db), Some(wal_root.path().to_path_buf()));
+
+    let v = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A, GROUP_B], "confirm": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 1);
+    assert_eq!(
+        v["result"]["unbound_impacts"].as_array().unwrap().len(),
+        0,
+        "the edge is deleted outright (owned by a purge target), never left unbound: {v}"
+    );
+
+    assert!(
+        !wal_root.path().join(DEFAULT_GROUP_ID).exists(),
+        "a multi-group purge must never create the default group's WAL directory"
+    );
+
+    let a_cyphers = read_wal_cyphers(wal_root.path(), GROUP_A);
+    assert!(
+        a_cyphers
+            .iter()
+            .any(|c| c.contains("RelatesToNode_") && c.contains("DETACH DELETE")),
+        "the edge's deletion must be attributed to A, the group that owns it: {a_cyphers:?}"
+    );
+
+    // B's own per-group purge pass still issues its own (zero-matching-row) RelatesToNode_
+    // delete call — that's B's own deletion attempt, not a leak of A's edge. What must never
+    // appear in B's stream is a forced-rebind attribute write for an edge B doesn't own.
+    let b_cyphers = read_wal_cyphers(wal_root.path(), GROUP_B);
+    assert!(
+        !b_cyphers.iter().any(|c| c.contains("rn.attributes")),
+        "B's stream must not receive a forced-rebind mutation for an edge it doesn't own: \
+         {b_cyphers:?}"
+    );
+}
+
+/// Edge Cases: `dry_run: true` produces no WAL mutations of any kind — no group, including the
+/// default group, gains a WAL directory as a side effect of a dry-run preview.
+#[tokio::test]
+async fn dry_run_creates_no_wal_directory_for_any_group() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&make_entity("Bob", GROUP_A, TS))
+            .unwrap();
+    }
+
+    let wal_root = TempDir::new().unwrap();
+    let state = make_state(Arc::clone(&db), Some(wal_root.path().to_path_buf()));
+
+    let v = dispatch_val(
+        1,
+        "knowledge_delete_by_group",
+        json!({"group_ids": [GROUP_A], "dry_run": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 1);
+    assert_eq!(v["result"]["dry_run"], true, "{v}");
+
+    assert!(
+        !wal_root.path().join(GROUP_A).exists(),
+        "dry_run must not create even the purged group's own WAL directory"
+    );
+    assert!(
+        !wal_root.path().join(DEFAULT_GROUP_ID).exists(),
+        "dry_run must not create the default group's WAL directory"
+    );
+}
+
+/// `clear_group_for_rebuild` (used by `knowledge_rebuild_from_wal`'s `from_seq: 0` path) shares
+/// `group_purge::purge_groups` with `handle_delete_by_group` and has the identical bug before
+/// #385: a forced rebind of a foreign owning group's pointers must land in that owning group's
+/// own WAL stream, not the default group's.
+#[tokio::test]
+async fn clear_group_for_rebuild_routes_forced_rebind_to_owning_group_not_default() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let db = Arc::new(open_db(&dir));
+    let wal_root = TempDir::new().unwrap();
+
+    // A minimal but valid pre-existing WAL stream for group A, so knowledge_rebuild_from_wal
+    // has something to replay after clear_group_for_rebuild's own purge runs. Its content is
+    // incidental to this test, which is about where the *forced rebind* mutation lands.
+    let seed_uuid = "33333333-3333-3333-3333-333333333333";
+    let group_a_dir = wal_root.path().join(GROUP_A);
+    std::fs::create_dir_all(&group_a_dir).unwrap();
+    std::fs::write(
+        group_a_dir.join("20260101_000000_seed_0000.jsonl"),
+        entity_wal_line(0, seed_uuid, "A-Seed", GROUP_A) + "\n",
+    )
+    .unwrap();
+
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: seed_uuid.to_string(),
+            ..make_entity("A-Seed", GROUP_A, TS)
+        })
+        .unwrap();
+        let alice = make_entity("Alice", GROUP_LAYER, TS);
+        conn.insert_entity(&alice).unwrap();
+        // Layer-owned cross-group edge pointing into A — the forced-rebind target once A is
+        // cleared for rebuild.
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(alice.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_A.to_string(),
+                    endpoint_name: "A-Seed".to_string(),
+                },
+                group_id: GROUP_LAYER.to_string(),
+                fact: "Alice knows A-Seed".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+    }
+
+    let state = make_state_with_path(
+        Arc::clone(&db),
+        db_path,
+        Some(wal_root.path().to_path_buf()),
+    );
+
+    let rebuild_v = dispatch_val(
+        1,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": GROUP_A, "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&rebuild_v, 1);
+    let job_id = rebuild_v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+    wait_for_rebuild(2, &job_id, &state).await;
+
+    assert!(
+        !wal_root.path().join(DEFAULT_GROUP_ID).exists(),
+        "clear_group_for_rebuild's forced rebind must never create the default group's WAL \
+         directory"
+    );
+    let layer_cyphers = read_wal_cyphers(wal_root.path(), GROUP_LAYER);
+    assert!(
+        layer_cyphers.iter().any(|c| c.contains("rn.attributes")),
+        "the forced rebind of the layer group's pointer must be attributed to the layer \
+         group's own stream: {layer_cyphers:?}"
     );
 }
