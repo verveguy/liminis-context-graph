@@ -9,7 +9,8 @@ Originally inspired by the knowledge-graph ideas in [graphiti](https://github.co
 ## Why
 
 - **One embedded engine.** [LadybugDB](https://github.com/lbugdb/lbug) (the community continuation of KuzuDB) provides the property graph, HNSW vector indices, and full-text search in a single embedded database — no server process, no network hop, data in ordinary files under your workspace.
-- **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files in `.lcg/wal/` before it touches the database. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
+- **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files under `.lcg/wal/` before it touches the database. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
+- **One database, many graphs.** `.lcg/wal/` is a WAL *root*: each `group_id` owns its own stream in `.lcg/wal/<group_id>/`, independently replayable and independently discardable. One process can hold several graphs at once without them bleeding into each other, and because a stream is just a directory of JSONL files it can be versioned, shipped, and replayed somewhere else.
 - **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters over the OpenAI-compatible `/v1/embeddings` and `/v1/chat/completions` shapes. Embedding runs fully local out of the box on macOS; extraction can run fully local too, or against the hosted Anthropic API.
 
 The result is a context graph you can treat like the rest of your local tooling: a single process, a directory of files, versionable with git, rebuildable from its own log.
@@ -23,10 +24,12 @@ The result is a context graph you can treat like the rest of your local tooling:
    JSON-RPC 2.0       │  extraction LLM ──► entities + relations        │
    over Unix socket   │  (out-of-process)   dedup + resolution          │
                       │                          │                      │
-   search queries     │           1. append ┌────▼───────┐              │
-  ──────────────────► │           ────────► │ WAL (JSONL)│ .lcg/wal/    │
-   hybrid results     │                     └────┬───────┘ source of    │
-  ◄────────────────── │           2. apply       │         truth        │
+   search queries     │           1. append ┌────▼───────┐ .lcg/wal/    │
+  ──────────────────► │           ────────► │ WAL (JSONL)│  <group_id>/ │
+   hybrid results     │                     └────┬───────┘ one stream   │
+  ◄────────────────── │           2. apply       │         per graph,   │
+                      │                          │         source of    │
+                      │                          │         truth        │
                       │           ────────► ┌────▼───────┐              │
                       │                     │ LadybugDB  │ .lcg/db/     │
                       │  embedder sidecar   │ graph+HNSW │ derived      │
@@ -37,6 +40,10 @@ The result is a context graph you can treat like the rest of your local tooling:
 **Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](https://v3rv.com/liminis-context-graph/ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced.
 
 **Search** is hybrid by default: `knowledge_find_entities` and `knowledge_find_relationships` combine full-text and vector similarity; `knowledge_search_passages` does semantic passage retrieval; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly.
+
+**Graphs are separated by `group_id`, and each one owns its WAL stream.** A `group_id` is a real isolation boundary, not a filter applied after the fact: entity resolution, dedup, merge, and purge are all scoped to it, so one graph's ingest cannot rewrite or delete another's data. Each group's mutations land in `.lcg/wal/<group_id>/`, which makes a single graph independently replayable (`knowledge_rebuild_from_wal`), independently disposable (`knowledge_delete_by_group`), and independently shippable — a stream is a directory of JSONL files, so it can be committed to git, distributed, and hydrated into someone else's database.
+
+That is what makes **replication and layering** practical. A consumer can hydrate several upstream streams into one local database, each keeping its own `group_id`, and still query any one of them in isolation or all of them together. A stream carries a **generation identity** (`wal.generation`) so a consumer can tell a forward advance from a reset and never mistakes a rebuilt upstream for an extension of the one it already replayed. Because entities in different groups stay distinct at the graph layer, references *between* graphs are expressed as resolvable pointers (`knowledge_add_cross_group_edge`, `knowledge_rebind_pointers`) rather than raw edges — so a **layer graph** can carry its own `group_id` and connect entities across two source graphs without either source having to know about it, and without the link dangling when a source is re-ingested.
 
 **Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client straight at the graph with no app or custom client in between. See the [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference).
 
@@ -120,13 +127,15 @@ See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) fo
 
 ## Scope
 
-**In scope**: a single-workspace, single-user context graph engine, shipped as a library crate (`lcg-core`) and an IPC binary (`lcg-service`) that are peers — embed it in a Rust application, or drive it from any language over the socket.
+**In scope**: a single-user, local-first context graph engine, shipped as a library crate (`lcg-core`) and an IPC binary (`lcg-service`) that are peers — embed it in a Rust application, or drive it from any language over the socket.
+
+**Multi-graph, not multi-tenant.** One process can hold many graphs, each with its own `group_id` and its own WAL stream, and a graph can be replicated into another database by shipping that stream. That is a data-organisation capability for one user's own workspaces and subscriptions — it is not tenancy. There is no authentication, no authorisation, and no per-tenant resource isolation: anything that can reach the socket can reach every group in the database. Treat the process boundary as the trust boundary.
 
 **Out of scope, by design:**
 
 - Storage engines other than LadybugDB — the single-engine bet is what keeps the service embedded, fast, and simple to operate.
 - In-process ML runtimes (`tch`, `candle`, `onnxruntime`) — embeddings and extraction stay behind out-of-process adapters.
-- Hosted or multi-tenant deployment — this is local-first infrastructure: one workspace, one process.
+- Hosted or multi-tenant deployment — this is local-first infrastructure: one process, on your machine, serving one user. Groups separate that user's graphs from each other; they do not separate users from each other, and are not a security boundary.
 
 ## Documentation
 
