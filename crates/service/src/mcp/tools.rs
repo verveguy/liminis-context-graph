@@ -352,7 +352,7 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "source_file": {"type": "string", "description": "Source file to delete episodes for (required, non-empty)."},
                         "group_ids": {
-                            "type": "array", "items": {"type": "string"},
+                            "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
                         }
                     },
@@ -371,7 +371,7 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "chunk_id": {"type": "string", "description": "Chunk ID to delete episodes for (required, non-empty)."},
                         "group_ids": {
-                            "type": "array", "items": {"type": "string"},
+                            "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
                         }
                     },

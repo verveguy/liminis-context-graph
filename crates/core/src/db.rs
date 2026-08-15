@@ -860,6 +860,8 @@ impl<'db> Conn<'db> {
     ///
     /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
     /// query is not representable here; callers must resolve a group scope before calling.
+    /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
+    /// caller bypassing the handler-layer validation.
     ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
     /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
@@ -868,6 +870,11 @@ impl<'db> Conn<'db> {
         source_file: &str,
         group_ids: &[&str],
     ) -> Result<Vec<String>, Error> {
+        if group_ids.is_empty() {
+            return Err(Error::Ipc(
+                "remove_episodes_by_source requires a non-empty group_ids".to_string(),
+            ));
+        }
         let prefix = format!("{}:", source_file);
         let match_sql = "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
              OR ep.source_description STARTS WITH $prefix) AND ep.group_id IN $gids \
@@ -896,6 +903,8 @@ impl<'db> Conn<'db> {
     ///
     /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
     /// query is not representable here; callers must resolve a group scope before calling.
+    /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
+    /// caller bypassing the handler-layer validation.
     ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
     /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
@@ -904,6 +913,11 @@ impl<'db> Conn<'db> {
         chunk_id: &str,
         group_ids: &[&str],
     ) -> Result<Vec<String>, Error> {
+        if group_ids.is_empty() {
+            return Err(Error::Ipc(
+                "remove_episodes_by_chunk_id requires a non-empty group_ids".to_string(),
+            ));
+        }
         let match_sql =
             "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id IN $gids RETURN ep.uuid";
         let params = serde_json::json!({ "name": chunk_id, "gids": group_ids });
