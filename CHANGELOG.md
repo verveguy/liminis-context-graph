@@ -30,6 +30,19 @@ A patch release closing an unscoped-delete gap: both `knowledge_delete_chunk_epi
   scope that matches nothing still returns a successful `deleted_count: 0`, unchanged. (#406,
   folds in #403)
 
+### Changed
+
+- **BREAKING: `group_ids` is now a required, non-empty parameter on `knowledge_delete_chunk_episode`
+  and `knowledge_delete_by_source`, on both the MCP and IPC surfaces.** The MCP tool schemas for
+  both methods move `group_ids` from optional into `required` and add `minItems: 1`. A caller
+  that previously omitted `group_ids` (absent, `null`, or `[]`) got a successful — and, per the
+  `### Fixed` entry above, potentially catastrophic — delete across every group; it now receives
+  an error naming the missing parameter instead, and no rows are deleted. The remedy is to pass
+  the caller's own group explicitly; there is no default to fall back to, because a silent
+  default (e.g. `DEFAULT_GROUP_ID`) is the defect this release fixes. This is shipped in a patch
+  release deliberately: the alternative is leaving active cross-group data loss reachable on
+  `main`. (#406)
+
 ## [0.13.1] - 2026-08-15
 
 A patch release closing an integrity gap in 0.13.0's layered-graph model: a cross-group pointer
