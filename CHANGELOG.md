@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.13.1] - 2026-08-15
+
+A patch release closing an integrity gap in 0.13.0's layered-graph model: a cross-group pointer
+left broken by an earlier operation could not be repaired through the public API.
+
+### Fixed
+
+- **`knowledge_rebind_pointers` now repairs pointers it had recorded as broken.** Its staleness
+  gate compared only WAL positions, so a pointer whose recorded `binding_state` was `unbound` or
+  `ambiguous` was skipped whenever the source group's applied position happened to look unchanged
+  — the tool declined to repair a fact it had written itself, and reported `checked: 0` as though
+  there were nothing to do. This is reachable through a documented flow: purge a group (#361), then
+  restore it to a checkpoint-bounded position (#365) matching where the pointers into it were
+  originally bound. Every layer graph pointing into that group stayed permanently broken with no
+  public repair. The gate now skips a pointer only when it is currently `bound` *and* its position
+  looks fresh; `unbound`/`ambiguous` pointers are always re-resolved. The position-based
+  optimisation is unchanged for pointers that are already correct, so a repeat call with no
+  intervening change remains a no-op. (#392,
+  [ADR-0392](docs/adr/0392-rebind-pointers-staleness-gate-binding-state.md))
+
+### Changed
+
+- **`knowledge_rebind_pointers` responses gain a `staleness_skipped` count**, distinguishing
+  "examined and already correct" from "not examined because it looked fresh". A `checked: 0`
+  result is no longer ambiguous about whether anything was actually looked at. Additive only —
+  no existing field changes meaning. (#392)
+
+### Added
+
+- **An end-to-end multi-stream integration test** (`crates/service/tests/mcp_multistream_e2e.rs`),
+  running in the default suite in a few seconds with no LLM, corpus or network. It drives a live
+  MCP process across three groups — two sources and a layer graph — and asserts on the on-disk WAL
+  layout as well as API responses, spanning per-group streams, positions, mutation attribution,
+  checkpoints, group purge, cross-group pointers and rebind in one composition. It found the defect
+  above, along with #383 and #385 during 0.13.0. (#394)
+
 ## [0.13.0] - 2026-08-13
 
 A minor release making the graph genuinely multi-tenant. Groups become a real isolation boundary
