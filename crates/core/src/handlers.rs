@@ -1322,9 +1322,10 @@ async fn handle_delete_chunk_episode(
 /// `RelatesToNode_` owned by a group outside the call (FR-008). See `crate::group_purge` for
 /// the full mechanism.
 ///
-/// `group_ids` is required and validated explicitly here rather than via
+/// `group_ids` is required and validated via `extract_required_group_ids` rather than
 /// `extract_optional_group_ids` (which treats an absent/empty value as "all groups") — a
-/// destructive admin op must never silently default to purging everything.
+/// destructive admin op must never silently default to purging everything. See that helper's
+/// doc comment for the exact rejection rules (non-empty array, no malformed/empty elements).
 ///
 /// `confirm` gates the real (mutating) call, exactly like `handle_clear_all`; `dry_run: true`
 /// takes precedence and skips the gate entirely (FR-013), since it doesn't mutate anything.
@@ -1333,10 +1334,6 @@ async fn handle_delete_chunk_episode(
 /// `write` still needs to purge as part of a per-source refresh.
 async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
-    // Every element must be a non-empty string, or the request is rejected outright — for a
-    // destructive, confirm-gated admin op, silently dropping a malformed element (e.g. a stray
-    // number from an upstream template bug) and proceeding with the rest would purge less than
-    // the caller specified without any indication that anything was ignored.
     let group_ids: Vec<String> = extract_required_group_ids(&p["group_ids"])?;
 
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
