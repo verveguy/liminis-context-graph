@@ -2731,6 +2731,10 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
         r["invalidated_duplicate"].is_number(),
         "invalidated_duplicate must be numeric: {rebind}"
     );
+    assert!(
+        r["staleness_skipped"].is_number(),
+        "staleness_skipped must be numeric: {rebind}"
+    );
 
     // A second call with no intervening source-side change (applied position unchanged since
     // the first call) must be a true no-op at the IPC layer too — FR-009's idempotency gate,
@@ -2747,6 +2751,13 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
         second["result"]["checked"], 0,
         "expected the staleness gate to skip an already-bound pointer with no intervening \
          source change: {second}"
+    );
+    // Issue #392 FR-003: the skip must be visible as staleness_skipped, not just an ambiguous
+    // checked: 0 — the pointer is Bound and its position hasn't advanced, so it's a genuine
+    // gate skip, not "nothing to look at".
+    assert_eq!(
+        second["result"]["staleness_skipped"], 1,
+        "expected the bound, position-stale pointer to be recorded as staleness-skipped: {second}"
     );
 }
 
