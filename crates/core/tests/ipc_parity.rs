@@ -1421,7 +1421,13 @@ fn count_chunk_text_oversized_events(capture: &CaptureSink) -> usize {
 /// #407: all advisory-threshold scenarios (below/above/exactly-at/env-override/repeated) live in
 /// a single test rather than several, because the env-var-override case mutates
 /// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, a process-global that `cargo test`'s default parallel
-/// test execution would otherwise race against any sibling test relying on the default.
+/// test execution runs concurrently with every other test in this binary. Bundling into one
+/// function keeps the override window (threshold=50, held only around the `dispatch_val(64,
+/// ...)` call below) to a single short-lived block rather than one per scenario. This does not
+/// by itself make the override race-proof: it stays safe only as long as no other test in this
+/// file sends a `chunk_text` between 51 and 8,000 characters (none currently do — see the
+/// `grep -c '"chunk_text"' ipc_parity.rs` literals above, all well under 51 chars). A future test
+/// adding a chunk_text in that range would need its own isolation.
 #[tokio::test]
 async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
     let (db, _dir) = make_db(4);
@@ -1584,6 +1590,41 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
         count_chunk_text_oversized_events(&capture),
         3,
         "override-triggered oversized call must also emit telemetry"
+    );
+}
+
+/// FR-006: the threshold and warning operate on character count, not byte count. `'世'` is 3
+/// bytes in UTF-8, so 4,000 of them is 12,000 bytes (over the 8,000 default) but only 4,000
+/// chars (under it). A byte-length implementation would wrongly warn here; this asserts it must
+/// not. No env var mutation, so this is race-free against other tests in this binary.
+#[tokio::test]
+async fn test_knowledge_process_chunk_multibyte_chars_use_char_count_not_byte_count() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let multibyte_text: String = "世".repeat(4_000);
+    assert_eq!(multibyte_text.chars().count(), 4_000);
+    assert_eq!(
+        multibyte_text.len(),
+        12_000,
+        "sanity check: 3 bytes per char"
+    );
+
+    let v = dispatch_val(
+        65,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": multibyte_text,
+            "chunk_id": "multibyte-under-char-threshold",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 65);
+    assert!(
+        v["result"].get("warning").is_none(),
+        "4,000 multibyte chars (12,000 bytes) must not warn under char-count semantics: {v}"
     );
 }
 

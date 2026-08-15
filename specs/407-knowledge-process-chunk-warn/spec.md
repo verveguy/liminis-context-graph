@@ -11,7 +11,7 @@
 
 The evidence comes from a real integrator's corpus (@totalslacker's WebBrain adapter, 4,374 pages, one `process_chunk` call per page):
 
-```
+```text
 median  5,468 chars      p90  21,953      p99  70,783      max  593,272
 >  8,000 chars:  1,589 pages (36.3%)
 > 20,000 chars:    506 pages (11.6%)

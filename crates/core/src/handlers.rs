@@ -4489,9 +4489,10 @@ mod tests {
 
     // #407: a single test function, not five, because `cargo test` runs tests within a binary
     // in parallel by default — separate tests toggling the same process-global env var would
-    // race each other. LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS is unique to this test (no other test
-    // or non-test code in this crate reads it), so sequencing all cases inside one test body is
-    // sufficient to make it race-free without a serialization crate.
+    // race each other. No other test in this file sets LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS
+    // (though the handler itself reads it, same as every call to resolve_chunk_text_advisory_
+    // max_chars below), so bundling into one function keeps the override window to a single,
+    // short-lived block instead of five concurrent ones.
     #[test]
     fn resolve_chunk_text_advisory_max_chars_parse_cases() {
         std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
