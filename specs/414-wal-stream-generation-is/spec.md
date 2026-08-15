@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-414`
 **Created**: 2026-08-15
-**Status**: Specified
+**Status**: Draft
 **Input**: User description: "WAL stream `generation` is null end-to-end — ADR-0387 reset detection is inert. After a clean per-group hydrate, `knowledge_status.wal_groups[*].generation` is `null` for every group. ADR-0387 makes generation identity the sole signal distinguishing a forward WAL advance from a reset/rebuild in both directions. With it null everywhere, that detection is inert."
 
 ## Background
@@ -55,6 +55,20 @@ This issue's scope is therefore narrower than "make generation non-null everywhe
 `.wal-generation.json`. Making the two reproduction repos themselves report a real, non-null
 generation requires their publisher (orac/tarial) to start writing `.wal-generation.json`, which is
 a change outside this repository.
+
+**Retrospective exposure, raised during clarification.** orac's consumer-side reset detection
+(orac #42) decides `force_clear` by comparing generations, and every currently hydrated stream
+reports `generation: null` — meaning that comparison has been null-vs-null since it shipped, for
+every stream hydrated from published `*.jsonl` files, not just the two in this issue's
+reproduction. Its reset detection has therefore never once fired, in either direction. The
+consequence is retrospective as well as prospective: any producer-side rebuild or force-push that
+has already happened against a currently-tracked channel would have been silently applied as a
+forward advance, with no error surfaced at either end — precisely the corruption class ADR-0387
+was written to close. Whether any such rebuild has actually occurred is an operational question
+for channel operators to investigate independently (this issue has no way to detect, after the
+fact, a reset that happened before the fix ships — that is the same undetectable case FR-002/FR-008
+describe). Whether this exposure changes FR-004's warn-vs-refuse resolution is Open Question 4
+below.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -112,10 +126,11 @@ not run" condition observable.
 1. **Given** a group with a previously recorded `WalPosition` and an on-disk generation that is
    currently unknown (missing or corrupt `.wal-generation.json`), **When**
    `knowledge_rebuild_from_wal` is called, **Then** the response and/or logs surface an explicit
-   warning that generation-based reset detection could not run for this call, and replay proceeds
-   using the caller's requested `from_seq`/`to_seq`/`force_clear` exactly as it does today — this
-   issue implements warn-and-proceed only; a hard refusal-to-advance mode is deferred (see Out of
-   Scope).
+   warning that generation-based reset detection could not run for this call. Whether replay then
+   proceeds using the caller's requested `from_seq`/`to_seq`/`force_clear` (warn-and-proceed,
+   matching today's non-blocking behavior) or is refused pending explicit operator opt-in is
+   reopened by Open Question 4 below — a warning that goes unread reproduces the current
+   silent-corruption exposure with extra steps, per the retrospective-exposure note in Background.
 
 ---
 
@@ -197,9 +212,13 @@ source code.
 - **FR-004**: When `knowledge_rebuild_from_wal` evaluates reset detection against a group whose
   current on-disk generation is unknown, it MUST surface an explicit, observable "unknown
   provenance" warning (response field and/or log line) rather than silently treating it as "never a
-  mismatch" with no trace. Replay proceeds using the caller's requested
-  `from_seq`/`to_seq`/`force_clear`, matching today's non-blocking behavior — this issue implements
-  warn-and-proceed only; see Out of Scope for the deferred hard-refusal mode.
+  mismatch" with no trace. Whether replay then proceeds using the caller's requested
+  `from_seq`/`to_seq`/`force_clear` (warn-and-proceed, this issue's prior default) or is refused
+  pending explicit operator opt-in is [NEEDS CLARIFICATION: Open Question 4 — reopened during
+  clarification by the retrospective-exposure note in Background: since orac #42's generation
+  compare has been null-vs-null for every hydrated stream, its reset detection has never fired, so
+  any already-occurred producer reset was already silently misapplied as a forward advance; does
+  that argue for refuse-to-advance now rather than warn-and-proceed?].
 - **FR-005**: This issue MUST NOT change ADR-0387's existing comparison semantics for a *known*
   generation mismatch (`wal_generation::position_reset_detected`'s existing `Some != Some` and
   `None`-recorded-vs-`Some`-current cases) — scope is limited to the unknown/null case and its
@@ -274,9 +293,9 @@ source code.
 - Any change to `.wal-bounds.json` (ADR-0375) parsing or its bounds-caching purpose.
 - Any lcg-side derivation or minting of a substitute generation for a stream lcg did not create,
   on the hydrate path or otherwise (see Resolution in Background and FR-002/FR-008).
-- A hard refusal-to-advance mode for `knowledge_rebuild_from_wal` when generation is unknown —
-  deferred to a follow-up issue; refusing today would break every currently-hydrated,
-  non-compliant stream. This issue implements warn-and-proceed only (FR-004).
+- Detecting, after the fact, whether a producer reset already occurred before this fix ships —
+  that is the same undetectable case FR-002/FR-008 describe; any such audit is an operational task
+  for channel operators, not a code deliverable of this issue.
 - Implementing the actual producer-side fix in orac/tarial (making `GES/orac-psetadrs`,
   `adamb1/a2h`, or the publisher generally write `.wal-generation.json`) — this repo's deliverable
   is the documented contract (FR-006), not the cross-repo implementation.
