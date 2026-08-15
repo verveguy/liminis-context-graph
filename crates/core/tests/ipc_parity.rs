@@ -31,7 +31,7 @@ use lcg_core::{
     ipc::IpcRequest,
     ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
     pointer::{self, read_merged_into},
-    telemetry::{NoopSink, TelemetrySink},
+    telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink},
     types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
     EntityRow, Ontology, RelatesToEdge, WalWriter,
 };
@@ -452,6 +452,37 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
     })
+}
+
+/// Mirrors `make_state_with_mock_embed` but wires a `CaptureSink` instead of `NoopSink`, so
+/// tests can assert on telemetry events emitted during an IPC dispatch (#407 SC-004).
+fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>) {
+    let capture = Arc::new(CaptureSink::new());
+    let sink: Arc<dyn TelemetrySink> = Arc::clone(&capture) as Arc<dyn TelemetrySink>;
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(4)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_root: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+    });
+    (state, capture)
 }
 
 fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppState> {
@@ -1373,6 +1404,186 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
     assert_ne!(
         uuid1, uuid2,
         "duplicate chunk_id must produce distinct episode_uuid values"
+    );
+}
+
+/// `capture.events()` also contains one `IpcCall` event per dispatch (emitted unconditionally by
+/// `handlers::dispatch`), so tests must filter for `ChunkTextOversized` specifically rather than
+/// asserting on the raw event count.
+fn count_chunk_text_oversized_events(capture: &CaptureSink) -> usize {
+    capture
+        .events()
+        .iter()
+        .filter(|e| matches!(e, TelemetryEvent::ChunkTextOversized { .. }))
+        .count()
+}
+
+/// #407: all advisory-threshold scenarios (below/above/exactly-at/env-override/repeated) live in
+/// a single test rather than several, because the env-var-override case mutates
+/// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, a process-global that `cargo test`'s default parallel
+/// test execution would otherwise race against any sibling test relying on the default.
+#[tokio::test]
+async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
+    let (db, _dir) = make_db(4);
+    let (state, capture) = make_state_with_capture_sink(db);
+
+    // Below the default threshold (8,000 chars): no warning, no telemetry, response otherwise
+    // matches test_knowledge_process_chunk_ok's shape (SC-002 byte-compatibility).
+    let v = dispatch_val(
+        60,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "below-threshold",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 60);
+    let r = &v["result"];
+    assert_eq!(r["success"], true);
+    assert!(
+        r.get("warning").is_none(),
+        "no warning expected below threshold: {v}"
+    );
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        0,
+        "no oversized-chunk telemetry expected below threshold"
+    );
+
+    // Above the default threshold: warning present with correct fields, exactly one
+    // ChunkTextOversized telemetry event captured (FR-001, SC-001, SC-004).
+    let oversized_text = "a".repeat(8_001);
+    let v = dispatch_val(
+        61,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": oversized_text,
+            "chunk_id": "above-threshold",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 61);
+    assert_eq!(v["result"]["success"], true);
+    let warning = &v["result"]["warning"];
+    assert_eq!(warning["type"], "chunk_text_oversized");
+    assert_eq!(warning["chunk_text_chars"], 8_001);
+    assert_eq!(warning["recommended_max_chars"], 8_000);
+    assert!(
+        warning["message"].as_str().unwrap().contains("8001"),
+        "message should name the actual size: {warning}"
+    );
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        1,
+        "exactly one oversized-chunk telemetry event expected: {:?}",
+        capture.events()
+    );
+    let oversized_event = capture
+        .events()
+        .into_iter()
+        .find(|e| matches!(e, TelemetryEvent::ChunkTextOversized { .. }))
+        .unwrap();
+    match oversized_event {
+        TelemetryEvent::ChunkTextOversized {
+            chunk_id,
+            source_file,
+            chunk_text_chars,
+            threshold_chars,
+            ..
+        } => {
+            assert_eq!(chunk_id, "above-threshold");
+            assert_eq!(source_file, "test.txt");
+            assert_eq!(chunk_text_chars, 8_001);
+            assert_eq!(threshold_chars, 8_000);
+        }
+        other => panic!("unexpected telemetry event: {other:?}"),
+    }
+
+    // Repeated calls with the same oversized chunk_text (resubmission) fire the warning and
+    // telemetry on every call, not just the first (Edge Cases).
+    let v = dispatch_val(
+        62,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": oversized_text,
+            "chunk_id": "above-threshold",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 62);
+    assert!(
+        v["result"].get("warning").is_some(),
+        "warning must fire again on resubmission: {v}"
+    );
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        2,
+        "second oversized call must emit a second telemetry event"
+    );
+
+    // Exactly at the threshold: MUST NOT warn (strictly-greater-than semantics, Edge Cases).
+    let at_threshold_text = "a".repeat(8_000);
+    let v = dispatch_val(
+        63,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": at_threshold_text,
+            "chunk_id": "at-threshold",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 63);
+    assert!(
+        v["result"].get("warning").is_none(),
+        "exactly-at-threshold must not warn: {v}"
+    );
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        2,
+        "no new telemetry event at exact threshold"
+    );
+
+    // Env var override: a chunk between the default and the overridden threshold warns/doesn't
+    // warn according to the override, not the default (User Story 1 AS3).
+    std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "50");
+    let override_oversized_text = "a".repeat(51);
+    let v = dispatch_val(
+        64,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": override_oversized_text,
+            "chunk_id": "override-oversized",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+    assert_ok_resp(&v, 64);
+    let warning = &v["result"]["warning"];
+    assert_eq!(warning["chunk_text_chars"], 51);
+    assert_eq!(
+        warning["recommended_max_chars"], 50,
+        "warning must reflect the overridden threshold, not the default: {v}"
+    );
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        3,
+        "override-triggered oversized call must also emit telemetry"
     );
 }
 
