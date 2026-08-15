@@ -353,10 +353,10 @@ pub fn registry() -> Vec<ToolSpec> {
                         "source_file": {"type": "string", "description": "Source file to delete episodes for (required, non-empty)."},
                         "group_ids": {
                             "type": "array", "items": {"type": "string"},
-                            "description": "Restrict deletion to these groups. Omit to delete across all groups."
+                            "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
                         }
                     },
-                    "required": ["source_file"]
+                    "required": ["source_file", "group_ids"]
                 })
             },
         },
@@ -372,10 +372,10 @@ pub fn registry() -> Vec<ToolSpec> {
                         "chunk_id": {"type": "string", "description": "Chunk ID to delete episodes for (required, non-empty)."},
                         "group_ids": {
                             "type": "array", "items": {"type": "string"},
-                            "description": "Restrict deletion to these groups. Omit to delete across all groups."
+                            "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
                         }
                     },
-                    "required": ["chunk_id"]
+                    "required": ["chunk_id", "group_ids"]
                 })
             },
         },

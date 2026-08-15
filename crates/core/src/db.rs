@@ -856,34 +856,25 @@ impl<'db> Conn<'db> {
     }
 
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
-    /// source_file + ":". Returns the UUIDs of deleted episodes.
+    /// source_file + ":", scoped to the given group_ids. Returns the UUIDs of deleted episodes.
     ///
-    /// When group_ids is Some, only episodes in those groups are considered.
+    /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
+    /// query is not representable here; callers must resolve a group scope before calling.
     ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
     /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
-        group_ids: Option<&[&str]>,
+        group_ids: &[&str],
     ) -> Result<Vec<String>, Error> {
-        let group_clause = match group_ids {
-            Some(ids) if !ids.is_empty() => " AND ep.group_id IN $gids",
-            _ => "",
-        };
         let prefix = format!("{}:", source_file);
-        let match_sql = format!(
-            "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
-             OR ep.source_description STARTS WITH $prefix){group_clause} RETURN ep.uuid"
-        );
-        let mut params = serde_json::json!({ "src": source_file, "prefix": prefix });
-        if let Some(ids) = group_ids {
-            if !ids.is_empty() {
-                params["gids"] = serde_json::json!(ids);
-            }
-        }
+        let match_sql = "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
+             OR ep.source_description STARTS WITH $prefix) AND ep.group_id IN $gids \
+             RETURN ep.uuid";
+        let params = serde_json::json!({ "src": source_file, "prefix": prefix, "gids": group_ids });
         let uuids: Vec<String> = self
-            .query_params(&match_sql, params)?
+            .query_params(match_sql, params)?
             .into_iter()
             .map(|row| value_as_string(&row[0]))
             .collect();
@@ -896,36 +887,28 @@ impl<'db> Conn<'db> {
         Ok(uuids)
     }
 
-    /// Deletes all Episodic nodes whose name (chunk identifier) matches chunk_id.
-    /// Returns the UUIDs of deleted episodes.
+    /// Deletes all Episodic nodes whose name (chunk identifier) matches chunk_id, scoped to the
+    /// given group_ids. Returns the UUIDs of deleted episodes.
     ///
     /// Matches on ep.name (which always stores chunk_id) rather than source_description.
     /// Orphaned entities connected only to the deleted episodes are NOT removed — callers
     /// should be aware that entity nodes may become disconnected after this call.
     ///
-    /// When group_ids is Some, only episodes in those groups are considered.
+    /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
+    /// query is not representable here; callers must resolve a group scope before calling.
     ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
     /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
-        group_ids: Option<&[&str]>,
+        group_ids: &[&str],
     ) -> Result<Vec<String>, Error> {
-        let group_clause = match group_ids {
-            Some(ids) if !ids.is_empty() => " AND ep.group_id IN $gids",
-            _ => "",
-        };
         let match_sql =
-            format!("MATCH (ep:Episodic) WHERE ep.name = $name{group_clause} RETURN ep.uuid");
-        let mut params = serde_json::json!({ "name": chunk_id });
-        if let Some(ids) = group_ids {
-            if !ids.is_empty() {
-                params["gids"] = serde_json::json!(ids);
-            }
-        }
+            "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id IN $gids RETURN ep.uuid";
+        let params = serde_json::json!({ "name": chunk_id, "gids": group_ids });
         let uuids: Vec<String> = self
-            .query_params(&match_sql, params)?
+            .query_params(match_sql, params)?
             .into_iter()
             .map(|row| value_as_string(&row[0]))
             .collect();
