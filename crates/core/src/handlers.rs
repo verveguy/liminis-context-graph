@@ -1223,6 +1223,8 @@ async fn handle_get_entities_by_source(
     Ok(json!({ "source": source_val, "nodes": nodes, "count": count }))
 }
 
+/// Deletes all Episodic nodes matching source_file, scoped to the required `group_ids`
+/// (issue #406 — an unscoped, all-groups delete is rejected outright).
 async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let source_file = p["source_file"]
@@ -1265,7 +1267,8 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     }))
 }
 
-/// Deletes all Episodic nodes for the given chunk_id.
+/// Deletes all Episodic nodes for the given chunk_id, scoped to the required `group_ids`
+/// (issue #406 — an unscoped, all-groups delete is rejected outright).
 ///
 /// Note: only the episode nodes are removed. Entity nodes that were extracted
 /// from this chunk and are connected solely to the deleted episodes become

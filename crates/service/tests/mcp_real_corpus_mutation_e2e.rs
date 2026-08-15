@@ -675,7 +675,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
         let del_chunk = structured(
             client.call_tool(
                 "knowledge_delete_chunk_episode",
-                json!({"chunk_id": "us1-chunk-c"}),
+                json!({"chunk_id": "us1-chunk-c", "group_ids": [group_id.clone()]}),
             ),
             "US1 delete_chunk_episode",
         );
