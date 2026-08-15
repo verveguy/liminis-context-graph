@@ -258,7 +258,8 @@ pub struct RebindCounts {
 ///
 /// - Skipped (and counted in [`RebindCounts::staleness_skipped`]) only when the pointer's
 ///   current `binding_state` is `Bound` **and** `bound_at_seq >= source.WalPosition.applied_seq`
-///   (FR-007's staleness gate; per-database singleton until #360 adds per-source positions).
+///   (FR-007's staleness gate, compared against the source group's own per-group applied WAL
+///   position, established by #378).
 ///   A pointer whose recorded `binding_state` is `Unbound` or `Ambiguous` is a known-broken fact,
 ///   not a "might have changed" question the position comparison can answer — such pointers are
 ///   always re-resolved regardless of `bound_at_seq` (issue #392), which is what lets this public

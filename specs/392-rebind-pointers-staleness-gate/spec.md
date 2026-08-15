@@ -30,9 +30,8 @@ edges into `A` and `B`):
 The restore returned A's position to the value it held when the pointers were originally bound, so
 every pointer looks fresh to the gate and is skipped — while its recorded `binding_state` says
 `unbound`. `rebind_pointers_forced` already handles this correctly (its doc comment describes this
-exact shape) and is used internally by `group_purge` and by #387's generation-change self-heal, but
-it is not reachable from the public API: `knowledge_rebind_pointers`'s schema takes only
-`source_group_id`.
+exact shape) and is used internally by `group_purge`, but it is not reachable from the public API:
+`knowledge_rebind_pointers`'s schema takes only `source_group_id`.
 
 A pointer whose recorded `binding_state` is `unbound` or `ambiguous` is a known-broken fact, not a
 "might have changed" question. The staleness gate is an optimisation for the latter question; it
@@ -87,11 +86,13 @@ pointers into A are `bound` — with no intervening write to A.
 
 ---
 
-### User Story 2 - Internal forced callers keep their exact current behavior (Priority: P1)
+### User Story 2 - Internal callers keep their exact current behavior (Priority: P1)
 
-`group_purge` and #387's generation-change reset self-heal both call `rebind_pointers_forced`
-today and must continue to behave exactly as they do now — this issue changes what the public,
-gated tool examines, not the forced internal path.
+`group_purge` calls `rebind_pointers_forced` today; #387's generation-change reset self-heal calls
+the plain, non-forced `rebind_pointers`, relying on the fact that a genuine reset always advances
+the source group's position past `bound_at_seq`, which reopens the existing staleness gate on its
+own. Both must continue to behave exactly as they do now — this issue changes what the public,
+gated tool examines, not either internal caller's outcome.
 
 **Why this priority**: Regressing either path would break group purge or generation-change
 recovery, both already shipped and depended on by downstream consumers.
@@ -103,8 +104,8 @@ output and behavior are byte-for-byte unchanged.
 
 1. **Given** a group purge, **When** `rebind_pointers_forced` runs internally as part of it,
    **Then** pointers into the purged group become `unbound` exactly as before.
-2. **Given** a generation-change self-heal (#387), **When** it invokes the forced rebind, **Then**
-   its behavior and outcome are unchanged from today.
+2. **Given** a generation-change self-heal (#387), **When** it invokes the non-forced
+   `rebind_pointers`, **Then** its behavior and outcome are unchanged from today.
 
 ---
 
@@ -130,8 +131,9 @@ output and behavior are byte-for-byte unchanged.
 - **FR-003**: The `knowledge_rebind_pointers` response MUST distinguish "examined and already
   correct" from "skipped by the staleness gate," so a `checked: 0` result is never ambiguous about
   whether anything was actually looked at.
-- **FR-004**: Internal callers that use `rebind_pointers_forced` today (`group_purge`, and #387's
-  generation-change reset self-heal) MUST retain their current behavior unchanged.
+- **FR-004**: `group_purge` (which calls `rebind_pointers_forced`) and #387's generation-change
+  reset self-heal (which calls the non-forced `rebind_pointers`) MUST both retain their current
+  behavior unchanged.
 
 ### Key Entities
 
@@ -186,8 +188,9 @@ output and behavior are byte-for-byte unchanged.
 - #361 — group purge (uses `rebind_pointers_forced` internally).
 - #365 — checkpoint-bounded restore (`knowledge_rebuild_from_wal`); this issue completes its
   public-repair story.
-- #387 — generation-change reset self-heal (uses `rebind_pointers_forced`; FR-004 / SC-003 cover
-  it).
+- #387 — generation-change reset self-heal (uses the non-forced `rebind_pointers`, relying on a
+  genuine reset always advancing position past `bound_at_seq` to reopen the gate; FR-004 / SC-003
+  cover it).
 - #395 — `crates/service/tests/mcp_multistream_e2e.rs`, containing the `TODO(#392)` regression
   assertion this fix flips.
 - Milestone 0.13.1: "Patch release. Integrity fix for the layered-graph model: cross-group

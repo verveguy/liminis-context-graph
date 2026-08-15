@@ -56,10 +56,13 @@ before) and from "examined and re-resolved" (`bound`/`unbound`/`ambiguous`). Thi
 `checked: 0` result unambiguous: it now always means "every candidate pointer was `Bound` and
 looked fresh," never "some pointers may have been silently skipped despite being known-broken."
 
-`rebind_pointers_forced` — used by `group_purge` and #387's generation-change self-heal — passes
-`force: true` and bypasses this entire block, so it is structurally unaffected. The two self-heal
-call sites (`handlers.rs`) reach the shared `rebind_pointers_impl` through the *non-forced*
-wrapper, so they do pick up the new binding-state check — this is additive-only (a reset can now
+`rebind_pointers_forced` — used by `group_purge` only — passes `force: true` and bypasses this
+entire block, so it is structurally unaffected. #387's generation-change self-heal does not call
+`rebind_pointers_forced`: both of its call sites (`handlers.rs`) invoke the plain, non-forced
+`rebind_pointers`, relying instead on the fact that a genuine reset always advances the source
+group's `applied_seq` past what's recorded, which reopens the pre-existing seq gate on its own.
+Because those call sites reach the shared `rebind_pointers_impl` through that same non-forced
+wrapper, they do pick up the new binding-state check too — this is additive-only (a reset can now
 repair strictly more previously-known-broken pointers than before, never fewer) and does not
 change the behavior the existing self-heal regression test exercises, since that test's pointer
 is already `Bound` pre-reset.
