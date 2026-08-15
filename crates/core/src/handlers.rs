@@ -3145,6 +3145,7 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
         "ambiguous": counts.ambiguous,
         "invalidated_self_loop": counts.invalidated_self_loop,
         "invalidated_duplicate": counts.invalidated_duplicate,
+        "staleness_skipped": counts.staleness_skipped,
     }))
 }
 

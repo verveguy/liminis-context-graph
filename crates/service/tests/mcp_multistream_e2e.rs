@@ -15,10 +15,12 @@
 //! that motivated this issue (#383, #385, #392) each lived in that composition, invisible to any
 //! single-feature test. Every assertion below names the issue it protects (FR-005).
 //!
-//! Phase 9's assertion is a deliberate exception: #392 (a staleness gate in
-//! `crates/core/src/cross_group.rs::rebind_pointers_impl`) is not yet fixed, so per FR-006 that
-//! assertion checks today's actual (broken) behavior with a `TODO(#392)` marker, rather than
-//! being `#[ignore]`d or silently dropped — see that assertion's comment for the mechanism.
+//! Phase 9's assertion covers #392: a staleness gate in
+//! `crates/core/src/cross_group.rs::rebind_pointers_impl` used to skip re-checking any pointer
+//! whose `bound_at_seq` looked fresh, even when its recorded `binding_state` was `unbound` —
+//! reachable through purge (#361) followed by a checkpoint-bounded restore (#365). The gate now
+//! also keys on binding state, so this assertion requires every pointer into A be `bound` after
+//! the public `knowledge_rebind_pointers` call.
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -460,27 +462,22 @@ fn multistream_layer_graph_composition() {
 
     let after_rebind = c_bindings(&mut client);
 
-    // ── Assertion (j): C's pointers into A re-bind after A is rehydrated (#369) ─────────────
-    // TODO(#392): `rebind_pointers_impl` (crates/core/src/cross_group.rs) skips re-checking a
-    // pointer whenever its stamped `bound_at_seq` is >= the source group's *current* applied_seq
-    // (its staleness gate). `group_purge::purge_groups`'s forced rebind stamps `bound_at_seq` at
-    // A's post-purge (high) applied_seq; `knowledge_rebuild_from_wal`'s checkpoint-bounded
-    // restore then rewinds A's applied_seq back down to the pre-purge checkpoint (a lower
-    // number). The non-forced `knowledge_rebind_pointers` call above sees a stamped
-    // `bound_at_seq` that is still >= the (now-lower) current applied_seq and skips
-    // re-checking — so the pointer never leaves `unbound`, even though A's data is back. Per
-    // FR-006, this assertion intentionally checks today's actual (broken) behavior rather than
-    // being `#[ignore]`d, so the fix for #392 is a deliberate, visible diff to this test: once
-    // fixed, `any_unbound(&after_rebind)` will be `false` and this assertion must be flipped to
-    // require that (removing this TODO), not deleted.
+    // ── Assertion (j): C's pointers into A re-bind after A is rehydrated (#369, #392) ───────
+    // `group_purge::purge_groups`'s forced rebind stamps `bound_at_seq` at A's post-purge (high)
+    // applied_seq and flips the pointers to `unbound`; `knowledge_rebuild_from_wal`'s
+    // checkpoint-bounded restore then rewinds A's applied_seq back down to the pre-purge
+    // checkpoint (a lower number). Before #392 was fixed, the non-forced
+    // `knowledge_rebind_pointers` call above saw a stamped `bound_at_seq` that was still >= the
+    // (now-lower) current applied_seq and skipped re-checking, leaving the pointer `unbound`
+    // even though A's data was back. The gate now also re-checks any pointer whose current
+    // `binding_state` is `unbound`/`ambiguous` regardless of `bound_at_seq`, so this composition
+    // repairs correctly through the public API alone.
     let into_a_after_rebind = binding_states_into(&after_rebind, "A");
     assert!(
-        !into_a_after_rebind.is_empty() && into_a_after_rebind.iter().all(|s| *s == "unbound"),
-        "TODO(#392): expected C's pointers into A to still be reported unbound after \
-         knowledge_rebind_pointers, due to the known rebind_pointers staleness-gate bug (#392) \
-         — if this assertion now fails, #392 may have been fixed upstream; flip this assertion \
-         to require every pointer into A be 'bound' and remove the TODO(#392) comment above. \
-         into_a={into_a_after_rebind:?} after_rebind={after_rebind:?}"
+        !into_a_after_rebind.is_empty() && into_a_after_rebind.iter().all(|s| *s == "bound"),
+        "expected C's pointers into A to be bound after knowledge_rebind_pointers, following \
+         A's purge and checkpoint-bounded restore (#392) — into_a={into_a_after_rebind:?} \
+         after_rebind={after_rebind:?}"
     );
 
     // ── Edge case (FR-003 / Background #385): no mutation in this test ever targets the

@@ -806,6 +806,159 @@ fn rebind_pointers_is_idempotent_with_no_intervening_change() {
     assert_eq!(second.bound, 0);
     assert_eq!(second.unbound, 0);
     assert_eq!(second.ambiguous, 0);
+    // FR-002/SC-002: the pointer is Bound and its position hasn't advanced, so it's skipped by
+    // the staleness gate — and that must be visible as staleness_skipped, not silently folded
+    // into an unhelpfully ambiguous checked: 0 (issue #392 FR-003).
+    assert_eq!(second.staleness_skipped, 1);
+}
+
+/// Issue #392: a pointer whose recorded `binding_state` is `Unbound` is a known-broken fact, not
+/// a "might have changed" question the staleness gate's position comparison can answer. This
+/// reproduces the issue's exact composition — purge, then a checkpoint-bounded restore that
+/// returns the source group's position to the value the pointer was originally bound at — and
+/// confirms the public, gated `rebind_pointers` (not `rebind_pointers_forced`) repairs it anyway.
+#[test]
+fn rebind_pointers_rechecks_unbound_pointer_despite_stale_bound_at_seq() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    let bob = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob).unwrap();
+    conn.set_wal_position(GROUP_A, 4, None).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Bound
+    );
+
+    // Purge group A: delete its entities and force-rebind, exactly as group_purge does
+    // internally. The purge does not advance GROUP_A's applied_seq, so it stays at 4.
+    conn.delete_entities_by_group_ids(&[GROUP_A]).unwrap();
+    let (purge_counts, _) = cross_group::rebind_pointers_forced(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(purge_counts.unbound, 1);
+
+    // Checkpoint-bounded restore: rehydrate Bob and return GROUP_A's position to exactly the
+    // value it held when the pointer was originally bound (4) — the shape that makes every
+    // pointer look "fresh" to a seq-only gate even though it is recorded as unbound.
+    let bob_restored = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob_restored).unwrap();
+    conn.set_wal_position(GROUP_A, 4, None).unwrap();
+
+    let mid_before = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&mid_before.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Unbound,
+        "sanity check: still recorded unbound before the public rebind call"
+    );
+
+    // The public, gated path — not rebind_pointers_forced — must repair this (SC-001).
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(
+        counts.checked, 1,
+        "the unbound pointer must be re-examined despite bound_at_seq >= current"
+    );
+    assert_eq!(counts.bound, 1);
+    assert_eq!(counts.staleness_skipped, 0);
+
+    let mid_after = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&mid_after.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Bound
+    );
+    assert_eq!(mid_after.target_node_uuid, bob_restored.uuid);
+}
+
+/// Issue #392, FR-001 acceptance scenario 2: an `Ambiguous` pointer must also be re-checked
+/// regardless of how `bound_at_seq` compares to the source group's current position.
+#[test]
+fn rebind_pointers_rechecks_ambiguous_pointer_despite_stale_bound_at_seq() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let alice = make_entity("Alice", GROUP_LAYER, TS);
+    conn.insert_entity(&alice).unwrap();
+    let bob1 = make_entity("Bob", GROUP_A, TS);
+    let bob2 = make_entity("Bob", GROUP_A, TS);
+    conn.insert_entity(&bob1).unwrap();
+    conn.insert_entity(&bob2).unwrap();
+    conn.set_wal_position(GROUP_A, 4, None).unwrap();
+
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                source_group_id: GROUP_A.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(
+        pointer::read_pointers(&edge.attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .binding_state,
+        BindingState::Ambiguous
+    );
+
+    // No intervening WAL activity: bound_at_seq (4) == current applied position (4) — the exact
+    // shape the old, position-only gate would have skipped.
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(
+        counts.checked, 1,
+        "the ambiguous pointer must be re-examined despite bound_at_seq >= current"
+    );
+    assert_eq!(counts.ambiguous, 1);
+    assert_eq!(counts.staleness_skipped, 0);
 }
 
 #[test]

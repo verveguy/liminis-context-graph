@@ -258,14 +258,21 @@ completely unaffected: pointers only ever exist on edges created through this to
 - **`knowledge_rebind_pointers`** (`{"source_group_id": "..."}`, required) re-resolves every
   pointer whose `source_group_id` matches, after that source group's own hydration, incremental
   replay, or refresh cycle — including an ordinary `knowledge_rebuild_from_wal` targeting that one
-  group, not only a full purge-and-rehydrate (issue #378). It skips any pointer whose
-  `bound_at_seq` is already at or past `source_group_id`'s **own** applied WAL position — never
-  any other group's, even when the edge carrying the pointer lives in a third, different group —
-  this is both the staleness gate and what makes a second call with no intervening change to
-  `source_group_id`'s stream a true no-op. A resolution that would create a self-loop or duplicate
-  an existing directed edge invalidates the edge instead of writing a broken or redundant one,
-  reusing `knowledge_merge_entities`'s own self-loop/dedup handling rather than a new policy.
-  Returns `{checked, bound, unbound, ambiguous, invalidated_self_loop, invalidated_duplicate}`.
+  group, not only a full purge-and-rehydrate (issue #378). A pointer currently `bound` is skipped
+  once its `bound_at_seq` is already at or past `source_group_id`'s **own** applied WAL position —
+  never any other group's, even when the edge carrying the pointer lives in a third, different
+  group — this staleness gate is what makes a second call with no intervening change to
+  `source_group_id`'s stream a true no-op for pointers that are already correct. A pointer
+  currently `unbound` or `ambiguous` is always re-resolved regardless of `bound_at_seq` (issue
+  #392): a known-broken pointer is repaired unconditionally, since the position comparison alone
+  cannot tell "nothing changed" apart from "the source group was purged and then restored to the
+  same position the pointer was originally bound at." A resolution that would create a self-loop
+  or duplicate an existing directed edge invalidates the edge instead of writing a broken or
+  redundant one, reusing `knowledge_merge_entities`'s own self-loop/dedup handling rather than a
+  new policy. Returns `{checked, bound, unbound, ambiguous, invalidated_self_loop,
+  invalidated_duplicate, staleness_skipped}` — `staleness_skipped` counts pointers skipped by the
+  gate above, distinct from `checked` (pointers actually re-resolved), so a `checked: 0` result is
+  never ambiguous about whether anything was examined.
 - **Unbound and ambiguous edges are excluded from normal reads.** Every existing two-hop
   traversal, search, and MCP read path requires both hops to exist — a pointer that hasn't
   resolved is invisible the same way any other incomplete edge would be, no special-casing

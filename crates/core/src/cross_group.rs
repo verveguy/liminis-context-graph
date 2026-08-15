@@ -246,20 +246,34 @@ pub struct RebindCounts {
     pub ambiguous: u64,
     pub invalidated_self_loop: u64,
     pub invalidated_duplicate: u64,
+    /// Pointers skipped by the staleness gate: currently `Bound` with `bound_at_seq` at or past
+    /// the source group's current applied position (issue #392). Distinguishes "examined and
+    /// already correct" (counted in `checked`) from "not looked at because it looked fresh" —
+    /// so a `checked: 0` result is never ambiguous about whether anything was actually examined.
+    pub staleness_skipped: u64,
 }
 
 /// Re-resolves every cross-group pointer whose `source_group_id == source_group_id`, for use
 /// after a source group's purge → rehydrate refresh cycle (User Story 3). For each pointer:
 ///
-/// - Skipped entirely if `bound_at_seq >= source.WalPosition.applied_seq` (FR-007's staleness
-///   gate; per-database singleton until #360 adds per-source positions). This is also what
-///   makes a second call with no intervening WAL activity a true no-op (FR-009): every pointer
-///   this call touches has its `bound_at_seq` bumped to the current applied position, so the
-///   next call's gate skips it. The gate only engages when *both* the pointer's `bound_at_seq`
-///   and the current applied position are known (`Some`): if no `WalPosition` has been recorded
-///   yet, `bound_at_seq` is written as `None` too, so every pointer is re-resolved on every pass
-///   until a position exists to compare against — always-recheck, not always-skip, is the safe
-///   default for "we don't yet know if this is stale."
+/// - Skipped (and counted in [`RebindCounts::staleness_skipped`]) only when the pointer's
+///   current `binding_state` is `Bound` **and** `bound_at_seq >= source.WalPosition.applied_seq`
+///   (FR-007's staleness gate, compared against the source group's own per-group applied WAL
+///   position, established by #378).
+///   A pointer whose recorded `binding_state` is `Unbound` or `Ambiguous` is a known-broken fact,
+///   not a "might have changed" question the position comparison can answer — such pointers are
+///   always re-resolved regardless of `bound_at_seq` (issue #392), which is what lets this public
+///   path repair pointers left `unbound` by a purge even after a checkpoint-bounded restore
+///   returns the source group's position to the value the pointer was originally bound at. For
+///   `Bound` pointers the position-based gate still applies unchanged, so a second call with no
+///   intervening WAL activity is still a true no-op for anything already correct (FR-009): every
+///   pointer this call resolves has its `bound_at_seq` bumped to the current applied position, so
+///   the next call's gate skips it once it's `Bound`. The seq half of the gate only engages when
+///   *both* the pointer's `bound_at_seq` and the current applied position are known (`Some`): if
+///   no `WalPosition` has been recorded yet, `bound_at_seq` is written as `None` too, so every
+///   pointer is re-resolved on every pass until a position exists to compare against —
+///   always-recheck, not always-skip, is the safe default for "we don't yet know if this is
+///   stale."
 /// - Otherwise re-resolved via [`resolve_endpoint`] (the same ADR-0283 authority, FR-003). Both
 ///   sides are fully resolved *before* either hop is written, and the self-loop/duplicate check
 ///   runs once against the fully-prospective `(src, dst)` pair — not per side — so a pass that
@@ -354,10 +368,13 @@ fn rebind_pointers_impl(
             if existing.source_group_id != source_group_id {
                 continue;
             }
-            if !force {
+            if !force && existing.binding_state == BindingState::Bound {
                 if let (Some(bound_at), Some(current)) = (existing.bound_at_seq, current_seq) {
                     if bound_at >= current {
-                        continue; // already checked as of this source position (FR-009)
+                        // Already checked as of this source position (FR-009), and not a
+                        // known-broken pointer (issue #392) — safe to skip.
+                        counts.staleness_skipped += 1;
+                        continue;
                     }
                 }
             }
