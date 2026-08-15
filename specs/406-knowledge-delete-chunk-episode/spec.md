@@ -78,26 +78,23 @@ A caller invokes `knowledge_delete_chunk_episode` without supplying any group sc
 
 ## Assumptions
 
-- The client-side fix — making the liminis app pass its workspace `group_id` on every `deleteChunkEpisode` call — is tracked as a separate issue against the `liminis` app and is not part of this issue. This issue's fix stands on its own regardless of when the client-side fix lands: once the server rejects unscoped calls, the app's current unscoped calls will start failing loudly instead of silently over-deleting, which is the intended interim behavior until the client-side fix ships.
+- The client-side fix — making the liminis app pass an explicit `group_id` on every `deleteChunkEpisode` call — is filed as `liminis#998`. Failing closed on an unscoped request is still correct behavior and is not weakened by this note; what changes is that the two fixes must be **coordinated at rollout**, not merely tracked as independent work: `liminis-app/scripts/build-liminis-context-graph.sh` builds the server binary from an unpinned sibling checkout (no tag/commit/version pin) and bundles it straight into the app, so the next app build after this server fix lands on `main` would bundle a server that rejects unscoped deletes while `indexing-queue.ts:1551` still sends them, breaking every unlink and every heading rename until the client fix also lands. This is a deployment-sequencing concern for whoever merges this issue's PR, not a change to this issue's own requirements or acceptance criteria.
+- `liminis#998` scoping also confirmed that the app's indexing path never sends a `group_id` either (`processChunk` params are `{ source_file, chunk_text, chunk_id, reference_time }`), so all app-indexed episodes currently live in `DEFAULT_GROUP_ID`. The client fix is to state that group explicitly, not to introduce a new one — informational context for Research/Plan, not a change to this issue's scope.
 - The narrower hazard in #292 (a `knowledge_add_episode` row colliding with a chunk lineage *within* one group) is explicitly out of scope, per the issue, and is being handled separately.
 - This fix does not depend on, and should not wait for, the chunked-ingest or temporal-model work referenced for later milestones.
 
 ## Out of Scope
 
-- The liminis app's client-side call site (`indexing-queue.ts`) — filed separately.
+- The liminis app's client-side call site (`indexing-queue.ts`) — filed as `liminis#998`; see Assumptions for the rollout-coordination note.
 - #292 (within-group `knowledge_add_episode`/chunk-lineage collision).
 - Chunked-ingest and temporal-model work for later milestones.
-
-## Open Questions
-
-- [ ] `Conn::remove_episodes_by_source` (`crates/core/src/db.rs:865-895`), which backs `knowledge_delete_by_source` (`handle_delete_by_source`, `crates/core/src/handlers.rs:1226-1268`), has the identical pattern: its group predicate is only added when `group_ids` is `Some` and non-empty, so an omitted/empty scope also produces an unscoped, name/prefix-matched `DETACH DELETE` across every group. This issue's title and acceptance criteria name only `knowledge_delete_chunk_episode`. Should this issue's fix also cover `knowledge_delete_by_source` (same root cause, same file, adjacent function), or is that intentionally deferred to a separate issue the way #292 was? If deferred, should a follow-up issue be filed now so the sibling hazard doesn't go untracked?
 
 ## Source References
 
 - `crates/core/src/db.rs:910-937` — `remove_episodes_by_chunk_id`
 - `crates/core/src/handlers.rs:1276-1318` — `handle_delete_chunk_episode`
 - `crates/core/src/handlers.rs:4356-4372` — `extract_optional_group_ids` (missing/null/empty all resolve to `None`)
-- `crates/core/src/db.rs:865-895` — `remove_episodes_by_source` (same conditional-scope pattern; see Open Questions)
+- `crates/core/src/db.rs:865-895` — `remove_episodes_by_source` (identical conditional-scope pattern; whether this issue's fix also covers it is an unresolved scope question — see the issue thread)
 - `crates/core/src/handlers.rs:1226-1268` — `handle_delete_by_source`
 - `crates/core/src/handlers.rs:1334-1363` — `handle_delete_by_group`'s existing mandatory, actionable `group_ids` validation (precedent for the error style this issue asks for)
 - `liminis-app/src/main/indexing-queue.ts:1551` — the unscoped client call
