@@ -953,12 +953,18 @@ pub fn registry() -> Vec<ToolSpec> {
                            purge/rehydrate refresh cycle so layer edges follow re-extracted \
                            entities, merges, and renames. Uses the same name-index resolution \
                            authority as pointer creation (ADR-0283), so results always agree \
-                           with what a fresh lookup would find. Skips any pointer whose \
-                           `bound_at_seq` is already at or past the current applied WAL \
-                           position, which is what makes a second call with no intervening \
-                           source change a no-op. A resolution that would create a self-loop or \
-                           duplicate an existing directed edge invalidates the edge instead of \
-                           writing a broken/redundant one, reusing the same handling \
+                           with what a fresh lookup would find. A pointer currently `bound` is \
+                           skipped (and counted in `staleness_skipped`) once its `bound_at_seq` \
+                           is already at or past the current applied WAL position, which is what \
+                           makes a second call with no intervening source change a no-op for \
+                           pointers that are already correct. A pointer currently `unbound` or \
+                           `ambiguous` is always re-resolved regardless of `bound_at_seq` (issue \
+                           #392), since a known-broken pointer must be repairable even when its \
+                           source group's position happens to look unchanged — e.g. after a \
+                           purge followed by a checkpoint-bounded restore back to the position \
+                           the pointer was originally bound at. A resolution that would create a \
+                           self-loop or duplicate an existing directed edge invalidates the edge \
+                           instead of writing a broken/redundant one, reusing the same handling \
                            `knowledge_merge_entities` uses.",
             scope: Scope::Admin,
             input_schema: || {
