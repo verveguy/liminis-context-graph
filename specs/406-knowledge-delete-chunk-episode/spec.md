@@ -9,9 +9,15 @@
 
 `knowledge_delete_chunk_episode` deletes `Episodic` rows by matching on `ep.name`, which stores the caller-supplied `chunk_id`. `Conn::remove_episodes_by_chunk_id` (`crates/core/src/db.rs:910-937`) only adds a `group_id IN $gids` predicate when `group_ids` is `Some` and non-empty; otherwise the `MATCH` has no group predicate at all, and the subsequent `DETACH DELETE` removes every matching row in the database regardless of group. `handle_delete_chunk_episode` (`crates/core/src/handlers.rs:1276-1318`) passes `group_ids` straight through via `extract_optional_group_ids`, which returns `None` for a missing key, `null`, or an empty array.
 
-The liminis app calls this method with no `group_ids` on every invocation (`liminis-app/src/main/indexing-queue.ts:1551`), and reaches it routinely rather than exceptionally: `chunk_id` is a structural address derived from a document's heading path (`buildChunkId(docId, headingPath, chunkIndex)`, `liminis-app/src/main/canonical-chunker.ts:456`), so renaming a heading changes the `chunk_id` for every chunk beneath it, and `ChunkStateStore.diffChunks()` enqueues an `unlink`/delete for each one. `Episodic.name` is not exclusive to chunk ingest — `knowledge_add_episode` lets any caller set an arbitrary `name` in any group — so a name collision across groups means an ordinary heading rename in one group can silently destroy another group's episode data.
+The liminis app calls this method with no `group_ids` on every invocation (`liminis-app/src/main/indexing-queue.ts:1551`), and reaches it routinely rather than exceptionally: `chunk_id` is a structural address derived from a document's heading path (`buildChunkId(docId, headingPath, chunkIndex)`, `liminis-app/src/main/canonical-chunker.ts:456`), so renaming a heading changes the `chunk_id` for every chunk beneath it. The old ids drop out of the new chunk set and land in `ChunkStateStore.diffChunks()`'s `deleted` bucket (`chunk-state-store.ts`), each of which is enqueued as an `unlink` (`indexing-queue.ts:1178-1181`) that in turn issues one unscoped `deleteChunkEpisode` call (`indexing-queue.ts:1551`) — so a single heading rename fires a batch of unscoped, name-matched deletes, not just one. `Episodic.name` is not exclusive to chunk ingest — `knowledge_add_episode` lets any caller set an arbitrary `name` in any group — so a name collision across groups means an ordinary heading rename in one group can silently destroy another group's episode data.
 
-This is the same failure class as #368 (an operation in one group destroying another group's data), which 0.13.0 treated as release-blocking, and it violates the principle established by ADR-0371 that a write in group G touches only G's data. It is reachable today on `main` with no new feature required, and is scoped as a patch-level defensive fix for 0.13.2.
+This is the same failure class as #368 (an operation in one group destroying another group's data), which 0.13.0 treated as release-blocking, and it violates the principle established across ADR-0368, ADR-0371, and ADR-0385 that a write in group G touches only G's data. It is reachable today on `main` with no new feature required, and is scoped as a patch-level defensive fix for 0.13.2.
+
+Issue #403 was filed independently, minutes before this issue, describing the same defect and mechanism; it is being closed as a duplicate of this one and its content folded in here.
+
+**Distinguishing this from #292**: #292 examined `knowledge_delete_chunk_episode` and ruled it in-bounds-and-fine for **name** collisions — its stated rationale is that this is "an explicit, caller-invoked deletion whose contract has always been 'delete everything with this name.'" That reasoning covers name collisions within the caller's own intent; it does not address **group** scope, and it presumes a deliberate operator action. The liminis app's calls are not that — they are issued automatically by the indexing pipeline in response to a heading rename, with no operator reviewing or confirming each delete. This issue and #292 are addressing different axes of the same handler and are not in tension.
+
+**Related**: #402 asks how a single `knowledge_delete_chunk_episode` call that spans multiple groups should attribute its WAL mutations. If this issue removes the unscoped (all-groups) form entirely, #402's premise may no longer apply — Research/Plan should check #402's status once this issue's approach is settled.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -80,7 +86,7 @@ A caller invokes `knowledge_delete_chunk_episode` without supplying any group sc
 
 - The client-side fix — making the liminis app pass an explicit `group_id` on every `deleteChunkEpisode` call — is filed as `liminis#998`. Failing closed on an unscoped request is still correct behavior and is not weakened by this note; what changes is that the two fixes must be **coordinated at rollout**, not merely tracked as independent work: `liminis-app/scripts/build-liminis-context-graph.sh` builds the server binary from an unpinned sibling checkout (no tag/commit/version pin) and bundles it straight into the app, so the next app build after this server fix lands on `main` would bundle a server that rejects unscoped deletes while `indexing-queue.ts:1551` still sends them, breaking every unlink and every heading rename until the client fix also lands. This is a deployment-sequencing concern for whoever merges this issue's PR, not a change to this issue's own requirements or acceptance criteria.
 - `liminis#998` scoping also confirmed that the app's indexing path never sends a `group_id` either (`processChunk` params are `{ source_file, chunk_text, chunk_id, reference_time }`), so all app-indexed episodes currently live in `DEFAULT_GROUP_ID`. The client fix is to state that group explicitly, not to introduce a new one — informational context for Research/Plan, not a change to this issue's scope.
-- The narrower hazard in #292 (a `knowledge_add_episode` row colliding with a chunk lineage *within* one group) is explicitly out of scope, per the issue, and is being handled separately.
+- #292 (a `knowledge_add_episode` row colliding with a chunk lineage *within* one group, on the **name** axis) is explicitly out of scope and is being handled separately — see Background for why it does not overlap with this issue's **group**-scope defect.
 - This fix does not depend on, and should not wait for, the chunked-ingest or temporal-model work referenced for later milestones.
 
 ## Out of Scope
@@ -98,6 +104,11 @@ A caller invokes `knowledge_delete_chunk_episode` without supplying any group sc
 - `crates/core/src/handlers.rs:1226-1268` — `handle_delete_by_source`
 - `crates/core/src/handlers.rs:1334-1363` — `handle_delete_by_group`'s existing mandatory, actionable `group_ids` validation (precedent for the error style this issue asks for)
 - `liminis-app/src/main/indexing-queue.ts:1551` — the unscoped client call
+- `liminis-app/src/main/indexing-queue.ts:1178-1181` — where a disappeared chunk is enqueued as `unlink`
 - `liminis-app/src/main/canonical-chunker.ts:456` — structural `chunk_id` derivation
-- `docs/adr/0371-merge-never-writes-foreign-group-data.md` — "a write in group G touches only G's data"
+- `liminis-app/src/main/chunk-state-store.ts` — `ChunkStateStore.diffChunks()`'s `deleted` bucket
+- `docs/adr/0368-group-scoped-edge-dedup-in-merge.md`, `docs/adr/0371-merge-never-writes-foreign-group-data.md`, `docs/adr/0385-per-group-mutation-attribution-for-multi-group-writers.md` — "a write in group G touches only G's data"
 - #368 — the same failure class, fixed in 0.13.0
+- #403 — duplicate of this issue, folded in
+- #292 — the name-collision question this issue's group-scope defect is distinct from
+- #402 — WAL attribution for multi-group `knowledge_delete_chunk_episode` calls; its premise may be affected by this issue's resolution
