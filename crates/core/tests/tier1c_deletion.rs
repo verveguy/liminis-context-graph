@@ -18,6 +18,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
+    wal_group::DEFAULT_GROUP_ID,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -146,6 +147,45 @@ async fn status_counts(id: i64, state: Arc<AppState>) -> (u64, u64, u64) {
     )
 }
 
+/// Adds an episode directly via `knowledge_add_episode`, naming both `name` (matched by
+/// `knowledge_delete_chunk_episode`) and `source_description` (matched by
+/// `knowledge_delete_by_source`) explicitly, so cross-group fixtures can share either value
+/// across groups without going through `process_chunk` (which always lands in
+/// `DEFAULT_GROUP_ID`).
+async fn add_episode(
+    id: i64,
+    name: &str,
+    source_description: &str,
+    group_id: &str,
+    state: Arc<AppState>,
+) -> Value {
+    dispatch_val(
+        id,
+        "knowledge_add_episode",
+        json!({
+            "name": name,
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "text",
+            "source_description": source_description,
+            "reference_time": "2024-01-01T00:00:00Z",
+            "group_id": group_id,
+        }),
+        state,
+    )
+    .await
+}
+
+async fn episode_count_in_group(id: i64, group_id: &str, state: Arc<AppState>) -> u64 {
+    let v = dispatch_val(
+        id,
+        "knowledge_get_episodes",
+        json!({"group_id": group_id, "last_n": 100}),
+        state,
+    )
+    .await;
+    v["result"]["count"].as_u64().unwrap_or(0)
+}
+
 // ── delete_by_source ──────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -173,7 +213,7 @@ async fn delete_by_source_basic() {
     let v = dispatch_val(
         5,
         "knowledge_delete_by_source",
-        json!({"source_file": "docs/a.md"}),
+        json!({"source_file": "docs/a.md", "group_ids": [DEFAULT_GROUP_ID]}),
         Arc::clone(&state),
     )
     .await;
@@ -195,7 +235,7 @@ async fn delete_by_source_no_match() {
     let v = dispatch_val(
         1,
         "knowledge_delete_by_source",
-        json!({"source_file": "no-such-file.md"}),
+        json!({"source_file": "no-such-file.md", "group_ids": [DEFAULT_GROUP_ID]}),
         state,
     )
     .await;
@@ -220,6 +260,101 @@ async fn delete_by_source_missing_param() {
     );
 }
 
+/// FR-001/FR-002, SC-004: an unscoped `knowledge_delete_by_source` call — group_ids omitted,
+/// null, or `[]` — must be rejected with an error naming `group_ids`, and must not delete
+/// anything in any group.
+#[tokio::test]
+async fn delete_by_source_requires_group_ids() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db, "test.db");
+
+    assert_ok(
+        &add_episode(1, "ep-a", "doc.md", "group-a", Arc::clone(&state)).await,
+        1,
+    );
+    assert_ok(
+        &add_episode(2, "ep-b", "doc.md", "group-b", Arc::clone(&state)).await,
+        2,
+    );
+
+    for (id, params) in [
+        (3, json!({"source_file": "doc.md"})),
+        (4, json!({"source_file": "doc.md", "group_ids": null})),
+        (5, json!({"source_file": "doc.md", "group_ids": []})),
+    ] {
+        let v = dispatch_val(id, "knowledge_delete_by_source", params, Arc::clone(&state)).await;
+        assert_err(&v, id);
+        let msg = v["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("group_ids"),
+            "error should mention group_ids: {v}"
+        );
+    }
+
+    assert_eq!(
+        episode_count_in_group(6, "group-a", Arc::clone(&state)).await,
+        1,
+        "group-a row must survive an unscoped call"
+    );
+    assert_eq!(
+        episode_count_in_group(7, "group-b", Arc::clone(&state)).await,
+        1,
+        "group-b row must survive an unscoped call"
+    );
+}
+
+/// FR-003/FR-007, SC-005: a scoped `knowledge_delete_by_source` call touches only the named
+/// group's rows, both for an exact `source_description` match and a `source_file:` prefix
+/// match; a same-source row in another group is untouched.
+#[tokio::test]
+async fn delete_by_source_scoped_to_one_group() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db, "test.db");
+
+    // Exact match in both groups.
+    assert_ok(
+        &add_episode(1, "ep-a1", "doc.md", "group-a", Arc::clone(&state)).await,
+        1,
+    );
+    assert_ok(
+        &add_episode(2, "ep-b1", "doc.md", "group-b", Arc::clone(&state)).await,
+        2,
+    );
+    // Prefix match in both groups.
+    assert_ok(
+        &add_episode(3, "ep-a2", "doc.md:section1", "group-a", Arc::clone(&state)).await,
+        3,
+    );
+    assert_ok(
+        &add_episode(4, "ep-b2", "doc.md:section1", "group-b", Arc::clone(&state)).await,
+        4,
+    );
+
+    let v = dispatch_val(
+        5,
+        "knowledge_delete_by_source",
+        json!({"source_file": "doc.md", "group_ids": ["group-a"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 5);
+    assert_eq!(
+        v["result"]["deleted_count"], 2,
+        "both exact and prefix matches in group-a must be deleted: {v}"
+    );
+
+    assert_eq!(
+        episode_count_in_group(6, "group-a", Arc::clone(&state)).await,
+        0,
+        "group-a rows must be gone"
+    );
+    assert_eq!(
+        episode_count_in_group(7, "group-b", Arc::clone(&state)).await,
+        2,
+        "group-b rows (exact and prefix) must survive"
+    );
+}
+
 // ── delete_chunk_episode ──────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -237,7 +372,7 @@ async fn delete_chunk_episode_basic() {
     let v = dispatch_val(
         3,
         "knowledge_delete_chunk_episode",
-        json!({"chunk_id": "my-chunk"}),
+        json!({"chunk_id": "my-chunk", "group_ids": [DEFAULT_GROUP_ID]}),
         Arc::clone(&state),
     )
     .await;
@@ -270,7 +405,7 @@ async fn delete_chunk_episode_all_revisions() {
     let v = dispatch_val(
         4,
         "knowledge_delete_chunk_episode",
-        json!({"chunk_id": "rev-chunk"}),
+        json!({"chunk_id": "rev-chunk", "group_ids": [DEFAULT_GROUP_ID]}),
         Arc::clone(&state),
     )
     .await;
@@ -292,13 +427,128 @@ async fn delete_chunk_episode_no_match() {
     let v = dispatch_val(
         1,
         "knowledge_delete_chunk_episode",
-        json!({"chunk_id": "nonexistent-chunk"}),
+        json!({"chunk_id": "nonexistent-chunk", "group_ids": [DEFAULT_GROUP_ID]}),
         state,
     )
     .await;
     assert_ok(&v, 1);
     assert_eq!(v["result"]["success"], true, "{v}");
     assert_eq!(v["result"]["deleted_count"], 0, "{v}");
+}
+
+/// FR-001/FR-002, SC-001: an unscoped `knowledge_delete_chunk_episode` call — group_ids
+/// omitted, null, or `[]` — must be rejected with an error naming `group_ids`, and must not
+/// delete anything in any group, even when the same `chunk_id` collides across groups.
+#[tokio::test]
+async fn delete_chunk_episode_requires_group_ids() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db, "test.db");
+
+    assert_ok(
+        &add_episode(
+            1,
+            "shared-chunk",
+            "docs/shared.md",
+            "group-a",
+            Arc::clone(&state),
+        )
+        .await,
+        1,
+    );
+    assert_ok(
+        &add_episode(
+            2,
+            "shared-chunk",
+            "docs/shared.md",
+            "group-b",
+            Arc::clone(&state),
+        )
+        .await,
+        2,
+    );
+
+    for (id, params) in [
+        (3, json!({"chunk_id": "shared-chunk"})),
+        (4, json!({"chunk_id": "shared-chunk", "group_ids": null})),
+        (5, json!({"chunk_id": "shared-chunk", "group_ids": []})),
+    ] {
+        let v = dispatch_val(
+            id,
+            "knowledge_delete_chunk_episode",
+            params,
+            Arc::clone(&state),
+        )
+        .await;
+        assert_err(&v, id);
+        let msg = v["error"]["message"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("group_ids"),
+            "error should mention group_ids: {v}"
+        );
+    }
+
+    assert_eq!(
+        episode_count_in_group(6, "group-a", Arc::clone(&state)).await,
+        1,
+        "group-a row must survive an unscoped call"
+    );
+    assert_eq!(
+        episode_count_in_group(7, "group-b", Arc::clone(&state)).await,
+        1,
+        "group-b row must survive an unscoped call"
+    );
+}
+
+/// FR-003/FR-006, SC-002: a scoped `knowledge_delete_chunk_episode` call touches only the
+/// named group's row(s); a same-name row in another group is untouched.
+#[tokio::test]
+async fn delete_chunk_episode_scoped_to_one_group() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db, "test.db");
+
+    assert_ok(
+        &add_episode(
+            1,
+            "shared-chunk",
+            "docs/shared.md",
+            "group-a",
+            Arc::clone(&state),
+        )
+        .await,
+        1,
+    );
+    assert_ok(
+        &add_episode(
+            2,
+            "shared-chunk",
+            "docs/shared.md",
+            "group-b",
+            Arc::clone(&state),
+        )
+        .await,
+        2,
+    );
+
+    let v = dispatch_val(
+        3,
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "shared-chunk", "group_ids": ["group-a"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok(&v, 3);
+    assert_eq!(v["result"]["deleted_count"], 1, "{v}");
+
+    assert_eq!(
+        episode_count_in_group(4, "group-a", Arc::clone(&state)).await,
+        0,
+        "group-a row must be gone"
+    );
+    assert_eq!(
+        episode_count_in_group(5, "group-b", Arc::clone(&state)).await,
+        1,
+        "group-b row must survive"
+    );
 }
 
 // ── clear_all ─────────────────────────────────────────────────────────────────
