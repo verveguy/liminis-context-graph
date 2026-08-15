@@ -287,7 +287,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            and adds them to the graph. The result reports \
                            `edges_dropped_unresolvable`: extracted edges discarded because an \
                            endpoint matched no entity in this chunk or in the graph. A nonzero \
-                           count means facts stated in this chunk were not written.",
+                           count means facts stated in this chunk were not written. \
+                           Recommended maximum `chunk_text` size is 8,000 characters (default, \
+                           overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
+                           quality degrades well before any context-window limit is reached. \
+                           Splitting oversized input into multiple `knowledge_process_chunk` \
+                           calls is the caller's responsibility; this call still succeeds above \
+                           the threshold, but the result gains a `warning` field naming the \
+                           actual size and the recommended maximum.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
