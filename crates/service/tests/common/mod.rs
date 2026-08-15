@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod real_corpus;
+pub mod wal_inspect;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -488,5 +489,18 @@ impl McpClient {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+}
+
+/// Safety net for every test using `McpClient`: if a test panics (e.g. a failed assertion)
+/// before it reaches `shutdown()` or `wait_for_exit()`, the spawned subprocess would otherwise
+/// keep running past the end of the test, leaking a process and its held file/socket handles
+/// into the rest of the suite. `kill`/`wait` are idempotent against an already-exited child (an
+/// error from either here is simply ignored), so this is always safe to run unconditionally,
+/// including after an explicit `shutdown()` already reaped the process.
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
