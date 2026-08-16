@@ -18,10 +18,21 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   stats-aware query planning, and HNSW scalar quantization. No IPC or MCP tool schema, response
   shape, or dispatch method changes.
 
-  **Upgrading is one-way.** A database created under `0.17.0` (storage version 41) opens directly
-  under `0.19.1` — no migration step, no export/reimport. But the first checkpoint under the new
-  binary rewrites it to storage version 43, and **an older `liminis-context-graph` binary will not
-  open it again**. Back up `.lcg/db/` first if you need the option to roll back.
+  **Upgrading is one-way for the database — but not for your data.** A database created under
+  `0.17.0` (storage version 41) opens directly under `0.19.1`: no migration step, no
+  export/reimport. The first checkpoint under the new binary then rewrites it to storage version
+  43, after which **an older `liminis-context-graph` binary will not open it again**.
+
+  This affects only `.lcg/db/`, which is a derived index. The WAL under `.lcg/wal/` is the source
+  of truth and is plain JSONL owned by this project — its format is independent of lbug's storage
+  version, so the bump does not touch it. **To roll back to an older binary: stop the service,
+  delete (or move aside) `.lcg/db/`, and start the older binary — it rebuilds the graph from the
+  WAL on startup.** No database backup is required for this path.
+
+  If you would rather keep a restorable snapshot than rebuild, back up `.lcg/db/` **and**
+  `.lcg/wal/` together before upgrading, copying the WAL directories whole — dot-namespace
+  included (`cp -R`/`rsync -a`, never a `*.jsonl` glob), since `.wal-generation.json` is
+  load-bearing. See `docs/operations.md`.
 
 ### Fixed
 
