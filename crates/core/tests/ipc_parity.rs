@@ -6313,3 +6313,145 @@ async fn omitted_group_ids_zero_group_graph_returns_empty_not_error() {
         "empty graph, omitted group_ids: {edges_by_group}"
     );
 }
+
+// ── #413 review follow-up: an explicit `group_ids` value must resolve exactly as it did before
+// #413's omitted-value fix — FR-009. Before #413, `knowledge_find_entities`/
+// `knowledge_find_relationships`/`knowledge_get_nodes_by_group`/`knowledge_get_edges_by_group`
+// treated an explicit empty array as an empty (non-`None`) filter that matched nothing; that must
+// still hold. An explicit `null` must behave identically to omission (all groups).
+
+#[tokio::test]
+async fn explicit_empty_group_ids_matches_zero_rows_not_all_groups() {
+    let (db, _dir) = make_db(4);
+    seed_413_two_group_fixture(&db);
+    let state = make_state_with_mock_embed(db);
+    dispatch_val(
+        530,
+        "knowledge_build_indices",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let find_entities = dispatch_val(
+        531,
+        "knowledge_find_entities",
+        json!({"query": "findme413", "num_results": 10, "group_ids": []}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&find_entities, 531);
+    assert_eq!(
+        find_entities["result"]["count"], 0,
+        "explicit empty group_ids must match zero rows, not all groups: {find_entities}"
+    );
+
+    let find_relationships = dispatch_val(
+        532,
+        "knowledge_find_relationships",
+        json!({"query": "linkme413", "num_results": 10, "group_ids": []}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&find_relationships, 532);
+    assert_eq!(
+        find_relationships["result"]["count"], 0,
+        "explicit empty group_ids must match zero rows, not all groups: {find_relationships}"
+    );
+
+    let nodes_by_group = dispatch_val(
+        533,
+        "knowledge_get_nodes_by_group",
+        json!({"group_ids": []}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&nodes_by_group, 533);
+    assert_eq!(
+        nodes_by_group["result"]["count"], 0,
+        "explicit empty group_ids must match zero rows, not all groups: {nodes_by_group}"
+    );
+
+    let edges_by_group = dispatch_val(
+        534,
+        "knowledge_get_edges_by_group",
+        json!({"group_ids": []}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&edges_by_group, 534);
+    assert_eq!(
+        edges_by_group["result"]["count"], 0,
+        "explicit empty group_ids must match zero rows, not all groups: {edges_by_group}"
+    );
+}
+
+#[tokio::test]
+async fn explicit_null_group_ids_matches_omitted_all_groups() {
+    let (db, _dir) = make_db(4);
+    seed_413_two_group_fixture(&db);
+    let state = make_state_with_mock_embed(db);
+    dispatch_val(
+        535,
+        "knowledge_build_indices",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    let find_entities = dispatch_val(
+        536,
+        "knowledge_find_entities",
+        json!({"query": "findme413", "num_results": 10, "group_ids": null}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&find_entities, 536);
+    assert_eq!(
+        extract_uuids(&find_entities, "nodes"),
+        vec!["413-ea1", "413-ea2", "413-eb1", "413-eb2"],
+        "explicit null group_ids must match omitted (all groups): {find_entities}"
+    );
+
+    let find_relationships = dispatch_val(
+        537,
+        "knowledge_find_relationships",
+        json!({"query": "linkme413", "num_results": 10, "group_ids": null}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&find_relationships, 537);
+    assert_eq!(
+        extract_uuids(&find_relationships, "facts"),
+        vec!["413-ra1", "413-rb1"],
+        "explicit null group_ids must match omitted (all groups): {find_relationships}"
+    );
+
+    let nodes_by_group = dispatch_val(
+        538,
+        "knowledge_get_nodes_by_group",
+        json!({"group_ids": null}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&nodes_by_group, 538);
+    assert_eq!(
+        extract_uuids(&nodes_by_group, "nodes"),
+        vec!["413-ea1", "413-ea2", "413-eb1", "413-eb2"],
+        "explicit null group_ids must match omitted (all groups): {nodes_by_group}"
+    );
+
+    let edges_by_group = dispatch_val(
+        539,
+        "knowledge_get_edges_by_group",
+        json!({"group_ids": null}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&edges_by_group, 539);
+    assert_eq!(
+        extract_uuids(&edges_by_group, "edges"),
+        vec!["413-ra1", "413-rb1"],
+        "explicit null group_ids must match omitted (all groups): {edges_by_group}"
+    );
+}

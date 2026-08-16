@@ -120,7 +120,8 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_nodes_by_group",
-            description: "List all entity nodes belonging to the given group IDs.",
+            description: "List all entity nodes belonging to the given group IDs, or every \
+                           group's nodes when group_ids is omitted.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -131,7 +132,8 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_edges_by_group",
-            description: "List all relationship edges belonging to the given group IDs.",
+            description: "List all relationship edges belonging to the given group IDs, or \
+                           every group's edges when group_ids is omitted.",
             scope: Scope::Read,
             input_schema: || {
                 json!({

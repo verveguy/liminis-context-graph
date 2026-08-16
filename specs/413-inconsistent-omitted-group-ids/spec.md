@@ -171,6 +171,11 @@ behavior without deferring to "depending on the tool," and that `knowledge_get_n
 - A single string passed for `group_ids` instead of an array (a form already accepted by some of these
   tools) continues to be treated as a one-element filter — this issue changes only the *omitted* case,
   not how a supplied value of either shape is interpreted.
+- An explicit empty array (`group_ids: []`), as distinct from an omitted or `null` value, is not
+  "omitted" and therefore MUST NOT be treated as "all groups" for the four fixed tools
+  (`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
+  `knowledge_get_edges_by_group`): it resolves to zero rows, exactly as it did before this issue
+  shipped (FR-009).
 - `knowledge_delete_by_group`: `group_ids` remains required and non-empty, validated explicitly with
   an error when absent or empty (`handlers.rs:1340`, doc comment at 1325-1327 explains why: "a
   destructive admin op must never silently default to purging everything"). This tool is genuinely

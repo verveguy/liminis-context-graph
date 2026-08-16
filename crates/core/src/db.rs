@@ -1006,19 +1006,20 @@ impl<'db> Conn<'db> {
         )
     }
 
-    /// Returns all Entity nodes in the given group_ids, or every group when `group_ids` is `None`.
+    /// Returns all Entity nodes in the given group_ids, or every group when `group_ids` is
+    /// `None`. `Some(&[])` is a real, non-`None` filter and matches no groups.
     pub fn get_entities_by_group_ids(
         &self,
         group_ids: Option<&[&str]>,
     ) -> Result<Vec<EntityRow>, Error> {
         let (cypher, params) = match group_ids {
-            Some(gids) if !gids.is_empty() => (
+            Some(gids) => (
                 "MATCH (e:Entity) WHERE e.group_id IN $gids \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
                  e.summary, e.attributes",
                 serde_json::json!({ "gids": gids }),
             ),
-            _ => (
+            None => (
                 "MATCH (e:Entity) \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
                  e.summary, e.attributes",
@@ -1042,20 +1043,21 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
-    /// Returns all RELATES_TO edges in the given group_ids, or every group when `group_ids` is `None`.
+    /// Returns all RELATES_TO edges in the given group_ids, or every group when `group_ids` is
+    /// `None`. `Some(&[])` is a real, non-`None` filter and matches no groups.
     pub fn get_edges_by_group_ids(
         &self,
         group_ids: Option<&[&str]>,
     ) -> Result<Vec<RelatesToEdge>, Error> {
         let (cypher, params) = match group_ids {
-            Some(gids) if !gids.is_empty() => (
+            Some(gids) => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
                  rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
                 serde_json::json!({ "gids": gids }),
             ),
-            _ => (
+            None => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
                  rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
@@ -1107,7 +1109,8 @@ impl<'db> Conn<'db> {
     // ── Search helpers ────────────────────────────────────────────────────────
 
     /// BM25 full-text search on Entity nodes; returns (uuid, score) pairs.
-    /// `group_ids: None` (or an empty slice) searches across every group.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
     pub fn fts_search_entities(
         &self,
         query: &str,
@@ -1115,8 +1118,8 @@ impl<'db> Conn<'db> {
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
-            _ => "",
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
         };
         let cypher = format!(
             "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', $q) \
@@ -1126,15 +1129,14 @@ impl<'db> Conn<'db> {
         );
         let mut params = serde_json::json!({ "q": query, "limit": limit as i64 });
         if let Some(gids) = group_ids {
-            if !gids.is_empty() {
-                params["gids"] = serde_json::json!(gids);
-            }
+            params["gids"] = serde_json::json!(gids);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
 
     /// BM25 full-text search on RelatesToNode_ (facts); returns (uuid, score) pairs.
-    /// `group_ids: None` (or an empty slice) searches across every group.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
     pub fn fts_search_edges(
         &self,
         query: &str,
@@ -1142,8 +1144,8 @@ impl<'db> Conn<'db> {
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
-            _ => "",
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
         };
         let cypher = format!(
             "CALL QUERY_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', $q) \
@@ -1153,15 +1155,14 @@ impl<'db> Conn<'db> {
         );
         let mut params = serde_json::json!({ "q": query, "limit": limit as i64 });
         if let Some(gids) = group_ids {
-            if !gids.is_empty() {
-                params["gids"] = serde_json::json!(gids);
-            }
+            params["gids"] = serde_json::json!(gids);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
 
     /// HNSW vector search on Entity nodes; returns (uuid, distance) pairs (lower = closer).
-    /// `group_ids: None` (or an empty slice) searches across every group.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
     pub fn vector_search_entities(
         &self,
         embedding: &[f32],
@@ -1169,8 +1170,8 @@ impl<'db> Conn<'db> {
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
-            _ => "",
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
         };
         let cypher = format!(
             "CALL QUERY_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', $emb, $limit) \
@@ -1180,15 +1181,14 @@ impl<'db> Conn<'db> {
         );
         let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
         if let Some(gids) = group_ids {
-            if !gids.is_empty() {
-                params["gids"] = serde_json::json!(gids);
-            }
+            params["gids"] = serde_json::json!(gids);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
 
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
-    /// `group_ids: None` (or an empty slice) searches across every group.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
     pub fn vector_search_edges(
         &self,
         embedding: &[f32],
@@ -1196,8 +1196,8 @@ impl<'db> Conn<'db> {
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
         let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
-            _ => "",
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
         };
         let cypher = format!(
             "CALL QUERY_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
@@ -1208,9 +1208,7 @@ impl<'db> Conn<'db> {
         );
         let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
         if let Some(gids) = group_ids {
-            if !gids.is_empty() {
-                params["gids"] = serde_json::json!(gids);
-            }
+            params["gids"] = serde_json::json!(gids);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }

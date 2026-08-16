@@ -777,7 +777,7 @@ async fn handle_knowledge_process_chunk(
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
-    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let result = search::hybrid_entity_search(
@@ -823,7 +823,7 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
 async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
-    let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let result = search::hybrid_edge_search(
@@ -924,18 +924,16 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
 }
 
 async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let group_ids = extract_optional_group_ids(&req.params["group_ids"]);
+    let group_ids = extract_optional_group_ids_preserve_empty(&req.params["group_ids"]);
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids
-            .as_deref()
-            .map(|v| v.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        conn.get_entities_by_group_ids(gid_slice)
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        conn.get_entities_by_group_ids(gid_refs.as_deref())
     })
     .await??;
     drop(_guard);
@@ -945,18 +943,16 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 }
 
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let group_ids = extract_optional_group_ids(&req.params["group_ids"]);
+    let group_ids = extract_optional_group_ids_preserve_empty(&req.params["group_ids"]);
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids
-            .as_deref()
-            .map(|v| v.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        conn.get_edges_by_group_ids(gid_slice)
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        conn.get_edges_by_group_ids(gid_refs.as_deref())
     })
     .await??;
     drop(_guard);
@@ -4387,7 +4383,11 @@ fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
 }
 
 /// Returns None when group_ids is absent, null, or false — meaning "all groups".
-/// Returns Some(vec) for an array or single string — meaning "these groups only".
+/// Returns Some(vec) for an array or single string — meaning "these groups only". An explicit
+/// empty array collapses to None (all groups) here, which is the pre-existing, out-of-scope-for-
+/// #413 behavior of this helper's own call sites (`handle_search_passages`, `handle_list_entities`,
+/// etc.) — see `extract_optional_group_ids_preserve_empty` for the four handlers that must NOT
+/// collapse an explicit empty array this way.
 /// Used by read/search handlers, where absent = all groups, not the default "liminis" group.
 fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
     match v {
@@ -4402,6 +4402,29 @@ fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
                 Some(gids)
             }
         }
+        Value::String(s) => Some(vec![s.clone()]),
+        _ => None,
+    }
+}
+
+/// Returns None when group_ids is absent, null, or false — meaning "all groups". Returns
+/// Some(vec) for an array (including an explicit empty array) or single string — meaning "exactly
+/// these groups", so `group_ids: []` resolves to zero rows, not all groups.
+///
+/// Used by `handle_find_entities`/`handle_find_relationships`/`handle_get_nodes_by_group`/
+/// `handle_get_edges_by_group` (issue #413, FR-009): before #413 these four handlers used
+/// `extract_group_ids`, which turned an explicit empty array into an empty (non-None) filter that
+/// matched nothing. `extract_optional_group_ids` cannot be reused here because it collapses an
+/// explicit empty array into `None` ("all groups"), which would silently change these four
+/// handlers' explicit-empty-array behavior as a side effect of fixing their omitted-value default
+/// — a regression FR-009 explicitly forbids.
+fn extract_optional_group_ids_preserve_empty(v: &Value) -> Option<Vec<String>> {
+    match v {
+        Value::Array(arr) => Some(
+            arr.iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect(),
+        ),
         Value::String(s) => Some(vec![s.clone()]),
         _ => None,
     }
