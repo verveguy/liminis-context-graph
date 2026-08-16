@@ -57,8 +57,8 @@
 //!   is deleted while its `.jsonl` content is left intact — the shape a mis-published stream has
 //!   in practice (#414's confirmed root cause was a `*.jsonl`-only glob silently dropping the
 //!   dot-namespaced sidecar). Asserts `knowledge_status` reports the condition distinguishably
-//!   and that B is still hydrated successfully; the specific "detected as unknown, not silently
-//!   inferred" R3 guard behavior is marked `TODO(#414)` pending that issue's own implementation.
+//!   (FR-001) and that a subsequent `knowledge_rebuild_from_wal` against B refuses outright
+//!   rather than silently proceeding, since B already has a recorded position (FR-002).
 
 use std::collections::HashMap;
 use std::process::Command;
@@ -937,20 +937,16 @@ fn multistream_layer_graph_composition() {
          generation', not merely 'no stream yet' (#414/SC-004): {positions_after_missing_sidecar}"
     );
 
-    // ── Assertion (s): B is still hydrated/replayed with its sidecar missing. Uses an
-    //    incremental replay (from B's own current applied_seq, no force_clear) rather than a
-    //    from-scratch rebuild: a `from_seq: 0`/`force_clear: true` full rebuild routes through
-    //    `clear_group_for_rebuild`, which internally purges B via `group_purge::purge_groups` —
-    //    that forces a rebind of every *other* group's pointers into B (here, C's C1_TO_B1/
-    //    C2_TO_B2), flushing mutations into C's own stream and violating this phase's own
-    //    Assertion (t) that C is unaffected. An incremental replay exercises the same
-    //    missing-sidecar-during-a-real-replay condition (#414) without that side effect. TODO
-    //    (#414): once #414's R3 guard lands, tighten this to assert its actual warn-and-continue
-    //    vs. refuse-to-advance semantics end to end (SC-004) — as of this writing,
-    //    position_reset_detected (crates/core/src/wal_generation.rs) unconditionally returns
-    //    false whenever the current on-disk generation is None, so an unknown-generation replay
-    //    today silently proceeds as an ordinary incremental replay. This asserts that actual
-    //    (gap) behavior, not #414's not-yet-landed guard ─────────────────────────────────────
+    // ── Assertion (s): B's replay refuses outright now that #414's FR-002 guard has landed. B
+    //    already has a recorded position (Assertion (r) above), so a subsequent
+    //    knowledge_rebuild_from_wal call against its now-unknown generation must fail before any
+    //    replay is attempted — including an incremental replay with no `force_clear` — rather
+    //    than silently proceeding as ordinary forward progress (#414 FR-002/SC-003). This
+    //    supersedes the pre-#414 "success: true, reset_detected != true" placeholder this phase
+    //    asserted while #414's guard didn't exist yet. Still exercised via an incremental replay
+    //    (not a `from_seq: 0`/`force_clear: true` rebuild) to keep parity with the rest of this
+    //    phase's setup — the refusal fires before any downstream path branches, so the specific
+    //    replay shape requested doesn't change the outcome ────────────────────────────────────
     let b_from_seq = b_entry_after_missing_sidecar["applied_seq"]
         .as_u64()
         .map(|seq| seq + 1)
@@ -961,21 +957,22 @@ fn multistream_layer_graph_composition() {
         "multistream-missing-sidecar-B",
         Duration::from_secs(600),
     );
-    let replay_missing_sidecar_result = structured(
-        &replay_missing_sidecar,
-        "rebuild_from_wal(B) with a missing generation sidecar",
-    );
     assert_eq!(
-        replay_missing_sidecar_result["success"],
+        replay_missing_sidecar["result"]["isError"],
         json!(true),
-        "hydrating/replaying group B must still succeed with its generation sidecar missing \
-         (#414): {replay_missing_sidecar_result}"
+        "rebuild_from_wal(B) with a recorded position and a missing generation sidecar must \
+         refuse outright, not silently proceed as an ordinary replay (#414 FR-002): \
+         {replay_missing_sidecar}"
     );
-    assert_ne!(
-        replay_missing_sidecar_result["reset_detected"],
-        json!(true),
-        "TODO(#414): a missing generation sidecar is not today detected as a reset — see this \
-         block's own comment above. {replay_missing_sidecar_result}"
+    let replay_missing_sidecar_message = replay_missing_sidecar["result"]["structuredContent"]
+        ["message"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        replay_missing_sidecar_message.contains('B')
+            && replay_missing_sidecar_message.contains(".wal-generation.json"),
+        "the refusal error must name the affected group and the missing sidecar (#414 FR-002): \
+         {replay_missing_sidecar}"
     );
 
     // ── Assertion (t): groups A and C, sharing the same WAL root as B, are unaffected by B's
