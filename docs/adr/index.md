@@ -101,6 +101,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) | Per-Group Mutation Attribution for `delete_by_group` and `rebind_pointers` | 2026-08-13 |
 | [0387](0387-wal-stream-generation-identity.md) | WAL Stream Generation Identity | 2026-08-13 |
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
+| [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 
 ## Historical numbering
 

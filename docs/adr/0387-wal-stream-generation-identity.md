@@ -189,6 +189,17 @@ carrying `None` forward when the source itself has none yet.
 
 ### Detection: one insertion point in `knowledge_rebuild_from_wal`, row-existence-aware
 
+> **Amended by [ADR-0414](0414-wal-generation-unknown-refuses-replay.md).** The "current on-disk
+> generation is unreadable → never a mismatch" rule below was, as originally decided, permanent
+> and indefinite: a stream that never had a generation was designed to keep booting and replaying
+> normally forever. Issue #414 found this made ADR-0387's own detection inert end-to-end in
+> production (every real hydrated stream reported `generation: null`, silently, with reset
+> detection never once having a value to compare) and reversed that tolerance for one specific
+> case: once a position has already been recorded for a group, a subsequent
+> `knowledge_rebuild_from_wal` call against an unknown current generation now refuses outright
+> instead of silently proceeding. The rule below is unchanged for a group's *first* encounter
+> (`applied_seq: None`), which still adopts an unknown generation exactly as designed here.
+
 Detection lives in `handle_rebuild_from_wal` only — not in ordinary live ingest, and not in
 `knowledge_status` (which only *reports* generation, FR-003) — inserted once, before the existing
 `from_seq == 0` non-empty-group guard, so it covers all three downstream replay paths (streaming,
