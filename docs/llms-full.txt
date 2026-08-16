@@ -196,6 +196,7 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed and `ANTHROPIC_API_KEY` is unset. If this var is also unset in that situation, no extraction provider is configured: the binary still starts, but every extraction-dependent call (`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`) fails with an error identifying the missing configuration — extraction has no default-socket auto-detection (unlike the embedder), so a running sidecar alone is not enough. |
 | `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
 | `LCG_EXTRACTION_MAX_TOKENS_CEILING` | No | Uniform ceiling (in tokens) on the per-call `max_tokens` budget for entity/edge extraction, across both the hosted Anthropic path and self-hosted/OAI-compatible models (default `32768`). The per-call initial budget scales with input chunk size up to this ceiling; it exists to stop genuine non-termination (a model that never stops generating), not to optimize spend, so it is intentionally generous. An invalid value (non-numeric, or below the compiled-in 4096-token floor) logs a warning to stderr and falls back to the default. Setting it near the floor is valid but self-defeating: since the per-call budget is `clamp(chunk_len_bytes * ratio, 4096, ceiling)`, a ceiling close to 4096 collapses that range and every call effectively gets the same floor-sized budget regardless of chunk size — silently disabling proportional scaling, not just narrowing the runaway guard. |
+| `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
 | `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
@@ -215,7 +216,7 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LIMINIS_DEDUP_HYBRID_THRESHOLD` | No | Entity count per `group_id` above which dedup switches from brute-force cosine to the hybrid FTS + vector path. |
 | `LIMINIS_LLM_COST_TABLE_PATH` | No | Path to a JSON model-pricing table used to populate `estimated_cost_usd` in `token_usage` telemetry. See [Telemetry](telemetry.md). |
 
-That's 27 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
+That's 28 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
 
 **Deprecated `GRAPHITI_*` aliases.** Every `LCG_*` variable above that predates the rename also
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
@@ -961,6 +962,32 @@ A stream ending in `"recovery_complete"` means the service healed itself; one en
 Example:
 ```json
 {"type":"wal_auto_recovery","ts_ms":1716100000090,"phase":"replay_complete","from_seq":7,"mutations_replayed":412,"elapsed_ms":1830}
+```
+
+### `chunk_text_oversized`
+
+Emitted by `knowledge_process_chunk` when `chunk_text`'s character count exceeds the advisory
+threshold (default `8000`, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` — see
+[Configuration](configuration.md)). A lightweight, counting-only event mirroring
+`extraction_truncated`'s shape, so oversized ingestion is visible in aggregate across a telemetry
+stream, not just in the single call's response `warning` field. Ingestion itself is unaffected —
+no rejection, truncation, or splitting — this event is purely observational, and fires on every
+oversized call, including repeated resubmissions of the same `chunk_id`.
+
+**The threshold and this event's `chunk_text_chars` field are measured in characters, not
+bytes.**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts_ms` | integer | Unix timestamp in milliseconds |
+| `chunk_id` | string | The oversized call's `chunk_id` |
+| `source_file` | string | The oversized call's `source_file` |
+| `chunk_text_chars` | integer | Character count of `chunk_text` (not bytes) |
+| `threshold_chars` | integer | The advisory threshold in effect for this call |
+
+Example:
+```json
+{"type":"chunk_text_oversized","ts_ms":1716100000095,"chunk_id":"page-042","source_file":"webbrain/page-042.html","chunk_text_chars":21953,"threshold_chars":8000}
 ```
 
 ---

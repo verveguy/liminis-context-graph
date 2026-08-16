@@ -43,6 +43,22 @@ A patch release closing an unscoped-delete gap: both `knowledge_delete_chunk_epi
   release deliberately: the alternative is leaving active cross-group data loss reachable on
   `main`. (#406)
 
+### Added
+
+- **`knowledge_process_chunk` now warns on oversized `chunk_text`.** Extraction quality degrades
+  well before any context-window or output-token limit is reached, so the response gains an
+  additive `warning` field — `{"type": "chunk_text_oversized", "chunk_text_chars", "recommended_max_chars", "message"}`
+  — whenever `chunk_text`'s character count exceeds an advisory threshold (default 8,000
+  characters, configurable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`; an invalid value falls back to
+  the default and logs a warning to stderr). Every successful oversized call also emits a
+  `chunk_text_oversized` telemetry event, so oversized ingestion is visible in aggregate across a
+  telemetry stream, not just in a single call's response. This is visibility only: nothing is
+  truncated, split or rejected, the call still succeeds above the threshold exactly as it did
+  before, episode counts are unchanged, and no existing response or tool schema field becomes
+  required. The `knowledge_process_chunk` MCP tool description, README, and `docs/configuration.md`
+  now document the recommended maximum and that splitting oversized input is the caller's
+  responsibility. (#407)
+
 ## [0.13.1] - 2026-08-15
 
 A patch release closing an integrity gap in 0.13.0's layered-graph model: a cross-group pointer
