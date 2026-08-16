@@ -58,6 +58,14 @@ A patch release closing an unscoped-delete gap: both `knowledge_delete_chunk_epi
   required. The `knowledge_process_chunk` MCP tool description, README, and `docs/configuration.md`
   now document the recommended maximum and that splitting oversized input is the caller's
   responsibility. (#407)
+- **`knowledge_process_chunk` now reports per-edge detail behind `edges_dropped_unresolvable`.**
+  The response gains an additive `dropped_edges` field: a list with one entry per edge counted in
+  `edges_dropped_unresolvable`, in extraction order, each carrying that edge's extracted
+  `source_name`, `target_name`, `relation_type`, and `fact`, plus `unresolved_endpoint`
+  (`"source"`, `"target"`, or `"both"`) naming which endpoint(s) failed to resolve. Previously the
+  count was the only signal a caller had — the specific fact and endpoint that caused a drop were
+  unrecoverable once logged. `dropped_edges` is always present, an empty list when nothing was
+  dropped; `edges_dropped_unresolvable`'s existing meaning is unchanged. (#411)
 
 ## [0.13.1] - 2026-08-15
 
