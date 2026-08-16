@@ -29,10 +29,26 @@ for bin in "$@"; do
     continue
   fi
 
+  # A missing tool must NOT read as "no OpenSSL found" — an empty `deps` greps
+  # clean and would report OK on a binary nobody actually inspected, which is the
+  # one failure mode this guard cannot afford.
   case "$(uname -s)" in
-    Darwin) deps="$(otool -L "$bin" 2>/dev/null || true)" ;;
-    # A fully static or non-dynamic binary makes ldd exit non-zero ("not a
-    # dynamic executable"); that is a pass, not an error, so swallow it.
+    Darwin) tool=otool ;;
+    *) tool=ldd ;;
+  esac
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "assert-static-openssl.sh: FAIL — '$tool' not found; cannot inspect '$bin'." >&2
+    echo "  Refusing to report a pass on an uninspected binary. Install $tool" >&2
+    echo "  (macOS: Xcode command line tools; Linux: libc-bin) and re-run." >&2
+    status=1
+    continue
+  }
+
+  # A fully static or non-dynamic binary makes ldd exit non-zero ("not a dynamic
+  # executable"); that is a pass, not an error, so swallow the exit code — the
+  # tool ran, which is what the check above establishes.
+  case "$tool" in
+    otool) deps="$(otool -L "$bin" 2>/dev/null || true)" ;;
     *) deps="$(ldd "$bin" 2>/dev/null || true)" ;;
   esac
 
