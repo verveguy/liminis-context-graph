@@ -297,6 +297,32 @@ Example:
 {"type":"wal_auto_recovery","ts_ms":1716100000090,"phase":"replay_complete","from_seq":7,"mutations_replayed":412,"elapsed_ms":1830}
 ```
 
+### `chunk_text_oversized`
+
+Emitted by `knowledge_process_chunk` when `chunk_text`'s character count exceeds the advisory
+threshold (default `8000`, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` — see
+[Configuration](configuration.md)). A lightweight, counting-only event mirroring
+`extraction_truncated`'s shape, so oversized ingestion is visible in aggregate across a telemetry
+stream, not just in the single call's response `warning` field. Ingestion itself is unaffected —
+no rejection, truncation, or splitting — this event is purely observational, and fires on every
+oversized call, including repeated resubmissions of the same `chunk_id`.
+
+**The threshold and this event's `chunk_text_chars` field are measured in characters, not
+bytes.**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts_ms` | integer | Unix timestamp in milliseconds |
+| `chunk_id` | string | The oversized call's `chunk_id` |
+| `source_file` | string | The oversized call's `source_file` |
+| `chunk_text_chars` | integer | Character count of `chunk_text` (not bytes) |
+| `threshold_chars` | integer | The advisory threshold in effect for this call |
+
+Example:
+```json
+{"type":"chunk_text_oversized","ts_ms":1716100000095,"chunk_id":"page-042","source_file":"webbrain/page-042.html","chunk_text_chars":21953,"threshold_chars":8000}
+```
+
 ---
 
 ## Sample Output

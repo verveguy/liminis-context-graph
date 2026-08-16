@@ -632,6 +632,43 @@ fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
     (true, file_count, byte_size)
 }
 
+/// Default advisory threshold (in characters) above which `chunk_text` is considered oversized
+/// (#407 FR-002). Traced through #282's Plan to a maintainer comment on #202: chunking to
+/// roughly 8KB retains most of the graph — the evidence in #407's spec shows 0% edge-drop at
+/// 4,797 chars and 5.6% drop already present at 12,785 chars. Overridable via
+/// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`.
+const CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT: usize = 8_000;
+
+/// Resolves the advisory threshold from `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, falling back to
+/// [`CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT`] on an absent, non-numeric, zero, or negative value
+/// (discoverable soft fallback + warn, matching `token_budget::resolve_max_tokens_ceiling`'s
+/// pattern rather than `episode::hybrid_threshold`'s silent one — #407's edge cases require the
+/// fallback to be discoverable). Re-read per call rather than cached: the cost is negligible next
+/// to the extraction LLM round-trip it precedes.
+fn resolve_chunk_text_advisory_max_chars() -> usize {
+    std::env::var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS")
+        .ok()
+        .and_then(|v| match v.parse::<usize>() {
+            Ok(parsed) if parsed > 0 => Some(parsed),
+            Ok(parsed) => {
+                eprintln!(
+                    "liminis-context-graph: LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS={parsed} must be \
+                     positive; using default {CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT}"
+                );
+                None
+            }
+            Err(_) => {
+                eprintln!(
+                    "liminis-context-graph: LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS={v:?} is not a \
+                     valid positive integer; using default \
+                     {CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT}"
+                );
+                None
+            }
+        })
+        .unwrap_or(CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT)
+}
+
 async fn handle_knowledge_process_chunk(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -670,6 +707,12 @@ async fn handle_knowledge_process_chunk(
         None => chrono::Utc::now().to_rfc3339(),
     };
 
+    // #407 FR-001/FR-006: purely observational — character count (not bytes), computed
+    // independent of add_episode's outcome, changing nothing about its inputs or the
+    // episode/WAL/DB path (FR-004, SC-005).
+    let chunk_text_chars = chunk_text.chars().count();
+    let threshold_chars = resolve_chunk_text_advisory_max_chars();
+
     let start = Instant::now();
     let source_desc = format!("{}:{}", source_file, chunk_id);
     let source_type = if source_file.to_lowercase().ends_with(".json") {
@@ -678,7 +721,7 @@ async fn handle_knowledge_process_chunk(
         SourceType::Text
     };
     let result = episode::add_episode(
-        state,
+        Arc::clone(&state),
         &chunk_id,
         &chunk_text,
         "text",
@@ -690,7 +733,7 @@ async fn handle_knowledge_process_chunk(
     )
     .await?;
 
-    Ok(json!({
+    let mut response = json!({
         "success": true,
         "chunk_id": chunk_id,
         "source_file": source_file,
@@ -703,7 +746,30 @@ async fn handle_knowledge_process_chunk(
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "edges_dropped_malformed": result.edges_dropped_malformed,
         "duration_seconds": start.elapsed().as_secs_f64(),
-    }))
+    });
+
+    if chunk_text_chars > threshold_chars {
+        state.sink.emit(TelemetryEvent::ChunkTextOversized {
+            ts_ms: now_ms(),
+            chunk_id: chunk_id.clone(),
+            source_file: source_file.clone(),
+            chunk_text_chars,
+            threshold_chars,
+        });
+        response["warning"] = json!({
+            "type": "chunk_text_oversized",
+            "chunk_text_chars": chunk_text_chars,
+            "recommended_max_chars": threshold_chars,
+            "message": format!(
+                "chunk_text is {chunk_text_chars} characters, which exceeds the recommended \
+                 maximum of {threshold_chars} characters; extraction quality degrades well \
+                 before any context-window limit, so consider splitting oversized input into \
+                 multiple knowledge_process_chunk calls."
+            ),
+        });
+    }
+
+    Ok(response)
 }
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────
@@ -4415,4 +4481,55 @@ fn enrich_edge_from_entity_ep_info(
     }
     edge.episode_uuids = ep_uuids;
     edge.source_descriptions = src_descs;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #407: a single test function, not five, because `cargo test` runs tests within a binary
+    // in parallel by default — separate tests toggling the same process-global env var would
+    // race each other. No other test in this file sets LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS
+    // (though the handler itself reads it, same as every call to resolve_chunk_text_advisory_
+    // max_chars below), so bundling into one function keeps the override window to a single,
+    // short-lived block instead of five concurrent ones.
+    #[test]
+    fn resolve_chunk_text_advisory_max_chars_parse_cases() {
+        std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+        assert_eq!(
+            resolve_chunk_text_advisory_max_chars(),
+            CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT,
+            "unset falls back to default"
+        );
+
+        std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "12345");
+        assert_eq!(
+            resolve_chunk_text_advisory_max_chars(),
+            12345,
+            "valid override is used"
+        );
+
+        std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "not-a-number");
+        assert_eq!(
+            resolve_chunk_text_advisory_max_chars(),
+            CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT,
+            "non-numeric falls back to default"
+        );
+
+        std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "0");
+        assert_eq!(
+            resolve_chunk_text_advisory_max_chars(),
+            CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT,
+            "zero falls back to default"
+        );
+
+        std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "-1");
+        assert_eq!(
+            resolve_chunk_text_advisory_max_chars(),
+            CHUNK_TEXT_ADVISORY_MAX_CHARS_DEFAULT,
+            "negative falls back to default"
+        );
+
+        std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+    }
 }

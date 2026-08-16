@@ -163,6 +163,18 @@ pub enum TelemetryEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         fallback_reason: Option<String>,
     },
+    /// Emitted by `handle_knowledge_process_chunk` when `chunk_text`'s character count exceeds
+    /// the advisory threshold (#407 FR-005) — a lightweight, counting-only event mirroring
+    /// `ExtractionTruncated`'s classification (per ADR-0306), so oversized ingestion is visible
+    /// in aggregate across a telemetry stream, not just in the single call's response warning.
+    /// Character count, not byte count, per FR-006.
+    ChunkTextOversized {
+        ts_ms: u64,
+        chunk_id: String,
+        source_file: String,
+        chunk_text_chars: usize,
+        threshold_chars: usize,
+    },
 }
 
 pub fn now_ms() -> u64 {
