@@ -509,6 +509,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // null for a pre-#387 stream that has never had one recorded (Story 5).
                     // Compared for equality only; never ordered or interpreted.
                     "generation": fields.wal_generation,
+                    // issue #414 FR-001: distinguishes "no stream yet" from "stream exists but
+                    // its generation is unknown" — both previously collapsed to `generation: null`
+                    // above with no way to tell them apart.
+                    "generation_status": wal_generation_status(fields.wal_max_seq, fields.wal_generation.as_deref()),
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
@@ -569,6 +573,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "applied_seq": wal_applied_seq,
                 "max_seq": wal_max_seq,
                 "generation": wal_generation,
+                "generation_status": wal_generation_status(wal_max_seq, wal_generation.as_deref()),
             },
             "wal_groups": wal_group_positions_json(&wal_group_positions),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
@@ -591,16 +596,41 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     Ok(result)
 }
 
+/// Classifies a group's generation reporting into the three states FR-001 requires be
+/// distinguishable (issue #414): a stream that was never hydrated (no `*.jsonl` content and no
+/// generation record) is `"not_applicable"`, a stream with content but no readable generation
+/// record — the reproduction's case, and the state of any stream whose publish step dropped the
+/// dot-namespace — is `"unknown"`, and a stream with a recorded generation is `"known"`
+/// regardless of whether it has any content yet (a freshly-minted, still-empty stream is
+/// `"known"`, not `"not_applicable"`).
+///
+/// Pure classification of values `handle_knowledge_status` already reads (`wal_max_seq`,
+/// `wal_generation::read_generation`) — no new filesystem I/O.
+fn wal_generation_status(max_seq: Option<u64>, generation: Option<&str>) -> &'static str {
+    match (max_seq, generation) {
+        (_, Some(_)) => "known",
+        (None, None) => "not_applicable",
+        (Some(_), None) => "unknown",
+    }
+}
+
 /// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
 /// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
-/// JSON map.
+/// JSON map. `generation_status` (issue #414 FR-001) is a sibling field alongside `generation`,
+/// not a replacement for it — `generation` keeps its existing value/meaning so a caller that only
+/// reads it is unaffected.
 fn wal_group_positions_json(positions: &[WalGroupPosition]) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
         .map(|(gid, applied, max, generation)| {
             (
                 gid.clone(),
-                json!({ "applied_seq": applied, "max_seq": max, "generation": generation }),
+                json!({
+                    "applied_seq": applied,
+                    "max_seq": max,
+                    "generation": generation,
+                    "generation_status": wal_generation_status(*max, generation.as_deref()),
+                }),
             )
         })
         .collect();
@@ -1997,6 +2027,31 @@ async fn handle_rebuild_from_wal(
         .await??
     };
     let current_generation = crate::wal_generation::read_generation(&wal_dir);
+
+    // ── Unknown-generation guard (issue #414, FR-002) ───────────────────────────────────────
+    // A group that already has a recorded position (`applied_seq.is_some()`) is a case where
+    // reset detection *should* be able to run — but if the current on-disk generation is
+    // unknown (missing or corrupt `.wal-generation.json`, indistinguishable per FR-005), that
+    // detection cannot evaluate at all and would otherwise silently fall through as an ordinary
+    // replay with no trace that the check never ran (ADR-0387's Story 5 "tolerated forever"
+    // behavior, which this issue deliberately reverses for this one case — see ADR-0414).
+    // Placed ahead of `position_reset_detected`/the dry-run early-return below so it applies
+    // uniformly to every downstream path (dry-run preview, streaming, non-streaming, background
+    // job) with no way to preview around it. Scoped to this group's own `wal_dir` only (SC-005):
+    // a sibling group in the same WAL root with a known generation is unaffected. No
+    // configuration flag, environment variable, or request parameter bypasses this (Out of Scope).
+    if recorded_position.applied_seq.is_some() && current_generation.is_none() {
+        return Err(Error::WalGenerationUnknown(format!(
+            "group {group_id:?}: {} is absent or unreadable at {} — cannot verify this \
+             stream's generation before replaying against a previously recorded position. \
+             Republish this stream's full directory (dot-namespace included: `cp -R`/`rsync -a` \
+             without an include-filter, or `git add -A` — not a `*.jsonl` glob) so its \
+             generation travels with it; see docs/operations.md's WAL stream-publish contract.",
+            crate::wal_generation::WAL_GENERATION_FILE,
+            wal_dir.display()
+        )));
+    }
+
     // `position_reset_detected` (not the simpler `generation_mismatch`, which is right for an
     // immutable checkpoint record but wrong here — see its own doc comment) is row-existence-
     // aware: no row yet (`applied_seq: None`) means first encounter, nothing to compare, the
@@ -4552,5 +4607,31 @@ mod tests {
         );
 
         std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+    }
+
+    // issue #414 FR-001: the three states a caller must be able to distinguish.
+    #[test]
+    fn wal_generation_status_not_applicable_for_never_hydrated() {
+        assert_eq!(wal_generation_status(None, None), "not_applicable");
+    }
+
+    #[test]
+    fn wal_generation_status_unknown_for_content_with_no_generation() {
+        // The reproduction's case: *.jsonl content exists, but no readable
+        // .wal-generation.json (missing or corrupt — both collapse to None upstream).
+        assert_eq!(wal_generation_status(Some(42), None), "unknown");
+    }
+
+    #[test]
+    fn wal_generation_status_known_when_generation_is_recorded() {
+        assert_eq!(wal_generation_status(Some(42), Some("gen-a")), "known");
+    }
+
+    #[test]
+    fn wal_generation_status_known_for_freshly_minted_still_empty_stream() {
+        // A stream just created by WalWriter::new mints a generation immediately even though
+        // it has no content yet (max_seq: None) — this must report "known", not
+        // "not_applicable", since a generation genuinely is recorded.
+        assert_eq!(wal_generation_status(None, Some("gen-a")), "known");
     }
 }
