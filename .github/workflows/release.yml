@@ -181,6 +181,27 @@ jobs:
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      # Guard the artifact that actually ships, before it is uploaded. ci.yml runs the
+      # same assertion, but only against a Linux `cargo build --release` binary — this
+      # is the only check that covers what `dist build` produced, and the only one that
+      # ever sees aarch64-apple-darwin, the target with no PR-path CI at all. Without it
+      # a dropped staging step reaches users rather than a red job. See ADR-0398.
+      - name: "Assert built artifacts have no dynamic OpenSSL dependency"
+        shell: bash
+        run: |
+          set -eu
+          # `dist build` writes each target's binary under target/<triple>/dist/.
+          # No mapfile/arrays here: the macOS runner's /bin/bash is 3.2.
+          find_bins() {
+            find target -type f -perm -u+x -path '*/dist/*' -name liminis-context-graph
+          }
+          if [ -z "$(find_bins)" ]; then
+            echo "No liminis-context-graph binary found under target/**/dist/ —" >&2
+            echo "refusing to pass without inspecting anything. Did dist build's" >&2
+            echo "output layout change?" >&2
+            exit 1
+          fi
+          find_bins | xargs bash scripts/assert-static-openssl.sh
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
