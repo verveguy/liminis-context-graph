@@ -39,6 +39,11 @@ fn spawn_unconfigured(dir: &TempDir, embedder_url: &str, extra_args: &[&str]) ->
 /// schema requires — the same fixture pattern `crates/core/src/recovery.rs`'s test helpers use —
 /// so `knowledge_rebuild_from_wal` has something to replay without depending on the large
 /// real-corpus fixture or any extraction/embedding call having ever produced it.
+///
+/// Also mints a generation directly (issue #414) — this test's own `knowledge_status` call
+/// records a `WalPosition` before `knowledge_rebuild_from_wal` ever runs, so a real
+/// (unminted) fixture would trip FR-002's unknown-generation refusal on a concern this test
+/// isn't exercising (#331's extraction-provider-optionality, not WAL generation identity).
 fn write_minimal_wal_file(wal_dir: &std::path::Path) {
     std::fs::create_dir_all(wal_dir).expect("create wal dir");
     let line = "{\"seq\":0,\"ts\":\"2026-01-01T00:00:00Z\",\"db\":\"test\",\
@@ -48,6 +53,7 @@ fn write_minimal_wal_file(wal_dir: &std::path::Path) {
                 \"params\":{\"uuid\":\"wal-fixture-episode\"}}\n";
     let mut f = std::fs::File::create(wal_dir.join("0.jsonl")).expect("create wal file");
     f.write_all(line.as_bytes()).expect("write wal fixture");
+    lcg_core::wal_generation::ensure_generation(wal_dir).expect("mint a generation for the fixture");
 }
 
 /// SC-001 / Acceptance Scenarios 1-2: starts with no provider, serves reads, and completes

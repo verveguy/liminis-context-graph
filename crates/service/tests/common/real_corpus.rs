@@ -213,6 +213,17 @@ pub fn seed_real_corpus_workspace(embedder_url: &str) -> SeededWorkspace {
             )
         });
     }
+    // The committed fixture ships no `.wal-generation.json` (it predates issue #387, and is
+    // itself an example of the dot-namespace-dropping publish step issue #414 documents) — mint
+    // one directly into the flat copy before the seeder subprocess ever starts. The subprocess's
+    // startup migration (`migrate_wal_root_if_needed`) relocates this alongside the `*.jsonl`
+    // files into `<wal_root>/liminis/`, so by the time the seeding rebuild below runs, the
+    // group's generation is known and every later `fork()`'d copy (which copies this file too)
+    // stays consistent — without this, the second `knowledge_rebuild_from_wal` call any
+    // downstream suite makes against a fork would trip issue #414's FR-002 unknown-generation
+    // refusal, which is testing a publish-step defect these tests don't intend to exercise.
+    lcg_core::wal_generation::ensure_generation(&wal_dir)
+        .expect("mint a generation for the seeded real-corpus WAL fixture copy");
 
     let mut seeder = McpClient::spawn({
         let mut cmd = Command::new(binary_path());
