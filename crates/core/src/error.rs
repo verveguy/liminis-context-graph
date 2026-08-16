@@ -172,8 +172,16 @@ mod is_missing_table_error_tests {
     ///
     /// The strings below were captured by running each failing query against a live 0.19.1
     /// engine over the IPC socket during the 0.17.0 → 0.19.1 bump (#398), not copied from a
-    /// changelog. If a future bump breaks one of these assertions, that is the signal to
-    /// re-probe the engine and update both the classifier and this test together.
+    /// changelog.
+    ///
+    /// **What this can and cannot catch.** The strings are literals, so these tests hold the
+    /// *classifiers* to text the engine was observed to emit — loosen or tighten a matcher and
+    /// they go red. They cannot detect the engine rewording an exception, because nothing here
+    /// talks to lbug. Detecting that stays the job of the behavioral tests that exercise the
+    /// real engine (`degraded_startup`, `auto_recovery`, the index auto-heal paths); the value
+    /// of this module is that when one of those fails after a bump, the observed 0.19.1 text is
+    /// recorded here to diff against instead of having to be re-derived. Re-probe the engine
+    /// and update the classifier and these literals together on every lbug bump.
     mod lbug_0_19_1_error_text {
         use super::*;
 

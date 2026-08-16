@@ -124,3 +124,19 @@ names — and inherit its documented residual risks without modification:
 - **TOCTOU race**: an entity resolved during (lock-free) edge validation could in principle be
   removed before Phase C's commit; not mitigated further, consistent with this ADR's existing
   position on concurrent-ingest races.
+
+## Amendment (2026-08-16, issue #398)
+
+The lbug pin moved from `0.17.0` to `0.19.1`. Two statements above are now historical rather
+than current:
+
+- "on the current lbug 0.17.0 pin" (in the residual-risk note on property indexes) should be
+  read as *on the then-current 0.17.0 pin*. The behaviour it describes was accurate for 0.17.0.
+- "only once lbug is upgraded past 0.17.0 (tracked as #220/#221)" — that upgrade has now landed.
+  0.18.0 added non-PK secondary ART indexes upstream (`LadybugDB/ladybug#582`), so the remedy
+  this ADR deferred is available at the engine level.
+
+**The decision itself is unchanged.** #398 was a dependency bump only and deliberately adopted
+none of the new engine capabilities; `get_entity_by_name_ci` still resolves through ADR-0038's
+in-process `NameIndex`. Replacing it with a materialized column plus an ART index remains
+tracked by **#221**, which is no longer blocked.
