@@ -2042,13 +2042,14 @@ async fn handle_rebuild_from_wal(
     // configuration flag, environment variable, or request parameter bypasses this (Out of Scope).
     if recorded_position.applied_seq.is_some() && current_generation.is_none() {
         return Err(Error::WalGenerationUnknown(format!(
-            "group {group_id:?}: {} is absent or unreadable at {} — cannot verify this \
+            "group {group_id:?}: {} is absent or unreadable — cannot verify this \
              stream's generation before replaying against a previously recorded position. \
              Republish this stream's full directory (dot-namespace included: `cp -R`/`rsync -a` \
              without an include-filter, or `git add -A` — not a `*.jsonl` glob) so its \
              generation travels with it; see docs/operations.md's WAL stream-publish contract.",
-            crate::wal_generation::WAL_GENERATION_FILE,
-            wal_dir.display()
+            wal_dir
+                .join(crate::wal_generation::WAL_GENERATION_FILE)
+                .display()
         )));
     }
 
