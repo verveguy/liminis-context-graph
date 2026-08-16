@@ -1,6 +1,21 @@
-# Note: LBUG_BUILD_FROM_SOURCE was removed with the lbug 0.17.0 bump.
-# The 0.17.0+ prebuilt is a self-contained fat bundle; source builds cause
-# 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
+# Note: LBUG_BUILD_FROM_SOURCE was removed with the lbug 0.17.0 bump and must
+# stay unset. The prebuilt is a fat bundle; source builds cause 7399
+# duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
+#
+# The bundle is no longer *fully* self-contained: 0.18.0 moved OpenSSL out of
+# it (LadybugDB/ladybug#590), which is why the staging step below exists.
+
+# Force the OpenSSL link static so release artifacts stay self-contained.
+# lbug's build.rs emits -lssl/-lcrypto unconditionally and takes its search
+# path from `pkg-config --variable=libdir openssl` alone; the script redirects
+# that at a directory holding only libssl.a/libcrypto.a and exports the result
+# via $GITHUB_ENV. Without it the macOS artifact inherits Homebrew's absolute
+# install name and fails to load on any machine lacking that exact path
+# (LadybugDB/ladybug#682). See ADR-0398.
+#
+# Must run BEFORE the build steps cargo-dist appends after this fragment.
+- name: Stage static OpenSSL for a self-contained link
+  run: bash scripts/stage-openssl-static.sh
 
 - name: Get rustc version for lbug cache key
   id: rustc-ver

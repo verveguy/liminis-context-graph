@@ -148,8 +148,10 @@ jobs:
       # NOTE: The lbug build script's `output` file embeds absolute paths rooted at
       # /home/runner/work/liminis-context-graph/liminis-context-graph/ — stable on GHA ubuntu-latest
       # but not portable to self-hosted runners with non-standard workspace paths.
-      # Note: lbug 0.17.0+ prebuilt is a self-contained fat bundle; LBUG_BUILD_FROM_SOURCE
-      # is no longer needed. This is a plain (restore-and-auto-save) cache: this job is
+      # Note: the lbug prebuilt is a fat bundle; LBUG_BUILD_FROM_SOURCE is no longer
+      # needed (and its source-build path is broken). Since 0.18.0 the bundle is no
+      # longer *fully* self-contained — OpenSSL links externally, which the staging
+      # step below handles. This is a plain (restore-and-auto-save) cache: this job is
       # the ONLY job in the whole run that ever writes this key (#341/FR-003) — every
       # other job that used to restore-only against it now gets its binaries from this
       # job's outputs instead of touching the lbug cache at all.
@@ -163,10 +165,29 @@ jobs:
             target/release/.fingerprint/lbug-*
             target/release/deps/liblbug-*
 
+      # Force the OpenSSL link static so the binary stays self-contained. lbug 0.18.0
+      # moved OpenSSL out of the prebuilt bundle (LadybugDB/ladybug#590) and its
+      # build.rs emits -lssl/-lcrypto unconditionally, taking its search path from
+      # `pkg-config --variable=libdir openssl` alone. The script points that at a
+      # directory holding only libssl.a/libcrypto.a and exports PKG_CONFIG_PATH via
+      # $GITHUB_ENV, so the steps below inherit it. Mirrors what the release build
+      # does via .github/build-setup.yml. See ADR-0398.
+      - name: Stage static OpenSSL for a self-contained link
+        run: bash scripts/stage-openssl-static.sh
+
       # The one and only `cargo build --release` in the whole CI run (#341/FR-001).
       # Builds the `liminis-context-graph` service binary the five e2e jobs need.
       - name: cargo build --release
         run: cargo build --release
+
+      # The permanent pre-tag regression guard. `release.yml`'s build-local-artifacts
+      # is gated off on PRs and every ci.yml job runs on ubuntu-latest, so the release
+      # binary is otherwise linked for the first time by the release itself — which is
+      # exactly how the v0.9.0 `ld: symbol(s) not found` failure reached a tag. This
+      # step at least holds the line on Linux: delete the staging step above and this
+      # goes red, instead of the dynamic dependency surfacing on a user's machine.
+      - name: Assert the release binary has no dynamic OpenSSL dependency
+        run: bash scripts/assert-static-openssl.sh target/release/liminis-context-graph
 
       # Compiles (links, but does not run) every integration test target, including the
       # five real-corpus e2e test binaries — without this flag the same command would

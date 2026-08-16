@@ -44,15 +44,25 @@ allow-dirty = ["ci"]
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
-# x86_64 pinned to 24.04 (GCC 13+): lbug 0.17.0's headers use the C++20
-# <format> header, absent from cargo-dist's default ubuntu-22.04 (GCC 11).
-# The v0.9.0 release x86_64 build failed with `fatal error: format: No such
-# file or directory`. arm64 already used 24.04-arm and built fine.
+# x86_64 pinned to 24.04 (GCC 13+): lbug's headers use the C++20 <format>
+# header, absent from cargo-dist's default ubuntu-22.04 (GCC 11). The v0.9.0
+# release x86_64 build failed with `fatal error: format: No such file or
+# directory`. arm64 already used 24.04-arm and built fine. Still required at
+# 0.19.1 — build.rs compiles the cxx bridges at C++20 regardless of the
+# prebuilt path, since that is a local compile of the FFI bridge rather than
+# of the downloaded engine.
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
 
 [workspace.metadata.dist.dependencies.apt]
 cmake = "*"
 ninja-build = "*"
+# lbug 0.18.0 moved OpenSSL out of the prebuilt fat bundle
+# (LadybugDB/ladybug#590), so liblbug.a now needs libssl/libcrypto at link
+# time. Declared rather than assumed present, for the same determinism reason
+# cmake and ninja-build are. libssl-dev also supplies the libssl.a/libcrypto.a
+# archives that scripts/stage-openssl-static.sh links against to keep the
+# release artifact free of a dynamic OpenSSL dependency — see ADR-0398.
+libssl-dev = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
