@@ -167,6 +167,28 @@ pub struct ExtractedEdge {
     pub original_relation_type: Option<String>,
 }
 
+/// Which endpoint(s) of a dropped edge failed to resolve to an entity (issue #411 FR-003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnresolvedEndpoint {
+    Source,
+    Target,
+    Both,
+}
+
+/// An edge that was extracted but dropped at Phase C commit time because an endpoint never
+/// resolved to an entity, counted in `AddEpisodeResult::edges_dropped_unresolvable` (issue #281).
+/// Carries the edge's extracted content verbatim so a consumer can report what fact was lost and
+/// why, without cross-referencing the persisted graph (issue #411 FR-001/FR-002/FR-003).
+#[derive(Debug, Clone, Serialize)]
+pub struct DroppedEdgeDetail {
+    pub source_name: String,
+    pub target_name: String,
+    pub relation_type: Option<String>,
+    pub fact: String,
+    pub unresolved_endpoint: UnresolvedEndpoint,
+}
+
 /// A structurally valid (deserializes fine) item can still be semantically empty — e.g. a
 /// `String` field that is present but blank or whitespace-only. `salvage_items` (extractor.rs)
 /// checks this in addition to deserializability, per #347. The blankness test is
