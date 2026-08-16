@@ -11,10 +11,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 A patch release hardening the group boundary in both directions. Deletes could reach across every
 group when a caller omitted `group_ids`; reads returned nothing at all in the same situation. Both
-are fixed, and the rule is now stateable: **reads default to all groups, writes and deletes require
-an explicit scope.** Alongside that, WAL stream generation identity stops failing open — a stream
-whose generation cannot be verified is refused rather than replayed silently — and
-`knowledge_process_chunk` reports what it dropped instead of only how much.
+are fixed: **an omitted `group_ids` now means all groups on every read tool, and the two episode
+deletion tools require an explicit scope instead of defaulting to one.** Ingest is unchanged — a
+`knowledge_process_chunk` or `knowledge_add_episode` call that omits a group still writes to the
+default group (`"liminis"`), exactly as before. Alongside that, WAL stream generation identity stops
+failing open — a stream whose generation cannot be verified is refused rather than replayed
+silently — and `knowledge_process_chunk` reports what it dropped instead of only how much.
 
 ### Fixed
 
