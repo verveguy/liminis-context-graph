@@ -64,6 +64,15 @@ ninja-build = "*"
 # release artifact free of a dynamic OpenSSL dependency — see ADR-0398.
 libssl-dev = "*"
 
+[workspace.metadata.dist.dependencies.homebrew]
+# The macOS half of the same requirement. scripts/stage-openssl-static.sh
+# resolves its libdir via `brew --prefix openssl@3` on Darwin and needs that
+# keg's libssl.a/libcrypto.a; declaring it here means cargo-dist's "Install
+# dependencies" step guarantees the keg rather than the step depending on
+# whatever the runner image happens to ship. The staging step runs immediately
+# after that install in release.yml — see ADR-0398.
+"openssl@3" = "*"
+
 [workspace.dependencies]
 arc-swap = "1"
 lbug = "=0.19.1"

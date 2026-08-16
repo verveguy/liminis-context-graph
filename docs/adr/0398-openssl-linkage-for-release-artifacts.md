@@ -94,9 +94,22 @@ Three pieces implement it:
   locally.
 - **`scripts/assert-static-openssl.sh`** fails if `otool -L`/`ldd` on a built binary mentions
   `libssl` or `libcrypto`. It runs in `ci.yml`'s `build-release` job against the release binary.
-- **`libssl-dev`** is declared in `[workspace.metadata.dist.dependencies.apt]`, for the same
-  determinism reason `cmake` and `ninja-build` are declared rather than assumed, and because it
-  is what supplies the `.a` files on both Linux runners.
+- **The OpenSSL dev package is declared on both platforms**, for the same determinism reason
+  `cmake` and `ninja-build` are declared rather than assumed, and because it is what supplies
+  the `.a` archives the script requires: `libssl-dev` in
+  `[workspace.metadata.dist.dependencies.apt]`, and `openssl@3` in
+  `[workspace.metadata.dist.dependencies.homebrew]`. `dist plan` on cargo-dist 0.32.0 resolves
+  these into each runner's `packages_install`:
+
+  | target | runner | `packages_install` |
+  |---|---|---|
+  | `aarch64-apple-darwin` | `macos-14` (cargo-dist default — no `github-custom-runners` entry) | `brew bundle install` of a Brewfile containing `openssl@3` |
+  | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `apt-get install cmake libssl-dev ninja-build` |
+  | `x86_64-unknown-linux-gnu` | `ubuntu-24.04` | `apt-get install cmake libssl-dev ninja-build` |
+
+  Without the `homebrew` entry, the macOS runner's `brew --prefix openssl@3` — the path the
+  script resolves its libdir from on Darwin — would depend entirely on what the `macos-14`
+  image happens to ship.
 
 The staging step is wired into `ci.yml`'s `build-release` job and into `release.yml`, and
 deliberately **not** into `.github/build-setup.yml`. Two facts about cargo-dist force that
