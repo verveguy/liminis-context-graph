@@ -7,6 +7,7 @@
 
 pub mod real_corpus;
 pub mod wal_inspect;
+pub mod wal_manipulate;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
