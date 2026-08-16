@@ -69,7 +69,8 @@ pub async fn search_passages(
 }
 
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).
-/// `group_ids: None` (or an empty vec) searches across every group.
+/// `group_ids: None` searches across every group; `Some(vec![])` is a real filter and matches no
+/// groups.
 pub async fn hybrid_entity_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
@@ -103,7 +104,8 @@ pub async fn hybrid_entity_search(
 }
 
 /// Hybrid BM25 + HNSW edge (fact) search with RRF fusion (HOT path).
-/// `group_ids: None` (or an empty vec) searches across every group.
+/// `group_ids: None` searches across every group; `Some(vec![])` is a real filter and matches no
+/// groups.
 pub async fn hybrid_edge_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
