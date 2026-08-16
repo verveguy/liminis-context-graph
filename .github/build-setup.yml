@@ -3,19 +3,22 @@
 # duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
 #
 # The bundle is no longer *fully* self-contained: 0.18.0 moved OpenSSL out of
-# it (LadybugDB/ladybug#590), which is why the staging step below exists.
-
-# Force the OpenSSL link static so release artifacts stay self-contained.
-# lbug's build.rs emits -lssl/-lcrypto unconditionally and takes its search
-# path from `pkg-config --variable=libdir openssl` alone; the script redirects
-# that at a directory holding only libssl.a/libcrypto.a and exports the result
-# via $GITHUB_ENV. Without it the macOS artifact inherits Homebrew's absolute
-# install name and fails to load on any machine lacking that exact path
-# (LadybugDB/ladybug#682). See ADR-0398.
+# it (LadybugDB/ladybug#590), so release artifacts have to force a static
+# OpenSSL link via scripts/stage-openssl-static.sh. See ADR-0398.
 #
-# Must run BEFORE the build steps cargo-dist appends after this fragment.
-- name: Stage static OpenSSL for a self-contained link
-  run: bash scripts/stage-openssl-static.sh
+# That step deliberately does NOT live in this fragment. cargo-dist inlines
+# build-setup.yml *above* its own "Install dependencies" step, which is what
+# applies `[workspace.metadata.dist.dependencies.apt]` — and libssl-dev, the
+# package supplying the libssl.a/libcrypto.a archives the script requires, comes
+# from exactly there on the Linux runners. Staged from here, the script would run
+# before its own dependency was installed and die with "libssl.a not found" on
+# any runner that does not happen to preinstall it.
+#
+# The step therefore lives in .github/workflows/release.yml, between "Install
+# dependencies" and "Build artifacts". `allow-dirty = ["ci"]` preserves it there.
+# If you ever regenerate release.yml, re-add it in that position by hand — a
+# regenerated workflow without it builds and ships a binary with a dynamic
+# OpenSSL dependency, and nothing on the release path catches that.
 
 - name: Get rustc version for lbug cache key
   id: rustc-ver

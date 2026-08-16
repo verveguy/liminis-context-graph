@@ -98,9 +98,21 @@ Three pieces implement it:
   determinism reason `cmake` and `ninja-build` are declared rather than assumed, and because it
   is what supplies the `.a` files on both Linux runners.
 
-The staging step is wired into `ci.yml`, `.github/build-setup.yml`, **and** `release.yml`. The
-last of those is not redundant: because `build-setup.yml` is inlined at `dist generate` time, a
-release built from the current `release.yml` would otherwise never run the script.
+The staging step is wired into `ci.yml`'s `build-release` job and into `release.yml`, and
+deliberately **not** into `.github/build-setup.yml`. Two facts about cargo-dist force that
+placement:
+
+- `build-setup.yml` is inlined at `dist generate` time rather than referenced at run time, so a
+  release built from the current `release.yml` only runs what `release.yml` itself contains.
+- cargo-dist inlines the fragment *above* its own `Install dependencies` step — the step that
+  applies `[workspace.metadata.dist.dependencies.apt]`. Since `libssl-dev` is what supplies the
+  `.a` archives the script requires on the Linux runners, a staging step inlined from
+  `build-setup.yml` would run before its own dependency was installed and die with
+  `libssl.a not found` on any runner that does not happen to preinstall it.
+
+In `release.yml` the step therefore sits between `Install dependencies` and `Build artifacts`,
+where `libssl-dev` is present and the `PKG_CONFIG_PATH` it writes to `$GITHUB_ENV` is still
+inherited by the build. `allow-dirty = ["ci"]` is what keeps it there.
 
 ## Alternatives Considered
 

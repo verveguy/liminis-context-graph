@@ -131,16 +131,6 @@ jobs:
       # LBUG_BUILD_FROM_SOURCE removed: the lbug prebuilt is a fat bundle (no longer
       # fully self-contained — OpenSSL links externally since 0.18.0).
       # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
-      #
-      # Force the OpenSSL link static so release artifacts stay self-contained. lbug's
-      # build.rs emits -lssl/-lcrypto unconditionally and takes its search path from
-      # `pkg-config --variable=libdir openssl` alone; the script redirects that at a
-      # directory holding only libssl.a/libcrypto.a and exports the result via
-      # $GITHUB_ENV. Without it the macOS artifact inherits Homebrew's absolute install
-      # name and fails to load on any machine lacking that exact path
-      # (LadybugDB/ladybug#682). See ADR-0398.
-      - name: "Stage static OpenSSL for a self-contained link"
-        run: "bash scripts/stage-openssl-static.sh"
       - name: "Get rustc version for lbug cache key"
         id: "rustc-ver"
         run: "echo \"version=$(rustc --version | shasum -a 256 | cut -c1-8)\" >> \"$GITHUB_OUTPUT\""
@@ -168,6 +158,24 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      # Force the OpenSSL link static so release artifacts stay self-contained. lbug's
+      # build.rs emits -lssl/-lcrypto unconditionally and takes its search path from
+      # `pkg-config --variable=libdir openssl` alone; the script redirects that at a
+      # directory holding only libssl.a/libcrypto.a and exports the result via
+      # $GITHUB_ENV, so the build step below inherits it. Without it the macOS artifact
+      # inherits Homebrew's absolute install name and fails to load on any machine
+      # lacking that exact path (LadybugDB/ladybug#682). See ADR-0398.
+      #
+      # ORDERING IS LOAD-BEARING: this must run AFTER "Install dependencies" above and
+      # BEFORE "Build artifacts" below. `packages_install` is what applies
+      # `[workspace.metadata.dist.dependencies.apt]`, which is where libssl-dev — the
+      # package supplying the libssl.a/libcrypto.a archives the script requires — comes
+      # from on the Linux runners. Run earlier (e.g. in the inlined build-setup.yml
+      # fragment, which cargo-dist places above `Install dependencies`) the script dies
+      # with "libssl.a not found" on any runner that does not happen to preinstall it.
+      # This is why the step lives here rather than in .github/build-setup.yml.
+      - name: "Stage static OpenSSL for a self-contained link"
+        run: "bash scripts/stage-openssl-static.sh"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
