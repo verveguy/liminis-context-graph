@@ -192,16 +192,25 @@ jobs:
           set -eu
           # `dist build` writes each target's binary under target/<triple>/dist/.
           # No mapfile/arrays here: the macOS runner's /bin/bash is 3.2.
+          # -print0/-0 throughout, for the same reason scripts/stage-openssl-static.sh
+          # escapes its export line: a checkout path containing a space must not be
+          # split into fragments. Whitespace-splitting here would hand the assertion
+          # nonexistent paths, and it reports a missing file as a failure, so this
+          # would surface as a confusing red rather than a silent pass — but the
+          # threat model is the same one, so handle it the same way.
           find_bins() {
-            find target -type f -perm -u+x -path '*/dist/*' -name liminis-context-graph
+            find target -type f -perm -u+x -path '*/dist/*' \
+              -name liminis-context-graph -print0
           }
-          if [ -z "$(find_bins)" ]; then
+          # Count NUL terminators, not lines: a path containing a newline must not
+          # read as "nothing found" and let the guard pass on an uninspected build.
+          if [ "$(find_bins | tr -dc '\0' | wc -c)" -eq 0 ]; then
             echo "No liminis-context-graph binary found under target/**/dist/ —" >&2
             echo "refusing to pass without inspecting anything. Did dist build's" >&2
             echo "output layout change?" >&2
             exit 1
           fi
-          find_bins | xargs bash scripts/assert-static-openssl.sh
+          find_bins | xargs -0 bash scripts/assert-static-openssl.sh
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
