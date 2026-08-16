@@ -15,7 +15,7 @@ unknown current generation (missing or corrupt `.wal-generation.json`) as **neve
 by design, a stream that has no generation was meant to keep booting and replaying normally
 forever, tolerated indefinitely (Story 5, Scenarios 1-2 in ADR-0387).
 
-In production this made detection **inert end-to-end**. Two real channels hydrated from published
+In real-world hydrated channels this made detection **inert end-to-end**. Two real channels hydrated from published
 WAL repos both reported `generation: null` for every group, and diagnosis traced this to a root
 cause outside lcg's minting logic (`WalWriter::new`'s `global_seq == 0` guard mints correctly,
 verified against the released binary): the publish step copied `*.jsonl` files only. A shell glob

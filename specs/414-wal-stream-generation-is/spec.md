@@ -14,7 +14,7 @@ republished from `seq: 0` with entirely new content and entity identities) apart
 ordinary forward progress — a distinction `applied_seq`/`max_seq` alone cannot make, because a
 reset that produces a *longer* stream than before looks identical to normal growth.
 
-In production, this detection is currently **inert**. Two channels hydrated from published WAL
+In real-world hydrated channels, this detection is currently **inert**. Two channels hydrated from published WAL
 repos (`GES/orac-psetadrs`, 3 files; `adamb1/a2h`, 1 file; lcg `0.13.0`) both report
 `generation: null` for every group, and top-level `wal.generation` is also `null`. The top-level
 `wal.generation: null` in the reproduction is expected, not a symptom: that field describes the
