@@ -183,6 +183,14 @@ pub fn generation_mismatch(recorded: Option<&str>, current: Option<&str>) -> boo
 /// `applied_seq: None` (no row recorded yet — literal first encounter for this stream/consumer
 /// pair) is always exempt: there is nothing yet to have diverged from, and the replay this check
 /// gates is itself what performs the adoption.
+///
+/// This function's own `current_generation.is_none()` exemption above is still exercised directly
+/// by this module's unit tests, but is no longer reachable from `handle_rebuild_from_wal`'s one
+/// production call site when `applied_seq.is_some()`: issue #414's unknown-generation guard
+/// (`Error::WalGenerationUnknown`, ADR-0414) now returns early for exactly that combination before
+/// this function is ever called, so a caller reaching this point with `applied_seq.is_some()` also
+/// has `current_generation.is_some()`. Kept for correctness and symmetry with `generation_mismatch`
+/// rather than narrowed to match, so the two functions' semantics don't drift apart silently.
 pub fn position_reset_detected(
     applied_seq: Option<u64>,
     recorded_generation: Option<&str>,

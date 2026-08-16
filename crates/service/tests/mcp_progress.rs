@@ -31,9 +31,17 @@ fn wait_for_socket(socket_path: &std::path::Path, timeout: Duration) -> bool {
 /// enough to exercise progress bridging (FR-007) without depending on a live extraction LLM
 /// call (`knowledge_add_episode`/`knowledge_process_chunk` both call the real Anthropic API,
 /// with no test-side stub hook, unlike the embedder's `--embedder-http`).
+///
+/// Also mints a generation directly (issue #414): `main.rs` backfills the default group's
+/// `applied_seq` at every process startup, before any client request — so by the time this
+/// test's single `knowledge_rebuild_from_wal` call runs, a position is already recorded. A
+/// real (unminted) fixture would trip FR-002's unknown-generation refusal on a concern this
+/// test isn't exercising (progress-notification bridging, not WAL generation identity).
 fn seed_wal_file(wal_dir: &std::path::Path) {
     std::fs::create_dir_all(wal_dir).expect("create wal dir");
     std::fs::write(wal_dir.join("0000000000000-seed.jsonl"), "").expect("write seed wal file");
+    lcg_core::wal_generation::ensure_generation(wal_dir)
+        .expect("mint a generation for the fixture");
 }
 
 #[test]

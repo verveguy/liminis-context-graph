@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **`knowledge_rebuild_from_wal` now refuses to replay a group whose current on-disk generation
+  is unknown, once a position has already been recorded for it.** ADR-0387's reset detection
+  compares a group's recorded WAL stream generation against what's currently on disk
+  (`.wal-generation.json`) to tell a genuine producer-side reset apart from ordinary forward
+  progress — but a stream whose generation was never recorded (missing or corrupt sidecar, most
+  commonly because a publish step globbed `*.jsonl` and silently dropped the dot-namespace) made
+  that comparison permanently inert: every real hydrated stream reported `generation: null`, and
+  reset detection never once had a value to compare. The call now fails outright with an
+  actionable error naming the group, rather than silently proceeding as an ordinary incremental
+  replay with no trace that the safety check couldn't run. Applies uniformly to `dry_run: true`;
+  no configuration flag, environment variable, or request parameter bypasses it. Scoped to the
+  affected group only — a sibling group sharing the same WAL root with a known generation remains
+  independently replayable. A group's first-ever encounter (no position recorded yet) is
+  unaffected and still adopts an unknown generation exactly as before. See
+  [ADR-0414](docs/adr/0414-wal-generation-unknown-refuses-replay.md). (#414)
+
+### Added
+
+- **`knowledge_status` reports a new `generation_status` field**, alongside the existing
+  `generation` value, in both the flat `wal` object and every `wal_groups[*]` entry:
+  `"not_applicable"` (no WAL stream yet), `"unknown"` (a stream exists but its generation is
+  currently unrecoverable), or `"known"`. Previously, "never hydrated" and "hydrated but
+  generation unknown" both collapsed indistinguishably to `generation: null`. Purely additive —
+  `generation` itself is unchanged. (#414)
+
+### Documentation
+
+- **Clarified what "publishing a WAL stream" means** in `docs/operations.md`: copying a group's
+  stream directory means copying the entire directory, dot-namespace included (`cp -R`/`rsync -a`
+  with no include-filter, or `git add -A`) — never a `*.jsonl`/`wal/*` glob, which silently drops
+  every dotfile while appearing to publish the complete stream. Documents which dot-namespace
+  entries are load-bearing (`.wal-generation.json`, MUST travel), a safely-omittable cache
+  (`.wal-bounds.json`), or local-only state (`.checkpoints/`). (#414)
+
 ## [0.13.2] - 2026-08-15
 
 A patch release closing an unscoped-delete gap: both `knowledge_delete_chunk_episode` and

@@ -1198,10 +1198,35 @@ that creates a group's stream directory directly, without going through lcg, MUS
 itself (a plain `json.dump({"generation": <any unique string>}, f)` from Python is sufficient) for
 `knowledge_rebuild_from_wal`'s reset detection (below) to work against that stream — lcg never
 retroactively mints one into a directory it didn't create, and a directory with no
-`.wal-generation.json` is treated as having an unknown generation (see FR-009 in
-[the generation-scoped `applied_seq` fields below](#knowledge_status-health-fields)), not as an
-error. Like `.checkpoints/` and `.wal-bounds.json`, it is invisible to every existing
-non-recursive `*.jsonl` scan.
+`.wal-generation.json` is treated as having an unknown generation (see `generation_status` in
+[the generation-scoped `applied_seq` fields below](#knowledge_status-health-fields)). Whether that
+is silently tolerated or an outright failure depends on whether a position for the group has
+already been recorded — see issue #414 below. Like `.checkpoints/` and `.wal-bounds.json`, it is
+invisible to every existing non-recursive `*.jsonl` scan.
+
+### Publishing a WAL stream (issue #414)
+
+**Publishing a group's stream directory means copying the entire directory, dot-namespace
+included — never a `*.jsonl` or `wal/*` glob.** A shell glob does not match a leading dot by
+default, so `git add wal/*`, `cp wal/*.jsonl`, `rsync --include='*.jsonl'`, and `tar wal/*` all
+silently drop every dotfile in the directory while appearing to publish the complete stream. This
+was confirmed as the root cause of a real-world reset-detection outage (issue #414): a publisher's
+`*.jsonl`-only copy step dropped `.wal-generation.json` on every publish, so every consumer that
+hydrated from it reported `generation: null` forever and `knowledge_rebuild_from_wal`'s reset
+detection never once had a generation to compare.
+
+Use a whole-directory copy instead — `cp -R`/`rsync -a` with no include-filter, or `git add -A` —
+and know what each entry in the dot-namespace costs you if you omit it anyway:
+
+| entry | requirement | consequence if dropped |
+|---|---|---|
+| `.wal-generation.json` (issue #387) | **MUST travel** — load-bearing | reset detection can never run for this stream again; every consumer that already recorded a position for this group starts hard-failing `knowledge_rebuild_from_wal` (issue #414, below) until the stream is republished with its generation intact |
+| `.wal-bounds.json` (issue #375) | MAY be omitted | not wrong, just slow — a cache; the consumer regenerates it by rescanning every `*.jsonl` file on next read |
+| `.checkpoints/` (issue #365) | MAY be excluded | local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation |
+
+Only `.wal-generation.json` is load-bearing. The other two are safe to omit deliberately; they are
+never safe to omit *by accident* as a side effect of a glob pattern that was only ever meant to
+select `*.jsonl` files.
 
 ## WAL administration
 
@@ -1216,10 +1241,26 @@ non-recursive `*.jsonl` scan.
   data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
   indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
   afterward — `knowledge_build_indices` is not normally required.
-- **Reset detection (issue #387).** Before doing anything else, `knowledge_rebuild_from_wal`
+- **Unknown-generation refusal (issue #414).** Before comparing anything, `knowledge_rebuild_from_wal`
+  checks whether the group already has a previously recorded position (`applied_seq` not null —
+  note a `knowledge_status` call can itself cause this to become true via its own backfill, so
+  this can trip on what looks like the first explicit rebuild call ever made against a group) and
+  whether the group's current on-disk generation is unknown (missing or corrupt
+  `.wal-generation.json` — the two are indistinguishable by design, see below). If both hold, the
+  call fails outright with an explicit error naming the group and pointing at the publish contract
+  above — replay does not proceed, `from_seq`/`to_seq`/`force_clear` are not applied, and this
+  applies uniformly to `dry_run: true` as well (there is nothing safe to preview). No
+  configuration flag, environment variable, or request parameter bypasses this check. The refusal
+  is scoped to the affected group only — a sibling group sharing the same WAL root whose own
+  generation is known remains independently replayable in the same or a later call. A group with
+  no previously recorded position is unaffected: it performs ordinary first-time adoption, including
+  adopting an unknown generation, exactly as before this issue. See
+  [ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md) for the full rationale.
+- **Reset detection (issue #387).** Once the check above has passed, `knowledge_rebuild_from_wal`
   compares the group's recorded generation against what's currently on disk
-  (`.wal-generation.json`). If they differ (both known and unequal — see FR-009 above for the
-  unknown-generation case), the caller's `from_seq`/`to_seq`/`force_clear` are overridden
+  (`.wal-generation.json`). If they differ (both known and unequal — see `wal.generation_status`
+  below for the unknown-generation case, handled by the refusal above instead), the caller's
+  `from_seq`/`to_seq`/`force_clear` are overridden
   entirely: this is always a full, automatic self-heal — purge the group, replay it from scratch
   against the new generation, then re-bind any cross-group pointers into it — rather than
   silently replaying new-generation mutations on top of old-generation data (the corruption this
@@ -1365,8 +1406,8 @@ mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
-(`{applied_seq, max_seq, generation}`). This is the multi-group view; the flat
-`wal.applied_seq`/`wal.max_seq`/`wal.generation` fields described next remain present and
+(`{applied_seq, max_seq, generation, generation_status}`). This is the multi-group view; the flat
+`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status` fields described next remain present and
 **pinned specifically to the default `"liminis"` group**, unchanged in meaning from a pre-378
 single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
 written before this issue) needs no change. If the default group has no WAL directory at all
@@ -1397,13 +1438,30 @@ file count either.
 nothing beyond what `applied_seq`/`max_seq` already pay (no new full-directory scan). This is
 deliberately the on-disk value, not lcg's own DB-recorded consumer-side position — an external
 consumer (e.g. orac) compares this against its *own* bookkeeping to answer "is this the same
-stream I was tracking?", the same on-disk-authoritative role `max_seq` already plays. `null`
-means the stream currently has no generation recorded — either it predates issue #387, or (for a
-group with no WAL directory at all) there is no stream to have one. Opaque: compare for equality
-only, never interpret or order it. lcg's own internally-recorded generation (paired with its own
-`applied_seq`, and what `knowledge_rebuild_from_wal`'s reset detection actually compares against)
-is not surfaced by `knowledge_status` at all — it is a purely internal bookkeeping value with no
-separate consumer-facing use.
+stream I was tracking?", the same on-disk-authoritative role `max_seq` already plays. `null` means
+the stream currently has no generation recorded — its own `generation_status` (next) says whether
+that is "no stream yet" or "unknown" (both used to collapse indistinguishably to this same `null`,
+issue #414). Opaque: compare for equality only, never interpret or order it. lcg's own
+internally-recorded generation (paired with its own `applied_seq`, and what
+`knowledge_rebuild_from_wal`'s reset detection actually compares against) is not surfaced by
+`knowledge_status` at all — it is a purely internal bookkeeping value with no separate
+consumer-facing use.
+
+**`wal.generation_status`** (issue #414; also scoped to the default group, and mirrored per-group
+inside `wal_groups`) — a sibling string field alongside `generation`, classifying why `generation`
+reads the way it does, since `generation: null` alone cannot distinguish "no stream" from "stream,
+but generation unknown." Pure classification of `max_seq`/`generation`, no new I/O:
+
+| `generation_status` | meaning |
+|---|---|
+| `"not_applicable"` | no WAL stream exists yet for this group (no `*.jsonl` content, no generation record) |
+| `"unknown"` | a stream exists (`*.jsonl` content is present) but its generation is currently unrecoverable — missing or corrupt `.wal-generation.json`, most commonly because a publish step dropped the dot-namespace (see [Publishing a WAL stream](#publishing-a-wal-stream-issue-414) above) |
+| `"known"` | a stream exists with a recorded generation — including a freshly-minted, still-empty stream (`max_seq: null`, `generation` non-null) |
+
+`generation_status: "unknown"` is exactly the condition that makes `knowledge_rebuild_from_wal`
+refuse once a position has been recorded for that group (see Unknown-generation refusal above) —
+checking this field before calling rebuild lets an operator see the condition coming rather than
+discovering it as an abrupt failure.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison:
@@ -2570,6 +2628,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) | Per-Group Mutation Attribution for `delete_by_group` and `rebind_pointers` | 2026-08-13 |
 | [0387](0387-wal-stream-generation-identity.md) | WAL Stream Generation Identity | 2026-08-13 |
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
+| [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 
 ## Historical numbering
 

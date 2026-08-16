@@ -451,21 +451,34 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
         );
     }
 
-    // Boot 2: a later boot, stream unchanged (still no generation) — must not force a rebuild.
+    // Boot 2: a later boot, stream unchanged (still no generation), but a position was already
+    // recorded by Boot 1 — issue #414 FR-002 reverses ADR-0387's original "tolerated forever"
+    // design for exactly this case: this must now hard-fail rather than silently proceed as an
+    // ordinary replay with reset detection unable to run.
     let boot2_v =
         dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state)).await;
-    assert_eq!(boot2_v["result"]["success"], true, "{boot2_v}");
-    assert_ne!(
-        boot2_v["result"]["reset_detected"], true,
-        "an unchanged, still-generationless stream must not spuriously force a rebuild on a \
-         later boot: {boot2_v}"
+    assert!(
+        boot2_v.get("error").is_some(),
+        "a recorded position with an unknown current generation must refuse to replay: {boot2_v}"
+    );
+    assert_eq!(boot2_v["error"]["code"], -32000, "{boot2_v}");
+    let boot2_msg = boot2_v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        boot2_msg.contains(G) && boot2_msg.contains(".wal-generation.json"),
+        "error should name the group and the missing sidecar: {boot2_v}"
     );
     {
         let db2 = state.db.load_full().unwrap();
         let conn = db2.connect().unwrap();
         assert!(
             conn.get_entity_by_uuid("legacy-0").unwrap().is_some(),
-            "boot 2 must not have purged anything"
+            "the refused boot 2 call must not have purged anything"
+        );
+        let pos = conn.get_wal_position(G).unwrap();
+        assert_eq!(
+            pos.applied_seq,
+            Some(1),
+            "the refused boot 2 call must not have advanced the recorded position"
         );
     }
 
@@ -501,6 +514,117 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
     let conn = db3.connect().unwrap();
     assert!(conn.get_entity_by_uuid("legacy-0").unwrap().is_none());
     assert!(conn.get_entity_by_uuid("post-upgrade-0").unwrap().is_some());
+}
+
+// ── issue #414 FR-001: knowledge_status's three-state generation_status field ──────────────────
+
+#[tokio::test]
+async fn fr001_knowledge_status_distinguishes_not_applicable_unknown_and_known() {
+    const NEVER: &str = "g-never-hydrated";
+    const UNKNOWN: &str = "g-content-no-generation";
+    const KNOWN: &str = "g-content-with-generation";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    // NEVER: no directory at all — the ordinary "not yet hydrated" state.
+    // UNKNOWN: content on disk, no .wal-generation.json — the reproduction's case.
+    write_group_wal(
+        &wal_root,
+        UNKNOWN,
+        "0000.jsonl",
+        &[entity_wal_line(0, "u-0", "u-0", UNKNOWN)],
+    );
+    // KNOWN: content on disk, generation sidecar present.
+    write_group_wal(
+        &wal_root,
+        KNOWN,
+        "0000.jsonl",
+        &[entity_wal_line(0, "k-0", "k-0", KNOWN)],
+    );
+    set_group_generation(&wal_root, KNOWN, "gen-known");
+
+    let state = make_state_with_wal(db, wal_root.clone());
+    let status_v = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(status_v.get("error").is_none(), "{status_v}");
+
+    let groups = &status_v["result"]["wal_groups"];
+    assert!(
+        groups.get(NEVER).is_none(),
+        "a group with no WAL directory at all must not appear in wal_groups: {status_v}"
+    );
+    assert_eq!(
+        groups[UNKNOWN]["generation"],
+        Value::Null,
+        "generation itself stays null for backward compatibility: {status_v}"
+    );
+    assert_eq!(
+        groups[UNKNOWN]["generation_status"], "unknown",
+        "content with no generation sidecar must be distinguishable from never-hydrated: {status_v}"
+    );
+    assert_eq!(groups[KNOWN]["generation"], "gen-known", "{status_v}");
+    assert_eq!(groups[KNOWN]["generation_status"], "known", "{status_v}");
+}
+
+// ── issue #414 FR-002 / SC-005: refusal is scoped to the affected group only ───────────────────
+
+#[tokio::test]
+async fn fr002_refusal_is_scoped_to_the_affected_group_only() {
+    const BAD: &str = "g-unknown-generation";
+    const GOOD: &str = "g-known-generation";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    write_group_wal(
+        &wal_root,
+        BAD,
+        "0000.jsonl",
+        &[entity_wal_line(0, "bad-0", "bad-0", BAD)],
+    );
+    write_group_wal(
+        &wal_root,
+        GOOD,
+        "0000.jsonl",
+        &[entity_wal_line(0, "good-0", "good-0", GOOD)],
+    );
+    set_group_generation(&wal_root, GOOD, "gen-good");
+
+    let state = make_state_with_wal(db, wal_root.clone());
+
+    // First-ever call for BAD adopts (applied_seq: None -> no comparison possible yet).
+    let boot_v = dispatch_rebuild_sync(
+        1,
+        json!({"group_id": BAD, "from_seq": 0}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
+
+    // A later call against BAD, now that a position is recorded and the on-disk generation is
+    // still unknown, must refuse — including under dry_run (no silent bypass, FR-002).
+    let dry_v = dispatch_rebuild_sync(
+        2,
+        json!({"group_id": BAD, "from_seq": 1, "dry_run": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        dry_v.get("error").is_some(),
+        "dry_run must not bypass the unknown-generation refusal: {dry_v}"
+    );
+
+    // GOOD, sharing the same WAL root, must remain independently replayable (SC-005).
+    let good_v = dispatch_rebuild_sync(
+        3,
+        json!({"group_id": GOOD, "from_seq": 0}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(
+        good_v["result"]["success"], true,
+        "a sibling group with a known generation must not be blocked by BAD's refusal: {good_v}"
+    );
 }
 
 // ── SC-008: multi-group isolation ──────────────────────────────────────────────────────────────
