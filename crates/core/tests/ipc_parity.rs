@@ -1213,6 +1213,11 @@ async fn test_knowledge_process_chunk_ok() {
         r["edges_dropped_unresolvable"].as_u64().is_some(),
         "expected numeric edges_dropped_unresolvable: {v}"
     );
+    assert_eq!(
+        r["dropped_edges"].as_array().map(|a| a.is_empty()),
+        Some(true),
+        "expected dropped_edges present and empty when nothing was dropped (issue #411 FR-005): {v}"
+    );
     assert!(
         r["edges_reclassified_unclassified"].as_u64().is_some(),
         "expected numeric edges_reclassified_unclassified (FR-005): {v}"

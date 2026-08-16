@@ -21,7 +21,7 @@ use lcg_core::{
     episode,
     extractor::ConfigurableExtractor,
     telemetry::{NoopSink, TelemetrySink},
-    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType, UnresolvedEndpoint},
 };
 use tempfile::TempDir;
 use tokio::sync::RwLock;
@@ -299,6 +299,25 @@ async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
         "both edges name a genuinely nonexistent entity and must be dropped, got {}",
         result.edges_dropped_unresolvable
     );
+    assert_eq!(
+        result.dropped_edges.len(),
+        2,
+        "shared endpoint name must not deduplicate dropped_edges entries (issue #411 edge case)"
+    );
+    assert_eq!(result.dropped_edges[0].source_name, "Alice");
+    assert_eq!(result.dropped_edges[0].target_name, "Ghost");
+    assert_eq!(result.dropped_edges[0].fact, "Alice mentions Ghost");
+    assert_eq!(
+        result.dropped_edges[0].unresolved_endpoint,
+        UnresolvedEndpoint::Target
+    );
+    assert_eq!(result.dropped_edges[1].source_name, "Bob");
+    assert_eq!(result.dropped_edges[1].target_name, "Ghost");
+    assert_eq!(result.dropped_edges[1].fact, "Bob mentions Ghost");
+    assert_eq!(
+        result.dropped_edges[1].unresolved_endpoint,
+        UnresolvedEndpoint::Target
+    );
 
     let conn = db.connect().unwrap();
     assert_eq!(
@@ -506,6 +525,21 @@ async fn test_salvage_does_not_collapse_adversarial_pairs_below_threshold() {
         result.edges_dropped_unresolvable, 1,
         "the unsalvaged edge must be counted as dropped"
     );
+    assert_eq!(
+        result.dropped_edges.len(),
+        1,
+        "dropped_edges must have exactly one entry per edges_dropped_unresolvable (issue #411 FR-001)"
+    );
+    let detail = &result.dropped_edges[0];
+    assert_eq!(detail.source_name, "CO");
+    assert_eq!(detail.target_name, "Carbon Dioxide");
+    assert_eq!(detail.fact, "CO is related to carbon dioxide");
+    assert_eq!(detail.relation_type, None);
+    assert_eq!(
+        detail.unresolved_endpoint,
+        UnresolvedEndpoint::Source,
+        "only the source endpoint ('CO') failed to resolve"
+    );
 
     let conn = db.connect().unwrap();
     let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
@@ -535,6 +569,52 @@ async fn test_genuinely_unresolvable_edge_is_counted_in_result() {
     assert_eq!(
         result.edges_dropped_unresolvable, 1,
         "a genuinely unresolvable edge must be reported in the process_chunk result, not only on stderr"
+    );
+    assert_eq!(result.dropped_edges.len(), 1);
+    let detail = &result.dropped_edges[0];
+    assert_eq!(detail.source_name, "Alice");
+    assert_eq!(detail.target_name, "Nonexistent");
+    assert_eq!(detail.fact, "Alice relates to Nonexistent");
+    assert_eq!(
+        detail.relation_type, None,
+        "relation_type must pass through as null, not be invented (issue #411 edge case)"
+    );
+    assert_eq!(
+        detail.unresolved_endpoint,
+        UnresolvedEndpoint::Target,
+        "only the target endpoint ('Nonexistent') failed to resolve"
+    );
+}
+
+// ── Edge case (issue #411): both endpoints fail to resolve ─────────────────────────────
+
+#[tokio::test]
+async fn test_both_endpoints_unresolvable_reports_both() {
+    let (db, _dir) = make_db();
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &[],
+        &[(
+            "Nonexistent Source",
+            "Nonexistent Target",
+            "Neither endpoint exists",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    let result = run_episode(&state, "ep-a", "Neither endpoint exists.", GROUP_A).await;
+
+    assert_eq!(result.edges_extracted, 0);
+    assert_eq!(result.edges_dropped_unresolvable, 1);
+    assert_eq!(result.dropped_edges.len(), 1);
+    let detail = &result.dropped_edges[0];
+    assert_eq!(detail.source_name, "Nonexistent Source");
+    assert_eq!(detail.target_name, "Nonexistent Target");
+    assert_eq!(detail.fact, "Neither endpoint exists");
+    assert_eq!(
+        detail.unresolved_endpoint,
+        UnresolvedEndpoint::Both,
+        "both endpoints failed to resolve, must be reported as Both, not just one side"
     );
 }
 
