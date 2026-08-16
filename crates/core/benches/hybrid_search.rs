@@ -15,8 +15,8 @@ fn bench_hybrid_entity_search(c: &mut Criterion) {
     c.bench_function("hybrid_entity_search_fts_fallback", |b| {
         b.iter(|| {
             let conn = db.connect().unwrap();
-            let _ = conn.fts_search_entities("Entity", &["bench"], 10);
-            let _ = conn.vector_search_entities(&query_vec, &["bench"], 10);
+            let _ = conn.fts_search_entities("Entity", Some(&["bench"]), 10);
+            let _ = conn.vector_search_entities(&query_vec, Some(&["bench"]), 10);
         });
     });
 }
@@ -32,8 +32,8 @@ fn bench_hybrid_edge_search(c: &mut Criterion) {
     c.bench_function("hybrid_edge_search_fts_fallback", |b| {
         b.iter(|| {
             let conn = db.connect().unwrap();
-            let _ = conn.fts_search_edges("fact", &["bench"], 10);
-            let _ = conn.vector_search_edges(&query_vec, &["bench"], 10);
+            let _ = conn.fts_search_edges("fact", Some(&["bench"]), 10);
+            let _ = conn.vector_search_edges(&query_vec, Some(&["bench"]), 10);
         });
     });
 }

@@ -227,14 +227,14 @@ fn hnsw_and_fts_self_maintain_on_entity_delete() {
     conn.insert_entity(&alice).unwrap();
 
     let fts_before = conn
-        .fts_search_entities("Alice Probe", &[GROUP_A], 10)
+        .fts_search_entities("Alice Probe", Some(&[GROUP_A]), 10)
         .unwrap();
     assert!(
         fts_before.iter().any(|(uuid, _)| uuid == &alice.uuid),
         "FTS should find the entity before delete: {fts_before:?}"
     );
     let vec_before = conn
-        .vector_search_entities(&[1.0, 0.0, 0.0, 0.0], &[GROUP_A], 10)
+        .vector_search_entities(&[1.0, 0.0, 0.0, 0.0], Some(&[GROUP_A]), 10)
         .unwrap();
     assert!(
         vec_before.iter().any(|(uuid, _)| uuid == &alice.uuid),
@@ -244,7 +244,7 @@ fn hnsw_and_fts_self_maintain_on_entity_delete() {
     conn.delete_entities_by_group_ids(&[GROUP_A]).unwrap();
 
     let fts_after = conn
-        .fts_search_entities("Alice Probe", &[GROUP_A], 10)
+        .fts_search_entities("Alice Probe", Some(&[GROUP_A]), 10)
         .unwrap();
     assert!(
         !fts_after.iter().any(|(uuid, _)| uuid == &alice.uuid),
@@ -252,7 +252,7 @@ fn hnsw_and_fts_self_maintain_on_entity_delete() {
          {fts_after:?}"
     );
     let vec_after = conn
-        .vector_search_entities(&[1.0, 0.0, 0.0, 0.0], &[GROUP_A], 10)
+        .vector_search_entities(&[1.0, 0.0, 0.0, 0.0], Some(&[GROUP_A]), 10)
         .unwrap();
     assert!(
         !vec_after.iter().any(|(uuid, _)| uuid == &alice.uuid),
@@ -357,7 +357,7 @@ async fn purge_removes_group_from_search_leaves_other_group_searchable() {
     {
         let conn = db.connect().unwrap();
         let before = conn
-            .fts_search_entities("Searchable", &[GROUP_A, GROUP_B], 10)
+            .fts_search_entities("Searchable", Some(&[GROUP_A, GROUP_B]), 10)
             .unwrap();
         assert_eq!(before.len(), 2, "{before:?}");
     }
@@ -374,7 +374,7 @@ async fn purge_removes_group_from_search_leaves_other_group_searchable() {
 
     let conn = db.connect().unwrap();
     let after = conn
-        .fts_search_entities("Searchable", &[GROUP_A, GROUP_B], 10)
+        .fts_search_entities("Searchable", Some(&[GROUP_A, GROUP_B]), 10)
         .unwrap();
     assert!(
         !after.iter().any(|(uuid, _)| uuid == &a_uuid),

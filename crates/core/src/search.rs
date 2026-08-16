@@ -69,11 +69,12 @@ pub async fn search_passages(
 }
 
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).
+/// `group_ids: None` (or an empty vec) searches across every group.
 pub async fn hybrid_entity_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
     query: &str,
-    group_ids: Vec<String>,
+    group_ids: Option<Vec<String>>,
     limit: usize,
 ) -> Result<Vec<EntityRow>, Error> {
     // Async: embed the query
@@ -83,11 +84,14 @@ pub async fn hybrid_entity_search(
     let query_owned = query.to_string();
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<EntityRow>, Error> {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         let candidate_limit = limit * 3;
 
-        let bm25 = conn.fts_search_entities(&query_owned, &gid_refs, candidate_limit)?;
-        let vector = conn.vector_search_entities(&embedding, &gid_refs, candidate_limit)?;
+        let bm25 = conn.fts_search_entities(&query_owned, gid_refs.as_deref(), candidate_limit)?;
+        let vector =
+            conn.vector_search_entities(&embedding, gid_refs.as_deref(), candidate_limit)?;
 
         let fused_uuids = rrf_fuse(&bm25, &vector);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
@@ -99,11 +103,12 @@ pub async fn hybrid_entity_search(
 }
 
 /// Hybrid BM25 + HNSW edge (fact) search with RRF fusion (HOT path).
+/// `group_ids: None` (or an empty vec) searches across every group.
 pub async fn hybrid_edge_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
     query: &str,
-    group_ids: Vec<String>,
+    group_ids: Option<Vec<String>>,
     limit: usize,
 ) -> Result<Vec<RelatesToEdge>, Error> {
     let embedding = embedder.embed(query).await?;
@@ -111,11 +116,13 @@ pub async fn hybrid_edge_search(
     let query_owned = query.to_string();
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<RelatesToEdge>, Error> {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
         let candidate_limit = limit * 3;
 
-        let bm25 = conn.fts_search_edges(&query_owned, &gid_refs, candidate_limit)?;
-        let vector = conn.vector_search_edges(&embedding, &gid_refs, candidate_limit)?;
+        let bm25 = conn.fts_search_edges(&query_owned, gid_refs.as_deref(), candidate_limit)?;
+        let vector = conn.vector_search_edges(&embedding, gid_refs.as_deref(), candidate_limit)?;
 
         let fused_uuids = rrf_fuse(&bm25, &vector);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();

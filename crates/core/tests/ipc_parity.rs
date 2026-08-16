@@ -2397,7 +2397,7 @@ fn python_db_index_names_fts_entities() {
     let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
         .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
-    let result = conn.fts_search_entities("test", &["*"], 5);
+    let result = conn.fts_search_entities("test", Some(&["*"]), 5);
     assert!(
         result.is_ok(),
         "fts_search_entities failed against Python DB (index name mismatch?): {:?}",
@@ -2418,7 +2418,7 @@ fn python_db_index_names_fts_edges() {
     let db = Db::open(path.to_str().expect("baseline_db path is not valid UTF-8"))
         .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
-    let result = conn.fts_search_edges("test", &["*"], 5);
+    let result = conn.fts_search_edges("test", Some(&["*"]), 5);
     assert!(
         result.is_ok(),
         "fts_search_edges failed against Python DB (index name mismatch?): {:?}",
@@ -2440,7 +2440,7 @@ fn python_db_index_names_vector_entities() {
         .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
-    let result = conn.vector_search_entities(&vec![0.0_f32; 768], &["*"], 5);
+    let result = conn.vector_search_entities(&vec![0.0_f32; 768], Some(&["*"]), 5);
     assert!(
         result.is_ok(),
         "vector_search_entities failed against Python DB (index name mismatch?): {:?}",
@@ -2462,7 +2462,7 @@ fn python_db_index_names_vector_edges() {
         .expect("open baseline_db copy");
     let conn = db.connect().expect("connect");
     // Python DBs use 768-dim bge-base-en-v1.5 embeddings; zero-vector confirms index resolves.
-    let result = conn.vector_search_edges(&vec![0.0_f32; 768], &["*"], 5);
+    let result = conn.vector_search_edges(&vec![0.0_f32; 768], Some(&["*"]), 5);
     assert!(
         result.is_ok(),
         "vector_search_edges failed against Python DB (index name mismatch?): {:?}",

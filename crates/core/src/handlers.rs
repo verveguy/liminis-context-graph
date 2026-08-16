@@ -777,7 +777,7 @@ async fn handle_knowledge_process_chunk(
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
-    let group_ids = extract_group_ids(&p["group_ids"]);
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let result = search::hybrid_entity_search(
@@ -823,7 +823,7 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
 async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
-    let group_ids = extract_group_ids(&p["group_ids"]);
+    let group_ids = extract_optional_group_ids(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
 
     let result = search::hybrid_edge_search(
@@ -924,14 +924,18 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
 }
 
 async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let group_ids = extract_group_ids(&req.params["group_ids"]);
+    let group_ids = extract_optional_group_ids(&req.params["group_ids"]);
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let nodes = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
-        conn.get_entities_by_group_ids(&gid_refs)
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        conn.get_entities_by_group_ids(gid_slice)
     })
     .await??;
     drop(_guard);
@@ -941,14 +945,18 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 }
 
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let group_ids = extract_group_ids(&req.params["group_ids"]);
+    let group_ids = extract_optional_group_ids(&req.params["group_ids"]);
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
-        conn.get_edges_by_group_ids(&gid_refs)
+        let gid_refs: Vec<&str> = group_ids
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
+        conn.get_edges_by_group_ids(gid_slice)
     })
     .await??;
     drop(_guard);
@@ -4376,17 +4384,6 @@ fn build_progress_fn(tx: Option<UnboundedSender<Value>>) -> Option<ProgressFn> {
         });
         f
     })
-}
-
-fn extract_group_ids(v: &Value) -> Vec<String> {
-    match v {
-        Value::Array(arr) => arr
-            .iter()
-            .filter_map(|e| e.as_str().map(str::to_string))
-            .collect(),
-        Value::String(s) => vec![s.clone()],
-        _ => vec![DEFAULT_GROUP_ID.to_string()],
-    }
 }
 
 /// Returns None when group_ids is absent, null, or false — meaning "all groups".

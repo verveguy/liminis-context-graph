@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // FTS search (works without an embedding service)
         println!("FTS results for 'knowledge':");
-        for (uuid, score) in conn.fts_search_entities("knowledge", &["demo"], 5)? {
+        for (uuid, score) in conn.fts_search_entities("knowledge", Some(&["demo"]), 5)? {
             println!("  uuid={uuid}  score={score:.4}");
         }
     }
@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&db),
         Arc::clone(&embedder),
         "distributed systems",
-        vec!["demo".to_string()],
+        Some(vec!["demo".to_string()]),
         5,
     )
     .await
