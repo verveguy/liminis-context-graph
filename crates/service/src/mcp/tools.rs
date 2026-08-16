@@ -34,8 +34,8 @@ fn group_ids_prop() -> Value {
     json!({
         "type": "array",
         "items": {"type": "string"},
-        "description": "Optional group IDs to scope the operation to. Omit for all groups \
-                         (or the default group, depending on the tool)."
+        "description": "Optional group IDs to scope the operation to. Omitting this searches \
+                         or lists across every group present in the graph — not a default group."
     })
 }
 
@@ -125,8 +125,7 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()},
-                    "required": ["group_ids"]
+                    "properties": {"group_ids": group_ids_prop()}
                 })
             },
         },
@@ -137,8 +136,7 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()},
-                    "required": ["group_ids"]
+                    "properties": {"group_ids": group_ids_prop()}
                 })
             },
         },
