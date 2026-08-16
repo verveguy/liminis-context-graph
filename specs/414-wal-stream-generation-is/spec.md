@@ -1,4 +1,4 @@
-# Feature Specification: WAL Stream Generation — Producer Contract & Unknown-State Guard
+# Feature Specification: WAL Stream Generation — Publish Contract & Unknown-State Guard
 
 **Feature Branch**: `fabrik/issue-414`
 **Created**: 2026-08-15
@@ -16,59 +16,82 @@ reset that produces a *longer* stream than before looks identical to normal grow
 
 In production, this detection is currently **inert**. Two channels hydrated from published WAL
 repos (`GES/orac-psetadrs`, 3 files; `adamb1/a2h`, 1 file; lcg `0.13.0`) both report
-`generation: null` for every group, and top-level `wal.generation` is also `null`.
+`generation: null` for every group, and top-level `wal.generation` is also `null`. The top-level
+`wal.generation: null` in the reproduction is expected, not a symptom: that field describes the
+legacy single-stream (pre-#378) directory, which does not exist under a per-group root, and reads
+`null` on a healthy 0.13.1 instance too — only the `wal_groups[*]` nulls were the defect.
 
 Generation identity is entirely separate from `.wal-bounds.json` — the two source repos shipping
 without a `.wal-bounds.json` is a red herring for this issue. `.wal-bounds.json` (ADR-0375) is a
 cached min/max-`seq` manifest for bounds lookups; it carries no generation information and never
 has. Generation lives exclusively in its own sidecar, `.wal-generation.json`
-(`crates/core/src/wal_generation.rs`), and both reproduction repos are missing that file too — that
-absence, not the missing bounds manifest, is the actual condition this issue is about.
+(`crates/core/src/wal_generation.rs`).
 
-**Root cause**, confirmed against `WalWriter::new` (`crates/core/src/wal.rs:84-88`): lcg mints a
-generation only when a stream's directory is opened with zero prior `.jsonl` content
-(`global_seq == 0`). A hydrated stream lands its `*.jsonl` files on disk (via `git clone`/pull of
-the published repo) before any lcg writer ever opens that directory, so by the time it's opened,
-`global_seq` is already non-zero (189, 63 in the reproduction) — the minting branch is never
-taken, and generation stays `None` permanently; nothing on any other code path mints one later.
-This guard is deliberate and correct as designed: minting a generation for a stream that already
-has content would fabricate an identity for a stream lcg never actually observed from creation,
-which is worse than reporting none. Its consequence, though, is that the hydrate path — the
-primary real-world use case ADR-0387 exists to serve — never acquires a generation under the
-current design, and (per the resolution below) it must not be changed to do so.
+**lcg mints correctly — verified, not inferred.** Probing the released 0.13.1 binary directly:
+creating two groups from empty produces a distinct, non-null `.wal-generation.json` for each
+(`wal/fresh/.wal-generation.json`, `wal/second/.wal-generation.json`), and `knowledge_status`
+surfaces both. The minting guard in `WalWriter::new` (`crates/core/src/wal.rs:83-88` — mint only
+when a stream's directory is opened with zero prior `.jsonl` content, `global_seq == 0`) behaves
+exactly as designed. **This guard is not the defect, and this issue does not change it.**
 
-**Resolution: generation identity must be producer-authored, not lcg-derived.** A locally
-lcg-minted substitute cannot detect a producer-side reset: the reset check always compares the
-generation lcg recorded last time against what's currently on disk, and if lcg minted that
-recorded value itself, a producer force-push/rebuild changes the published `*.jsonl` files but not
-lcg's own sidecar — so the comparison still reads "same stream" and the reset goes undetected.
-Deriving a value locally would make `knowledge_status` report a non-null generation that satisfies
-the letter of "non-null," while leaving reset detection exactly as inert as it is today — a worse
-outcome than an honest `null`, because it looks fixed without being fixed. Generation identity has
-to travel with the stream to mean anything, which makes it producer-authored by construction: this
-issue does not add any lcg-side minting/derivation on the hydrate or any other consume-only path.
+**Confirmed root cause: the publish step drops the entire dot-namespace via glob semantics.**
+`.wal-generation.json` is a dotfile, and a shell glob does not match a leading dot by default.
+`git add wal/*`, `cp wal/*.jsonl`, `rsync --include='*.jsonl'`, and `tar wal/*` all silently drop
+it — and everything else in the stream directory's dot-namespace — while appearing to publish the
+complete stream:
 
-This issue's scope is therefore narrower than "make generation non-null everywhere": (1) make the
-"generation unknown" state loud and distinguishable, both in `knowledge_status` and in
-`knowledge_rebuild_from_wal`'s reset-detection path, rather than the current silent collapse into
-`null`/"never a mismatch"; and (2) confirm and strengthen the producer-contract documentation for
-`.wal-generation.json`. Making the two reproduction repos themselves report a real, non-null
-generation requires their publisher (orac/tarial) to start writing `.wal-generation.json`, which is
-a change outside this repository.
+| dropped | consequence |
+|---|---|
+| `.wal-generation.json` (ADR-0387) | reset detection inert — the reported defect |
+| `.wal-bounds.json` (ADR-0375) | bounds cache lost; regenerated by rescanning every file on next read, so slow rather than wrong |
+| `.checkpoints/` (ADR-0365) | named recovery positions do not travel to the consumer |
 
-**Retrospective exposure, raised during clarification.** orac's consumer-side reset detection
-(orac #42) decides `force_clear` by comparing generations, and every currently hydrated stream
-reports `generation: null` — meaning that comparison has been null-vs-null since it shipped, for
-every stream hydrated from published `*.jsonl` files, not just the two in this issue's
-reproduction. Its reset detection has therefore never once fired, in either direction. The
-consequence is retrospective as well as prospective: any producer-side rebuild or force-push that
-has already happened against a currently-tracked channel would have been silently applied as a
-forward advance, with no error surfaced at either end — precisely the corruption class ADR-0387
-was written to close. Whether any such rebuild has actually occurred is an operational question
-for channel operators to investigate independently (this issue has no way to detect, after the
-fact, a reset that happened before the fix ships — that is the same undetectable case FR-002/FR-008
-describe). Whether this exposure changes FR-004's warn-vs-refuse resolution is Open Question 4
-below.
+Confirmed against the actual publisher (orac): its publish step copies `*.jsonl` only. A consumer
+that then `git clone`s the resulting repo and opens the (now dotfile-less) directory hits the same
+`global_seq == 0` guard from the other side: `global_seq` is already non-zero at open time (content
+already exists), so nothing mints a substitute, and the directory permanently reads as
+generation-unknown — correctly, by the guard's own design, since lcg must not fabricate an identity
+for a stream it did not itself observe from creation.
+
+**Resolution: no new authoring mechanism is needed.** An earlier round of this spec framed the
+question as "producer-authored vs. lcg-derived" and argued generation must be authored by whichever
+party publishes a stream. That framing was incorrect: generation is already lcg-minted, once, by
+whichever lcg instance first creates a stream from empty, and it needs no separate authoring step —
+it only needs to travel with the rest of the stream when that stream is published. Publishing a
+stream means copying its entire directory, dot-namespace included, not glob-selecting `*.jsonl`.
+This issue's actual scope is therefore:
+
+1. **Documentation (R4)** — state explicitly what "publishing a WAL stream" means: copy the whole
+   directory (`cp -R`/`rsync -a` without an include-filter, or `git add -A`), not a `*.jsonl` glob,
+   and give the per-artifact table above so a publisher knows which entries are load-bearing
+   (`.wal-generation.json`, MUST travel), which are a cache whose loss only costs performance
+   (`.wal-bounds.json`, MAY be omitted), and which are local-only recovery state that need not
+   travel (`.checkpoints/`, MAY be excluded, but as an explicit, documented decision rather than an
+   accident of the same glob that drops generation).
+2. **Guard (R3)** — because a copy step getting this wrong is otherwise invisible (nothing on
+   either end reports it, and this exact failure went undetected until someone happened to read a
+   status field), `knowledge_status` and `knowledge_rebuild_from_wal` must make the "generation
+   unknown" state loud rather than an indistinguishable `null`, so a future publish-step regression
+   — this one, or a new one affecting a different consumer — is caught rather than silently
+   reproduced.
+
+No lcg minting/derivation code changes are required. Making the two reproduction repos themselves
+report a real, non-null generation requires their publish step to stop dropping the dot-namespace —
+a change to that copy process, outside this repository's code (though this repository documents the
+contract it must follow, per R4).
+
+**Retrospective exposure.** orac's consumer-side reset detection (orac #42) decides `force_clear`
+by comparing generations, and every currently hydrated stream reports `generation: null` — meaning
+that comparison has been null-vs-null since it shipped, for every stream hydrated from a
+dot-namespace-dropping publish step, not just the two in this issue's reproduction. Its reset
+detection has therefore never once fired, in either direction. The consequence is retrospective as
+well as prospective: any producer-side rebuild or force-push that has already happened against a
+currently-tracked channel would have been silently applied as a forward advance, with no error
+surfaced at either end — precisely the corruption class ADR-0387 was written to close. Whether any
+such rebuild has actually occurred is an operational question for channel operators to investigate
+independently (this issue has no way to detect, after the fact, a reset that happened before the
+fix ships). Whether this exposure changes the reset-detection guard's warn-vs-refuse behavior when
+generation is unknown is Open Question 4 below.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -78,15 +101,17 @@ An operator or downstream consumer (e.g. orac #42, which drives its `force_clear
 generation compare) calls `knowledge_status` against a group that has been fully hydrated from a
 published WAL stream. Today, both "this group has never been created" and "this group has real
 content but no recorded generation" report identically as `generation: null` — there is no way to
-tell a healthy-but-non-compliant stream apart from one that was simply never written to. This
-condition is not hypothetical: it is the state of every stream produced by the current real-world
-publisher, since it does not yet write `.wal-generation.json` at all.
+tell a stream whose publish step dropped the dot-namespace apart from one that was simply never
+written to. This condition is not hypothetical: it is the state of every stream produced by the
+current real-world publisher, since its publish step globs `*.jsonl` and drops
+`.wal-generation.json` even though lcg minted one correctly at creation.
 
 **Why this priority**: This is the reproduction's core symptom and the reason ADR-0387's detection
 is inert end-to-end — without this distinction, nothing downstream of `knowledge_status` can reason
 about generation at all, and it is the only piece of this issue that changes what a caller observes
-for the two specific groups in the reproduction (their generation stays unrecoverable, but "unknown"
-becomes an honest, explicit signal instead of an indistinguishable `null`).
+for the two specific groups in the reproduction (their generation stays unrecoverable until their
+publish step is fixed, but "unknown" becomes an honest, explicit signal instead of an
+indistinguishable `null`).
 
 **Independent Test**: Hydrate a group from a WAL directory containing `*.jsonl` content but no
 `.wal-generation.json`, then call `knowledge_status`. The response must let a caller distinguish
@@ -99,9 +124,9 @@ this case from a group with no WAL directory at all.
    a way that is recognizable as "not applicable / no stream yet," not conflated with a stream that
    exists but lacks a generation record.
 2. **Given** a group WAL directory with `*.jsonl` content but no `.wal-generation.json` (the
-   reproduction's case, and the current state of every group produced by a non-compliant
-   publisher), **When** `knowledge_status` is called, **Then** the response surfaces this as a
-   distinct, identifiable "unknown" condition rather than indistinguishable `null`.
+   reproduction's case, and the current state of every group produced by a publish step that drops
+   the dot-namespace), **When** `knowledge_status` is called, **Then** the response surfaces this
+   as a distinct, identifiable "unknown" condition rather than indistinguishable `null`.
 
 ---
 
@@ -115,7 +140,9 @@ prevent.
 
 **Why this priority**: This is the other half of "inert" — even once `knowledge_status` reports the
 unknown state (Story 1), nothing today tells an operator that a *specific replay* skipped the
-safety check.
+safety check. It is also the guard that would have caught this issue's actual root cause on day
+one: a publish step silently dropping the dot-namespace is otherwise invisible until someone reads
+a status field.
 
 **Independent Test**: Run `knowledge_rebuild_from_wal` against a group with a recorded position and
 an unknown on-disk generation, and confirm the response and/or logs make the "reset detection could
@@ -134,57 +161,63 @@ not run" condition observable.
 
 ---
 
-### User Story 3 - Producer contract for `.wal-generation.json` is unambiguous (Priority: P2)
+### User Story 3 - The stream-publish contract is unambiguous about what "publishing a WAL stream" includes (Priority: P2)
 
-A team implementing or maintaining a non-lcg WAL publisher (orac/tarial, or any future
-distributed-WAL producer) needs a single, canonical, complete description of what to write, in
-what format, and when, for `.wal-generation.json` — so that a newly published stream is
-generation-compliant from its first write rather than requiring a later lcg-side workaround. Both
-producers in this issue's reproduction (`GES/orac-psetadrs`, `adamb1/a2h`) currently ship without
-this file and need their publish step changed to become compliant, independent of anything this
-issue changes in lcg.
+A team implementing or maintaining a WAL publisher (orac/tarial, or any future distributed-WAL
+producer) needs a single, canonical, complete description of what copying/publishing a group's
+stream directory must include — so that a newly published stream carries its generation (and any
+other load-bearing sidecar) from its first publish, rather than a glob pattern silently dropping it
+while appearing to succeed. Both producers in this issue's reproduction (`GES/orac-psetadrs`,
+`adamb1/a2h`) currently publish via a `*.jsonl`-only step and need that step changed to copy the
+full directory, independent of anything this issue changes in lcg.
 
-**Why this priority**: Addresses the producer-contract requirement and the issue's own framing that
-this is primarily a producer-side fix. Lower priority than Stories 1–2 because it is a
-documentation deliverable, not new runtime behavior, and `docs/operations.md` already contains a
-first pass at this contract.
+**Why this priority**: Addresses the publish-contract requirement (R4) and the issue's own framing
+that this is primarily a publish-process fix, not an lcg code defect. Lower priority than Stories
+1–2 because it is a documentation deliverable, not new runtime behavior.
 
 **Independent Test**: A reader unfamiliar with lcg's internals can, from the documented contract
-alone, correctly implement a `.wal-generation.json` writer for a new stream without consulting lcg
-source code.
+alone, correctly implement a publish step that preserves every load-bearing part of a WAL stream
+directory without consulting lcg source code.
 
 **Acceptance Scenarios**:
 
-1. **Given** the published producer-contract documentation, **When** a new non-lcg publisher
-   creates a group's WAL stream directory for the first time, **Then** the documentation states
-   unambiguously that it MUST write `.wal-generation.json` at that time, the exact file name,
-   location, and JSON shape, and the consequence of omitting it (reset detection stays inert for
-   that stream, surfaced only as the "unknown" state from Story 1).
+1. **Given** the published stream-copy documentation, **When** a publisher copies a group's stream
+   directory to publish it, **Then** the documentation states unambiguously that a glob such as
+   `wal/*` or `*.jsonl` is insufficient (it silently drops the dot-namespace), gives a working
+   alternative (`cp -R`/`rsync -a` without an include-filter, or `git add -A`), and states per
+   artifact whether it is load-bearing (`.wal-generation.json`, MUST travel), a safely-omittable
+   cache (`.wal-bounds.json`, MAY be omitted at a performance cost), or local-only state
+   (`.checkpoints/`, MAY be excluded, as an explicit stated decision).
 
 ---
 
 ### Edge Cases
 
-- A group's WAL directory has `*.jsonl` content but no `.wal-generation.json` (this issue's
-  reproduction: a non-compliant producer). Must be distinguishable from "never hydrated" (Story 1)
-  and must not crash or silently pass reset detection with no trace (Story 2).
+- A group's WAL directory has `*.jsonl` content but no `.wal-generation.json` because the publish
+  step that produced it used a dotfile-dropping glob (this issue's reproduction). Must be
+  distinguishable from "never hydrated" (Story 1) and must not crash or silently pass reset
+  detection with no trace (Story 2).
 - A group's WAL directory has never been written to at all — no subdirectory exists yet. This is
   the ordinary "not yet hydrated" state and MUST NOT be reported as a warning condition.
 - `.wal-generation.json` exists but is corrupt or unparseable — per ADR-0387, this MUST continue to
-  collapse to "unknown," not to an error, and MUST NOT be distinguished from "producer never wrote
-  it" by any change in this issue (Assumptions).
+  collapse to "unknown," not to an error, and MUST NOT be distinguished from "never published" by
+  any change in this issue (Assumptions).
 - A producer writes `.wal-generation.json` for the first time on a stream that was previously
-  populated with no generation record. Per ADR-0387's existing `position_reset_detected` rule, a
-  recorded `WalPosition` with `generation: None` compared against a newly-appeared `Some` value on
-  disk is *already* treated as a detected reset by design (Story 5, Scenario 3 in ADR-0387). This
-  issue MUST NOT change that existing behavior.
+  published with no generation record (e.g. after its publish step is fixed). Per ADR-0387's
+  existing `position_reset_detected` rule, a recorded `WalPosition` with `generation: None`
+  compared against a newly-appeared `Some` value on disk is *already* treated as a detected reset
+  by design (Story 5, Scenario 3 in ADR-0387). This issue MUST NOT change that existing behavior.
 - `.wal-bounds.json` (ADR-0375) is a distinct sidecar from `.wal-generation.json` and does not
-  itself carry a generation field, and never has — confirmed during clarification. This issue makes
-  no change to `.wal-bounds.json` parsing.
+  itself carry a generation field, and never has. This issue makes no change to `.wal-bounds.json`
+  parsing; its loss to the same dotfile-dropping glob is a performance regression, not a
+  correctness one.
 - A stream hydrated via `git clone`/pull of a published repo is opened by lcg's `WalWriter` only
   after its `*.jsonl` files already exist on disk — `global_seq` is non-zero at open time, so the
-  existing minting guard in `WalWriter::new` (`crates/core/src/wal.rs:84-88`) never fires for it.
-  This issue does not change that guard.
+  existing minting guard in `WalWriter::new` (`crates/core/src/wal.rs:83-88`) never fires for it.
+  This issue does not change that guard; it is verified correct (Background).
+- `.checkpoints/` (ADR-0365) not traveling with a published stream may be entirely intentional
+  (named recovery marks as local-only state) — but per R4, this MUST be a stated, documented
+  decision, not left to be an accidental consequence of the same glob that drops generation.
 
 ## Requirements *(mandatory)*
 
@@ -195,55 +228,51 @@ source code.
   with a known, stable generation, and (c) a WAL stream exists but its generation is currently
   unknown (missing or corrupt `.wal-generation.json`). States (a) and (c) currently both collapse to
   `generation: null` and MUST become distinguishable.
-- **FR-002**: The generation source of truth for a WAL stream is **producer-authored only**. lcg
-  MUST NOT derive, mint, or substitute a generation for a stream it did not create, on the hydrate
-  path or any other consume-only path — a locally-minted value cannot detect a producer-side reset
-  (the comparison is always against lcg's own previously recorded value, which a local mint would
-  make self-referential) and would misleadingly present as "fixed" while leaving reset detection as
-  inert as it is today.
-- **FR-003**: For a stream produced by a generation-compliant publisher (one that writes
-  `.wal-generation.json` per FR-006's contract) and fully hydrated, `knowledge_status.wal_groups[g].generation`
-  (and the top-level `wal.generation` for the default group) MUST report a non-null, stable value.
-  For a stream produced by a non-compliant publisher — including both groups in this issue's
-  reproduction, as their producers currently exist — the deliverable is FR-001's explicit "unknown"
-  signal, not a fabricated non-null value; this issue does not, by itself, make the reproduction's
-  two groups report a non-null generation, since that requires their producer to be fixed
-  (out of this repo's scope).
-- **FR-004**: When `knowledge_rebuild_from_wal` evaluates reset detection against a group whose
+- **FR-002**: When `knowledge_rebuild_from_wal` evaluates reset detection against a group whose
   current on-disk generation is unknown, it MUST surface an explicit, observable "unknown
   provenance" warning (response field and/or log line) rather than silently treating it as "never a
   mismatch" with no trace. Whether replay then proceeds using the caller's requested
   `from_seq`/`to_seq`/`force_clear` (warn-and-proceed, this issue's prior default) or is refused
-  pending explicit operator opt-in is [NEEDS CLARIFICATION: Open Question 4 — reopened during
-  clarification by the retrospective-exposure note in Background: since orac #42's generation
-  compare has been null-vs-null for every hydrated stream, its reset detection has never fired, so
-  any already-occurred producer reset was already silently misapplied as a forward advance; does
-  that argue for refuse-to-advance now rather than warn-and-proceed?].
-- **FR-005**: This issue MUST NOT change ADR-0387's existing comparison semantics for a *known*
+  pending explicit operator opt-in is [NEEDS CLARIFICATION: Open Question 4 — since orac #42's
+  generation compare has been null-vs-null for every hydrated stream, its reset detection has never
+  fired, so any already-occurred producer reset was already silently misapplied as a forward
+  advance; does that argue for refuse-to-advance now rather than warn-and-proceed?].
+- **FR-003**: This issue MUST NOT change ADR-0387's existing comparison semantics for a *known*
   generation mismatch (`wal_generation::position_reset_detected`'s existing `Some != Some` and
   `None`-recorded-vs-`Some`-current cases) — scope is limited to the unknown/null case and its
   reporting.
-- **FR-006**: The `.wal-generation.json` producer contract (file name, location, JSON shape, and
-  when a publisher MUST write it) MUST be documented in one canonical, unambiguous location —
-  confirming and strengthening the existing `docs/operations.md` section — and MUST explicitly note
-  that a publisher creating a group's stream directory for the first time is required to write this
-  file at that time for reset detection to ever apply to that stream.
-- **FR-007**: A corrupt or unparseable `.wal-generation.json` MUST continue to be indistinguishable
-  from "no file written," per ADR-0387's existing design (a damaged sidecar must never masquerade as
+- **FR-004**: The stream-publish contract MUST be documented in one canonical, unambiguous
+  location — confirming and strengthening the existing `docs/operations.md` section — and MUST
+  state: (a) that publishing a group's WAL stream directory means copying the entire directory
+  (e.g. `cp -R`/`rsync -a` without an include-filter, or `git add -A`), not a `*.jsonl`/`wal/*`
+  glob, because such a glob silently drops the directory's dot-namespace while appearing to publish
+  the complete stream; (b) which dot-namespace entries are load-bearing and MUST travel
+  (`.wal-generation.json`), which are a cache that MAY be safely omitted at a performance cost
+  (`.wal-bounds.json`), and which are local-only state that MAY be excluded but only as an
+  explicit, stated decision (`.checkpoints/`).
+- **FR-005**: A corrupt or unparseable `.wal-generation.json` MUST continue to be indistinguishable
+  from "no file present," per ADR-0387's existing design (a damaged sidecar must never masquerade as
   a detected reset) — this issue MUST NOT introduce a way to tell those two cases apart.
-- **FR-008**: lcg MUST NOT mint or derive a generation on any hydrate/consume-only path. The
-  existing guard in `WalWriter::new` (`crates/core/src/wal.rs:84-88`, minting only when
-  `global_seq == 0`) MUST remain the sole minting condition — no new code path may mint a generation
-  against a directory with pre-existing content that lcg did not create.
+- **FR-006**: The existing generation-minting guard in `WalWriter::new`
+  (`crates/core/src/wal.rs:83-88` — mint only when a stream is created from empty, `global_seq ==
+  0`) is correct and verified against the released 0.13.1 binary (two freshly created groups each
+  produced a distinct, non-null generation, both surfaced by `knowledge_status`). This issue MUST
+  NOT change that guard, and MUST NOT introduce any alternative minting or derivation path for a
+  stream lcg did not itself create from empty.
 
 ### Key Entities *(include if feature involves data)*
 
 - **WAL stream generation**: A per-group-directory identity token (`.wal-generation.json`,
   `{"generation": "<string>"}`), stable for the life of a stream, opaque (compared for equality
-  only), producer-authored. Existing entity from ADR-0387; this issue does not redefine its shape or
-  its authorship model, only how its absence is reported and handled.
+  only), minted once by whichever lcg instance first creates the stream from empty. It must travel
+  with the rest of the stream directory when published; this issue does not redefine its shape or
+  minting mechanism, only how its absence (due to a publish-step defect) is reported and handled.
 - **Generation status** *(new)*: A per-group classification — not-yet-hydrated / known / unknown —
   that `knowledge_status` must expose so states (a) and (c) above are no longer conflated.
+- **Stream dot-namespace**: The set of dotfiles/dot-directories alongside a stream's `*.jsonl`
+  files (`.wal-generation.json`, `.wal-bounds.json`, `.checkpoints/`), each with a different
+  publish-time requirement (load-bearing / safely-omittable cache / local-only), documented by
+  FR-004.
 
 ## Success Criteria *(mandatory)*
 
@@ -255,34 +284,34 @@ source code.
 - **SC-002**: For the specific reproduction scenario in this issue (a group hydrated from a
   published WAL repo containing only `*.jsonl` files, no `.wal-generation.json`),
   `knowledge_status` reports the group's generation as explicitly "unknown" (FR-001) rather than an
-  indistinguishable `null` — becoming a real non-null value requires the producer to be fixed, which
-  is outside this issue's success measure.
+  indistinguishable `null` — becoming a real non-null value requires the publisher's copy step to
+  stop dropping the dot-namespace, which is outside this issue's success measure.
 - **SC-003**: `knowledge_rebuild_from_wal` run against a group with a recorded position and an
   unknown current generation produces an observable signal (response field and/or log) in 100% of
   such runs — zero silent skips.
 - **SC-004**: A reader with no prior lcg source-code knowledge can correctly describe, from
-  documentation alone, what a WAL publisher must do to make a newly created stream
-  generation-compliant.
+  documentation alone, what a WAL publisher must copy to make a newly published stream
+  generation-compliant, including why a `*.jsonl` glob is insufficient.
 
 ## Assumptions
 
 - ADR-0387's on-disk shape (`.wal-generation.json`, `{"generation": "<string>"}`) and its
   comparison semantics for *known* generations are correct and unchanged by this issue — only the
   unknown/null case's reporting and handling are in scope.
-- Generation identity must be producer-authored to be meaningful: a locally lcg-minted value cannot
-  detect a producer-side reset, because the comparison is always against lcg's own previously
-  recorded value. Confirmed during clarification; this rules out any lcg-side derivation/minting on
-  a consume-only (hydrate) path.
+- `WalWriter::new`'s minting guard is correct and verified (0.13.1); this issue requires no change
+  to lcg's minting/derivation logic. The confirmed root cause is a publish-step glob that drops the
+  dot-namespace, not an lcg mint defect.
 - The consumer-side reset mechanics in orac #42 (using a generation compare to drive `force_clear`)
   are out of scope and assumed correct given a non-null generation, per the issue's explicit Scope
   statement.
 - A corrupted `.wal-generation.json` must remain indistinguishable from a missing one; this issue
   does not add file-integrity detection for the sidecar itself.
-- The two real-world reproduction repos (`GES/orac-psetadrs`, `adamb1/a2h`) are representative of
-  the current orac/tarial publisher behavior (no `.wal-generation.json`) and will remain in the
-  "unknown" generation state after this issue ships, until their publisher is changed independently.
-- `.wal-bounds.json` (ADR-0375) is unrelated to generation identity and requires no change for this
-  issue.
+- The two real-world reproduction repos (`GES/orac-psetadrs`, `adamb1/a2h`) publish via a
+  `*.jsonl`-only copy step (confirmed on the orac side) and will remain in the "unknown" generation
+  state after this issue ships, until that publish step is fixed independently.
+- `.checkpoints/` (ADR-0365) is treated as local-only recovery state, not required to be part of
+  what a publisher copies when publishing a stream — but FR-004 requires this be a stated,
+  documented decision rather than an accidental consequence of the same glob that drops generation.
 
 ## Out of Scope
 
@@ -291,25 +320,25 @@ source code.
 - Adding integrity/corruption detection to `.wal-generation.json` itself (a corrupt file stays
   indistinguishable from a missing one).
 - Any change to `.wal-bounds.json` (ADR-0375) parsing or its bounds-caching purpose.
-- Any lcg-side derivation or minting of a substitute generation for a stream lcg did not create,
-  on the hydrate path or otherwise (see Resolution in Background and FR-002/FR-008).
+- Any lcg-side derivation or minting of a substitute generation for a stream lcg did not create
+  from empty, on the hydrate path or otherwise (see Background and FR-006).
 - Detecting, after the fact, whether a producer reset already occurred before this fix ships —
-  that is the same undetectable case FR-002/FR-008 describe; any such audit is an operational task
-  for channel operators, not a code deliverable of this issue.
-- Implementing the actual producer-side fix in orac/tarial (making `GES/orac-psetadrs`,
-  `adamb1/a2h`, or the publisher generally write `.wal-generation.json`) — this repo's deliverable
-  is the documented contract (FR-006), not the cross-repo implementation.
+  this issue has no way to distinguish that from ordinary generation-unknown; any such audit is an
+  operational task for channel operators, not a code deliverable of this issue.
+- Implementing the actual fix to the publish step in orac/tarial (changing `GES/orac-psetadrs`,
+  `adamb1/a2h`, or the publisher generally to copy the full stream directory) — this repo's
+  deliverable is the documented contract (FR-004), not the cross-repo implementation.
 
 ## Source References
 
 - ADR-0387 (`docs/adr/0387-wal-stream-generation-identity.md`) — WAL stream generation identity,
   the design this issue's inertness report is against.
-- `docs/operations.md` (`.wal-generation.json` section) — existing producer-contract documentation,
-  first pass.
+- `docs/operations.md` (`.wal-generation.json` section) — existing publish-contract documentation,
+  to be strengthened per FR-004.
 - `crates/core/src/wal_generation.rs` — `read_generation`, `ensure_generation`,
   `position_reset_detected`, `generation_mismatch`.
-- `crates/core/src/wal.rs:84-88` (`WalWriter::new`) — the `global_seq == 0` minting guard that is
-  this issue's confirmed root cause, and which FR-008 requires stay unchanged.
+- `crates/core/src/wal.rs:83-88` (`WalWriter::new`) — the `global_seq == 0` minting guard, verified
+  correct against 0.13.1; FR-006 requires it stay unchanged.
 - `crates/core/src/handlers.rs` — `knowledge_status`'s `wal`/`wal_groups` generation reporting;
   `handle_rebuild_from_wal`'s detection insertion point.
 - #362 (`to_seq` rebuild bound), #365 (WAL checkpoints) — prior art referenced by ADR-0387.
