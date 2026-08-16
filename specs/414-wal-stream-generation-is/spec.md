@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-414`
 **Created**: 2026-08-15
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "WAL stream `generation` is null end-to-end — ADR-0387 reset detection is inert. After a clean per-group hydrate, `knowledge_status.wal_groups[*].generation` is `null` for every group. ADR-0387 makes generation identity the sole signal distinguishing a forward WAL advance from a reset/rebuild in both directions. With it null everywhere, that detection is inert."
 
 ## Background
@@ -90,8 +90,21 @@ currently-tracked channel would have been silently applied as a forward advance,
 surfaced at either end — precisely the corruption class ADR-0387 was written to close. Whether any
 such rebuild has actually occurred is an operational question for channel operators to investigate
 independently (this issue has no way to detect, after the fact, a reset that happened before the
-fix ships). Whether this exposure changes the reset-detection guard's warn-vs-refuse behavior when
-generation is unknown is Open Question 4 below.
+fix ships).
+
+**Resolved: refuse to advance, hard fail, no opt-in, no legacy tolerance.** The guard's behavior
+when generation is unknown is refusal, not a warning (FR-002). There are no production consumers
+of this stream format today — everything hydrating lcg streams is dev/test — so the entire cost of
+a hard failure is that the affected publishers fix their publish step, which they must do
+regardless, since a stream without a generation cannot participate in reset detection no matter how
+tolerant the consumer is. A warn-and-proceed-plus-strict-mode-opt-in alternative was considered and
+rejected: the only reason to tolerate a generation-less stream is the existing dev/test streams,
+which get republished as soon as the publish step is fixed, so a compatibility flag added now would
+outlive its justification by design — permanent surface for a window that closes in days, defaulting
+to the unsafe behavior for exactly as long as anyone forgets to flip it. A warning is also the same
+category of signal that already failed to be noticed here: orac #42's generation compare has been
+null-vs-null since it shipped and never once fired, through a full two-channel hydrate, without
+anyone noticing.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -130,7 +143,7 @@ this case from a group with no WAL directory at all.
 
 ---
 
-### User Story 2 - Reset detection warns loudly instead of silently skipping when generation is unknown (Priority: P1)
+### User Story 2 - Reset detection refuses to advance when generation is unknown (Priority: P1)
 
 An operator runs `knowledge_rebuild_from_wal` against a group that already has a recorded
 `WalPosition` and whose current on-disk generation is unknown. Today this silently proceeds as an
@@ -139,25 +152,29 @@ operator has no way to know they are exposed to the exact corruption scenario AD
 prevent.
 
 **Why this priority**: This is the other half of "inert" — even once `knowledge_status` reports the
-unknown state (Story 1), nothing today tells an operator that a *specific replay* skipped the
-safety check. It is also the guard that would have caught this issue's actual root cause on day
-one: a publish step silently dropping the dot-namespace is otherwise invisible until someone reads
-a status field.
+unknown state (Story 1), nothing today stops a *specific replay* from proceeding with no safety
+check having run at all. It is also the guard that would have caught this issue's actual root cause
+on day one: a publish step silently dropping the dot-namespace is otherwise invisible until someone
+reads a status field, and a warning is the same category of signal that already went unnoticed
+through this issue's own reproduction.
 
 **Independent Test**: Run `knowledge_rebuild_from_wal` against a group with a recorded position and
-an unknown on-disk generation, and confirm the response and/or logs make the "reset detection could
-not run" condition observable.
+an unknown on-disk generation, and confirm the call fails with an explicit, actionable error rather
+than proceeding.
 
 **Acceptance Scenarios**:
 
 1. **Given** a group with a previously recorded `WalPosition` and an on-disk generation that is
    currently unknown (missing or corrupt `.wal-generation.json`), **When**
-   `knowledge_rebuild_from_wal` is called, **Then** the response and/or logs surface an explicit
-   warning that generation-based reset detection could not run for this call. Whether replay then
-   proceeds using the caller's requested `from_seq`/`to_seq`/`force_clear` (warn-and-proceed,
-   matching today's non-blocking behavior) or is refused pending explicit operator opt-in is
-   reopened by Open Question 4 below — a warning that goes unread reproduces the current
-   silent-corruption exposure with extra steps, per the retrospective-exposure note in Background.
+   `knowledge_rebuild_from_wal` is called, **Then** the call fails outright with an explicit error
+   naming the group and stating that `.wal-generation.json` is absent or unreadable, pointing at
+   the publish contract (FR-004/Story 3) as the fix. Replay does not proceed, the caller's
+   `from_seq`/`to_seq`/`force_clear` are not applied, and no configuration flag, environment
+   variable, or request parameter bypasses the check.
+2. **Given** a WAL root with multiple groups, one of which has a recorded position and unknown
+   generation, **When** `knowledge_rebuild_from_wal` is called for a *different* group in the same
+   root whose generation is known, **Then** that call proceeds normally — the refusal is scoped to
+   the affected group only.
 
 ---
 
@@ -228,15 +245,22 @@ directory without consulting lcg source code.
   with a known, stable generation, and (c) a WAL stream exists but its generation is currently
   unknown (missing or corrupt `.wal-generation.json`). States (a) and (c) currently both collapse to
   `generation: null` and MUST become distinguishable.
-- **FR-002**: When `knowledge_rebuild_from_wal` evaluates reset detection against a group whose
-  current on-disk generation is unknown, it MUST surface an explicit, observable "unknown
-  provenance" warning (response field and/or log line) rather than silently treating it as "never a
-  mismatch" with no trace. Whether replay then proceeds using the caller's requested
-  `from_seq`/`to_seq`/`force_clear` (warn-and-proceed, this issue's prior default) or is refused
-  pending explicit operator opt-in is [NEEDS CLARIFICATION: Open Question 4 — since orac #42's
-  generation compare has been null-vs-null for every hydrated stream, its reset detection has never
-  fired, so any already-occurred producer reset was already silently misapplied as a forward
-  advance; does that argue for refuse-to-advance now rather than warn-and-proceed?].
+- **FR-002**: When `knowledge_rebuild_from_wal` evaluates reset detection against a group that
+  already has a previously recorded position (`applied_seq` is not null) and whose current on-disk
+  generation is unknown (missing or corrupt `.wal-generation.json`), it MUST fail the call outright
+  with an explicit, actionable error, rather than silently treating it as "never a mismatch" and
+  proceeding as an ordinary replay. The error MUST name the affected group, state that
+  `.wal-generation.json` is absent or unreadable, and point at the publish contract (FR-004) as the
+  fix. Replay MUST NOT proceed and MUST NOT degrade to a seq-only inference; the caller's
+  `from_seq`/`to_seq`/`force_clear` are not applied. No configuration flag, environment variable, or
+  request parameter MAY be offered to bypass this check — if a future consumer needs one, that is a
+  new issue with a concrete use case, not a hook added preemptively here. The refusal is scoped to
+  the affected group only: other groups sharing the same WAL root, whose own generation is known,
+  remain independently replayable. This does not change the existing, unrelated "no row yet"
+  behavior (a group with no previously recorded position performs ordinary first-time adoption,
+  including adopting an unknown generation, per ADR-0387's existing rule) — the refusal applies only
+  once a position has already been recorded and a subsequent call finds the current generation
+  unknown.
 - **FR-003**: This issue MUST NOT change ADR-0387's existing comparison semantics for a *known*
   generation mismatch (`wal_generation::position_reset_detected`'s existing `Some != Some` and
   `None`-recorded-vs-`Some`-current cases) — scope is limited to the unknown/null case and its
@@ -252,7 +276,8 @@ directory without consulting lcg source code.
   explicit, stated decision (`.checkpoints/`).
 - **FR-005**: A corrupt or unparseable `.wal-generation.json` MUST continue to be indistinguishable
   from "no file present," per ADR-0387's existing design (a damaged sidecar must never masquerade as
-  a detected reset) — this issue MUST NOT introduce a way to tell those two cases apart.
+  a detected reset) — this issue MUST NOT introduce a way to tell those two cases apart. Both now
+  trigger FR-002's refusal identically when a position is already recorded.
 - **FR-006**: The existing generation-minting guard in `WalWriter::new`
   (`crates/core/src/wal.rs:83-88` — mint only when a stream is created from empty, `global_seq ==
   0`) is correct and verified against the released 0.13.1 binary (two freshly created groups each
@@ -287,11 +312,14 @@ directory without consulting lcg source code.
   indistinguishable `null` — becoming a real non-null value requires the publisher's copy step to
   stop dropping the dot-namespace, which is outside this issue's success measure.
 - **SC-003**: `knowledge_rebuild_from_wal` run against a group with a recorded position and an
-  unknown current generation produces an observable signal (response field and/or log) in 100% of
-  such runs — zero silent skips.
+  unknown current generation fails explicitly in 100% of such runs — zero silent skips, zero
+  successful replays.
 - **SC-004**: A reader with no prior lcg source-code knowledge can correctly describe, from
   documentation alone, what a WAL publisher must copy to make a newly published stream
   generation-compliant, including why a `*.jsonl` glob is insufficient.
+- **SC-005**: A `knowledge_rebuild_from_wal` failure for one group (unknown generation) does not
+  prevent a different group sharing the same WAL root from being replayed independently in the same
+  or a subsequent call.
 
 ## Assumptions
 
@@ -312,6 +340,15 @@ directory without consulting lcg source code.
 - `.checkpoints/` (ADR-0365) is treated as local-only recovery state, not required to be part of
   what a publisher copies when publishing a stream — but FR-004 requires this be a stated,
   documented decision rather than an accidental consequence of the same glob that drops generation.
+- There are no production consumers of this WAL stream format today; every currently-hydrated
+  stream is dev/test. This is why FR-002's refusal is acceptable even though it breaks every
+  currently-hydrated, non-compliant stream (both reproduction groups included) until their publish
+  step is fixed — the cost is borne entirely by dev/test users who must fix the publish step
+  regardless, not by any production workload.
+- #400's FR-006 references "whichever behaviour #414 settles on" for its own multi-group replay
+  assertions; this issue's resolution (refuse-to-advance, FR-002) is the input #400 depends on —
+  #400 must assert refusal for the affected group and continued, independent replayability for
+  other groups sharing the same WAL root (SC-005).
 
 ## Out of Scope
 
@@ -328,6 +365,9 @@ directory without consulting lcg source code.
 - Implementing the actual fix to the publish step in orac/tarial (changing `GES/orac-psetadrs`,
   `adamb1/a2h`, or the publisher generally to copy the full stream directory) — this repo's
   deliverable is the documented contract (FR-004), not the cross-repo implementation.
+- Any configuration flag, environment variable, or request parameter that bypasses FR-002's
+  refusal — explicitly rejected (Background, Resolved). If a future consumer needs a compatibility
+  path, that requires a new issue with a concrete use case, not a hook added preemptively here.
 
 ## Source References
 
@@ -343,3 +383,5 @@ directory without consulting lcg source code.
   `handle_rebuild_from_wal`'s detection insertion point.
 - #362 (`to_seq` rebuild bound), #365 (WAL checkpoints) — prior art referenced by ADR-0387.
 - orac #42 — consumer-side reset mechanics (out of scope, cross-repo).
+- #400 (FR-006) — depends on this issue's refuse-to-advance resolution for its own multi-group
+  replay assertions (Assumptions).
