@@ -1223,6 +1223,8 @@ async fn handle_get_entities_by_source(
     Ok(json!({ "source": source_val, "nodes": nodes, "count": count }))
 }
 
+/// Deletes all Episodic nodes matching source_file, scoped to the required `group_ids`
+/// (issue #406 — an unscoped, all-groups delete is rejected outright).
 async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let source_file = p["source_file"]
@@ -1231,25 +1233,23 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
         .ok_or_else(|| Error::Ipc("source_file is required and must be non-empty".to_string()))?
         .to_string();
 
-    let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
+    let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
-        let gid_refs: Option<Vec<&str>> = group_ids_owned
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        let uuids = conn.remove_episodes_by_source(&source_file, gid_refs.as_deref())?;
-        // `group_ids` is optional and, when given, an array — a call with no filter or more
-        // than one group can genuinely span multiple groups, so per-operation attribution can't
+        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+        let uuids = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
+        // `group_ids` is required and non-empty (issue #406) — a call naming more than one
+        // group can still genuinely span multiple groups, so per-operation attribution can't
         // name one group there (FR-004), and it routes through the default group's writer, the
         // same documented limitation as handle_delete_by_group. But a caller that named exactly
         // one group is not ambiguous — route to that group directly rather than discarding
         // information the request already gave us.
-        let target_group = match group_ids_owned.as_deref() {
-            Some([single]) => single.as_str(),
+        let target_group = match group_ids_owned.as_slice() {
+            [single] => single.as_str(),
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
@@ -1267,7 +1267,8 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     }))
 }
 
-/// Deletes all Episodic nodes for the given chunk_id.
+/// Deletes all Episodic nodes for the given chunk_id, scoped to the required `group_ids`
+/// (issue #406 — an unscoped, all-groups delete is rejected outright).
 ///
 /// Note: only the episode nodes are removed. Entity nodes that were extracted
 /// from this chunk and are connected solely to the deleted episodes become
@@ -1284,22 +1285,21 @@ async fn handle_delete_chunk_episode(
         .ok_or_else(|| Error::Ipc("chunk_id is required and must be non-empty".to_string()))?
         .to_string();
 
-    let group_ids_owned = extract_optional_group_ids(&p["group_ids"]);
+    let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
-        let gid_refs: Option<Vec<&str>> = group_ids_owned
-            .as_ref()
-            .map(|v| v.iter().map(String::as_str).collect());
-        let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, gid_refs.as_deref())?;
+        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+        let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
         // Same FR-004 rationale as handle_delete_by_source above: a single named group is
-        // routed there directly; no filter, or more than one group, falls back to the default
-        // group's writer as a genuinely multi-group call.
-        let target_group = match group_ids_owned.as_deref() {
-            Some([single]) => single.as_str(),
+        // routed there directly; more than one group falls back to the default group's writer
+        // as a genuinely multi-group call. `group_ids` itself is required and non-empty
+        // (issue #406), so there is no "no filter" case to route here anymore.
+        let target_group = match group_ids_owned.as_slice() {
+            [single] => single.as_str(),
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
@@ -1322,9 +1322,10 @@ async fn handle_delete_chunk_episode(
 /// `RelatesToNode_` owned by a group outside the call (FR-008). See `crate::group_purge` for
 /// the full mechanism.
 ///
-/// `group_ids` is required and validated explicitly here rather than via
+/// `group_ids` is required and validated via `extract_required_group_ids` rather than
 /// `extract_optional_group_ids` (which treats an absent/empty value as "all groups") — a
-/// destructive admin op must never silently default to purging everything.
+/// destructive admin op must never silently default to purging everything. See that helper's
+/// doc comment for the exact rejection rules (non-empty array, no malformed/empty elements).
 ///
 /// `confirm` gates the real (mutating) call, exactly like `handle_clear_all`; `dry_run: true`
 /// takes precedence and skips the gate entirely (FR-013), since it doesn't mutate anything.
@@ -1333,34 +1334,7 @@ async fn handle_delete_chunk_episode(
 /// `write` still needs to purge as part of a per-source refresh.
 async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
-    // Every element must be a non-empty string, or the request is rejected outright — for a
-    // destructive, confirm-gated admin op, silently dropping a malformed element (e.g. a stray
-    // number from an upstream template bug) and proceeding with the rest would purge less than
-    // the caller specified without any indication that anything was ignored.
-    let group_ids: Vec<String> = p["group_ids"]
-        .as_array()
-        .filter(|arr| {
-            !arr.is_empty()
-                && arr
-                    .iter()
-                    .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-        })
-        .map(|arr| {
-            // Dedup while preserving first-seen order: a repeated group_id would otherwise
-            // produce duplicate per-group entries in the response and redundant (harmless but
-            // misleading) rebind passes in `group_purge::purge_groups`.
-            let mut seen = std::collections::HashSet::new();
-            arr.iter()
-                .map(|v| v.as_str().unwrap_or_default().to_string())
-                .filter(|s| seen.insert(s.clone()))
-                .collect::<Vec<_>>()
-        })
-        .ok_or_else(|| {
-            Error::Ipc(
-                "group_ids is required and must be a non-empty array of non-empty strings"
-                    .to_string(),
-            )
-        })?;
+    let group_ids: Vec<String> = extract_required_group_ids(&p["group_ids"])?;
 
     let dry_run = p["dry_run"].as_bool().unwrap_or(false);
     let confirm = p["confirm"].as_bool().unwrap_or(false);
@@ -4351,8 +4325,7 @@ fn extract_group_ids(v: &Value) -> Vec<String> {
 
 /// Returns None when group_ids is absent, null, or false — meaning "all groups".
 /// Returns Some(vec) for an array or single string — meaning "these groups only".
-/// Used by deletion methods, which differ from search handlers: absent = all groups,
-/// not the default "liminis" group.
+/// Used by read/search handlers, where absent = all groups, not the default "liminis" group.
 fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
     match v {
         Value::Array(arr) => {
@@ -4369,6 +4342,40 @@ fn extract_optional_group_ids(v: &Value) -> Option<Vec<String>> {
         Value::String(s) => Some(vec![s.clone()]),
         _ => None,
     }
+}
+
+/// Returns a deduplicated (first-seen order preserved), non-empty list of group_ids, or an
+/// actionable error naming `group_ids` when the value is absent, null, an empty array, or
+/// contains any non-string / empty-string element.
+///
+/// Used by destructive, explicitly group-scoped operations (`knowledge_delete_by_group`,
+/// `knowledge_delete_chunk_episode`, `knowledge_delete_by_source`) where a missing scope must
+/// never be interpreted as "all groups" (issue #406) — unlike `extract_optional_group_ids`,
+/// there is no "absent" case that resolves to anything but an error.
+fn extract_required_group_ids(v: &Value) -> Result<Vec<String>, Error> {
+    v.as_array()
+        .filter(|arr| {
+            !arr.is_empty()
+                && arr
+                    .iter()
+                    .all(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+        })
+        .map(|arr| {
+            // Dedup while preserving first-seen order: a repeated group_id would otherwise
+            // produce duplicate per-group entries in a response and redundant (harmless but
+            // misleading) work downstream.
+            let mut seen = std::collections::HashSet::new();
+            arr.iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .filter(|s| seen.insert(s.clone()))
+                .collect::<Vec<_>>()
+        })
+        .ok_or_else(|| {
+            Error::Ipc(
+                "group_ids is required and must be a non-empty array of non-empty strings"
+                    .to_string(),
+            )
+        })
 }
 
 /// Returns a deduplicated list of entity UUIDs from edge source and target endpoints.

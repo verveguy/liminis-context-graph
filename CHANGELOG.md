@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.13.2] - 2026-08-15
+
+A patch release closing an unscoped-delete gap: both `knowledge_delete_chunk_episode` and
+`knowledge_delete_by_source` could destroy another group's data whenever the caller omitted
+`group_ids`, which the liminis app does on every call.
+
+### Fixed
+
+- **`knowledge_delete_chunk_episode` and `knowledge_delete_by_source` now require an explicit
+  group scope.** Both matched `Episodic` rows by `name` or `source_description`/prefix without
+  any group predicate whenever `group_ids` was absent, `null`, or `[]`, so the subsequent
+  `DETACH DELETE` removed every matching row across every group in the database — reachable on
+  every call the liminis app makes, since it never sends `group_ids` on this path
+  (`indexing-queue.ts`'s `unlink` handling issues one unscoped delete per chunk on an ordinary
+  heading rename). This is the same failure class as #368 (a write in one group destroying
+  another group's data), which 0.13.0 treated as release-blocking (see ADR-0368, ADR-0371,
+  ADR-0385). Both methods now reject a missing/null/empty `group_ids` with an actionable error
+  naming the parameter, and `Conn::remove_episodes_by_chunk_id`/`remove_episodes_by_source` take
+  a mandatory (non-`Option`) group scope, so an unscoped, all-groups query is no longer
+  representable at the data-access layer, not merely blocked in the handler above it. A valid
+  scope that matches nothing still returns a successful `deleted_count: 0`, unchanged. (#406,
+  folds in #403)
+
+### Changed
+
+- **BREAKING: `group_ids` is now a required, non-empty parameter on `knowledge_delete_chunk_episode`
+  and `knowledge_delete_by_source`, on both the MCP and IPC surfaces.** The MCP tool schemas for
+  both methods move `group_ids` from optional into `required` and add `minItems: 1`. A caller
+  that previously omitted `group_ids` (absent, `null`, or `[]`) got a successful — and, per the
+  `### Fixed` entry above, potentially catastrophic — delete across every group; it now receives
+  an error naming the missing parameter instead, and no rows are deleted. The remedy is to pass
+  the caller's own group explicitly; there is no default to fall back to, because a silent
+  default (e.g. `DEFAULT_GROUP_ID`) is the defect this release fixes. This is shipped in a patch
+  release deliberately: the alternative is leaving active cross-group data loss reachable on
+  `main`. (#406)
+
 ## [0.13.1] - 2026-08-15
 
 A patch release closing an integrity gap in 0.13.0's layered-graph model: a cross-group pointer
