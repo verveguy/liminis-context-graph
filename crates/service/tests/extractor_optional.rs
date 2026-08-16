@@ -53,7 +53,8 @@ fn write_minimal_wal_file(wal_dir: &std::path::Path) {
                 \"params\":{\"uuid\":\"wal-fixture-episode\"}}\n";
     let mut f = std::fs::File::create(wal_dir.join("0.jsonl")).expect("create wal file");
     f.write_all(line.as_bytes()).expect("write wal fixture");
-    lcg_core::wal_generation::ensure_generation(wal_dir).expect("mint a generation for the fixture");
+    lcg_core::wal_generation::ensure_generation(wal_dir)
+        .expect("mint a generation for the fixture");
 }
 
 /// SC-001 / Acceptance Scenarios 1-2: starts with no provider, serves reads, and completes

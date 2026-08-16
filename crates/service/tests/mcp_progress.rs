@@ -40,7 +40,8 @@ fn wait_for_socket(socket_path: &std::path::Path, timeout: Duration) -> bool {
 fn seed_wal_file(wal_dir: &std::path::Path) {
     std::fs::create_dir_all(wal_dir).expect("create wal dir");
     std::fs::write(wal_dir.join("0000000000000-seed.jsonl"), "").expect("write seed wal file");
-    lcg_core::wal_generation::ensure_generation(wal_dir).expect("mint a generation for the fixture");
+    lcg_core::wal_generation::ensure_generation(wal_dir)
+        .expect("mint a generation for the fixture");
 }
 
 #[test]
