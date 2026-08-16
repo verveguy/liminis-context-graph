@@ -114,7 +114,9 @@ Or run it as a native MCP server instead — add to your client's MCP config:
 
 ### Build from source
 
-Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
+Requires [Rust/Cargo](https://rustup.rs/) and OpenSSL 3. The first build downloads a prebuilt lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step. The bundle statically ships its other third-party dependencies, but since lbug 0.18.0 it links OpenSSL externally, so you need `openssl@3` (macOS: `brew install openssl@3`; Debian/Ubuntu: `apt install libssl-dev`).
+
+This applies to building from source only. Released binaries link OpenSSL statically and require nothing installed — see [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md):
 
 ```bash
 cargo build --release                         # build both crates

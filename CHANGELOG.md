@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Changed
+
+- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.19.1`, moving both the crate pin in
+  `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together. Picks
+  up upstream's buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint
+  lock-file cleanup fixes (0.19.0), batched detached-node relationship deletes, WAL group commits,
+  stats-aware query planning, and HNSW scalar quantization. No IPC or MCP tool schema, response
+  shape, or dispatch method changes.
+
+  **Upgrading is one-way.** A database created under `0.17.0` (storage version 41) opens directly
+  under `0.19.1` — no migration step, no export/reimport. But the first checkpoint under the new
+  binary rewrites it to storage version 43, and **an older `liminis-context-graph` binary will not
+  open it again**. Back up `.lcg/db/` first if you need the option to roll back.
+
+### Fixed
+
+- Release binaries no longer carry a dynamic OpenSSL dependency. `lbug 0.18.0` moved OpenSSL out
+  of the prebuilt bundle, which by default made the shipped binary require `libssl`/`libcrypto` on
+  the user's machine — and on macOS bake in Homebrew's absolute install path, so it would fail to
+  load for anyone without `openssl@3` at exactly `/opt/homebrew/opt/openssl@3`. OpenSSL is now
+  linked statically into release artifacts, preserving the self-contained single-binary install.
+  See [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md).
+
+  Building *from source* now requires OpenSSL 3 development files (`brew install openssl@3` on
+  macOS, `apt install libssl-dev` on Debian/Ubuntu). Installing a released binary requires nothing.
+
 ## [0.13.3] - 2026-08-22
 
 A patch release closing the upgrade-path regression 0.13.2 introduced, scoping the last two
