@@ -78,6 +78,16 @@ pub enum Error {
         "invalid group_id {0:?}: must be non-empty and map to a directory name of 1-200 chars"
     )]
     InvalidGroupId(String),
+
+    /// `knowledge_rebuild_from_wal` was asked to replay a group that already has a recorded
+    /// `WalPosition` (`applied_seq.is_some()`) whose current on-disk generation is unknown —
+    /// `.wal-generation.json` is missing or unreadable (issue #414, FR-002). Distinct from
+    /// `Error::Ipc` so callers/tests can match on it directly rather than string-sniffing,
+    /// matching SC-003's "zero silent skips" requirement. Refusal, not a warning: replay does
+    /// not proceed, and no configuration flag, environment variable, or request parameter
+    /// bypasses this check (Out of Scope).
+    #[error("WAL stream generation unknown: {0}")]
+    WalGenerationUnknown(String),
 }
 
 impl From<tokio::task::JoinError> for Error {

@@ -48,9 +48,13 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
                            embedding config, WAL state (including each group's applied_seq, \
-                           max_seq, and current on-disk generation — issue #387, cheap: no extra \
-                           WAL directory scan), ontology summary, and whether search indices are \
-                           built. Returns a status object (not a JSON-RPC error) \
+                           max_seq, current on-disk generation, and generation_status — issue \
+                           #387/#414, cheap: no extra WAL directory scan), ontology summary, and \
+                           whether search indices are built. generation_status is \
+                           \"not_applicable\" (no WAL stream yet), \"unknown\" (stream exists but \
+                           .wal-generation.json is missing or corrupt — knowledge_rebuild_from_wal \
+                           will refuse once a position is recorded), or \"known\". Returns a \
+                           status object (not a JSON-RPC error) \
                            when the database is open but a core table is missing — check the \
                            `queryable` field (and `reason` when false) to distinguish that state \
                            from a genuinely empty graph, whose counts read as 0 rather than \
@@ -848,7 +852,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            that group's WAL files, optionally from a given sequence number \
                            and/or up to a given sequence number — never disturbing any other \
                            group's WalPosition row (issue #378 FR-006). Supports MCP progress \
-                           notifications when called with a progress token. Before anything \
+                           notifications when called with a progress token. If the group already \
+                           has a recorded position and its current on-disk generation is unknown \
+                           (missing or corrupt .wal-generation.json), the call fails outright \
+                           with an explicit error naming the group — no replay, no exceptions for \
+                           dry_run, no bypass flag (issue #414); see knowledge_status's \
+                           generation_status to see this coming. Otherwise, before anything \
                            else, compares the group's recorded generation against what's \
                            currently on disk (issue #387): if they differ, the caller's \
                            from_seq/to_seq/force_clear are overridden entirely and this becomes \
