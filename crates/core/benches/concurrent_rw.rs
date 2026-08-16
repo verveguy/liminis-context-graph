@@ -139,7 +139,7 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                                     s.db.load_full().expect("bench requires healthy DB"),
                                     Arc::clone(&s.embedder),
                                     "Alice",
-                                    vec!["bench".to_string()],
+                                    Some(vec!["bench".to_string()]),
                                     10,
                                 )
                                 .await;

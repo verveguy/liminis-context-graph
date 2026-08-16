@@ -34,8 +34,8 @@ fn group_ids_prop() -> Value {
     json!({
         "type": "array",
         "items": {"type": "string"},
-        "description": "Optional group IDs to scope the operation to. Omit for all groups \
-                         (or the default group, depending on the tool)."
+        "description": "Optional group IDs to scope the operation to. Omitting this searches \
+                         or lists across every group present in the graph — not a default group."
     })
 }
 
@@ -120,25 +120,25 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_nodes_by_group",
-            description: "List all entity nodes belonging to the given group IDs.",
+            description: "List all entity nodes belonging to the given group IDs, or every \
+                           group's nodes when group_ids is omitted.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()},
-                    "required": ["group_ids"]
+                    "properties": {"group_ids": group_ids_prop()}
                 })
             },
         },
         ToolSpec {
             name: "knowledge_get_edges_by_group",
-            description: "List all relationship edges belonging to the given group IDs.",
+            description: "List all relationship edges belonging to the given group IDs, or \
+                           every group's edges when group_ids is omitted.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()},
-                    "required": ["group_ids"]
+                    "properties": {"group_ids": group_ids_prop()}
                 })
             },
         },
