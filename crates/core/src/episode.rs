@@ -13,7 +13,10 @@ use crate::{
     ontology_sidecar,
     prompts::normalize_name,
     reprocess_relations::UNCLASSIFIED,
-    types::{EntityRow, EpisodicRow, ExtractionOutcome, MentionsEdge, RelatesToEdge, SourceType},
+    types::{
+        DroppedEdgeDetail, EntityRow, EpisodicRow, ExtractionOutcome, MentionsEdge, RelatesToEdge,
+        SourceType, UnresolvedEndpoint,
+    },
     wal_exec,
 };
 
@@ -25,6 +28,11 @@ pub struct AddEpisodeResult {
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
     /// the persisted graph, and were dropped at Phase C commit time (issue #281 FR-004/FR-005).
     pub edges_dropped_unresolvable: usize,
+    /// Per-edge detail behind `edges_dropped_unresolvable` above — one entry per edge counted
+    /// there, in extraction order, carrying the edge's extracted content and which endpoint(s)
+    /// failed to resolve (issue #411 FR-001/FR-002/FR-003/FR-006). Always present, empty when
+    /// nothing was dropped (FR-005).
+    pub dropped_edges: Vec<DroppedEdgeDetail>,
     /// Strict-mode edges whose relation type was outside the ontology's vocabulary even after
     /// alias normalisation, reclassified to `UNCLASSIFIED` rather than dropped (issue #310
     /// FR-004/FR-005 — distinct from `edges_dropped_unresolvable`'s issue #281 FR-004/FR-005
@@ -668,11 +676,13 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
-    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified) =
-        tokio::task::spawn_blocking(move || -> Result<(usize, usize, usize), Error> {
+    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified, dropped_edges) =
+        tokio::task::spawn_blocking(
+            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>), Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
+        let mut dropped_edges: Vec<DroppedEdgeDetail> = Vec::new();
         // Authoritative count of edges persisted with `relation_type = UNCLASSIFIED` (FR-005) —
         // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
         // reclassified but then dropped as self-referential or unresolvable is never counted.
@@ -773,6 +783,19 @@ pub async fn add_episode(
                         edge.source_name, edge.target_name, src.is_some(), dst.is_some()
                     );
                     edges_dropped_unresolvable += 1;
+                    let unresolved_endpoint = match (src.is_some(), dst.is_some()) {
+                        (false, false) => UnresolvedEndpoint::Both,
+                        (false, true) => UnresolvedEndpoint::Source,
+                        (true, false) => UnresolvedEndpoint::Target,
+                        (true, true) => unreachable!("both endpoints resolved is not a drop"),
+                    };
+                    dropped_edges.push(DroppedEdgeDetail {
+                        source_name: edge.source_name.clone(),
+                        target_name: edge.target_name.clone(),
+                        relation_type: edge.relation_type.clone(),
+                        fact: edge.fact.clone(),
+                        unresolved_endpoint,
+                    });
                     continue;
                 }
             };
@@ -852,9 +875,11 @@ pub async fn add_episode(
             edges_inserted,
             edges_dropped_unresolvable,
             edges_reclassified_unclassified,
+            dropped_edges,
         ))
-    })
-    .await??;
+            },
+        )
+        .await??;
     drop(_write_guard);
 
     // After a successful DB commit, persist the current ontology hash to `.lcg/ontology-hash.json`
@@ -877,6 +902,7 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
+        dropped_edges,
         edges_reclassified_unclassified,
         entities_reclassified_unclassified,
         entities_dropped_malformed,

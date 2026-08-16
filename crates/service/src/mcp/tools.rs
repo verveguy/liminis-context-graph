@@ -287,7 +287,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            and adds them to the graph. The result reports \
                            `edges_dropped_unresolvable`: extracted edges discarded because an \
                            endpoint matched no entity in this chunk or in the graph. A nonzero \
-                           count means facts stated in this chunk were not written. \
+                           count means facts stated in this chunk were not written. The result \
+                           also carries `dropped_edges`, a list with one entry per edge counted \
+                           in `edges_dropped_unresolvable`: each entry gives that edge's \
+                           extracted `source_name`, `target_name`, `relation_type`, and `fact`, \
+                           plus `unresolved_endpoint` (`source`, `target`, or `both`) naming \
+                           which endpoint(s) failed to resolve — always present, empty when \
+                           nothing was dropped. \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \

@@ -741,6 +741,7 @@ async fn handle_knowledge_process_chunk(
         "nodes_extracted": result.nodes_extracted,
         "edges_extracted": result.edges_extracted,
         "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
+        "dropped_edges": result.dropped_edges,
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
