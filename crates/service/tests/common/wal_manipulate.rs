@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use lcg_core::{wal_generation, wal_group};
 
-/// A standalone `Entity` WAL line, named after its own uuid unless `name` is given.
+/// A standalone `Entity` WAL line for `uuid`, named `name`, in `group_id`.
 pub fn entity_wal_line(seq: u64, uuid: &str, name: &str, group_id: &str) -> String {
     let embedding = vec!["0.0"; 768].join(", ");
     format!(

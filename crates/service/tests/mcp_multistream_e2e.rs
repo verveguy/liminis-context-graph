@@ -201,10 +201,6 @@ fn c_bindings(client: &mut McpClient) -> HashMap<String, HashMap<String, Pointer
     out
 }
 
-/// The `binding_state` of every cross-group pointer (across all of C's edges, either side) that
-/// resolves into `into_group` specifically — e.g. `binding_states_into(&bindings, "A")` isolates
-/// pointers into A from pointers into B, so a regression that unbinds the wrong group's pointers
-/// still gets caught instead of passing a weaker "some pointer somewhere is unbound" check.
 /// The `"dst"`-side [`PointerInfo`] of the named edge — every cross-group pointer this test
 /// constructs (existing and new) puts its foreign endpoint on `target`/`"dst"` (`source` is
 /// always `{"uuid": ...}`, already local to the edge's own group), so this is the one accessor
@@ -221,6 +217,10 @@ fn dst_pointer<'a>(
         })
 }
 
+/// The `binding_state` of every cross-group pointer (across all of C's edges, either side) that
+/// resolves into `into_group` specifically — e.g. `binding_states_into(&bindings, "A")` isolates
+/// pointers into A from pointers into B, so a regression that unbinds the wrong group's pointers
+/// still gets caught instead of passing a weaker "some pointer somewhere is unbound" check.
 fn binding_states_into<'a>(
     bindings: &'a HashMap<String, HashMap<String, PointerInfo>>,
     into_group: &str,
