@@ -113,14 +113,20 @@ Libs: -L\${libdir} -lssl -lcrypto
 Cflags: -I\${includedir}
 EOF
 
-export_line="PKG_CONFIG_PATH=$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+new_path="$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 echo "stage-openssl-static.sh: staged libssl.a + libcrypto.a from $libdir ($source_desc)" >&2
 echo "stage-openssl-static.sh: -> $staging_dir" >&2
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
-  echo "$export_line" >> "$GITHUB_ENV"
+  # $GITHUB_ENV is parsed as literal KEY=VALUE, not by a shell, so it must NOT be
+  # quoted or escaped — Actions would treat the quotes as part of the value.
+  echo "PKG_CONFIG_PATH=$new_path" >> "$GITHUB_ENV"
   echo "stage-openssl-static.sh: appended PKG_CONFIG_PATH to \$GITHUB_ENV" >&2
 else
-  echo "export $export_line"
+  # This line is meant to be consumed by `eval`, so it must survive word splitting.
+  # A checkout path containing a space (Fabrik worktrees are nested several levels
+  # deep under a user-chosen directory) would otherwise be split mid-path and set
+  # PKG_CONFIG_PATH to a truncated value, silently reintroducing a dynamic link.
+  printf 'export PKG_CONFIG_PATH=%q\n' "$new_path"
 fi
