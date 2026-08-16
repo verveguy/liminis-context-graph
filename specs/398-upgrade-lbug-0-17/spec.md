@@ -132,7 +132,7 @@ As a maintainer who has observed three unexplained multi-hour CI hangs in `cargo
 
 ### Measurable Outcomes
 
-- **SC-001**: `cargo test --release` passes in CI, and completes in a time consistent with the local roughly 5-minute baseline rather than hanging.
+- **SC-001**: `cargo test --release` passes in CI, and its observed completion time across several post-upgrade runs is recorded. **The gate is that the suite passes and the outcome is reported, not that the hangs are gone** — whether completion times land near the roughly 5-minute local baseline is the result of User Story 4's hypothesis test, and either answer satisfies this criterion as long as it is stated explicitly. If hangs persist, that is a recorded negative result and a follow-up lead (Linux-vs-macOS, #378), not a failure of this issue; see Edge Cases and Out of Scope, which this wording is written to agree with.
 - **SC-002**: The release workflow builds and links on every target platform.
 - **SC-003**: A WAL written under 0.17.0 replays under 0.19.1 to byte-identical graph state.
 - **SC-004**: `~/dev/liminis-project/multistream_test.py` still passes 9/10 (the tenth being #392) — covering per-group streams, cross-group pointers, purge, checkpoint restore and rebind.
