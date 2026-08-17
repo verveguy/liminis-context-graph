@@ -40,6 +40,7 @@ use lcg_core::{
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
     types::ExtractionOutcome,
+    wal_group,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -112,6 +113,25 @@ fn wal_dir() -> PathBuf {
     fixture_dir().join("wal")
 }
 
+/// Recursively copies `src` (a directory) into `dst`, creating `dst` and any intermediate
+/// directories as needed (`dst` may already exist, e.g. as a fresh empty `TempDir`) — mirrors
+/// `crates/service/tests/common/real_corpus.rs`'s helper of the same name.
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)
+            .unwrap_or_else(|e| panic!("create dir {}: {e}", dst.display()));
+        for entry in
+            std::fs::read_dir(src).unwrap_or_else(|e| panic!("read dir {}: {e}", src.display()))
+        {
+            let entry = entry.expect("read dir entry");
+            copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()));
+        }
+    } else {
+        std::fs::copy(src, dst)
+            .unwrap_or_else(|e| panic!("copy {} to {}: {e}", src.display(), dst.display()));
+    }
+}
+
 fn expected_results() -> Value {
     let path = fixture_dir().join("expected_results.json");
     let raw = std::fs::read_to_string(&path)
@@ -133,13 +153,23 @@ struct CallCounts {
     embedder: Arc<AtomicUsize>,
 }
 
-/// Builds a fresh, empty lbug DB + AppState wired at `wal_dir()`, with call-counting
+/// Builds a fresh, empty lbug DB + AppState wired at a copy of the fixture's WAL that has been
+/// migrated to the current post-ADR-0378 per-group layout, with call-counting
 /// Extractor/Embedder wrappers so that "nothing in this test file makes an LLM, extractor, or
 /// embedder network call" (FR-004, FR-011) is an explicit, asserted count rather than an
 /// assumption that happens to hold because the wired-in implementation is a mock. The
 /// fixture's real embeddings are already baked into the WAL from capture time; only
 /// query-time embedding at test time is mocked (and counted).
-fn make_state(dim: usize) -> (Arc<AppState>, TempDir, CallCounts) {
+///
+/// The checked-in fixture at `wal_dir()` predates ADR-0378 (flat `.jsonl` files, no per-group
+/// subdirectory) and must never be written into. #429: rather than pointing `wal_root` at it
+/// directly (which would fail `knowledge_rebuild_from_wal`'s per-group directory resolution
+/// with "No WAL files found") or physically restructuring the checked-in fixture, this copies
+/// the fixture into a fresh `TempDir` and runs the same `wal_group::migrate_wal_root_if_needed`
+/// upgrade a real binary would run at startup against a legacy workspace — mirroring
+/// `wal_root_migration.rs`'s existing precedent — so the suite continues to exercise the real
+/// migration path rather than sidestepping it.
+fn make_state(dim: usize) -> (Arc<AppState>, TempDir, TempDir, CallCounts) {
     let db_dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(db_dir.path().join("real_corpus.db").to_str().unwrap()).unwrap());
     {
@@ -149,6 +179,12 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, CallCounts) {
         // rebuilds all indexes (FTS + HNSW) itself at the end of a non-dry-run replay, so
         // pre-creating them here would just be redundant work this harness doesn't need.
     }
+
+    let wal_dir_tempdir = TempDir::new().unwrap();
+    let wal_root = wal_dir_tempdir.path().to_path_buf();
+    copy_dir_recursive(&wal_dir(), &wal_root);
+    wal_group::migrate_wal_root_if_needed(&wal_root)
+        .expect("migrate the copied fixture WAL to the per-group layout");
 
     let extractor_calls = Arc::new(AtomicUsize::new(0));
     let embedder_calls = Arc::new(AtomicUsize::new(0));
@@ -169,7 +205,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, CallCounts) {
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: db_dir.path().join("real_corpus.db").display().to_string(),
-        wal_root: Some(wal_dir()),
+        wal_root: Some(wal_root),
         wal_max_events_per_file: 10_000,
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
@@ -186,6 +222,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, CallCounts) {
     (
         state,
         db_dir,
+        wal_dir_tempdir,
         CallCounts {
             extractor: extractor_calls,
             embedder: embedder_calls,
@@ -283,7 +320,7 @@ fn as_uuid_set(v: &Value, key: &str) -> std::collections::BTreeSet<String> {
 async fn rebuild_and_assert_all_non_determinism_expectations() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
-    let (state, _db_dir, calls) = make_state(dim);
+    let (state, _db_dir, _wal_dir, calls) = make_state(dim);
     let group_id = expected["group_id"].clone();
 
     // Task 7 (FR-004, FR-005): rebuild with zero LLM/extractor/embedder calls; counts match.
@@ -560,8 +597,8 @@ async fn replay_is_deterministic_across_independent_processes() {
     let expected = expected_results();
     let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
 
-    let (state_a, _db_dir_a, calls_a) = make_state(dim);
-    let (state_b, _db_dir_b, calls_b) = make_state(dim);
+    let (state_a, _db_dir_a, _wal_dir_a, calls_a) = make_state(dim);
+    let (state_b, _db_dir_b, _wal_dir_b, calls_b) = make_state(dim);
 
     let rebuild_a = rebuild(&state_a).await;
     let rebuild_b = rebuild(&state_b).await;
