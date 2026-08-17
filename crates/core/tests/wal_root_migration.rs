@@ -292,8 +292,8 @@ async fn migration_is_a_noop_on_second_startup() {
 #[tokio::test]
 #[ignore]
 async fn sc001_legacy_flat_wal_fixture_migrates_and_rebuilds_with_0_13_1_parity() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/real_corpus_wal");
+    let fixture_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/real_corpus_wal");
     let expected: Value = serde_json::from_str(
         &std::fs::read_to_string(fixture_dir.join("expected_results.json")).unwrap(),
     )
