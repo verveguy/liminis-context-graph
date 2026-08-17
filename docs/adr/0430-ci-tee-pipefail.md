@@ -1,0 +1,126 @@
+# ADR-0430: Workflow-Level `shell: bash` to Restore `pipefail` for `| tee` Steps
+
+**Status**: Accepted
+**Date**: 2026-08-17
+**Issues**: #430
+
+## Context
+
+Nine `run:` steps across `.github/workflows/ci.yml` (six) and `.github/workflows/bench.yml`
+(three) pipe a status-bearing command's combined stdout/stderr through `tee`, so the output
+is both streamed live to the job log and saved to a file for a later step to inspect:
+
+```yaml
+run: cargo test --release 2>&1 | tee /tmp/build.log
+```
+
+GitHub Actions' implicit default shell — used whenever no `shell:` key is set anywhere in
+scope — is `bash -e {0}`. Critically, this is *not* the same as `bash -eo pipefail {0}`:
+without `pipefail`, a pipeline's exit status is the last command's, which here is always
+`tee`. `tee` succeeds as long as it can write its file, regardless of what `cargo test` (or
+the e2e binary, or `cargo bench`) actually reported. The result: none of these nine steps
+can ever fail their containing job on a genuine test/bench failure.
+
+One of the six `ci.yml` sites is the `test (ubuntu-latest)` job — the repository's *sole*
+required merge-gate status check (`required_status_checks.contexts ==
+["test (ubuntu-latest)"]`, confirmed live via `gh api repos/.../branches/main/protection`).
+The other five are the real-corpus e2e jobs that back this project's pre-release "full e2e
+must pass" invariant. This was not merely reasoned about: three consecutive `main` runs
+(`31964057813`, `31961733817`, `31946235305`) each contain `test result: FAILED` in the job
+log while reporting a passing conclusion, and the masked gate let a real regression (#428)
+reach releases 0.13.0–0.13.2, each "verified" only by reading job conclusions.
+
+## Decision
+
+Add a top-level `defaults: { run: { shell: bash } }` block to both `ci.yml` and `bench.yml`,
+rather than adding `set -o pipefail` to each of the nine affected steps individually.
+
+GitHub's own shell-selection docs establish a second, non-obvious default distinct from the
+"no shell key at all" case above: whenever `shell: bash` is set *explicitly* — whether
+per-step or via `defaults.run.shell` at job or workflow level — GitHub Actions runs it as
+`bash --noprofile --norc -eo pipefail {0}`. `pipefail` is not something this ADR's YAML
+spells out; it's supplied by GitHub for free the moment `bash` is named explicitly instead
+of left implicit. The workflow-level `defaults` block is the broadest-scope way to make that
+switch, applying to every job and every step in the file, present and future.
+
+### Why workflow-level over per-step `set -o pipefail`
+
+This repo already has a working per-step precedent (`eval.yml`'s `run` step puts
+`set -o pipefail` on its own line immediately before its `| tee`), so the per-step
+mechanism was a real alternative, not a hypothetical. Workflow-level won on:
+
+- **No reformatting required.** Six of the nine sites in `ci.yml` are single-line `run:`
+  scalars; GitHub wraps a `run:` value through whatever shell is configured regardless of
+  whether it's written as a scalar or a `run: |` block, so `defaults.run.shell` fixes all
+  nine sites with zero changes to the steps themselves. A per-step fix would have required
+  converting six single-line scalars into multi-line blocks just to give `set -o pipefail`
+  a line to live on.
+- **Confirmed-safe blast radius.** The natural objection to a workflow-wide shell change is
+  that it also affects every *other* `run:` step in the file, not just the nine known
+  `tee` sites. A full-file audit of every `|` in both `ci.yml` and `bench.yml` (see
+  Consequences) found exactly one other pipe usage, and it is already `|| true`-guarded
+  against `-e`, so it was already tolerant of a failing left-hand side under the *implicit*
+  default and remains so under the explicit one. There is no other pipe in either file that
+  behaves differently after this change.
+- **Covers steps added later, not just the nine known today.** A per-step fix only protects
+  the sites edited today; a future `| tee` step in either file inherits `pipefail`
+  automatically instead of silently reintroducing this exact defect.
+- **Smaller diff.** Two lines per file versus nine per-step insertions (six of which also
+  need reformatting).
+
+### Why not job-level `defaults.run.shell`
+
+A third granularity — `defaults: { run: { shell: bash } }` inside just the `test` job and
+each of the five e2e jobs in `ci.yml` — was considered and rejected as strictly worse than
+workflow-level for this file: it requires six insertions instead of one, offers no
+correctness benefit (the full-file audit already clears every other step in the file), and
+still misses future `tee` steps added to jobs outside that list.
+
+### `release.yml`: audited, no changes
+
+`release.yml` was re-audited at implementation time per FR-003 rather than assumed
+unchanged from spec time (it was flagged as likely to drift, pending #398). It remains the
+unmodified `cargo-dist`-autogenerated file: its few pipe usages are an installer script
+(`curl | sh`) and output transforms feeding `$GITHUB_OUTPUT` (`rustc --version | shasum |
+cut`), none of them a test/bench command whose exit status is meant to gate the step. No
+fix was needed; this ADR's `defaults` change was deliberately scoped to `ci.yml` and
+`bench.yml` only.
+
+## Consequences
+
+- All nine `| tee` sites (six in `ci.yml`, three in `bench.yml`) now fail their containing
+  step — and therefore their job — when the piped command exits non-zero, closing the gap
+  between "job says green" and "the underlying command actually passed."
+- Every other `run:` step in both files now also runs under `-eo pipefail` instead of the
+  previously-implicit `-e` alone. The one other pipe found in either file
+  (`... | awk ... | grep -Ex '(tch|candle|onnxruntime|tract)' || true` in `ci.yml`) is
+  already `|| true`-guarded and unaffected.
+- `release.yml` is untouched; its audit result ("nothing found") is recorded here rather
+  than as a diff.
+- The documented release-verification step changes from reading job conclusions to
+  `gh run view <id> --log | grep -a "test result: FAILED"` (see
+  `docs/release-process.md`), since this issue's own history is proof that the conclusion
+  alone is not a trustworthy signal even after this fix — defense in depth against any
+  future regression of the same shape.
+
+## Alternatives Considered
+
+- **Per-step `set -o pipefail`** (matches `eval.yml`'s existing precedent): rejected in
+  favor of workflow-level — see Decision above. Smaller blast radius per step, but more
+  repetition, requires reformatting six single-line steps, and does not protect steps added
+  later.
+- **Job-level `defaults.run.shell`**: rejected — strictly more insertions than
+  workflow-level for no correctness benefit once the full-file pipe audit cleared every
+  other step in both files.
+- **Leaving `release.yml` untouched**: not really an alternative — confirmed by audit to be
+  the correct outcome, not a tradeoff.
+
+## References
+
+- Issue #430
+- #428 — the regression that shipped behind these green jobs
+- #429 — companion issue that fixed the four tests failing behind the masked gate (closed
+  before this issue's gate could be safely armed)
+- `docs/release-process.md` — the release-verification doc this issue also introduces
+- `.github/workflows/eval.yml` — the pre-existing per-step `set -o pipefail` precedent this
+  ADR chose not to replicate at the other two files' scale
