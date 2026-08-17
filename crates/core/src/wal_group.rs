@@ -237,6 +237,17 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// unmoved remainder and finishes the job — no separate marker file is needed, and a second call
 /// over an already-fully-migrated root is a cheap no-op (the top-level scan finds nothing to
 /// move). Must be called before any per-group `WalWriter` is constructed against `wal_root`.
+///
+/// Also stamps a `.wal-generation.json` for the destination group (issue #431), once relocation
+/// has actually moved something: a legacy flat WAL predates generation identity (#387) entirely
+/// and is treated as locally owned by construction (this node wrote it), so migration mints a
+/// generation for it rather than leaving it to be refused by #414's unknown-generation guard on
+/// the very next rebuild. `wal_generation::ensure_generation` is itself idempotent (FR-002: never
+/// overwrites an existing record) and is only ever called here on `default_dir`, the exact
+/// directory this migration just relocated loose content into — never as a general sweep over
+/// every group directory, which would also stamp an unrelated stream that arrived without a
+/// generation for other reasons (e.g. one stripped per the ADR-0387 publish contract) and defeat
+/// the guard #414 introduced.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -266,6 +277,7 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         }
         fs::rename(&entry, &dest)?;
     }
+    crate::wal_generation::ensure_generation(&default_dir)?;
     Ok(())
 }
 
@@ -455,6 +467,75 @@ mod tests {
             .exists());
         assert!(!tmp.path().join(".checkpoints").exists());
         assert!(!tmp.path().join(".wal-bounds.json").exists());
+    }
+
+    /// FR-001/SC-002: relocating loose legacy content into the destination group's directory
+    /// must also stamp a readable generation for it, so #414's unknown-generation guard doesn't
+    /// refuse the very next rebuild.
+    #[test]
+    fn migrate_stamps_a_generation_for_the_relocated_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        let generation = crate::wal_generation::read_generation(&default_dir);
+        assert!(
+            generation.is_some(),
+            "migration must mint a generation for the group it relocated content into"
+        );
+    }
+
+    /// FR-002: if the destination group already has a generation recorded (e.g. a partially
+    /// completed prior migration, or the group already received writes through some other path),
+    /// migration must not overwrite it with a fresh one.
+    #[test]
+    fn migrate_does_not_overwrite_an_existing_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        let pre_existing = crate::wal_generation::ensure_generation(&default_dir).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some(pre_existing),
+            "migration must not overwrite an already-recorded generation"
+        );
+    }
+
+    /// Guards against the over-broad "stamp any unstamped group" sweep the spec explicitly
+    /// rejects: a sibling group directory migration doesn't touch must not gain a generation
+    /// stamp as a side effect of an unrelated migration run.
+    #[test]
+    fn migrate_does_not_stamp_a_sibling_group_it_did_not_relocate_content_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let sibling_dir = tmp.path().join("group-a");
+        fs::create_dir_all(&sibling_dir).unwrap();
+        fs::write(sibling_dir.join("0000.jsonl"), b"{}\n").unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            crate::wal_generation::read_generation(&sibling_dir).is_none(),
+            "an untouched sibling group must not be stamped by this migration"
+        );
     }
 
     #[test]
