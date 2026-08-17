@@ -39,9 +39,11 @@ field.
 > destination group's directory but never minted a generation for it, so the very first
 > `knowledge_rebuild_from_wal` call against a migrated group — the exact recovery path this
 > refusal exists to make trustworthy — hit "position recorded, generation unknown" and refused. A
-> legacy flat WAL predates generation identity entirely and this node wrote it itself, so issue
-> #431 has migration mint a generation for the stream it relocates, the same way `WalWriter::new`
-> mints one for any other stream created with no prior content — closing the gap without weakening
+> legacy flat WAL predates generation identity entirely, and issue #431's migration *assumes* it is
+> locally owned (an assumption, not something provable from the directory contents alone — see
+> issue #431's `## Assumptions` for why it holds today and what would invalidate it), so migration
+> mints a generation for the stream it relocates, the same way `WalWriter::new` mints one for any
+> other stream created with no prior content — closing the gap without weakening
 > this ADR's refusal for any stream that arrives generation-less for a reason unrelated to this
 > node's own migration (e.g. a publish step that dropped the dot-namespace, per this ADR's
 > Context). See `wal_group::migrate_wal_root_if_needed` and `wal_generation::ensure_generation`.

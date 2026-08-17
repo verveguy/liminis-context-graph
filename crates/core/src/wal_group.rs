@@ -239,15 +239,17 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// move). Must be called before any per-group `WalWriter` is constructed against `wal_root`.
 ///
 /// Also stamps a `.wal-generation.json` for the destination group (issue #431), once relocation
-/// has actually moved something: a legacy flat WAL predates generation identity (#387) entirely
-/// and is treated as locally owned by construction (this node wrote it), so migration mints a
-/// generation for it rather than leaving it to be refused by #414's unknown-generation guard on
-/// the very next rebuild. `wal_generation::ensure_generation` is itself idempotent (FR-002: never
-/// overwrites an existing record) and is only ever called here on `default_dir`, the exact
-/// directory this migration just relocated loose content into — never as a general sweep over
-/// every group directory, which would also stamp an unrelated stream that arrived without a
-/// generation for other reasons (e.g. one stripped per the ADR-0387 publish contract) and defeat
-/// the guard #414 introduced.
+/// has actually moved something: a legacy flat WAL predates generation identity (#387) entirely,
+/// and this migration *assumes* it is locally owned (this node wrote it) rather than proving it —
+/// nothing on disk distinguishes a flat WAL this node wrote from one copied in from elsewhere; see
+/// issue #431's `## Assumptions` for why the assumption holds today and what would invalidate it.
+/// Under that assumption, migration mints a generation for it rather than leaving it to be refused
+/// by #414's unknown-generation guard on the very next rebuild. `wal_generation::ensure_generation`
+/// is itself idempotent (FR-002: never overwrites an existing record) and is only ever called here
+/// on `default_dir`, the exact directory this migration just relocated loose content into — never
+/// as a general sweep over every group directory, which would also stamp an unrelated stream that
+/// arrived without a generation for other reasons (e.g. one stripped per the ADR-0387 publish
+/// contract) and defeat the guard #414 introduced.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on

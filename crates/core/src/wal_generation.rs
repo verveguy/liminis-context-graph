@@ -61,9 +61,9 @@ pub fn read_generation(wal_dir: &Path) -> Option<String> {
 /// `wal_group::migrate_wal_root_if_needed` calls this on the destination directory of a legacy
 /// flat-WAL migration, which does have prior content. That call site is not the general
 /// retroactive backfill this invariant forbids — it stamps only the exact directory the
-/// migration itself just relocated content into, treating a legacy flat WAL as locally owned by
-/// construction (see issue #431's Assumptions). It does not extend to any other populated,
-/// unstamped stream.
+/// migration itself just relocated content into, under the *assumption* (not a proof — see issue
+/// #431's `## Assumptions`) that a legacy flat WAL is locally owned. It does not extend to any
+/// other populated, unstamped stream.
 ///
 /// Race-safe by construction, not by timing: two processes racing to create the same stream's
 /// directory for the first time (Edge Cases) both call this. Each writes its full, complete

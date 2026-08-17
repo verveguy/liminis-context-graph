@@ -19,8 +19,9 @@ recovery, or #398's documented rollback procedure needs to rebuild from.
 
 - **`migrate_wal_root_if_needed` now stamps a generation for the legacy flat WAL it migrates.** A
   legacy flat WAL (`.lcg/wal/*.jsonl`, pre-0.13.0) predates generation identity (#387) entirely,
-  and this node wrote it itself, so migration mints one for the destination group as part of the
-  same relocation — the same act of ownership `WalWriter::new` performs for any other stream
+  and migration now *assumes* it is locally owned (an assumption, not a proof — see #431's
+  Assumptions section), minting one for the destination group as part of the same relocation —
+  the same act `WalWriter::new` performs for any other stream
   created with no prior content. This closes the gap without weakening #414's refusal for any
   other reason a stream might arrive with no generation (e.g. a publish step that dropped the
   dot-namespace): the new call is scoped strictly to the exact directory this migration just

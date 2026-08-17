@@ -38,10 +38,12 @@ migrated automatically and idempotently on first boot under the upgraded binary 
 [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the migration mechanics; no
 operator action is required. As of issue #431, this migration also mints a
 `.wal-generation.json` for the group it relocates content into: a legacy flat WAL predates
-generation identity (issue #387) entirely, and this node wrote it itself, so it is treated as
-locally owned rather than left with an unknown generation (see the unknown-generation refusal
-below, and [ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md)'s amendment note). No
-operator action is required for this either — it happens as part of the same migration.
+generation identity (issue #387) entirely, and migration *assumes* it is locally owned — this is
+an assumption, not something provable from the directory contents alone (see issue #431's
+`## Assumptions` for why it holds today and what would invalidate it) — rather than leaving it
+with an unknown generation (see the unknown-generation refusal below, and
+[ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md)'s amendment note). No operator
+action is required for this either — it happens as part of the same migration.
 
 **`.wal-generation.json` (issue #387) gives each group's stream a stable identity, distinct from
 its `seq` numbering.** `seq` identifies a position *within* a stream; it says nothing about
