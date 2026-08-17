@@ -13,10 +13,12 @@ generation for the resulting stream. #414's guard, shipped in 0.13.2, refuses to
 has a recorded position but an unknown generation — which is exactly the state migration leaves
 behind.
 
-**This node owns the stream it is refusing to replay.** It wrote that flat WAL itself. There is no
-publisher to discipline and no reset to detect: generation identity exists so a *consumer* can tell a
-publisher's rebuild from an append, and a node replaying its own WAL has no such exposure. The guard
-is firing where the property it protects does not apply.
+**This node is assumed to own the stream it is refusing to replay** — this is an assumption, not
+something the migration can prove from directory contents alone (see *Assumptions* below for why it
+holds today and what would invalidate it). Under that assumption, there is no publisher to discipline
+and no reset to detect: generation identity exists so a *consumer* can tell a publisher's rebuild from
+an append, and a node replaying its own WAL has no such exposure. The guard is firing where the
+property it protects does not apply.
 
 This issue replaces #428, which reached the same diagnosis but scoped the fix too widely (see *Out of
 Scope* below).
@@ -103,12 +105,13 @@ migration), and confirm `knowledge_rebuild_from_wal` still refuses.
 
 ---
 
-### User Story 3 - Refusal message distinguishes local from received streams (Priority: P2)
+### User Story 3 - Refusal message covers both local and received-stream remedies (Priority: P2)
 
-An operator who hits the unknown-generation refusal needs the message to tell them whether they are
+An operator who hits the unknown-generation refusal needs a remedy that works whether they are
 looking at a locally-owned stream (no publisher exists, so "republish" is not an available remedy)
-or a received stream (where republishing from the publisher is the correct next step), so they don't
-attempt a recovery action that cannot work.
+or a received stream (where republishing from the publisher is the correct next step). The two
+situations are indistinguishable on disk (see *Assumptions*), so the message cannot pick one — it
+must state both, so a reader isn't left with only a remedy that doesn't apply to their case.
 
 **Why this priority**: This improves operator experience when the guard fires for a legitimately
 unknown stream (Story 2's case). It is secondary to fixing the regression (Story 1) and preserving
@@ -116,15 +119,16 @@ the guard (Story 2), since those determine correctness; this determines clarity 
 error.
 
 **Independent Test**: Trigger the refusal on a stream lacking migration provenance (per Story 2's
-setup) and confirm the message text is accurate for that case, distinct from the existing
-"republish this stream's full directory" wording used for received streams.
+setup) and confirm the message states both remedies, not just the prior "republish this stream's
+full directory" wording alone.
 
 **Acceptance Scenarios**:
 
 1. **Given** `knowledge_rebuild_from_wal` refuses a stream because its generation is unknown,
-   **When** the refusal message is rendered, **Then** the message content is chosen based on
-   whether the workspace's own migration stamped (or was eligible to stamp) that stream, so a reader
-   of a locally-owned, unstamped stream is not instructed to republish from a nonexistent publisher.
+   **When** the refusal message is rendered, **Then** the message states both possible remedies —
+   republishing from a publisher for a received stream, and hand-creating the sidecar for a local
+   workspace with no publisher — since the two situations that can produce this refusal are
+   indistinguishable on disk and the message cannot assert which one applies.
 
 ### Edge Cases
 
@@ -153,10 +157,11 @@ setup) and confirm the message text is accurate for that case, distinct from the
   behavior. A stream that is genuinely unknown for reasons unrelated to this migration — e.g. an
   externally published stream stripped of its dot-namespace per ADR-0387's publish contract — MUST
   still be refused. This issue adds a stamp on one local code path; it does not relax the check.
-- **FR-004**: `knowledge_rebuild_from_wal`'s refusal message MUST distinguish the two situations it
-  can arise from, so a reader with a local workspace is not told to republish from a publisher that
-  does not exist. The existing "republish this stream's full directory" remedy remains correct for a
-  received stream.
+- **FR-004**: `knowledge_rebuild_from_wal`'s refusal message MUST state both remedies for the two
+  situations it can arise from — republishing from a publisher (received stream) and hand-creating
+  the sidecar (local workspace with no publisher) — since the two are indistinguishable on disk and
+  the message cannot assert which one applies. The existing "republish this stream's full directory"
+  remedy remains correct for a received stream; it is joined by, not replaced with, the local remedy.
 - **FR-005**: No IPC or MCP tool schema, response shape, or dispatch method may change — this ships
   as a patch release.
 - **FR-006**: Tests MUST cover both directions: (a) a workspace migrated from the legacy flat layout
@@ -214,9 +219,9 @@ Scope*) stops being deferrable.
 - **A general stream-ownership model.** "Is this stream ours to write or someone else's to consume?"
   is a real modelling gap, and it is the property both the minting rule (`global_seq == 0` as a
   proxy for it) and #414's guard are really reaching for. It is not needed here: at migration time,
-  ownership is established by construction, not inferred. Worth filing separately if a case appears
-  that genuinely cannot be answered locally; it should not ride along on a patch unblocking
-  upgrades.
+  ownership is asserted by the migration itself, under the assumption stated above, rather than
+  inferred from ambiguous on-disk state. Worth filing separately if a case appears that genuinely
+  cannot be answered locally; it should not ride along on a patch unblocking upgrades.
 
 ## Source References
 
