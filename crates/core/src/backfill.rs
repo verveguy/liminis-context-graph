@@ -291,4 +291,9 @@ mod tests {
         let rt = derive_relation_type("", "Alice knows Bob");
         assert!(!rt.is_empty());
     }
+
+    #[test]
+    fn issue_430_fr004_deliberate_failure_demo() {
+        assert!(false, "deliberate failure for issue #430 FR-004 demonstration — must be reverted before merge");
+    }
 }
