@@ -26,20 +26,25 @@ already true of the runs that turned out to be broken.
 For the release commit's CI run on `main`, check **both** of the following — a passing
 conclusion alone is not sufficient:
 
-1. **Job conclusions.** `test (ubuntu-latest)` and all five real-corpus e2e jobs
+1. **Job conclusions.** `gh run list --json conclusion` reports the *workflow run's*
+   overall conclusion, not each job's — and with several workflows (`CI`, `Release`,
+   `Docs drift check`, ...) triggering on the same push, an unfiltered `--limit 1` isn't
+   even guaranteed to return the `CI` run. Find that run explicitly, then check the six
+   jobs by name — `test (ubuntu-latest)` and the five real-corpus e2e jobs
    (`real_corpus_e2e`, `mcp_real_corpus_e2e`, `mcp_real_corpus_mutation_e2e`,
-   `mcp_real_corpus_admin_data_e2e`, `mcp_real_corpus_admin_lifecycle_e2e`) report
-   success:
+   `mcp_real_corpus_admin_data_e2e`, `mcp_real_corpus_admin_lifecycle_e2e`) must each
+   show `conclusion: success`:
 
    ```bash
-   gh run list --branch main --limit 1 --json databaseId,conclusion,name
+   run_id=$(gh run list --branch main --workflow ci.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+   gh run view "$run_id" --json jobs --jq '.jobs[] | {name, conclusion}'
    ```
 
-2. **Log grep for the actual test result.** For each of those six jobs' run, confirm the
+2. **Log grep for the actual test result.** Using that same `$run_id`, confirm the run's
    log contains no `test result: FAILED` line:
 
    ```bash
-   gh run view <run-id> --log | grep -a "test result: FAILED"
+   gh run view "$run_id" --log | grep -a "test result: FAILED"
    ```
 
    No output means no failing test was masked. Any match — even alongside a "success"
