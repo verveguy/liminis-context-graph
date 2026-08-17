@@ -44,13 +44,51 @@ for bin in "$@"; do
     continue
   }
 
-  # A fully static or non-dynamic binary makes ldd exit non-zero ("not a dynamic
-  # executable"); that is a pass, not an error, so swallow the exit code — the
-  # tool ran, which is what the check above establishes.
+  # Capture the tool's output AND its real exit status. Discarding both
+  # (`2>/dev/null || true`) collapses "the tool could not inspect this file" into
+  # an empty `deps`, which greps clean and reports OK on a binary nobody looked
+  # at — the same silent pass the `command -v` check above exists to prevent,
+  # just reached with the tool present and failing rather than missing. Verified
+  # reachable on all three of: a chmod-000 artifact (otool exits 1), a truncated
+  # Mach-O, and a file that is not an object file (otool exits 0 but emits a
+  # diagnostic instead of a dependency listing).
+  set +e
   case "$tool" in
-    otool) deps="$(otool -L "$bin" 2>/dev/null || true)" ;;
-    *) deps="$(ldd "$bin" 2>/dev/null || true)" ;;
+    otool) deps="$(otool -L "$bin" 2>&1)" ;;
+    *) deps="$(ldd "$bin" 2>&1)" ;;
   esac
+  tool_status=$?
+  set -e
+
+  inspect_error=""
+  case "$tool" in
+    otool)
+      # otool exits 0 for a non-Mach-O or damaged file, so its status alone is
+      # not sufficient — require a real dependency listing and reject the
+      # diagnostics it prints in place of one.
+      if [ "$tool_status" -ne 0 ]; then
+        inspect_error="otool exited $tool_status"
+      elif echo "$deps" | grep -qE 'is not an object file|extends past end|truncated|malformed|can.t open file'; then
+        inspect_error="otool could not parse the file"
+      fi
+      ;;
+    *)
+      # A fully static binary makes ldd exit non-zero with "not a dynamic
+      # executable" — that is a genuine pass. Any other non-zero exit means the
+      # file was not inspected.
+      if [ "$tool_status" -ne 0 ] && ! echo "$deps" | grep -qi 'not a dynamic executable'; then
+        inspect_error="ldd exited $tool_status"
+      fi
+      ;;
+  esac
+
+  if [ -n "$inspect_error" ]; then
+    echo "assert-static-openssl.sh: FAIL — could not inspect '$bin' ($inspect_error)." >&2
+    echo "  Refusing to report a pass on an uninspected binary. $tool said:" >&2
+    echo "$deps" | sed 's/^/    /' >&2
+    status=1
+    continue
+  fi
 
   if echo "$deps" | grep -qiE 'libssl|libcrypto'; then
     echo "assert-static-openssl.sh: FAIL — '$bin' has a dynamic OpenSSL dependency:" >&2
