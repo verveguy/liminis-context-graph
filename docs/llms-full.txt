@@ -29,6 +29,7 @@ and a standalone quickstart; this site is the full reference.
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
 - **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
 - **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
+- **[Release Process](release-process.md)** — maintainer procedure for verifying CI status before cutting a release.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).
 
 ## llms.txt
@@ -2671,6 +2672,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0387](0387-wal-stream-generation-identity.md) | WAL Stream Generation Identity | 2026-08-13 |
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
+| [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 
 ## Historical numbering
 
