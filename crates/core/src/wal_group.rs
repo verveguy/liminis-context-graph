@@ -238,18 +238,27 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// over an already-fully-migrated root is a cheap no-op (the top-level scan finds nothing to
 /// move). Must be called before any per-group `WalWriter` is constructed against `wal_root`.
 ///
-/// Also stamps a `.wal-generation.json` for the destination group (issue #431), once relocation
-/// has actually moved something: a legacy flat WAL predates generation identity (#387) entirely,
-/// and this migration *assumes* it is locally owned (this node wrote it) rather than proving it —
+/// Also stamps a `.wal-generation.json` for the destination group (issue #431), whenever there is
+/// legacy content to relocate: a legacy flat WAL predates generation identity (#387) entirely, and
+/// this migration *assumes* it is locally owned (this node wrote it) rather than proving it —
 /// nothing on disk distinguishes a flat WAL this node wrote from one copied in from elsewhere; see
 /// issue #431's `## Assumptions` for why the assumption holds today and what would invalidate it.
 /// Under that assumption, migration mints a generation for it rather than leaving it to be refused
 /// by #414's unknown-generation guard on the very next rebuild. `wal_generation::ensure_generation`
 /// is itself idempotent (FR-002: never overwrites an existing record) and is only ever called here
-/// on `default_dir`, the exact directory this migration just relocated loose content into — never
-/// as a general sweep over every group directory, which would also stamp an unrelated stream that
-/// arrived without a generation for other reasons (e.g. one stripped per the ADR-0387 publish
-/// contract) and defeat the guard #414 introduced.
+/// on `default_dir`, the exact directory this migration just relocated (or is relocating) loose
+/// content into — never as a general sweep over every group directory, which would also stamp an
+/// unrelated stream that arrived without a generation for other reasons (e.g. one stripped per the
+/// ADR-0387 publish contract) and defeat the guard #414 introduced.
+///
+/// The stamp is minted *before* the relocation loop below, not after: if it ran last and failed
+/// (disk full, permissions) on a call where every loose entry had already been renamed, the next
+/// call's `loose_entries` scan would find nothing left at the root and take the early return above
+/// without ever retrying the stamp, leaving the group permanently generationless. Minting first
+/// keeps the stamp attempt covered by the same retry the relocation loop already gets: as long as
+/// any loose entry remains unmoved, this function is re-entered past the early return on the next
+/// call, and `ensure_generation`'s own idempotency (FR-002) makes re-attempting it there a no-op
+/// once it has actually succeeded.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -268,6 +277,7 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
 
     let default_dir = wal_root.join(DEFAULT_GROUP_ID);
     fs::create_dir_all(&default_dir)?;
+    crate::wal_generation::ensure_generation(&default_dir)?;
     for entry in loose_entries {
         let Some(file_name) = entry.file_name() else {
             continue;
@@ -279,7 +289,6 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         }
         fs::rename(&entry, &dest)?;
     }
-    crate::wal_generation::ensure_generation(&default_dir)?;
     Ok(())
 }
 
@@ -537,6 +546,64 @@ mod tests {
         assert!(
             crate::wal_generation::read_generation(&sibling_dir).is_none(),
             "an untouched sibling group must not be stamped by this migration"
+        );
+    }
+
+    /// Failure-injection regression for the recoverability gap CodeRabbit flagged on this PR: if
+    /// `ensure_generation` fails (here, simulated via a read-only destination directory) on a run
+    /// where it would otherwise be the last step, a naive "stamp after relocating" ordering would
+    /// leave the group permanently generationless — the next call's top-level scan finds no loose
+    /// entries left and takes the early return before ever retrying the stamp. Stamping *before*
+    /// the relocation loop (this function's actual order) means the loose entries are still at the
+    /// root when the stamp fails, so the next call is guaranteed to retry both.
+    #[test]
+    #[cfg(unix)]
+    fn migrate_recovers_after_generation_stamp_fails_on_a_prior_call() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_file = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_file, b"{}\n").unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        let mut perms = fs::metadata(&default_dir).unwrap().permissions();
+        perms.set_mode(0o555); // read + execute, no write: blocks ensure_generation's tmp-file create
+        fs::set_permissions(&default_dir, perms).unwrap();
+
+        let result = migrate_wal_root_if_needed(tmp.path());
+        assert!(
+            result.is_err(),
+            "the stamp attempt must fail while the destination directory is read-only"
+        );
+        assert!(
+            loose_file.exists(),
+            "relocation must not have happened yet — the stamp runs first and failed"
+        );
+        assert!(
+            crate::wal_generation::read_generation(&default_dir).is_none(),
+            "no generation should have been minted by the failed attempt"
+        );
+
+        let mut perms = fs::metadata(&default_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&default_dir, perms).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            !loose_file.exists(),
+            "the retried migration must finish relocating the loose entry"
+        );
+        assert!(
+            default_dir
+                .join("20260101_000000_abcdef_0000.jsonl")
+                .is_file(),
+            "the loose entry must have landed in the destination group directory"
+        );
+        assert!(
+            crate::wal_generation::read_generation(&default_dir).is_some(),
+            "the retried migration must finish stamping a generation"
         );
     }
 
