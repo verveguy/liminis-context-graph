@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.13.3] - Unreleased
+
+A patch release fixing a regression 0.13.2 introduced on the upgrade path: the per-group WAL
+migration never stamped a generation for the legacy stream it relocated, so #414's
+unknown-generation guard refused `knowledge_rebuild_from_wal` on every workspace upgraded from a
+pre-0.13.0 flat WAL — exactly the state a lost or corrupted database, an ADR-0009 degraded-mode
+recovery, or #398's documented rollback procedure needs to rebuild from.
+
+### Fixed
+
+- **`migrate_wal_root_if_needed` now stamps a generation for the legacy flat WAL it migrates.** A
+  legacy flat WAL (`.lcg/wal/*.jsonl`, pre-0.13.0) predates generation identity (#387) entirely,
+  and this node wrote it itself, so migration mints one for the destination group as part of the
+  same relocation — the same act of ownership `WalWriter::new` performs for any other stream
+  created with no prior content. This closes the gap without weakening #414's refusal for any
+  other reason a stream might arrive with no generation (e.g. a publish step that dropped the
+  dot-namespace): the new call is scoped strictly to the exact directory this migration just
+  relocated content into, never a general sweep over every group. `knowledge_status` now reports
+  a non-null `generation` and `generation_status: "known"` for a freshly migrated group. See
+  [ADR-0414](docs/adr/0414-wal-generation-unknown-refuses-replay.md)'s amendment note. (#431)
+- **`knowledge_rebuild_from_wal`'s unknown-generation refusal message now names both possible
+  remedies.** The two situations that produce this refusal — a received stream whose sidecar was
+  stripped, and a workspace migrated by a binary older than this fix — are indistinguishable on
+  disk, so the message can no longer assume which one applies. It now states both: republish the
+  stream's full directory if it came from a publisher, or hand-create `.wal-generation.json` for a
+  local workspace with no publisher. (#431)
+
 ## [0.13.2] - 2026-08-16
 
 A patch release hardening the group boundary in both directions. Deletes could reach across every

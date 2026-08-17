@@ -40,11 +40,15 @@ fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
 }
 
 fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppState> {
+    make_state_with_wal_dim(db, wal_root, 4)
+}
+
+fn make_state_with_wal_dim(db: Arc<Db>, wal_root: std::path::PathBuf, dim: usize) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
-        embedder: Arc::new(MockEmbedder::new(4)),
+        embedder: Arc::new(MockEmbedder::new(dim)),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
@@ -270,4 +274,97 @@ async fn migration_is_a_noop_on_second_startup() {
         .unwrap_or_else(|| panic!("checkpoint must survive a second, no-op migration: {list_v}"));
     assert_eq!(cp["seq"], 0, "{list_v}");
     assert_eq!(cp["reachable"], true, "{list_v}");
+}
+
+/// SC-001 (issue #431): the exact reproduction fixture from the issue's Background — the same
+/// legacy flat WAL described there (16 files, 74,396,854 bytes, `max_seq: 12481`) — must migrate
+/// and then rebuild successfully, producing the same counts 0.13.1 produced before #414's
+/// unknown-generation guard regressed this on 0.13.2. Reuses `real_corpus_e2e.rs`'s fixture and
+/// `expected_results.json` as the regression oracle, but (unlike that file's existing tests,
+/// which point `AppState.wal_root` directly at the fixture's already-per-group-shaped
+/// `wal/liminis/` layout) drives the fixture's loose top-level files through
+/// `migrate_wal_root_if_needed` first, exercising the exact upgrade path this issue fixes.
+///
+/// `#[ignore]`d like `real_corpus_e2e.rs`'s own use of this fixture: a full 74MB/12,481-seq
+/// replay plus index build is too slow for the default `cargo test` / local pre-commit gate
+/// budget documented in this repo's CLAUDE.md. Run explicitly with:
+/// `cargo test --test wal_root_migration -- --ignored`
+#[tokio::test]
+#[ignore]
+async fn sc001_legacy_flat_wal_fixture_migrates_and_rebuilds_with_0_13_1_parity() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/real_corpus_wal");
+    let expected: Value = serde_json::from_str(
+        &std::fs::read_to_string(fixture_dir.join("expected_results.json")).unwrap(),
+    )
+    .unwrap();
+    let dim = expected["embedding_dim"].as_u64().unwrap() as usize;
+
+    // Copy the fixture's loose top-level *.jsonl files into a fresh WAL root, reproducing the
+    // exact "legacy flat WAL, never opened by an upgraded binary" starting state the issue's
+    // Background describes -- not the committed fixture directory itself, so this test can't
+    // mutate (or be polluted by a prior run's mutation of) the checked-in fixture.
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+    for entry in std::fs::read_dir(fixture_dir.join("wal")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            std::fs::copy(&path, wal_root.join(path.file_name().unwrap())).unwrap();
+        }
+    }
+
+    // This is what the upgraded binary's startup does before constructing AppState/any
+    // WalWriter (see AppState::from_env / main.rs) -- run it explicitly here to mirror that
+    // path, exactly as the other tests in this file do.
+    wal_group::migrate_wal_root_if_needed(&wal_root).unwrap();
+
+    let default_dir = wal_root.join(wal_group::DEFAULT_GROUP_ID);
+    assert!(
+        wal_generation::read_generation(&default_dir).is_some(),
+        "migration must stamp a generation for the legacy stream it just relocated (FR-001)"
+    );
+
+    let (db, _db_dir) = make_db(dim);
+    let state = make_state_with_wal_dim(db, wal_root, dim);
+
+    // A progress sender must be supplied to take the synchronous replay path -- with
+    // progress_tx: None, handle_rebuild_from_wal always spawns a background job and returns
+    // immediately (see real_corpus_e2e.rs's identical note on its own `rebuild` helper).
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(1),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let rebuild_resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    let rebuild_v = serde_json::to_value(rebuild_resp).unwrap();
+    assert!(
+        rebuild_v.get("error").is_none(),
+        "knowledge_rebuild_from_wal returned an error: {rebuild_v}"
+    );
+    assert_eq!(rebuild_v["result"]["success"], true, "{rebuild_v}");
+
+    let status_v = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_ok_resp(&status_v, 2);
+    assert_eq!(
+        status_v["result"]["entity_count"], expected["entity_count"],
+        "entity_count mismatch: {status_v}"
+    );
+    assert_eq!(
+        status_v["result"]["relationship_count"], expected["relationship_count"],
+        "relationship_count mismatch: {status_v}"
+    );
+    assert_eq!(
+        status_v["result"]["episode_count"], expected["episode_count"],
+        "episode_count mismatch: {status_v}"
+    );
+    let wal = &status_v["result"]["wal"];
+    assert_eq!(wal["applied_seq"], wal["max_seq"], "{status_v}");
+    assert_eq!(
+        status_v["result"]["wal_groups"][wal_group::DEFAULT_GROUP_ID]["generation_status"],
+        "known",
+        "{status_v}"
+    );
 }
