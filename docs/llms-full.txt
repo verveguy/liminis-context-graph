@@ -624,6 +624,48 @@ completely unaffected: pointers only ever exist on edges created through this to
   unbound, ambiguous}` field, so a refresh in progress is observable without a dedicated
   inspection endpoint.
 
+### Ingestion results (`process_chunk`)
+
+`knowledge_process_chunk` reports what it could not write, not only how much. Two additive
+result fields exist for that, both introduced in 0.13.2.
+
+- **`dropped_edges` reports the edges behind `edges_dropped_unresolvable`.** An extracted edge
+  whose source or target endpoint resolves to no entity — neither in the current extraction batch
+  nor in the persisted graph — is dropped rather than written
+  ([ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)). `edges_dropped_unresolvable`
+  counts those drops; `dropped_edges` describes them, with one entry per counted edge, in
+  extraction order:
+
+  ```json
+  {
+    "edges_dropped_unresolvable": 1,
+    "dropped_edges": [
+      {
+        "source_name": "Ada Lovelace",
+        "target_name": "Analytical Engine",
+        "relation_type": "WROTE_NOTES_ON",
+        "fact": "Ada Lovelace wrote the first published algorithm for the Analytical Engine.",
+        "unresolved_endpoint": "target"
+      }
+    ]
+  }
+  ```
+
+  `unresolved_endpoint` is `"source"`, `"target"`, or `"both"`. `relation_type` may be `null`,
+  mirroring the fact that it is already optional on an extracted edge before resolution is
+  attempted. The dropped edge's content is not persisted anywhere, so this result is the only
+  place it appears — a consumer that wants to tell a user which fact was lost must read it here
+  rather than recover it later. **`dropped_edges` is always present**, an empty list when nothing
+  was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
+  meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
+
+- **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
+  (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
+  [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
+  character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
+  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
+  Splitting oversized input is the caller's responsibility (issue #407).
+
 ### Progress notifications
 
 The five long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
