@@ -214,16 +214,13 @@ pub fn seed_real_corpus_workspace(embedder_url: &str) -> SeededWorkspace {
         });
     }
     // The committed fixture ships no `.wal-generation.json` (it predates issue #387, and is
-    // itself an example of the dot-namespace-dropping publish step issue #414 documents) — mint
-    // one directly into the flat copy before the seeder subprocess ever starts. The subprocess's
-    // startup migration (`migrate_wal_root_if_needed`) relocates this alongside the `*.jsonl`
-    // files into `<wal_root>/liminis/`, so by the time the seeding rebuild below runs, the
-    // group's generation is known and every later `fork()`'d copy (which copies this file too)
-    // stays consistent — without this, the second `knowledge_rebuild_from_wal` call any
-    // downstream suite makes against a fork would trip issue #414's FR-002 unknown-generation
-    // refusal, which is testing a publish-step defect these tests don't intend to exercise.
-    lcg_core::wal_generation::ensure_generation(&wal_dir)
-        .expect("mint a generation for the seeded real-corpus WAL fixture copy");
+    // itself an example of the dot-namespace-dropping publish step issue #414 documents) — this
+    // flat copy is exactly the genuine pre-378 legacy layout issue #428's migration-time fix
+    // targets. The seeder subprocess's startup migration (`migrate_wal_root_if_needed`) both
+    // relocates the `*.jsonl` files into `<wal_root>/liminis/` *and* stamps a generation for the
+    // resulting stream (issue #428 FR-001) — no separate pre-stamping step is needed here
+    // anymore. See the assertion after the seeding rebuild below, which turns this into a live
+    // regression check for every downstream suite built on this harness.
 
     let mut seeder = McpClient::spawn({
         let mut cmd = Command::new(binary_path());
@@ -267,6 +264,19 @@ pub fn seed_real_corpus_workspace(embedder_url: &str) -> SeededWorkspace {
         rebuild_content["indices_built"],
         json!(true),
         "seeding rebuild did not build indices: {rebuild:?}"
+    );
+
+    // Issue #428 regression check: the seeder subprocess's startup migration must have stamped
+    // a generation for the default group as part of relocating the flat fixture copy (FR-001) —
+    // turning every downstream suite built on this harness into a live check that migration
+    // keeps producing a replayable, non-refused workspace.
+    let default_group_dir =
+        lcg_core::wal_group::group_wal_dir(&wal_dir, lcg_core::wal_group::DEFAULT_GROUP_ID)
+            .expect("encode default group WAL dir name");
+    assert!(
+        lcg_core::wal_generation::read_generation(&default_group_dir).is_some(),
+        "the seeder subprocess's startup migration must stamp a readable .wal-generation.json \
+         for the default group (issue #428 FR-001)"
     );
 
     // Clean shutdown (never kill()) so the just-completed rebuild's WAL checkpoint is durable

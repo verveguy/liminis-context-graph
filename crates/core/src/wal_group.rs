@@ -514,7 +514,10 @@ mod tests {
         migrate_wal_root_if_needed(tmp.path()).unwrap();
         let second = wal_generation::read_generation(&default_dir).unwrap();
 
-        assert_eq!(first, second, "repeated boots must not re-mint a generation");
+        assert_eq!(
+            first, second,
+            "repeated boots must not re-mint a generation"
+        );
     }
 
     /// Neither a fresh/absent `wal_root` nor a native per-group install with no loose top-level

@@ -632,8 +632,8 @@ async fn fr002_refusal_is_scoped_to_the_affected_group_only() {
 //    so the workspace isn't left permanently re-hitting it ────────────────────────────────────
 
 #[tokio::test]
-async fn fr002_428_no_prior_content_at_risk_exemption_lets_rebuild_succeed_and_stamps_a_generation(
-) {
+async fn fr002_428_no_prior_content_at_risk_exemption_lets_rebuild_succeed_and_stamps_a_generation()
+{
     const G: &str = "g-migrated-unstamped";
     let (db, _db_dir) = make_db(4);
     let wal_dir = TempDir::new().unwrap();
