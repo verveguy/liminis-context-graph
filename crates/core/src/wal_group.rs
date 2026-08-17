@@ -259,6 +259,12 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// any loose entry remains unmoved, this function is re-entered past the early return on the next
 /// call, and `ensure_generation`'s own idempotency (FR-002) makes re-attempting it there a no-op
 /// once it has actually succeeded.
+///
+/// A loose `.wal-generation.json` — recognized by [`is_legacy_top_level_wal_artifact`] for
+/// consistency with the other sidecars, though no genuine pre-378 install can actually have one —
+/// is relocated ahead of both the mint and the general loop, specifically so the mint never gets a
+/// chance to occupy `default_dir`'s sidecar path first and cause the general loop to skip (and
+/// thereby orphan) the loose original.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -277,7 +283,24 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
 
     let default_dir = wal_root.join(DEFAULT_GROUP_ID);
     fs::create_dir_all(&default_dir)?;
+
+    // A loose `.wal-generation.json` (if one is somehow present — see `WAL_GENERATION_FILE`'s own
+    // doc comment on why no genuine pre-378 install can have one) must be relocated *before*
+    // `ensure_generation` mints a fresh record below. Otherwise `ensure_generation` would create
+    // `default_dir`'s sidecar first, the relocation loop's `dest.exists()` check would then see it
+    // and skip the loose file, and the loose file's real content would be silently orphaned at the
+    // WAL root forever in favor of a freshly-minted, unrelated UUID.
+    if let Some(loose_generation) = loose_entries
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(WAL_GENERATION_FILE))
+    {
+        let dest = default_dir.join(WAL_GENERATION_FILE);
+        if !dest.exists() {
+            fs::rename(loose_generation, &dest)?;
+        }
+    }
     crate::wal_generation::ensure_generation(&default_dir)?;
+
     for entry in loose_entries {
         let Some(file_name) = entry.file_name() else {
             continue;
@@ -604,6 +627,37 @@ mod tests {
         assert!(
             crate::wal_generation::read_generation(&default_dir).is_some(),
             "the retried migration must finish stamping a generation"
+        );
+    }
+
+    /// Regression for the review finding on stamp-before-relocate ordering: a loose
+    /// `.wal-generation.json` at the WAL root's top level (structurally impossible for a genuine
+    /// pre-378 install, per `WAL_GENERATION_FILE`'s doc comment, but still recognized by
+    /// `is_legacy_top_level_wal_artifact` "for consistency") must have its real content preserved
+    /// by relocation, not silently discarded in favor of a freshly-minted UUID because
+    /// `ensure_generation` got to occupy the destination path first.
+    #[test]
+    fn migrate_relocates_a_loose_generation_sidecar_instead_of_orphaning_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"original-value"}"#).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        assert!(
+            !loose_generation_file.exists(),
+            "the loose sidecar must have been relocated, not left orphaned at the WAL root"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("original-value".to_string()),
+            "the relocated sidecar's original content must be preserved, not overwritten by a fresh mint"
         );
     }
 
