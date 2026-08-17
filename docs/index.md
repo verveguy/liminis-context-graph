@@ -31,6 +31,7 @@ and a standalone quickstart; this site is the full reference.
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
 - **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
 - **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
+- **[Release Process](release-process.md)** — maintainer procedure for verifying CI status before cutting a release.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).
 
 ## llms.txt
