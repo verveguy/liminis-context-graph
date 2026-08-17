@@ -1642,12 +1642,16 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
 /// read guard across dispatch so it cannot observe a concurrently-mutated
 /// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`.
 // Holding the std `RwLockReadGuard` across `.await` is intentional here, not an oversight:
-// each `#[tokio::test]` runs its own single-threaded runtime, so the guard is never held
-// across a yield point that could contend with another task in the same runtime — the
-// contention this lock exists to prevent is between *OS threads* (`cargo test`'s parallel
-// test execution), which this guard still correctly serializes against.
+// `flavor = "current_thread"` below pins this test to a single-threaded runtime (tokio's
+// default for `#[tokio::test]`, but pinned explicitly rather than left implicit, since the
+// workspace's `tokio` dependency enables the `rt-multi-thread` feature and a future edit could
+// otherwise add `flavor = "multi_thread"` here without anyone noticing the safety argument
+// broke). With only one task ever running on this runtime, the guard is never held across a
+// yield point that could contend with another task on the same runtime — the contention this
+// lock exists to prevent is between *OS threads* (`cargo test`'s parallel test execution),
+// which this guard still correctly serializes against.
 #[allow(clippy::await_holding_lock)]
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn test_knowledge_process_chunk_multibyte_chars_use_char_count_not_byte_count() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);

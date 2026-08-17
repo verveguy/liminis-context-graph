@@ -113,8 +113,9 @@ fn wal_dir() -> PathBuf {
     fixture_dir().join("wal")
 }
 
-/// Recursively copies `src` to `dst` (`dst`'s parent must already exist; `dst` itself must
-/// not) — mirrors `crates/service/tests/common/real_corpus.rs`'s helper of the same name.
+/// Recursively copies `src` (a directory) into `dst`, creating `dst` and any intermediate
+/// directories as needed (`dst` may already exist, e.g. as a fresh empty `TempDir`) — mirrors
+/// `crates/service/tests/common/real_corpus.rs`'s helper of the same name.
 fn copy_dir_recursive(src: &Path, dst: &Path) {
     if src.is_dir() {
         std::fs::create_dir_all(dst)
