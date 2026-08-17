@@ -102,6 +102,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0387](0387-wal-stream-generation-identity.md) | WAL Stream Generation Identity | 2026-08-13 |
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
+| [0428](0428-legacy-migration-generation-stamp-and-guard-narrowing.md) | Legacy-Migration Generation Stamp and a Content-Scoped Guard Exemption | 2026-08-17 |
 
 ## Historical numbering
 

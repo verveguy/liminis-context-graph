@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.13.3] - 2026-08-17
+
+A patch release fixing a regression introduced by 0.13.2: `knowledge_rebuild_from_wal` was
+refused on every workspace that had gone through the legacy flat-WAL-to-per-group migration,
+which is every workspace upgrading from ≤0.12.x and every workspace already migrated by 0.13.0 or
+0.13.1.
+
+### Fixed
+
+- **The per-group WAL migration now stamps a generation for the resulting stream, and
+  `knowledge_rebuild_from_wal` no longer permanently refuses a workspace this migration (or an
+  earlier release's identical migration) already touched.** #414's unknown-generation guard
+  (shipped in 0.13.2) refuses to replay a group that has a previously recorded position but an
+  unknown current-on-disk generation — correct for a genuinely external stream whose publish step
+  dropped `.wal-generation.json`, but a pre-0.13.0 flat WAL layout never had a generation sidecar
+  in the first place (the feature postdates it), so every workspace the legacy migration relocated
+  landed in exactly that refused state, permanently. This broke the #398 lbug-upgrade rollback
+  procedure and any operator-invoked ADR-0009 degraded-mode recovery that reaches for an explicit
+  rebuild. Two narrow fixes, verified not to weaken the guard's actual protection: the legacy
+  migration (`migrate_wal_root_if_needed`) now stamps a generation immediately after relocating a
+  flat layout it just took ownership of, and `knowledge_rebuild_from_wal`'s guard is exempted for
+  the specific case where a group's recorded position is `applied_seq: 0` against a database with
+  zero rows for that group — demonstrably nothing previously applied to protect, regardless of why
+  the generation is unknown — minting a generation at that point so the workspace isn't left
+  permanently re-hitting the same exemption. Every group with real content at risk (`applied_seq
+  > 0`, or any non-empty database) remains refused exactly as before. The refusal error message
+  now also names the locally-migrated-workspace remedy (remove or move aside `.lcg/db` and retry)
+  alongside the existing republish-the-full-directory remedy, since the code cannot tell which
+  applies and doesn't need to. See
+  [ADR-0428](docs/adr/0428-legacy-migration-generation-stamp-and-guard-narrowing.md), which amends
+  [ADR-0387](docs/adr/0387-wal-stream-generation-identity.md) and
+  [ADR-0414](docs/adr/0414-wal-generation-unknown-refuses-replay.md). (#428)
+
 ## [0.13.2] - 2026-08-16
 
 A patch release hardening the group boundary in both directions. Deletes could reach across every

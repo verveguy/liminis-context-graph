@@ -109,6 +109,23 @@ merely possible to notice.
   generation is *handled* at replay time; it does not touch `WalWriter::new`'s minting guard or
   introduce any way for lcg to fabricate an identity for a stream it did not itself observe from
   empty (ADR-0387's Out of Scope, unchanged).
+
+  > **Amended by [ADR-0428](0428-legacy-migration-generation-stamp-and-guard-narrowing.md).** This
+  > bullet was, as originally decided, unconditional. Issue #428 found that this guard's own
+  > refusal condition — a recorded position plus an unknown generation — is exactly the state
+  > ADR-0378's legacy-layout migration leaves every upgraded pre-0.13.0 workspace in, since that
+  > migration never had a generation to relocate. Combined, the two decisions made
+  > `knowledge_rebuild_from_wal` permanently unavailable on every migrated workspace, not only
+  > genuinely externally-stripped ones this guard was built to catch. ADR-0428 adds one narrow
+  > exemption directly to this guard: when the group's recorded position is `applied_seq: Some(0)`
+  > against a database with zero rows for that group, there is demonstrably nothing previously
+  > applied to protect, so the call proceeds (minting a generation immediately, on non-dry-run
+  > use, rather than leaving the workspace permanently re-hitting this same exemption) instead of
+  > refusing. This is deliberately narrower than "any lcg-side derivation" — it does not attempt to
+  > distinguish a locally-migrated stream from an externally-stripped one (there is no on-disk
+  > signal that could), it relies only on there being nothing currently at risk. Every case this
+  > guard was built to catch — any `applied_seq` greater than `0`, or any non-empty database — is
+  > refused exactly as originally decided here, unchanged by ADR-0428.
 - **Cross-repo**: the actual fix for the two reproduction channels is a publish-step change (copy
   the whole stream directory, dot-namespace included) outside this repository — this repository's
   deliverable is the refusal itself plus the documented contract

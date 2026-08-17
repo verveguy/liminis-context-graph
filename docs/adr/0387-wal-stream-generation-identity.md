@@ -100,6 +100,21 @@ generation record (a pre-#387 stream — Story 5) is **never** retroactively min
 `None` until something else writes one, matching the spec's explicit exclusion of a proactive
 migration pass.
 
+> **Amended by [ADR-0428](0428-legacy-migration-generation-stamp-and-guard-narrowing.md).** The
+> "never retroactively minted... matching the spec's explicit exclusion of a proactive migration
+> pass" statement above was, as originally decided, unconditional. Issue #428 found this made the
+> per-378 legacy-layout migration (ADR-0378's `migrate_wal_root_if_needed`) permanently unable to
+> produce a stamped stream — a pre-0.13.0 install never had a generation to relocate, so every
+> migrated workspace stayed generation-unknown forever, which combined with ADR-0414's guard to
+> make `knowledge_rebuild_from_wal` permanently unavailable on every upgraded workspace. ADR-0428
+> adds two narrow, deliberate exceptions, each scoped to content lcg has direct, first-hand
+> evidence about (not to directory contents alone): the legacy migration itself now stamps a
+> generation immediately after relocating a flat layout it just proved it owns, and
+> `handle_rebuild_from_wal`'s guard mints one when a group's recorded position is provably nothing
+> previously applied (`applied_seq: Some(0)` against an empty database). The exclusion above
+> remains true for every other case — a populated pre-#387 stream lcg has no ownership or
+> emptiness evidence for still stays `None` until something else writes one.
+
 This placement has a load-bearing side effect: `knowledge_dump_wal`'s output directory is always
 freshly created and empty before its `WalWriter` is constructed against it (an FR-004-of-#365
 precedent already enforces this), so FR-006 ("a dumped stream always carries a new generation,

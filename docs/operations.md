@@ -36,7 +36,10 @@ writer, one recorded position. An **existing** pre-378 `.lcg/wal/` (loose
 `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` directly under `wal/`, no `liminis/` subdirectory) is
 migrated automatically and idempotently on first boot under the upgraded binary — see
 [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the migration mechanics; no
-operator action is required.
+operator action is required. Since issue #428, this migration also stamps a `.wal-generation.json`
+for the resulting stream as part of the same pass, so `knowledge_rebuild_from_wal` is immediately
+usable afterward — see [ADR-0428](adr/0428-legacy-migration-generation-stamp-and-guard-narrowing.md)
+and the unknown-generation refusal section below.
 
 **`.wal-generation.json` (issue #387) gives each group's stream a stable identity, distinct from
 its `seq` numbering.** `seq` identifies a position *within* a stream; it says nothing about
@@ -57,9 +60,15 @@ Any string value works — lcg mints a UUID, but nothing requires that shape. **
 publisher-writable**: an external, non-lcg publisher (e.g. a distributed, git-published WAL model)
 that creates a group's stream directory directly, without going through lcg, MUST write this file
 itself (a plain `json.dump({"generation": <any unique string>}, f)` from Python is sufficient) for
-`knowledge_rebuild_from_wal`'s reset detection (below) to work against that stream — lcg never
-retroactively mints one into a directory it didn't create, and a directory with no
-`.wal-generation.json` is treated as having an unknown generation (see `generation_status` in
+`knowledge_rebuild_from_wal`'s reset detection (below) to work against that stream. lcg does not
+retroactively mint a generation into an externally-published directory it didn't create — with two
+narrow, deliberate exceptions added by issue #428, both scoped to content lcg itself is
+demonstrably responsible for, not to directory contents alone: (1) the legacy-layout migration
+above stamps one immediately after relocating a genuine pre-378 flat WAL it just took ownership of,
+and (2) `knowledge_rebuild_from_wal` mints one when a group's recorded position is `applied_seq: 0`
+against an empty database — nothing was previously applied, so there is nothing a stamp could
+silently corrupt. Outside those two cases, a directory with no `.wal-generation.json` is treated as
+having an unknown generation (see `generation_status` in
 [the generation-scoped `applied_seq` fields below](#knowledge_status-health-fields)). Whether that
 is silently tolerated or an outright failure depends on whether a position for the group has
 already been recorded — see issue #414 below. Like `.checkpoints/` and `.wal-bounds.json`, it is
@@ -108,15 +117,30 @@ select `*.jsonl` files.
   this can trip on what looks like the first explicit rebuild call ever made against a group) and
   whether the group's current on-disk generation is unknown (missing or corrupt
   `.wal-generation.json` — the two are indistinguishable by design, see below). If both hold, the
-  call fails outright with an explicit error naming the group and pointing at the publish contract
-  above — replay does not proceed, `from_seq`/`to_seq`/`force_clear` are not applied, and this
-  applies uniformly to `dry_run: true` as well (there is nothing safe to preview). No
-  configuration flag, environment variable, or request parameter bypasses this check. The refusal
-  is scoped to the affected group only — a sibling group sharing the same WAL root whose own
-  generation is known remains independently replayable in the same or a later call. A group with
-  no previously recorded position is unaffected: it performs ordinary first-time adoption, including
-  adopting an unknown generation, exactly as before this issue. See
-  [ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md) for the full rationale.
+  call fails outright — replay does not proceed, `from_seq`/`to_seq`/`force_clear` are not
+  applied, and this applies uniformly to `dry_run: true` as well (there is nothing safe to
+  preview) — **except for one narrow case added by issue #428**: if `applied_seq` is exactly `0`
+  and the group has zero rows in the database, there is demonstrably nothing previously applied to
+  protect, so a non-dry-run call mints a generation for the stream right then and proceeds as an
+  ordinary (adopting) replay instead of refusing; a `dry_run: true` call in this same narrow case
+  still previews cleanly without minting anything (dry runs never write to disk). Every other
+  case still refuses exactly as before: any `applied_seq` greater than `0`, or any non-empty
+  database, is real content at risk and remains hard-refused regardless of *why* the generation is
+  unknown — the code cannot tell a workspace migrated locally by an earlier lcg release apart from
+  one published externally and stripped of its dot-namespace, and does not need to, since neither
+  case has anything at risk when the exemption applies and both remain refused when it doesn't. The
+  error message for a still-refused call names two possible remedies rather than guessing which
+  applies: removing or moving aside `.lcg/db` and retrying (which lands a locally-owned, unstamped
+  workspace back in the exempted case above, per issue #398's rollback procedure), or republishing
+  the stream's full directory (dot-namespace included) if it was genuinely published externally.
+  No configuration flag, environment variable, or request parameter bypasses this check. The
+  refusal is scoped to the affected group only — a sibling group sharing the same WAL root whose
+  own generation is known remains independently replayable in the same or a later call. A group
+  with no previously recorded position is unaffected: it performs ordinary first-time adoption,
+  including adopting an unknown generation, exactly as before this issue. See
+  [ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md) and
+  [ADR-0428](adr/0428-legacy-migration-generation-stamp-and-guard-narrowing.md) for the full
+  rationale.
 - **Reset detection (issue #387).** Once the check above has passed, `knowledge_rebuild_from_wal`
   compares the group's recorded generation against what's currently on disk
   (`.wal-generation.json`). If they differ (both known and unequal — see `wal.generation_status`
