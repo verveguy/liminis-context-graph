@@ -42,6 +42,43 @@ use tokio::sync::RwLock;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` is a process-global env var read by
+// `resolve_chunk_text_advisory_max_chars()` (crates/core/src/handlers.rs). Any test that
+// mutates it races, under `RUST_TEST_THREADS=4`, against any other test in this binary that
+// sends a `chunk_text` between 51 and 8,000 chars (the gap between an overridden and the
+// default threshold) — see #429. This lock serializes that hazard: the mutating test takes
+// the write guard for its whole override window; any test sending a `chunk_text` in that
+// racy range takes the read guard across its dispatch call, so it never runs concurrently
+// with a write. Tests outside the hazard (the common case) never touch this lock and pay no
+// cost. A future test adding a `chunk_text` in [51, 8000) chars must take the read guard too.
+static CHUNK_ADVISORY_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// RAII guard: takes the write lock, sets `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` to `value`, and
+/// removes the env var again on drop.
+struct ChunkAdvisoryEnvOverrideGuard<'a> {
+    _lock: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl ChunkAdvisoryEnvOverrideGuard<'_> {
+    fn set(value: &str) -> Self {
+        let lock = CHUNK_ADVISORY_ENV_LOCK.write().unwrap();
+        std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", value);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for ChunkAdvisoryEnvOverrideGuard<'_> {
+    fn drop(&mut self) {
+        std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+    }
+}
+
+/// Must be held across any dispatch call that sends a `chunk_text` between 51 and 8,000
+/// chars, so it cannot observe a concurrently-mutated `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`.
+fn chunk_advisory_env_read_guard() -> std::sync::RwLockReadGuard<'static, ()> {
+    CHUNK_ADVISORY_ENV_LOCK.read().unwrap()
+}
+
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(dir.path().join("parity.db").to_str().unwrap()).unwrap());
@@ -1428,11 +1465,10 @@ fn count_chunk_text_oversized_events(capture: &CaptureSink) -> usize {
 /// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, a process-global that `cargo test`'s default parallel
 /// test execution runs concurrently with every other test in this binary. Bundling into one
 /// function keeps the override window (threshold=50, held only around the `dispatch_val(64,
-/// ...)` call below) to a single short-lived block rather than one per scenario. This does not
-/// by itself make the override race-proof: it stays safe only as long as no other test in this
-/// file sends a `chunk_text` between 51 and 8,000 characters (none currently do — see the
-/// `grep -c '"chunk_text"' ipc_parity.rs` literals above, all well under 51 chars). A future test
-/// adding a chunk_text in that range would need its own isolation.
+/// ...)` call below) to a single short-lived block rather than one per scenario. #429: the
+/// override window is additionally guarded by `CHUNK_ADVISORY_ENV_LOCK` (write side), so any
+/// other test in this file sending a `chunk_text` between 51 and 8,000 characters — via
+/// `chunk_advisory_env_read_guard()` — cannot observe the mutated value mid-flight.
 #[tokio::test]
 async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
     let (db, _dir) = make_db(4);
@@ -1569,7 +1605,7 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
 
     // Env var override: a chunk between the default and the overridden threshold warns/doesn't
     // warn according to the override, not the default (User Story 1 AS3).
-    std::env::set_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS", "50");
+    let override_guard = ChunkAdvisoryEnvOverrideGuard::set("50");
     let override_oversized_text = "a".repeat(51);
     let v = dispatch_val(
         64,
@@ -1583,7 +1619,7 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
         Arc::clone(&state),
     )
     .await;
-    std::env::remove_var("LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS");
+    drop(override_guard);
     assert_ok_resp(&v, 64);
     let warning = &v["result"]["warning"];
     assert_eq!(warning["chunk_text_chars"], 51);
@@ -1601,7 +1637,16 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
 /// FR-006: the threshold and warning operate on character count, not byte count. `'世'` is 3
 /// bytes in UTF-8, so 4,000 of them is 12,000 bytes (over the 8,000 default) but only 4,000
 /// chars (under it). A byte-length implementation would wrongly warn here; this asserts it must
-/// not. No env var mutation, so this is race-free against other tests in this binary.
+/// not. This test performs no env var mutation itself, but its `chunk_text` (4,000 chars) falls
+/// inside the racy [51, 8000) range guarded by `CHUNK_ADVISORY_ENV_LOCK` (#429): it holds the
+/// read guard across dispatch so it cannot observe a concurrently-mutated
+/// `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`.
+// Holding the std `RwLockReadGuard` across `.await` is intentional here, not an oversight:
+// each `#[tokio::test]` runs its own single-threaded runtime, so the guard is never held
+// across a yield point that could contend with another task in the same runtime — the
+// contention this lock exists to prevent is between *OS threads* (`cargo test`'s parallel
+// test execution), which this guard still correctly serializes against.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn test_knowledge_process_chunk_multibyte_chars_use_char_count_not_byte_count() {
     let (db, _dir) = make_db(4);
@@ -1614,6 +1659,7 @@ async fn test_knowledge_process_chunk_multibyte_chars_use_char_count_not_byte_co
         "sanity check: 3 bytes per char"
     );
 
+    let _read_guard = chunk_advisory_env_read_guard();
     let v = dispatch_val(
         65,
         "knowledge_process_chunk",
@@ -1626,6 +1672,7 @@ async fn test_knowledge_process_chunk_multibyte_chars_use_char_count_not_byte_co
         state,
     )
     .await;
+    drop(_read_guard);
     assert_ok_resp(&v, 65);
     assert!(
         v["result"].get("warning").is_none(),
