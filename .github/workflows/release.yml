@@ -198,18 +198,42 @@ jobs:
           # nonexistent paths, and it reports a missing file as a failure, so this
           # would surface as a confusing red rather than a silent pass — but the
           # threat model is the same one, so handle it the same way.
+          # Match by layout, not by name: SC-006 requires every binary the release
+          # workflow produces. `dist plan` publishes TWO packages — lcg-service (whose
+          # binary is liminis-context-graph) and lcg-eval — each with tarballs on all
+          # three targets and its own installer, and lcg-eval reaches lbug via lcg-core
+          # so it links OpenSSL on identical terms. A `-name liminis-context-graph`
+          # filter inspected one of the two and let the other ship on the assumption
+          # that one job's PKG_CONFIG_PATH covers both; FR-009 exists precisely so
+          # self-containment does not rest on that incidental coupling. Globbing by
+          # position also covers a future third binary without editing this step.
+          #
+          # `! -path '*/dist/*/*'` is load-bearing: target/<triple>/dist/ is a full
+          # cargo profile directory, so without it deps/ and build/ drag in ~88 test
+          # and build-script executables.
           find_bins() {
             find target -type f -perm -u+x -path '*/dist/*' \
-              -name liminis-context-graph -print0
+              ! -path '*/dist/*/*' -print0
           }
-          # Count NUL terminators, not lines: a path containing a newline must not
-          # read as "nothing found" and let the guard pass on an uninspected build.
-          if [ "$(find_bins | tr -dc '\0' | wc -c)" -eq 0 ]; then
-            echo "No liminis-context-graph binary found under target/**/dist/ —" >&2
-            echo "refusing to pass without inspecting anything. Did dist build's" >&2
-            echo "output layout change?" >&2
-            exit 1
-          fi
+          # Then assert the known-shipping binaries are actually among them, so a
+          # layout change cannot quietly reduce the set to a subset (or to nothing)
+          # and still pass. NUL-safe read, and no arrays: the macOS runner's
+          # /bin/bash is 3.2.
+          found=""
+          while IFS= read -r -d '' bin; do
+            found="$found $(basename "$bin")"
+          done < <(find_bins)
+          for expected in liminis-context-graph lcg-eval; do
+            case " $found " in
+              *" $expected "*) ;;
+              *)
+                echo "No '$expected' binary found under target/**/dist/ — refusing to" >&2
+                echo "pass without inspecting every shipped binary. Did dist build's" >&2
+                echo "output layout, or the set of published packages, change?" >&2
+                exit 1
+                ;;
+            esac
+          done
           find_bins | xargs -0 bash scripts/assert-static-openssl.sh
       - id: cargo-dist
         name: Post-build

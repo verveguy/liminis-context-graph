@@ -186,8 +186,16 @@ jobs:
       # exactly how the v0.9.0 `ld: symbol(s) not found` failure reached a tag. This
       # step at least holds the line on Linux: delete the staging step above and this
       # goes red, instead of the dynamic dependency surfacing on a user's machine.
-      - name: Assert the release binary has no dynamic OpenSSL dependency
-        run: bash scripts/assert-static-openssl.sh target/release/liminis-context-graph
+      #
+      # Both dist-published binaries, not just the service one: `cargo build --release`
+      # above builds every workspace member, and lcg-eval ships its own tarballs and
+      # installer on all three targets while reaching lbug through lcg-core, so it
+      # links OpenSSL on identical terms. See ADR-0398 and release.yml's equivalent.
+      - name: Assert the release binaries have no dynamic OpenSSL dependency
+        run: |
+          bash scripts/assert-static-openssl.sh \
+            target/release/liminis-context-graph \
+            target/release/lcg-eval
 
       # Compiles (links, but does not run) every integration test target, including the
       # five real-corpus e2e test binaries — without this flag the same command would

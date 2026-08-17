@@ -93,7 +93,31 @@ Three pieces implement it:
   appending to `$GITHUB_ENV` when set, printing an `export` line otherwise so it is usable
   locally.
 - **`scripts/assert-static-openssl.sh`** fails if `otool -L`/`ldd` on a built binary mentions
-  `libssl` or `libcrypto`. It runs in `ci.yml`'s `build-release` job against the release binary.
+  `libssl` or `libcrypto`. It also fails when the inspection tool cannot produce a dependency
+  listing at all — a missing tool, an unreadable file, or a damaged binary that makes `otool`
+  print a diagnostic and still exit 0 — because "no listing" greps clean and would otherwise
+  report OK on a binary nobody looked at.
+
+  It runs in **two** places, over **every** binary that ships:
+
+  | where | what it inspects |
+  |---|---|
+  | `ci.yml`'s `build-release` | `target/release/{liminis-context-graph,lcg-eval}` — a pre-tag signal, Linux only |
+  | `release.yml`, after `Build artifacts` and before upload | every executable directly under `target/*/dist/`, i.e. what `dist build` actually produced, on all three targets |
+
+  **Two packages ship, not one.** `dist plan` publishes `lcg-service` (whose binary is
+  `liminis-context-graph`) *and* `lcg-eval`, each with tarballs on all three targets and its own
+  shell installer. `lcg-eval` reaches lbug through `lcg-core`, so it links OpenSSL on identical
+  terms and its installer breaks for users in exactly the same way. The `release.yml` guard
+  therefore matches by **position** (`-path '*/dist/*' ! -path '*/dist/*/*'`) rather than by
+  binary name, which also covers a future third binary without editing the step. The
+  `! -path` clause is load-bearing: `target/<triple>/dist/` is a full cargo profile directory,
+  so without it `deps/` and `build/` drag in scores of test and build-script executables. A
+  name-filtered guard inspected one of the two and let the other ship on the assumption that
+  one job's `PKG_CONFIG_PATH` covers both; the point of an automated check is that
+  self-containment does not rest on that incidental coupling. The step additionally asserts
+  both known binaries are among those found, so a layout change cannot quietly reduce the set
+  to a subset — or to nothing — and still pass.
 - **The OpenSSL dev package is declared on both platforms**, for the same determinism reason
   `cmake` and `ninja-build` are declared rather than assumed, and because it is what supplies
   the `.a` archives the script requires: `libssl-dev` in
@@ -167,6 +191,22 @@ linking, and it matches how every other third-party dependency in the bundle alr
 a binary that builds and tests fine and then fails on a user's machine. That is why
 `assert-static-openssl.sh` exists and runs in CI. If you are reading this because you are about to
 delete the "Stage static OpenSSL" step: the assertion will go red, and that is the point.
+
+**`lbug` does not watch `PKG_CONFIG_PATH`, so a warm `target/` can defeat the staging script.**
+`lbug` 0.19.1's `build.rs` declares `rerun-if-env-changed` for seven `LBUG_*` variables and not
+for `PKG_CONFIG_PATH`. Two consequences, both **fail-closed** — `assert-static-openssl.sh` catches
+each, so neither can ship a bad artifact:
+
+- Running `stage-openssl-static.sh` and then `dist build` on a tree that was already built
+  *without* staging reuses the cached build-script output and links dynamically anyway. Run
+  `cargo clean -p lbug` first; otherwise the local verification recipe above reports a confusing
+  FAIL on a warm tree.
+- Editing the staging path *without* also bumping the `lbug` version restores a cached
+  build-script output pointing at the old directory and does not re-run it. `ci.yml`'s lbug cache
+  key hashes the `lbug` stanza of `Cargo.lock` and nothing derived from `PKG_CONFIG_PATH` or the
+  staging script, so a cache hit survives an edit to either.
+
+Cold release runners build in the correct order, so the release path itself is unaffected.
 
 **macOS remains unproven by CI.** This ADR does not fix that structural gap — it only makes the
 release path reproducible locally so it can be checked by hand before tagging. Closing the gap
