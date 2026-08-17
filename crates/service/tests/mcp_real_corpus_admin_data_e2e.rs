@@ -461,6 +461,13 @@ fn mcp_admin_data_operations_over_real_corpus_fixture() {
         let wal_dir = dir.path().join("wal");
         std::fs::create_dir_all(&wal_dir).unwrap();
         std::fs::write(wal_dir.join("0000000000000-seed.jsonl"), "").unwrap();
+        // #429: without a generation stamp, `main.rs`'s `backfill_applied_seq_if_absent` (which
+        // runs at every startup) records `applied_seq: Some(0)` with `generation: None` for this
+        // fresh DB, and `handle_rebuild_from_wal`'s unknown-generation guard then refuses to
+        // replay — mirrors `common::real_corpus::seed_real_corpus_workspace`'s identical
+        // workaround one function away in this crate.
+        lcg_core::wal_generation::ensure_generation(&wal_dir)
+            .expect("mint a generation for the synthetic single-empty-file WAL");
         let db_path = dir.path().join("no-token-rebuild.db");
 
         let mut client = spawn_fresh(&db_path, &wal_dir, &embedder_url, &["--scope=admin"]);
