@@ -22,7 +22,7 @@ use lcg_core::{
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
-    wal_group, EntityRow,
+    wal_generation, wal_group, EntityRow,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -202,6 +202,22 @@ async fn pre_378_flat_wal_dir_migrates_and_preserves_position_and_checkpoint_rea
     assert_ok_resp(&status_v, 2);
     assert_eq!(status_v["result"]["wal"]["applied_seq"], 1, "{status_v}");
     assert_eq!(status_v["result"]["wal"]["max_seq"], 1, "{status_v}");
+
+    // Issue #431 / SC-002: migration must also stamp a readable generation for the group it
+    // relocated content into, so knowledge_status reports it as known rather than leaving #414's
+    // unknown-generation guard to refuse the next rebuild.
+    assert_eq!(
+        wal_generation::read_generation(&default_dir),
+        status_v["result"]["wal_groups"][wal_group::DEFAULT_GROUP_ID]["generation"]
+            .as_str()
+            .map(String::from),
+        "{status_v}"
+    );
+    assert_eq!(
+        status_v["result"]["wal_groups"][wal_group::DEFAULT_GROUP_ID]["generation_status"],
+        "known",
+        "{status_v}"
+    );
 }
 
 /// A migration re-run against an already-migrated root (e.g. a second startup after the first
@@ -220,8 +236,22 @@ async fn migration_is_a_noop_on_second_startup() {
     write_legacy_checkpoint(&wal_root, "cp", Some(0));
 
     wal_group::migrate_wal_root_if_needed(&wal_root).unwrap();
+    let default_dir = wal_root.join(wal_group::DEFAULT_GROUP_ID);
+    let generation_after_first_run = wal_generation::read_generation(&default_dir);
+    assert!(
+        generation_after_first_run.is_some(),
+        "the first migration run must stamp a generation (issue #431)"
+    );
+
     // Simulates the second startup's own migration call.
     wal_group::migrate_wal_root_if_needed(&wal_root).unwrap();
+
+    // FR-002: the stamp written by the first run must survive a second, no-op run unchanged.
+    assert_eq!(
+        wal_generation::read_generation(&default_dir),
+        generation_after_first_run,
+        "a second, no-op migration run must not mint a new generation"
+    );
 
     let (db, _db_dir) = make_db(4);
     {
