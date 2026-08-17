@@ -264,7 +264,11 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// consistency with the other sidecars, though no genuine pre-378 install can actually have one —
 /// is relocated ahead of both the mint and the general loop, specifically so the mint never gets a
 /// chance to occupy `default_dir`'s sidecar path first and cause the general loop to skip (and
-/// thereby orphan) the loose original.
+/// thereby orphan) the loose original. If `default_dir` already has its own sidecar (FR-002's
+/// "don't overwrite" case) *and* a loose one is also present at the root, the two cannot be
+/// silently reconciled — one of them is stale or the two disagree, and neither an unconditional
+/// overwrite nor a silent skip is safe — so this returns an error instead of relocating anything,
+/// including the other loose artifacts, until an operator resolves which sidecar is authoritative.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -295,9 +299,14 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(WAL_GENERATION_FILE))
     {
         let dest = default_dir.join(WAL_GENERATION_FILE);
-        if !dest.exists() {
-            fs::rename(loose_generation, &dest)?;
+        if dest.exists() {
+            return Err(Error::Ipc(format!(
+                "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and a \
+                 destination {dest:?} both exist — reconcile which one is authoritative (delete \
+                 whichever is stale) before retrying. No artifacts were relocated."
+            )));
         }
+        fs::rename(loose_generation, &dest)?;
     }
     crate::wal_generation::ensure_generation(&default_dir)?;
 
@@ -658,6 +667,48 @@ mod tests {
             crate::wal_generation::read_generation(&default_dir),
             Some("original-value".to_string()),
             "the relocated sidecar's original content must be preserved, not overwritten by a fresh mint"
+        );
+    }
+
+    /// CodeRabbit finding on PR #433: a loose sidecar coexisting with an already-populated
+    /// destination sidecar must not be silently reconciled by discarding one of them. Migration
+    /// must refuse instead, and leave every artifact — including the other loose entries that
+    /// have nothing to do with the conflict — exactly where it found them, so an operator can
+    /// inspect and choose which value is authoritative.
+    #[test]
+    fn migrate_fails_instead_of_silently_reconciling_conflicting_generation_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_jsonl = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_jsonl, b"{}\n").unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"loose-value"}"#).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        fs::write(
+            default_dir.join(".wal-generation.json"),
+            r#"{"generation":"destination-value"}"#,
+        )
+        .unwrap();
+
+        let result = migrate_wal_root_if_needed(tmp.path());
+        assert!(
+            result.is_err(),
+            "migration must refuse when the loose and destination generations conflict"
+        );
+
+        assert!(
+            loose_jsonl.exists(),
+            "unrelated loose artifacts must not be relocated while the conflict is unresolved"
+        );
+        assert!(
+            loose_generation_file.exists(),
+            "the loose generation sidecar must be left in place, not discarded"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("destination-value".to_string()),
+            "the destination's existing generation must be untouched"
         );
     }
 
