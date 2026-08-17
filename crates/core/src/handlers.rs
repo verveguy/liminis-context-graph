@@ -2026,9 +2026,9 @@ async fn handle_rebuild_from_wal(
         })
         .await??
     };
-    let current_generation = crate::wal_generation::read_generation(&wal_dir);
+    let mut current_generation = crate::wal_generation::read_generation(&wal_dir);
 
-    // ── Unknown-generation guard (issue #414, FR-002) ───────────────────────────────────────
+    // ── Unknown-generation guard (issue #414, FR-002; narrowed by issue #428, FR-002/FR-003) ──
     // A group that already has a recorded position (`applied_seq.is_some()`) is a case where
     // reset detection *should* be able to run — but if the current on-disk generation is
     // unknown (missing or corrupt `.wal-generation.json`, indistinguishable per FR-005), that
@@ -2040,17 +2040,54 @@ async fn handle_rebuild_from_wal(
     // job) with no way to preview around it. Scoped to this group's own `wal_dir` only (SC-005):
     // a sibling group in the same WAL root with a known generation is unaffected. No
     // configuration flag, environment variable, or request parameter bypasses this (Out of Scope).
+    //
+    // Issue #428 narrows this by exactly one content-based (not provenance-based) case: when
+    // there is demonstrably nothing previously applied to protect (`applied_seq == Some(0)` and
+    // the group has zero rows in the database), a full replay from empty can only ever reproduce
+    // the WAL's own content, so there is nothing a genuine reset could silently corrupt — this
+    // holds regardless of *why* the generation is unknown (a workspace migrated locally by
+    // 0.13.0/0.13.1, which never stamped one, is indistinguishable on disk from a stream
+    // published externally and stripped of its dot-namespace, and this check does not need to
+    // tell them apart to be safe). Any group with real prior content at risk
+    // (`applied_seq > 0`, or a non-empty database) remains refused exactly as before (SC-004).
     if recorded_position.applied_seq.is_some() && current_generation.is_none() {
-        return Err(Error::WalGenerationUnknown(format!(
-            "group {group_id:?}: {} is absent or unreadable — cannot verify this \
-             stream's generation before replaying against a previously recorded position. \
-             Republish this stream's full directory (dot-namespace included: `cp -R`/`rsync -a` \
-             without an include-filter, or `git add -A` — not a `*.jsonl` glob) so its \
-             generation travels with it; see docs/operations.md's WAL stream-publish contract.",
-            wal_dir
-                .join(crate::wal_generation::WAL_GENERATION_FILE)
-                .display()
-        )));
+        let no_prior_content_at_risk = recorded_position.applied_seq == Some(0) && {
+            let db_for_check = load_db(&state)?;
+            let gid_check = group_id.clone();
+            tokio::task::spawn_blocking(move || -> Result<bool, Error> {
+                let conn = db_for_check.connect()?;
+                crate::recovery::group_has_no_content(&conn, &gid_check)
+            })
+            .await??
+        };
+
+        if !no_prior_content_at_risk {
+            return Err(Error::WalGenerationUnknown(format!(
+                "group {group_id:?}: {} is absent or unreadable — cannot verify this \
+                 stream's generation before replaying against a previously recorded position. \
+                 If this is a workspace migrated or upgraded locally (no publisher to re-copy \
+                 from), remove or move aside `.lcg/db` and retry — a rebuild against an empty \
+                 database stamps a generation for the stream automatically. If this stream was \
+                 published externally, republish its full directory (dot-namespace included: \
+                 `cp -R`/`rsync -a` without an include-filter, or `git add -A` — not a \
+                 `*.jsonl` glob) so its generation travels with it; see docs/operations.md's \
+                 WAL stream-publish contract.",
+                wal_dir
+                    .join(crate::wal_generation::WAL_GENERATION_FILE)
+                    .display()
+            )));
+        }
+
+        // The narrow exemption applies: nothing previously applied is at risk. Mint a
+        // generation now (unless this is a dry-run preview, which must never write to disk) so
+        // this workspace does not stay permanently stuck re-hitting this exemption on every
+        // future call. `position_reset_detected` below then sees a generationless baseline
+        // gaining a generation for the first time — the same case Story 5 Scenario 3 already
+        // covers — which drives the full purge-and-replay this call performs anyway (from an
+        // already-empty group, so the purge has nothing to do).
+        if !dry_run {
+            current_generation = Some(crate::wal_generation::ensure_generation(&wal_dir)?);
+        }
     }
 
     // `position_reset_detected` (not the simpler `generation_mismatch`, which is right for an

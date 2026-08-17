@@ -54,10 +54,24 @@ pub fn read_generation(wal_dir: &Path) -> Option<String> {
 
 /// Ensures `wal_dir` has a recorded generation, minting a fresh one if none exists yet.
 ///
-/// Callers MUST only invoke this when the stream has no prior content (see `WalWriter::new`,
-/// which gates this on `scan_max_seq(&wal_dir)? == 0`) — a pre-existing populated directory with
-/// no generation file (a pre-#387 stream) must stay `None` rather than being retroactively
-/// minted (Out of Scope).
+/// Most callers (e.g. `WalWriter::new`, gated on `scan_max_seq(&wal_dir)? == 0`) invoke this only
+/// when the stream has no prior content — the ordinary "new stream" mint. Issue #428 (ADR-0428)
+/// added two more deliberate call sites that mint over a directory that already holds content,
+/// each narrowly scoped to a case where doing so is safe despite ADR-0387's original "no
+/// retroactive migration pass" position:
+///
+/// 1. `wal_group::migrate_wal_root_if_needed`, immediately after relocating a genuine pre-378
+///    flat WAL layout into `<wal_root>/liminis/` — scoped by that call having direct, first-hand
+///    proof (loose top-level artifacts found by its own scan) that this process just took
+///    ownership of the stream, not by inspecting directory contents alone.
+/// 2. `handlers::handle_rebuild_from_wal`'s unknown-generation guard, when the recorded position
+///    is `applied_seq: Some(0)` against a group with zero rows in the database — scoped by there
+///    being demonstrably nothing previously applied to protect, regardless of *why* the
+///    generation is unknown.
+///
+/// Outside these two sites, a pre-existing populated directory with no generation file (a stream
+/// this process has no proof of ownership over, and no proof nothing is at risk) must stay `None`
+/// rather than being retroactively minted.
 ///
 /// Race-safe by construction, not by timing: two processes racing to create the same stream's
 /// directory for the first time (Edge Cases) both call this. Each writes its full, complete

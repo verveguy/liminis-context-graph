@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::checkpoint;
 use crate::error::Error;
+use crate::wal_generation;
 
 /// The group every write handler that has no narrower single group in scope falls back to
 /// (FR-004), and the group a pre-378 single-stream deployment's entire WAL directory migrates
@@ -237,6 +238,17 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// unmoved remainder and finishes the job — no separate marker file is needed, and a second call
 /// over an already-fully-migrated root is a cheap no-op (the top-level scan finds nothing to
 /// move). Must be called before any per-group `WalWriter` is constructed against `wal_root`.
+///
+/// Also stamps `<wal_root>/liminis/`'s `.wal-generation.json` (issue #428, FR-001), once
+/// relocation is complete, but only on a call whose own top-level scan actually found loose
+/// entries to move — i.e. only when this call has direct, first-hand proof that this exact
+/// process just took ownership of a genuine pre-378 flat layout. That "loose entries found at the
+/// WAL root's top level" signal is a reliable, unforgeable local-provenance marker: nothing else
+/// in this codebase (no publish/subscribe path, no external tool) ever writes WAL artifacts
+/// directly at the WAL root's top level, so a call that finds none (a fresh install, an
+/// already-fully-migrated root, or a native per-group install) never mints anything. See
+/// ADR-0428 for why this is safe despite ADR-0387/ADR-0414's general "no retroactive minting"
+/// rule.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -266,6 +278,7 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         }
         fs::rename(&entry, &dest)?;
     }
+    wal_generation::ensure_generation(&default_dir)?;
     Ok(())
 }
 
@@ -455,6 +468,13 @@ mod tests {
             .exists());
         assert!(!tmp.path().join(".checkpoints").exists());
         assert!(!tmp.path().join(".wal-bounds.json").exists());
+        // Issue #428 FR-001: a genuine flat-layout migration now stamps a generation for the
+        // resulting stream, closing the gap that left `knowledge_rebuild_from_wal` permanently
+        // refused on every upgraded workspace.
+        assert!(
+            wal_generation::read_generation(&default_dir).is_some(),
+            "a fresh flat-layout migration must leave a readable .wal-generation.json"
+        );
     }
 
     #[test]
@@ -475,6 +495,45 @@ mod tests {
             .is_file());
     }
 
+    /// A second call, once migration is fully complete, must not re-mint — the top-level scan
+    /// finds nothing loose left to move, so the generation stamp is left exactly as the first
+    /// call minted it.
+    #[test]
+    fn migrate_generation_stamp_is_idempotent_across_repeated_boots() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+        let default_dir = tmp.path().join("liminis");
+        let first = wal_generation::read_generation(&default_dir).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+        let second = wal_generation::read_generation(&default_dir).unwrap();
+
+        assert_eq!(first, second, "repeated boots must not re-mint a generation");
+    }
+
+    /// Neither a fresh/absent `wal_root` nor a native per-group install with no loose top-level
+    /// entries has anything for this migration to own — no `liminis/` directory, and certainly no
+    /// generation file, may be fabricated for either case.
+    #[test]
+    fn migrate_does_not_stamp_a_generation_when_there_is_nothing_to_migrate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        migrate_wal_root_if_needed(&missing).unwrap();
+        assert!(!missing.join(DEFAULT_GROUP_ID).exists());
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp2.path().join("group-a")).unwrap();
+        fs::create_dir_all(tmp2.path().join("group-b")).unwrap();
+        migrate_wal_root_if_needed(tmp2.path()).unwrap();
+        assert!(!tmp2.path().join(DEFAULT_GROUP_ID).exists());
+    }
+
     /// Simulates a crash between creating `liminis/` and finishing every rename: one entry made
     /// it across, one didn't. The next call must finish the job, not skip the remainder because
     /// `liminis/` already exists.
@@ -493,6 +552,10 @@ mod tests {
         assert!(default_dir.join("moved_0000.jsonl").is_file());
         assert!(default_dir.join("unmoved_0001.jsonl").is_file());
         assert!(!tmp.path().join("unmoved_0001.jsonl").exists());
+        assert!(
+            wal_generation::read_generation(&default_dir).is_some(),
+            "the resumed call, which finished relocation, must stamp a generation"
+        );
     }
 
     #[test]

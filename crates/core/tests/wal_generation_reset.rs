@@ -627,6 +627,137 @@ async fn fr002_refusal_is_scoped_to_the_affected_group_only() {
     );
 }
 
+// ── issue #428 FR-002/FR-006/SC-004: a group with demonstrably nothing previously applied to
+//    protect is exempted from the unknown-generation guard, and the exemption mints a generation
+//    so the workspace isn't left permanently re-hitting it ────────────────────────────────────
+
+#[tokio::test]
+async fn fr002_428_no_prior_content_at_risk_exemption_lets_rebuild_succeed_and_stamps_a_generation(
+) {
+    const G: &str = "g-migrated-unstamped";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    // Content on disk, no generation sidecar — the shape a workspace migrated by 0.13.0/0.13.1
+    // is left in (issue #428 Story 2), before this issue's migration-time stamp (FR-001) existed.
+    write_group_wal(
+        &wal_root,
+        G,
+        "0000.jsonl",
+        &[
+            entity_wal_line(0, "mig-0", "mig-0", G),
+            entity_wal_line(1, "mig-1", "mig-1", G),
+        ],
+    );
+    assert_eq!(read_group_generation(&wal_root, G), None);
+
+    let state = make_state_with_wal(Arc::clone(&db), wal_root.clone());
+
+    // Simulate `knowledge_status`'s own backfill having already recorded a position at
+    // `applied_seq: 0` against an empty database — the exact "demonstrably nothing at risk"
+    // state issue #428's narrow exemption targets. Written directly (not via a prior rebuild
+    // call), since the whole point of this scenario is that this row can arrive without ever
+    // having gone through a rebuild.
+    {
+        let conn = db.connect().unwrap();
+        conn.set_wal_position(G, 0, None).unwrap();
+    }
+
+    // Without issue #428's fix, this call would be refused outright by #414's guard
+    // (`applied_seq.is_some() && current_generation.is_none()`) — the exact regression this
+    // issue exists to fix.
+    let rebuild_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
+    assert_ok_resp(&rebuild_v, 1);
+    assert_eq!(rebuild_v["result"]["success"], true, "{rebuild_v}");
+
+    // The exemption mints a generation immediately (not left permanently unstamped) — visible
+    // both on disk and to the completion write.
+    let minted = read_group_generation(&wal_root, G);
+    assert!(
+        minted.is_some(),
+        "the exemption must stamp a generation, not leave the stream permanently unstamped"
+    );
+
+    {
+        let conn = db.connect().unwrap();
+        assert!(conn.get_entity_by_uuid("mig-0").unwrap().is_some());
+        assert!(conn.get_entity_by_uuid("mig-1").unwrap().is_some());
+        let pos = conn.get_wal_position(G).unwrap();
+        assert_eq!(pos.applied_seq, Some(1));
+        assert_eq!(
+            pos.generation, minted,
+            "the completion write must record the newly minted generation"
+        );
+    }
+
+    // A follow-up call now behaves as an ordinary, generation-known incremental replay — no more
+    // special-casing, no repeated refusal.
+    write_group_wal(
+        &wal_root,
+        G,
+        "0001.jsonl",
+        &[entity_wal_line(2, "mig-2", "mig-2", G)],
+    );
+    let followup_v =
+        dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 2}), Arc::clone(&state)).await;
+    assert_ok_resp(&followup_v, 2);
+    assert_eq!(followup_v["result"]["success"], true, "{followup_v}");
+    assert_ne!(
+        followup_v["result"]["reset_detected"], true,
+        "ordinary forward progress on the now-known generation must never be flagged: {followup_v}"
+    );
+
+    let conn = db.connect().unwrap();
+    assert!(conn.get_entity_by_uuid("mig-2").unwrap().is_some());
+    let pos = conn.get_wal_position(G).unwrap();
+    assert_eq!(pos.applied_seq, Some(2));
+    assert_eq!(pos.generation, minted, "{pos:?}");
+}
+
+/// dry_run under the narrow exemption must remain a true no-op: no generation minted, no
+/// database mutation, consistent with every other dry-run path in this handler.
+#[tokio::test]
+async fn fr002_428_no_prior_content_at_risk_exemption_is_not_mutated_by_dry_run() {
+    const G: &str = "g-migrated-unstamped-dry";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    write_group_wal(
+        &wal_root,
+        G,
+        "0000.jsonl",
+        &[entity_wal_line(0, "dry-0", "dry-0", G)],
+    );
+
+    let state = make_state_with_wal(Arc::clone(&db), wal_root.clone());
+    {
+        let conn = db.connect().unwrap();
+        conn.set_wal_position(G, 0, None).unwrap();
+    }
+
+    let dry_v = dispatch_rebuild_sync(
+        1,
+        json!({"group_id": G, "from_seq": 0, "dry_run": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&dry_v, 1);
+    assert_eq!(dry_v["result"]["success"], true, "{dry_v}");
+    assert_eq!(
+        read_group_generation(&wal_root, G),
+        None,
+        "a dry-run preview must never write a generation sidecar to disk"
+    );
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid("dry-0").unwrap().is_none(),
+        "a dry-run preview must never mutate the database"
+    );
+}
+
 // ── SC-008: multi-group isolation ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
