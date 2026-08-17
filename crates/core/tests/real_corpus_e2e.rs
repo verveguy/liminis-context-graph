@@ -659,15 +659,3 @@ async fn replay_is_deterministic_across_independent_processes() {
         "traversal hop1 node set must be identical across independent rebuilds"
     );
 }
-
-// Deliberate, temporary failure for issue #430 FR-004's live demonstration that the
-// real_corpus_e2e job's CI conclusion turns red on a genuine failure. No fixture
-// dependency so it fails fast. Reverted in the immediately-following commit.
-#[test]
-#[ignore]
-fn issue_430_fr004_deliberate_failure_demo() {
-    assert!(
-        false,
-        "deliberate failure for issue #430 FR-004 demonstration — must be reverted before merge"
-    );
-}
