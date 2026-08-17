@@ -299,14 +299,22 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(WAL_GENERATION_FILE))
     {
         let dest = default_dir.join(WAL_GENERATION_FILE);
-        if dest.exists() {
-            return Err(Error::Ipc(format!(
-                "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and a \
-                 destination {dest:?} both exist — reconcile which one is authoritative (delete \
-                 whichever is stale) before retrying. No artifacts were relocated."
-            )));
+        // Publish via `hard_link` + `remove_file`, not `rename`: a plain rename would silently
+        // replace an already-existing `dest` if another process raced this migration on the same
+        // `wal_root` between an `exists()` check and the rename call. `hard_link` fails closed
+        // with `AlreadyExists` instead, giving the same conflict error with no TOCTOU window —
+        // the same publish pattern `wal_generation::ensure_generation` itself uses for its mint.
+        match fs::hard_link(loose_generation, &dest) {
+            Ok(()) => fs::remove_file(loose_generation)?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(Error::Ipc(format!(
+                    "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and a \
+                     destination {dest:?} both exist — reconcile which one is authoritative \
+                     (delete whichever is stale) before retrying. No artifacts were relocated."
+                )));
+            }
+            Err(e) => return Err(e.into()),
         }
-        fs::rename(loose_generation, &dest)?;
     }
     crate::wal_generation::ensure_generation(&default_dir)?;
 
