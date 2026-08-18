@@ -125,10 +125,13 @@ masked exit status would discard.
   worth a future reader knowing the difference between "we trust CI because it works" and
   "we trust CI because we haven't checked whether it works" is exactly the gap #430 closed.
 - The documented release-verification step changes from reading job conclusions to
-  `gh run view <id> --log | grep -a "test result: FAILED"` (see
-  `docs/release-process.md`), since this issue's own history is proof that the conclusion
-  alone is not a trustworthy signal even after this fix — defense in depth against any
-  future regression of the same shape.
+  capturing the run log and grepping it for `test result: FAILED` (see
+  `docs/release-process.md`) — `gh run view <id> --log > file` first, then `grep -a
+  "test result: FAILED" file`, not a direct `--log | grep` pipe, since a piped form would
+  let a failed log fetch silently read as "no failure found," the same masking shape this
+  issue is about. This is defense in depth against any future regression of that shape:
+  this issue's own history is proof the conclusion alone is not a trustworthy signal even
+  after this fix.
 
 ## Alternatives Considered
 
