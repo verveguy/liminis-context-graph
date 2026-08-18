@@ -70,6 +70,7 @@ As a maintainer preparing a release, I want the documented way to verify "e2e pa
 ### Functional Requirements
 
 - **FR-001**: Each of the six `run:` steps below MUST fail its containing job when the piped command exits non-zero, not merely when `tee` fails:
+
   | file | line (at spec time) | job |
   |---|---|---|
   | `.github/workflows/ci.yml` | 295 | `test (ubuntu-latest)` — required merge gate, `cargo test --release` |
@@ -78,6 +79,7 @@ As a maintainer preparing a release, I want the documented way to verify "e2e pa
   | `.github/workflows/ci.yml` | 497 | `mcp_real_corpus_mutation_e2e` |
   | `.github/workflows/ci.yml` | 536 | `mcp_real_corpus_admin_data_e2e` |
   | `.github/workflows/ci.yml` | 576 | `mcp_real_corpus_admin_lifecycle_e2e` |
+
 - **FR-002**: The mechanism used to satisfy FR-001 (adding `set -o pipefail` to each affected step individually, versus a workflow-wide `defaults.run.shell: bash -eo pipefail`) is an implementation choice, not fixed by this spec — the tradeoff (repetition vs. blast radius across every `run:` step in the file) is called out explicitly in the source issue for the next stage to weigh.
 - **FR-003**: `.github/workflows/bench.yml` and `.github/workflows/release.yml` MUST be audited for the same pattern — any `run:` step piping a status-bearing command's output through another command with no `pipefail` protection — and any instance found MUST receive the same fix as FR-001. `bench.yml` is known at spec time to contain three such steps (the `dedup bench 1k`/`10k`/`50k` steps, each piping `cargo bench` through `tee`). `release.yml` MUST be re-checked at implementation time rather than assumed identical to the source issue's description, since it references a specific step (an OpenSSL static-link assertion from a separate in-flight issue, #398) that had not yet merged to `main` as of this spec being written and may or may not be present when this issue is implemented.
 - **FR-004**: For the required test gate (the line-295 step) and at least one of the five e2e jobs, the fix MUST be demonstrated working, not merely asserted from reading the YAML: a deliberate, temporary failure is introduced, shown to turn the containing job's CI conclusion red, and then reverted.

@@ -88,6 +88,7 @@ ORDERED=(
   "testing-and-evaluation.md:${SITE_URL}/testing-and-evaluation"
   "eval-full-corpus-runbook.md:${SITE_URL}/eval-full-corpus-runbook"
   "extraction-quality-evaluation.md:${SITE_URL}/extraction-quality-evaluation"
+  "release-process.md:${SITE_URL}/release-process"
   "adr/index.md:${SITE_URL}/adr/index"
 )
 
