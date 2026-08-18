@@ -265,10 +265,14 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// is relocated ahead of both the mint and the general loop, specifically so the mint never gets a
 /// chance to occupy `default_dir`'s sidecar path first and cause the general loop to skip (and
 /// thereby orphan) the loose original. If `default_dir` already has its own sidecar (FR-002's
-/// "don't overwrite" case) *and* a loose one is also present at the root, the two cannot be
-/// silently reconciled — one of them is stale or the two disagree, and neither an unconditional
+/// "don't overwrite" case) *and* a loose one is also present at the root, and the two disagree,
+/// they cannot be silently reconciled — one of them is stale, and neither an unconditional
 /// overwrite nor a silent skip is safe — so this returns an error instead of relocating anything,
 /// including the other loose artifacts, until an operator resolves which sidecar is authoritative.
+/// If instead the two are byte-identical, that is not a conflict: it is this function's own
+/// leftover from a prior call whose `hard_link` succeeded but whose following `remove_file` failed
+/// (e.g. a permission/mount change racing between the two calls) — that case self-heals by
+/// removing the loose duplicate, consistent with every other crash point in this migration.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -307,11 +311,26 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
         match fs::hard_link(loose_generation, &dest) {
             Ok(()) => fs::remove_file(loose_generation)?,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(Error::Ipc(format!(
-                    "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and a \
-                     destination {dest:?} both exist — reconcile which one is authoritative \
-                     (delete whichever is stale) before retrying. No artifacts were relocated."
-                )));
+                // Not necessarily a genuine conflict: a prior call may have hard_link'd
+                // successfully and then failed on this same remove_file (a permission/mount
+                // change racing between the two calls), leaving `loose_generation` and `dest`
+                // as two paths to identical content. That is this function's own unfinished
+                // cleanup, not a disagreement between two authorities — recognize it by content
+                // equality and self-heal by removing the leftover loose file, matching every
+                // other crash point in this migration's "idempotent and crash-safe" guarantee.
+                // Only a genuine content mismatch is left as a real conflict.
+                let loose_bytes = fs::read(loose_generation)?;
+                let dest_bytes = fs::read(&dest)?;
+                if loose_bytes == dest_bytes {
+                    fs::remove_file(loose_generation)?;
+                } else {
+                    return Err(Error::Ipc(format!(
+                        "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and \
+                         a destination {dest:?} both exist and disagree — reconcile which one is \
+                         authoritative (delete whichever is stale) before retrying. No artifacts \
+                         were relocated."
+                    )));
+                }
             }
             Err(e) => return Err(e.into()),
         }
@@ -717,6 +736,47 @@ mod tests {
             crate::wal_generation::read_generation(&default_dir),
             Some("destination-value".to_string()),
             "the destination's existing generation must be untouched"
+        );
+    }
+
+    /// handarbeit-pruefer finding on PR #433: a loose sidecar and destination sidecar that are
+    /// byte-identical are not a genuine conflict — they are this function's own leftover from a
+    /// prior call whose `hard_link` succeeded but whose following `remove_file` failed. That case
+    /// must self-heal (remove the loose duplicate and proceed) rather than permanently refusing
+    /// with a "reconcile which is authoritative" error an operator cannot actually act on, since
+    /// there is nothing to reconcile: the two paths already agree.
+    #[test]
+    fn migrate_self_heals_a_leftover_loose_sidecar_identical_to_the_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_jsonl = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_jsonl, b"{}\n").unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"shared-value"}"#).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        // Simulates a prior call's hard_link succeeding and its remove_file failing: the two
+        // paths hold identical content, as real hard-linked files would.
+        fs::write(
+            default_dir.join(".wal-generation.json"),
+            r#"{"generation":"shared-value"}"#,
+        )
+        .unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            !loose_generation_file.exists(),
+            "the leftover loose duplicate must be cleaned up, not left in place forever"
+        );
+        assert!(
+            !loose_jsonl.exists(),
+            "once the leftover is recognized as benign, the other loose artifacts must still be relocated"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("shared-value".to_string()),
+            "the destination's generation must be preserved unchanged"
         );
     }
 
