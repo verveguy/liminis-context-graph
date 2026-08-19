@@ -516,6 +516,61 @@ async fn story5_legacy_no_generation_stream_across_two_boots_then_later_reset_is
     assert!(conn.get_entity_by_uuid("post-upgrade-0").unwrap().is_some());
 }
 
+/// Issue #431 FR-006(b)/SC-003: the unknown-generation guard must remain unweakened for a stream
+/// whose missing sidecar did not arise from `migrate_wal_root_if_needed`'s migration path. This
+/// stream never has a flat, pre-378 origin at all — its content is written directly into its
+/// per-group directory, and it briefly carries a real generation (recorded into a position by a
+/// first rebuild) before that sidecar is removed by hand, simulating a stream that arrived
+/// without one for reasons unrelated to this issue's migration fix (e.g. one stripped per the
+/// ADR-0387 publish contract). This must still be refused, exactly as before this issue's change.
+#[tokio::test]
+async fn sc003_stream_with_generation_removed_by_hand_after_migration_fix_is_still_refused() {
+    const G: &str = "g-stripped";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    write_group_wal(
+        &wal_root,
+        G,
+        "0000.jsonl",
+        &[entity_wal_line(0, "stripped-0", "stripped-0", G)],
+    );
+    set_group_generation(&wal_root, G, "gen-original");
+
+    let state = make_state_with_wal(db, wal_root.clone());
+
+    // Boot 1: replays normally and records a position against the known generation.
+    let boot1_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
+    assert_eq!(boot1_v["result"]["success"], true, "{boot1_v}");
+    {
+        let db2 = state.db.load_full().unwrap();
+        let conn = db2.connect().unwrap();
+        let pos = conn.get_wal_position(G).unwrap();
+        assert_eq!(pos.applied_seq, Some(0));
+        assert_eq!(pos.generation.as_deref(), Some("gen-original"));
+    }
+
+    // The sidecar is stripped by hand, not by migration — this workspace was never a flat,
+    // pre-378 WAL, and `migrate_wal_root_if_needed` is never called in this test at all.
+    std::fs::remove_file(group_dir(&wal_root, G).join(".wal-generation.json")).unwrap();
+    assert_eq!(read_group_generation(&wal_root, G), None);
+
+    let boot2_v =
+        dispatch_rebuild_sync(2, json!({"group_id": G, "from_seq": 1}), Arc::clone(&state)).await;
+    assert!(
+        boot2_v.get("error").is_some(),
+        "a recorded position with a since-removed generation must still refuse to replay: {boot2_v}"
+    );
+    assert_eq!(boot2_v["error"]["code"], -32000, "{boot2_v}");
+    let boot2_msg = boot2_v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        boot2_msg.contains(G) && boot2_msg.contains(".wal-generation.json"),
+        "error should name the group and the missing sidecar: {boot2_v}"
+    );
+}
+
 // ── issue #414 FR-001: knowledge_status's three-state generation_status field ──────────────────
 
 #[tokio::test]

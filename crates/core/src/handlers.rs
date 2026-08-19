@@ -2041,12 +2041,21 @@ async fn handle_rebuild_from_wal(
     // a sibling group in the same WAL root with a known generation is unaffected. No
     // configuration flag, environment variable, or request parameter bypasses this (Out of Scope).
     if recorded_position.applied_seq.is_some() && current_generation.is_none() {
+        // FR-004 (issue #431): the two situations that produce this state — a received stream
+        // whose sidecar was stripped, and a workspace migrated by a pre-#431 binary before
+        // migration itself learned to stamp one — are indistinguishable on disk (same directory
+        // shape, same recorded position, same absent file), so the message cannot assert which
+        // one applies. It presents both remedies rather than picking one.
         return Err(Error::WalGenerationUnknown(format!(
             "group {group_id:?}: {} is absent or unreadable — cannot verify this \
              stream's generation before replaying against a previously recorded position. \
-             Republish this stream's full directory (dot-namespace included: `cp -R`/`rsync -a` \
-             without an include-filter, or `git add -A` — not a `*.jsonl` glob) so its \
-             generation travels with it; see docs/operations.md's WAL stream-publish contract.",
+             If this stream was received from a publisher, republish its full directory \
+             (dot-namespace included: `cp -R`/`rsync -a` without an include-filter, or \
+             `git add -A` — not a `*.jsonl` glob) so its generation travels with it; see \
+             docs/operations.md's WAL stream-publish contract. If this is a local workspace \
+             with no publisher (e.g. migrated from a pre-0.13.0 flat WAL by a binary older \
+             than this fix), create `.wal-generation.json` in the group's WAL directory by \
+             hand with any unique string value, e.g. `{{\"generation\": \"<uuid>\"}}`.",
             wal_dir
                 .join(crate::wal_generation::WAL_GENERATION_FILE)
                 .display()

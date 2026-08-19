@@ -237,6 +237,42 @@ fn is_legacy_top_level_wal_artifact(path: &Path) -> bool {
 /// unmoved remainder and finishes the job — no separate marker file is needed, and a second call
 /// over an already-fully-migrated root is a cheap no-op (the top-level scan finds nothing to
 /// move). Must be called before any per-group `WalWriter` is constructed against `wal_root`.
+///
+/// Also stamps a `.wal-generation.json` for the destination group (issue #431), whenever there is
+/// legacy content to relocate: a legacy flat WAL predates generation identity (#387) entirely, and
+/// this migration *assumes* it is locally owned (this node wrote it) rather than proving it —
+/// nothing on disk distinguishes a flat WAL this node wrote from one copied in from elsewhere; see
+/// issue #431's `## Assumptions` for why the assumption holds today and what would invalidate it.
+/// Under that assumption, migration mints a generation for it rather than leaving it to be refused
+/// by #414's unknown-generation guard on the very next rebuild. `wal_generation::ensure_generation`
+/// is itself idempotent (FR-002: never overwrites an existing record) and is only ever called here
+/// on `default_dir`, the exact directory this migration just relocated (or is relocating) loose
+/// content into — never as a general sweep over every group directory, which would also stamp an
+/// unrelated stream that arrived without a generation for other reasons (e.g. one stripped per the
+/// ADR-0387 publish contract) and defeat the guard #414 introduced.
+///
+/// The stamp is minted *before* the relocation loop below, not after: if it ran last and failed
+/// (disk full, permissions) on a call where every loose entry had already been renamed, the next
+/// call's `loose_entries` scan would find nothing left at the root and take the early return above
+/// without ever retrying the stamp, leaving the group permanently generationless. Minting first
+/// keeps the stamp attempt covered by the same retry the relocation loop already gets: as long as
+/// any loose entry remains unmoved, this function is re-entered past the early return on the next
+/// call, and `ensure_generation`'s own idempotency (FR-002) makes re-attempting it there a no-op
+/// once it has actually succeeded.
+///
+/// A loose `.wal-generation.json` — recognized by [`is_legacy_top_level_wal_artifact`] for
+/// consistency with the other sidecars, though no genuine pre-378 install can actually have one —
+/// is relocated ahead of both the mint and the general loop, specifically so the mint never gets a
+/// chance to occupy `default_dir`'s sidecar path first and cause the general loop to skip (and
+/// thereby orphan) the loose original. If `default_dir` already has its own sidecar (FR-002's
+/// "don't overwrite" case) *and* a loose one is also present at the root, and the two disagree,
+/// they cannot be silently reconciled — one of them is stale, and neither an unconditional
+/// overwrite nor a silent skip is safe — so this returns an error instead of relocating anything,
+/// including the other loose artifacts, until an operator resolves which sidecar is authoritative.
+/// If instead the two are byte-identical, that is not a conflict: it is this function's own
+/// leftover from a prior call whose `hard_link` succeeded but whose following `remove_file` failed
+/// (e.g. a permission/mount change racing between the two calls) — that case self-heals by
+/// removing the loose duplicate, consistent with every other crash point in this migration.
 pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
     if !wal_root.exists() {
         // Fresh install: nothing to migrate. Per-group directories are created lazily on
@@ -255,6 +291,52 @@ pub fn migrate_wal_root_if_needed(wal_root: &Path) -> Result<(), Error> {
 
     let default_dir = wal_root.join(DEFAULT_GROUP_ID);
     fs::create_dir_all(&default_dir)?;
+
+    // A loose `.wal-generation.json` (if one is somehow present — see `WAL_GENERATION_FILE`'s own
+    // doc comment on why no genuine pre-378 install can have one) must be relocated *before*
+    // `ensure_generation` mints a fresh record below. Otherwise `ensure_generation` would create
+    // `default_dir`'s sidecar first, the relocation loop's `dest.exists()` check would then see it
+    // and skip the loose file, and the loose file's real content would be silently orphaned at the
+    // WAL root forever in favor of a freshly-minted, unrelated UUID.
+    if let Some(loose_generation) = loose_entries
+        .iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(WAL_GENERATION_FILE))
+    {
+        let dest = default_dir.join(WAL_GENERATION_FILE);
+        // Publish via `hard_link` + `remove_file`, not `rename`: a plain rename would silently
+        // replace an already-existing `dest` if another process raced this migration on the same
+        // `wal_root` between an `exists()` check and the rename call. `hard_link` fails closed
+        // with `AlreadyExists` instead, giving the same conflict error with no TOCTOU window —
+        // the same publish pattern `wal_generation::ensure_generation` itself uses for its mint.
+        match fs::hard_link(loose_generation, &dest) {
+            Ok(()) => fs::remove_file(loose_generation)?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Not necessarily a genuine conflict: a prior call may have hard_link'd
+                // successfully and then failed on this same remove_file (a permission/mount
+                // change racing between the two calls), leaving `loose_generation` and `dest`
+                // as two paths to identical content. That is this function's own unfinished
+                // cleanup, not a disagreement between two authorities — recognize it by content
+                // equality and self-heal by removing the leftover loose file, matching every
+                // other crash point in this migration's "idempotent and crash-safe" guarantee.
+                // Only a genuine content mismatch is left as a real conflict.
+                let loose_bytes = fs::read(loose_generation)?;
+                let dest_bytes = fs::read(&dest)?;
+                if loose_bytes == dest_bytes {
+                    fs::remove_file(loose_generation)?;
+                } else {
+                    return Err(Error::Ipc(format!(
+                        "cannot migrate WAL root {wal_root:?}: a loose {loose_generation:?} and \
+                         a destination {dest:?} both exist and disagree — reconcile which one is \
+                         authoritative (delete whichever is stale) before retrying. No artifacts \
+                         were relocated."
+                    )));
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    crate::wal_generation::ensure_generation(&default_dir)?;
+
     for entry in loose_entries {
         let Some(file_name) = entry.file_name() else {
             continue;
@@ -455,6 +537,247 @@ mod tests {
             .exists());
         assert!(!tmp.path().join(".checkpoints").exists());
         assert!(!tmp.path().join(".wal-bounds.json").exists());
+    }
+
+    /// FR-001/SC-002: relocating loose legacy content into the destination group's directory
+    /// must also stamp a readable generation for it, so #414's unknown-generation guard doesn't
+    /// refuse the very next rebuild.
+    #[test]
+    fn migrate_stamps_a_generation_for_the_relocated_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        let generation = crate::wal_generation::read_generation(&default_dir);
+        assert!(
+            generation.is_some(),
+            "migration must mint a generation for the group it relocated content into"
+        );
+    }
+
+    /// FR-002: if the destination group already has a generation recorded (e.g. a partially
+    /// completed prior migration, or the group already received writes through some other path),
+    /// migration must not overwrite it with a fresh one.
+    #[test]
+    fn migrate_does_not_overwrite_an_existing_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        let pre_existing = crate::wal_generation::ensure_generation(&default_dir).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some(pre_existing),
+            "migration must not overwrite an already-recorded generation"
+        );
+    }
+
+    /// Guards against the over-broad "stamp any unstamped group" sweep the spec explicitly
+    /// rejects: a sibling group directory migration doesn't touch must not gain a generation
+    /// stamp as a side effect of an unrelated migration run.
+    #[test]
+    fn migrate_does_not_stamp_a_sibling_group_it_did_not_relocate_content_into() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let sibling_dir = tmp.path().join("group-a");
+        fs::create_dir_all(&sibling_dir).unwrap();
+        fs::write(sibling_dir.join("0000.jsonl"), b"{}\n").unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            crate::wal_generation::read_generation(&sibling_dir).is_none(),
+            "an untouched sibling group must not be stamped by this migration"
+        );
+    }
+
+    /// Failure-injection regression for the recoverability gap CodeRabbit flagged on this PR: if
+    /// `ensure_generation` fails (here, simulated via a read-only destination directory) on a run
+    /// where it would otherwise be the last step, a naive "stamp after relocating" ordering would
+    /// leave the group permanently generationless — the next call's top-level scan finds no loose
+    /// entries left and takes the early return before ever retrying the stamp. Stamping *before*
+    /// the relocation loop (this function's actual order) means the loose entries are still at the
+    /// root when the stamp fails, so the next call is guaranteed to retry both.
+    #[test]
+    #[cfg(unix)]
+    fn migrate_recovers_after_generation_stamp_fails_on_a_prior_call() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_file = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_file, b"{}\n").unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        let mut perms = fs::metadata(&default_dir).unwrap().permissions();
+        perms.set_mode(0o555); // read + execute, no write: blocks ensure_generation's tmp-file create
+        fs::set_permissions(&default_dir, perms).unwrap();
+
+        let result = migrate_wal_root_if_needed(tmp.path());
+        assert!(
+            result.is_err(),
+            "the stamp attempt must fail while the destination directory is read-only"
+        );
+        assert!(
+            loose_file.exists(),
+            "relocation must not have happened yet — the stamp runs first and failed"
+        );
+        assert!(
+            crate::wal_generation::read_generation(&default_dir).is_none(),
+            "no generation should have been minted by the failed attempt"
+        );
+
+        let mut perms = fs::metadata(&default_dir).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&default_dir, perms).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            !loose_file.exists(),
+            "the retried migration must finish relocating the loose entry"
+        );
+        assert!(
+            default_dir
+                .join("20260101_000000_abcdef_0000.jsonl")
+                .is_file(),
+            "the loose entry must have landed in the destination group directory"
+        );
+        assert!(
+            crate::wal_generation::read_generation(&default_dir).is_some(),
+            "the retried migration must finish stamping a generation"
+        );
+    }
+
+    /// Regression for the review finding on stamp-before-relocate ordering: a loose
+    /// `.wal-generation.json` at the WAL root's top level (structurally impossible for a genuine
+    /// pre-378 install, per `WAL_GENERATION_FILE`'s doc comment, but still recognized by
+    /// `is_legacy_top_level_wal_artifact` "for consistency") must have its real content preserved
+    /// by relocation, not silently discarded in favor of a freshly-minted UUID because
+    /// `ensure_generation` got to occupy the destination path first.
+    #[test]
+    fn migrate_relocates_a_loose_generation_sidecar_instead_of_orphaning_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("20260101_000000_abcdef_0000.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"original-value"}"#).unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        assert!(
+            !loose_generation_file.exists(),
+            "the loose sidecar must have been relocated, not left orphaned at the WAL root"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("original-value".to_string()),
+            "the relocated sidecar's original content must be preserved, not overwritten by a fresh mint"
+        );
+    }
+
+    /// CodeRabbit finding on PR #433: a loose sidecar coexisting with an already-populated
+    /// destination sidecar must not be silently reconciled by discarding one of them. Migration
+    /// must refuse instead, and leave every artifact — including the other loose entries that
+    /// have nothing to do with the conflict — exactly where it found them, so an operator can
+    /// inspect and choose which value is authoritative.
+    #[test]
+    fn migrate_fails_instead_of_silently_reconciling_conflicting_generation_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_jsonl = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_jsonl, b"{}\n").unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"loose-value"}"#).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        fs::write(
+            default_dir.join(".wal-generation.json"),
+            r#"{"generation":"destination-value"}"#,
+        )
+        .unwrap();
+
+        let result = migrate_wal_root_if_needed(tmp.path());
+        assert!(
+            result.is_err(),
+            "migration must refuse when the loose and destination generations conflict"
+        );
+
+        assert!(
+            loose_jsonl.exists(),
+            "unrelated loose artifacts must not be relocated while the conflict is unresolved"
+        );
+        assert!(
+            loose_generation_file.exists(),
+            "the loose generation sidecar must be left in place, not discarded"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("destination-value".to_string()),
+            "the destination's existing generation must be untouched"
+        );
+    }
+
+    /// handarbeit-pruefer finding on PR #433: a loose sidecar and destination sidecar that are
+    /// byte-identical are not a genuine conflict — they are this function's own leftover from a
+    /// prior call whose `hard_link` succeeded but whose following `remove_file` failed. That case
+    /// must self-heal (remove the loose duplicate and proceed) rather than permanently refusing
+    /// with a "reconcile which is authoritative" error an operator cannot actually act on, since
+    /// there is nothing to reconcile: the two paths already agree.
+    #[test]
+    fn migrate_self_heals_a_leftover_loose_sidecar_identical_to_the_destination() {
+        let tmp = tempfile::tempdir().unwrap();
+        let loose_jsonl = tmp.path().join("20260101_000000_abcdef_0000.jsonl");
+        fs::write(&loose_jsonl, b"{}\n").unwrap();
+        let loose_generation_file = tmp.path().join(".wal-generation.json");
+        fs::write(&loose_generation_file, r#"{"generation":"shared-value"}"#).unwrap();
+
+        let default_dir = tmp.path().join("liminis");
+        fs::create_dir_all(&default_dir).unwrap();
+        // Simulates a prior call's hard_link succeeding and its remove_file failing: the two
+        // paths hold identical content, as real hard-linked files would.
+        fs::write(
+            default_dir.join(".wal-generation.json"),
+            r#"{"generation":"shared-value"}"#,
+        )
+        .unwrap();
+
+        migrate_wal_root_if_needed(tmp.path()).unwrap();
+
+        assert!(
+            !loose_generation_file.exists(),
+            "the leftover loose duplicate must be cleaned up, not left in place forever"
+        );
+        assert!(
+            !loose_jsonl.exists(),
+            "once the leftover is recognized as benign, the other loose artifacts must still be relocated"
+        );
+        assert_eq!(
+            crate::wal_generation::read_generation(&default_dir),
+            Some("shared-value".to_string()),
+            "the destination's generation must be preserved unchanged"
+        );
     }
 
     #[test]
