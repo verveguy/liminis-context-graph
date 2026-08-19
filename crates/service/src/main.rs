@@ -153,6 +153,11 @@ fn recording_sink(
 /// (`--mcp-stdio` without `--connect`) so both reuse byte-for-byte the same bootstrap path —
 /// attached MCP mode (`--mcp-stdio --connect <path>`) never calls this at all, since it forwards
 /// every call to an already-running service instead of opening the DB itself (FR-006).
+///
+/// Precondition (#437): must only be called after `migration::migrate_workspace` has run for
+/// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call
+/// below needs `.lcg/wal` to already exist for a `.graphiti`-era workspace, or it silently no-ops
+/// and legacy WAL content is left loose and invisible.
 async fn bootstrap_app_state(
     telemetry_sink: Arc<dyn TelemetrySink>,
     pre_migration_degraded: Option<String>,
@@ -517,6 +522,17 @@ async fn bootstrap_app_state(
     let startup_wal_root = std::path::PathBuf::from(
         lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").unwrap_or_else(|_| ".lcg/wal".to_string()),
     );
+    // #437: relies on `migration::migrate_workspace` (async_main, above) having already moved
+    // any `.graphiti/wal` content into `startup_wal_root` before this runs — see this function's
+    // doc comment. `migrate_wal_root_if_needed` is idempotent and no-ops cleanly on a missing or
+    // already-migrated root, so re-running it here (it's also called from
+    // `AppState::from_env`, below) is safe; it just must never run *before* that workspace move.
+    //
+    // #437 FR-008: we deliberately do NOT add a post-migration scan for stray loose WAL content
+    // left over after both migrations run. Both migrations are idempotent and now correctly
+    // ordered (see above), and the un-ignored `binary_migrates_legacy_workspace_on_startup`
+    // regression test guards that ordering going forward — a "scan for strays and warn" step
+    // would be defense-in-depth for a defect that no longer exists, not a fix for one that does.
     if let Err(e) = lcg_core::wal_group::migrate_wal_root_if_needed(&startup_wal_root) {
         eprintln!(
             "liminis-context-graph: wal root migration failed for {startup_wal_root:?} \
@@ -997,6 +1013,15 @@ async fn async_main(
     // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
     // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
     // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
+    //
+    // #437: this MUST also run before `bootstrap_app_state` (called later in this function, at
+    // lines 1067/1092), because `bootstrap_app_state` is what performs the per-group WAL-root
+    // migration (`wal_group::migrate_wal_root_if_needed`, see the comment at its call site).
+    // For a `.graphiti`-era workspace, `.lcg/wal` doesn't exist until this migration moves it
+    // there — if the per-group migration ran first, it would no-op on the missing directory and
+    // never get another chance, leaving the relocated WAL files loose forever. The dependency
+    // is enforced only by this straight-line call order, not by the type system: don't extract a
+    // "resolve paths" helper or otherwise move `bootstrap_app_state`'s call ahead of this one.
     let (pre_migration_degraded, did_migrate) =
         match migration::migrate_workspace(Path::new("."), &*telemetry_sink) {
             Ok(migration::MigrationOutcome::Migrated) => (None, true),

@@ -124,6 +124,13 @@ impl AppState {
             lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
                 .unwrap_or_else(|_| ".lcg/wal".to_string()),
         ));
+        // #437: by the time `from_env` runs, `main.rs`'s startup sequence has already run
+        // `migration::migrate_workspace` (the `.graphiti/` → `.lcg/` move) followed by its own
+        // `migrate_wal_root_if_needed` call in `bootstrap_app_state` — so this call is a
+        // redundant, idempotent no-op safety net for callers that construct `AppState` directly
+        // via `from_env` without going through `bootstrap_app_state` first, not the primary
+        // relocation point. It must never become the *only* call, since `from_env` has no access
+        // to `.graphiti/`-era paths and cannot itself run the workspace move.
         if let Some(root) = wal_root.as_deref() {
             if let Err(e) = crate::wal_group::migrate_wal_root_if_needed(root) {
                 eprintln!(
