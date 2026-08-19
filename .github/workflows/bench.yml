@@ -12,6 +12,13 @@ on:
   # schedule:
   #   - cron: '0 2 * * *'  # 02:00 UTC every night
 
+# See ci.yml's `defaults:` block for why this is here: without an explicit `shell: bash`,
+# GitHub's implicit default shell has no `pipefail`, so the `cargo bench ... | tee` steps
+# below would report `tee`'s exit status, not `cargo bench`'s. #430.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   bench:
     name: bench (ubuntu-latest)
