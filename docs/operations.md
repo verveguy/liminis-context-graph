@@ -36,7 +36,14 @@ writer, one recorded position. An **existing** pre-378 `.lcg/wal/` (loose
 `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` directly under `wal/`, no `liminis/` subdirectory) is
 migrated automatically and idempotently on first boot under the upgraded binary — see
 [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md) for the migration mechanics; no
-operator action is required.
+operator action is required. As of issue #431, this migration also mints a
+`.wal-generation.json` for the group it relocates content into: a legacy flat WAL predates
+generation identity (issue #387) entirely, and migration *assumes* it is locally owned — this is
+an assumption, not something provable from the directory contents alone (see issue #431's
+`## Assumptions` for why it holds today and what would invalidate it) — rather than leaving it
+with an unknown generation (see the unknown-generation refusal below, and
+[ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md)'s amendment note). No operator
+action is required for this either — it happens as part of the same migration.
 
 **`.wal-generation.json` (issue #387) gives each group's stream a stable identity, distinct from
 its `seq` numbering.** `seq` identifies a position *within* a stream; it says nothing about
@@ -117,6 +124,15 @@ select `*.jsonl` files.
   no previously recorded position is unaffected: it performs ordinary first-time adoption, including
   adopting an unknown generation, exactly as before this issue. See
   [ADR-0414](adr/0414-wal-generation-unknown-refuses-replay.md) for the full rationale.
+  A workspace migrated from a legacy flat WAL by a binary containing issue #431's fix does not
+  hit this refusal — migration itself stamps a generation, so the group's current on-disk
+  generation is never unknown afterward (see the migration paragraph above). If it still fires,
+  the error message gives two possible remedies, since the two situations that can produce this
+  state are indistinguishable on disk: republish the stream's full directory if it was received
+  from a publisher (above), or — for a local workspace with no publisher, e.g. one migrated by a
+  binary older than issue #431's fix — create `.wal-generation.json` in the group's WAL directory
+  by hand with any unique string value, `{"generation": "<any unique string>"}`, as a one-time,
+  deliberate assertion of ownership.
 - **Reset detection (issue #387).** Once the check above has passed, `knowledge_rebuild_from_wal`
   compares the group's recorded generation against what's currently on disk
   (`.wal-generation.json`). If they differ (both known and unequal — see `wal.generation_status`
