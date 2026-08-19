@@ -135,7 +135,7 @@ As a maintainer who has observed three unexplained multi-hour CI hangs in `cargo
 - **SC-001**: `cargo test --release` passes in CI, and its observed completion time across several post-upgrade runs is recorded. **The gate is that the suite passes and the outcome is reported, not that the hangs are gone** — whether completion times land near the roughly 5-minute local baseline is the result of User Story 4's hypothesis test, and either answer satisfies this criterion as long as it is stated explicitly. If hangs persist, that is a recorded negative result and a follow-up lead (Linux-vs-macOS, #378), not a failure of this issue; see Edge Cases and Out of Scope, which this wording is written to agree with.
 - **SC-002**: The release workflow builds and links on every target platform.
 - **SC-003**: A WAL written under 0.17.0 replays under 0.19.1 to byte-identical graph state.
-- **SC-004**: `~/dev/liminis-project/multistream_test.py` still passes 9/10 (the tenth being #392) — covering per-group streams, cross-group pointers, purge, checkpoint restore and rebind.
+- **SC-004**: `~/dev/liminis-project/multistream_test.py` passes **10/10** — covering per-group streams, cross-group pointers, purge, checkpoint restore and rebind. (Originally written as "9/10, the tenth being #392". #392 merged via PR #399 before this issue's implementation, so the target is 10/10 and a tenth passing test is expected rather than anomalous. Verified 10/10 during Validate.)
 - **SC-005**: No change to any `knowledge_*` tool schema or response shape.
 
 ## Assumptions
@@ -164,5 +164,5 @@ As a maintainer who has observed three unexplained multi-hour CI hangs in `cargo
 - Issue #221 — blocked on secondary ART indexes; explicitly out of scope here
 - Issue #378 — `check_no_case_insensitive_collision`, one of the leads if hangs persist post-upgrade
 - Issues #190 and #220 — superseded by this issue; #190's linkage analysis is reproduced in Background
-- `~/dev/liminis-project/multistream_test.py` — SC-004's 9/10 regression check
+- `~/dev/liminis-project/multistream_test.py` — SC-004's regression check
 - Upstream `LadybugDB/ladybug` releases 0.17.1 through 0.19.1, and PRs `#590`, `#579`, `#581`, `#665`, `#687`, `#689`, `#615`, `#582`, `#577`, `#574`, `#569`, `#673`, `#547`, `#762`
