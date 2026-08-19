@@ -76,18 +76,22 @@ mod migration_binary_tests {
         port
     }
 
-    // FR-001, FR-002, FR-003, SC-001, SC-002:
+    // FR-001, FR-002, FR-003, FR-006, FR-007, SC-001, SC-002:
     // Binary migrates a legacy .graphiti/ workspace to .lcg/ on startup and then
     // serves IPC requests normally without data loss.
     //
-    // Quarantined: #437. The per-group WAL migration (main.rs:520) runs before the
-    // .graphiti/->.lcg/ move (main.rs:1001), so at relocation time there is no .lcg/wal
-    // yet and it correctly no-ops; the legacy WAL file then lands loose at .lcg/wal/ and
-    // is never relocated into .lcg/wal/liminis/, failing the assertion below. This is a
-    // genuine startup-ordering defect, not a test-infra flake — see #437 for the fix.
-    // Un-ignore this test once #437 lands.
+    // Regression guard for #437: `migration::migrate_workspace` (the .graphiti/->.lcg/ move)
+    // must complete before `bootstrap_app_state`'s per-group WAL-root migration
+    // (`wal_group::migrate_wal_root_if_needed`) inspects `.lcg/wal` for loose files to
+    // relocate — otherwise, for a .graphiti-era workspace, `.lcg/wal` doesn't exist yet at
+    // that point, the per-group migration no-ops on the missing directory, and the legacy
+    // WAL content that migrate_workspace moves in afterward is left loose at .lcg/wal/'s
+    // top level forever (invisible to this process — see the comments at both call sites in
+    // main.rs). Uses a 5-file corpus, not a single file, to distinguish "one file happens to
+    // relocate correctly" from "every file in the set is relocated," and asserts the
+    // .wal-generation.json sidecar (issue #431) lands under the group directory rather than
+    // loose at the root.
     #[test]
-    #[ignore = "#437: per-group WAL migration runs before the .graphiti/->.lcg/ move on startup"]
     fn binary_migrates_legacy_workspace_on_startup() {
         let dir = TempDir::new().unwrap();
         let workspace = dir.path();
@@ -105,10 +109,15 @@ mod migration_binary_tests {
         let db = Db::open(legacy_db_path.to_str().unwrap()).unwrap();
         drop(db);
 
-        // Application WAL directory with a dummy JSONL file
+        // Application WAL directory with several dummy JSONL files (FR-007: a more realistic
+        // multi-file corpus than a single file, to catch a fix that only relocates the first
+        // entry it sees rather than every loose file at the root).
         let wal_dir = legacy.join("wal");
         std::fs::create_dir(&wal_dir).unwrap();
-        std::fs::write(wal_dir.join("001.jsonl"), b"{\"type\":\"test\"}\n").unwrap();
+        let wal_file_names = ["001.jsonl", "002.jsonl", "003.jsonl", "004.jsonl", "005.jsonl"];
+        for name in wal_file_names {
+            std::fs::write(wal_dir.join(name), b"{\"type\":\"test\"}\n").unwrap();
+        }
 
         // Ontology and hash sidecar
         std::fs::write(
@@ -164,16 +173,37 @@ mod migration_binary_tests {
             ".lcg/wal/ must be a directory"
         );
         // .lcg/wal/ is a WAL root with one subdirectory per group_id (issue #378): the legacy
-        // .graphiti/->.lcg/ migration above lands 001.jsonl loose at .lcg/wal/'s top level,
-        // which the #378 root migration then relocates into the default group's subdirectory
-        // on the same startup, before the socket is ready.
+        // .graphiti/->.lcg/ migration above lands the WAL files loose at .lcg/wal/'s top level,
+        // which the #378 per-group migration then relocates into the default group's
+        // subdirectory on the same startup, before the socket is ready (#437: this only works
+        // because migrate_workspace runs first — see main.rs).
+        let group_wal_dir = new_dir.join("wal").join("liminis");
+        for name in wal_file_names {
+            assert!(
+                group_wal_dir.join(name).exists(),
+                "WAL file {name} must be migrated to .lcg/wal/liminis/ (issue #378 WAL-root layout)"
+            );
+        }
+        // FR-002/SC-001: no *.jsonl file may remain loose directly under .lcg/wal/.
+        let loose_jsonl: Vec<_> = std::fs::read_dir(new_dir.join("wal"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect();
         assert!(
-            new_dir
-                .join("wal")
-                .join("liminis")
-                .join("001.jsonl")
-                .exists(),
-            "WAL files must be migrated to .lcg/wal/liminis/ (issue #378 WAL-root layout)"
+            loose_jsonl.is_empty(),
+            "no *.jsonl file may remain loose directly under .lcg/wal/, found: {loose_jsonl:?}"
+        );
+        // FR-007: the .wal-generation.json sidecar (issue #431) must land under the group
+        // directory, not loose at the WAL root.
+        assert!(
+            group_wal_dir.join(".wal-generation.json").exists(),
+            ".wal-generation.json must be stamped under .lcg/wal/liminis/"
+        );
+        assert!(
+            !new_dir.join("wal").join(".wal-generation.json").exists(),
+            ".wal-generation.json must not remain loose at .lcg/wal/"
         );
         assert!(
             new_dir.join("ontology.yaml").exists(),
