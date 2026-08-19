@@ -124,13 +124,16 @@ impl AppState {
             lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR")
                 .unwrap_or_else(|_| ".lcg/wal".to_string()),
         ));
-        // #437: by the time `from_env` runs, `main.rs`'s startup sequence has already run
-        // `migration::migrate_workspace` (the `.graphiti/` → `.lcg/` move) followed by its own
-        // `migrate_wal_root_if_needed` call in `bootstrap_app_state` — so this call is a
-        // redundant, idempotent no-op safety net for callers that construct `AppState` directly
-        // via `from_env` without going through `bootstrap_app_state` first, not the primary
-        // relocation point. It must never become the *only* call, since `from_env` has no access
-        // to `.graphiti/`-era paths and cannot itself run the workspace move.
+        // #437: this call is idempotent, but it is not always a no-op — `from_env` has other
+        // callers (e.g. tests, or any future direct construction path) besides the service
+        // binary's own startup, and for one of those a flat `.lcg/wal` root with nothing yet
+        // relocated makes this the operative migration call. What it can *never* do is perform
+        // the `.graphiti/` → `.lcg/` workspace move itself (`from_env` has no access to
+        // `.graphiti/`-era paths), so on the service binary's startup path specifically, this
+        // call is only reached after `main.rs`'s `migration::migrate_workspace` and
+        // `bootstrap_app_state`'s own `migrate_wal_root_if_needed` call have already run — see
+        // those call sites for why that order matters. It must never become the *sole* call on
+        // that path.
         if let Some(root) = wal_root.as_deref() {
             if let Err(e) = crate::wal_group::migrate_wal_root_if_needed(root) {
                 eprintln!(

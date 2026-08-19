@@ -158,6 +158,13 @@ fn recording_sink(
 /// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call
 /// below needs `.lcg/wal` to already exist for a `.graphiti`-era workspace, or it silently no-ops
 /// and legacy WAL content is left loose and invisible.
+///
+/// Known limitation, tracked separately as #442 (pre-existing, not introduced or fixed by
+/// #437): `migrate_workspace` always moves `.graphiti/wal` to the hardcoded `.lcg/wal`,
+/// ignoring `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR`. If either is set to a non-default path for a
+/// `.graphiti`-era workspace, `startup_wal_root` below resolves to that custom path while the
+/// legacy content actually lands at `.lcg/wal` — so this ordering fix does not, by itself,
+/// cover a configured WAL root on that upgrade path.
 async fn bootstrap_app_state(
     telemetry_sink: Arc<dyn TelemetrySink>,
     pre_migration_degraded: Option<String>,
@@ -1014,9 +1021,11 @@ async fn async_main(
     // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
     // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
     //
-    // #437: this MUST also run before `bootstrap_app_state` (called later in this function, at
-    // lines 1067/1092), because `bootstrap_app_state` is what performs the per-group WAL-root
-    // migration (`wal_group::migrate_wal_root_if_needed`, see the comment at its call site).
+    // #437: this MUST also run before `bootstrap_app_state` (called from every `CliMode` arm
+    // further down in this function — do not trust specific line numbers here, they drift;
+    // grep for `bootstrap_app_state(` call sites instead), because `bootstrap_app_state` is
+    // what performs the per-group WAL-root migration (`wal_group::migrate_wal_root_if_needed`,
+    // see the comment at its call site).
     // For a `.graphiti`-era workspace, `.lcg/wal` doesn't exist until this migration moves it
     // there — if the per-group migration ran first, it would no-op on the missing directory and
     // never get another chance, leaving the relocated WAL files loose forever. The dependency
