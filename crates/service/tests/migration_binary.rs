@@ -1,10 +1,11 @@
 // Binary-level migration integration test (SC-001, SC-002, FR-002).
 //
-// Spawns the real binary against a legacy .graphiti/ workspace, waits for the
-// service to become ready (migration ran + socket bound), then asserts:
-// 1. The correct post-migration file layout under .lcg/
-// 2. The service is not degraded and responds to IPC
-// 3. Entity counts match the pre-migration state (0, since the legacy DB was empty)
+// Spawns the real binary against a legacy .graphiti/ workspace, waits for the socket to bind,
+// then confirms migration has actually completed via a blocking IPC round-trip (socket-bound
+// alone is not sufficient — see the comment at that call site), then asserts:
+// 1. The service is not degraded and responds to IPC
+// 2. Entity counts match the pre-migration state (0, since the legacy DB was empty)
+// 3. The correct post-migration file layout under .lcg/
 
 #[cfg(unix)]
 mod migration_binary_tests {
@@ -176,6 +177,62 @@ mod migration_binary_tests {
             panic!("service did not become ready within 30s — migration may have failed");
         }
 
+        // ── Assert IPC is functional post-migration ───────────────────────────
+        // Deliberately performed *before* the filesystem assertions below. `wait_for_socket`
+        // only proves the socket is bound — main.rs binds it, and prints "listening on ...",
+        // before calling `bootstrap_app_state` (ADR-0009: this lets health_check/recovery IPC
+        // work even in a degraded state). `bootstrap_app_state` is what runs the per-group WAL
+        // migration this test exists to guard (#437), so a socket-bound check alone races
+        // against it: the OS accepts connect() into the listen backlog as soon as bind()
+        // returns, whether or not the server has called accept() yet, let alone finished
+        // migrating. A blocking `knowledge_status` round-trip only returns once
+        // `run_socket_service` is actually processing requests, which happens after
+        // `bootstrap_app_state().await` resolves — so a successful response here is the
+        // earliest point at which the filesystem assertions below are safe to make.
+        let mut stream =
+            UnixStream::connect(&socket_path).expect("failed to connect to service socket");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"knowledge_status","params":{}}"#;
+        writeln!(stream, "{req}").expect("failed to write knowledge_status request");
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader
+            .read_line(&mut response)
+            .expect("failed to read knowledge_status response");
+
+        assert!(
+            !response.is_empty(),
+            "expected a response from knowledge_status"
+        );
+
+        let resp: serde_json::Value =
+            serde_json::from_str(response.trim()).expect("knowledge_status response is not JSON");
+
+        assert!(
+            resp.get("result").is_some(),
+            "expected result field in knowledge_status response: {resp}"
+        );
+        // In the healthy (non-degraded) code path, the response has context_graph_initialized=true
+        // rather than a `degraded` field. Assert the healthy path was taken.
+        assert_eq!(
+            resp["result"]["context_graph_initialized"],
+            serde_json::Value::Bool(true),
+            "service must not be in degraded mode after successful migration: {resp}"
+        );
+        // SC-002 count parity: pre-migration count was 0 (no entities added),
+        // post-migration count must still be 0.
+        assert_eq!(
+            resp["result"]["entity_count"],
+            serde_json::Value::Number(0.into()),
+            "entity count must match pre-migration count (0): {resp}"
+        );
+
+        drop(reader);
+
         // ── Assert post-migration file layout (FR-002) ────────────────────────
         let new_dir = workspace.join(".lcg");
         assert!(
@@ -242,51 +299,6 @@ mod migration_binary_tests {
             new_dir.join("ontology-hash.json").exists(),
             "ontology-hash.json must be migrated to .lcg/"
         );
-
-        // ── Assert IPC is functional post-migration ───────────────────────────
-        let mut stream =
-            UnixStream::connect(&socket_path).expect("failed to connect to service socket");
-        stream
-            .set_read_timeout(Some(Duration::from_secs(15)))
-            .unwrap();
-
-        let req = r#"{"jsonrpc":"2.0","id":1,"method":"knowledge_status","params":{}}"#;
-        writeln!(stream, "{req}").expect("failed to write knowledge_status request");
-
-        let mut reader = BufReader::new(stream);
-        let mut response = String::new();
-        reader
-            .read_line(&mut response)
-            .expect("failed to read knowledge_status response");
-
-        assert!(
-            !response.is_empty(),
-            "expected a response from knowledge_status"
-        );
-
-        let resp: serde_json::Value =
-            serde_json::from_str(response.trim()).expect("knowledge_status response is not JSON");
-
-        assert!(
-            resp.get("result").is_some(),
-            "expected result field in knowledge_status response: {resp}"
-        );
-        // In the healthy (non-degraded) code path, the response has context_graph_initialized=true
-        // rather than a `degraded` field. Assert the healthy path was taken.
-        assert_eq!(
-            resp["result"]["context_graph_initialized"],
-            serde_json::Value::Bool(true),
-            "service must not be in degraded mode after successful migration: {resp}"
-        );
-        // SC-002 count parity: pre-migration count was 0 (no entities added),
-        // post-migration count must still be 0.
-        assert_eq!(
-            resp["result"]["entity_count"],
-            serde_json::Value::Number(0.into()),
-            "entity count must match pre-migration count (0): {resp}"
-        );
-
-        drop(reader);
 
         // ── Clean shutdown ────────────────────────────────────────────────────
         send_sigterm(child.id());
