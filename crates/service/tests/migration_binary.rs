@@ -114,7 +114,13 @@ mod migration_binary_tests {
         // entry it sees rather than every loose file at the root).
         let wal_dir = legacy.join("wal");
         std::fs::create_dir(&wal_dir).unwrap();
-        let wal_file_names = ["001.jsonl", "002.jsonl", "003.jsonl", "004.jsonl", "005.jsonl"];
+        let wal_file_names = [
+            "001.jsonl",
+            "002.jsonl",
+            "003.jsonl",
+            "004.jsonl",
+            "005.jsonl",
+        ];
         for name in wal_file_names {
             std::fs::write(wal_dir.join(name), b"{\"type\":\"test\"}\n").unwrap();
         }
