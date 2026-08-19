@@ -42,6 +42,17 @@ concurrency:
 permissions:
   contents: read
 
+# GitHub's implicit default shell (no `shell:`/`defaults.run.shell` anywhere) is
+# `bash -e {0}` — no `pipefail`. That means `cmd 2>&1 | tee log` steps report the exit
+# status of `tee`, not `cmd`, so a failing `cargo test`/e2e binary piped through `tee`
+# for dual logging can never fail its step. Explicitly setting `shell: bash` switches to
+# GitHub's own `bash --noprofile --norc -eo pipefail {0}`, which supplies `pipefail` for
+# free — fixing every `| tee` step below (and any added later) without reformatting any
+# of them. See #430 and docs/adr/0430-ci-tee-pipefail.md.
+defaults:
+  run:
+    shell: bash
+
 env:
   # Bump this date to manually bust the lbug C++ build cache (e.g., if a cache entry is corrupted).
   # Incrementing this invalidates ALL existing lbug cache entries across all branches.
