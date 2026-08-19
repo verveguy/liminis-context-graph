@@ -88,9 +88,10 @@ mod migration_binary_tests {
     // WAL content that migrate_workspace moves in afterward is left loose at .lcg/wal/'s
     // top level forever (invisible to this process — see the comments at both call sites in
     // main.rs). Uses a 5-file corpus, not a single file, to distinguish "one file happens to
-    // relocate correctly" from "every file in the set is relocated," and asserts the
-    // .wal-generation.json sidecar (issue #431) lands under the group directory rather than
-    // loose at the root.
+    // relocate correctly" from "every file in the set is relocated," and includes a pre-existing
+    // .wal-generation.json sidecar (issue #431) with a known id in the legacy fixture so the
+    // assertions can confirm it is *relocated* (its content survives) under the group directory
+    // rather than loose at the root or silently replaced by a fresh mint.
     #[test]
     fn binary_migrates_legacy_workspace_on_startup() {
         let dir = TempDir::new().unwrap();
@@ -124,6 +125,21 @@ mod migration_binary_tests {
         for name in wal_file_names {
             std::fs::write(wal_dir.join(name), b"{\"type\":\"test\"}\n").unwrap();
         }
+
+        // FR-007/Acceptance Scenario 2: a pre-existing `.wal-generation.json` sidecar in the
+        // legacy fixture, with a known generation id, so the post-migration assertions below can
+        // distinguish "migration relocated the original sidecar" (this id survives, byte-for-byte)
+        // from "migration only stamped a fresh one" (a different id would appear) — the two are
+        // indistinguishable by an existence-only check. `wal_group::migrate_wal_root_if_needed`
+        // relocates any loose `.wal-generation.json` at the WAL root ahead of minting a new one
+        // (see its doc comment), so a genuine legacy sidecar, once it lands loose at `.lcg/wal/`
+        // via the whole-directory `.graphiti/wal` -> `.lcg/wal` rename, must win over a fresh mint.
+        let legacy_generation_id = "11111111-1111-1111-1111-111111111111";
+        std::fs::write(
+            wal_dir.join(".wal-generation.json"),
+            format!("{{\"generation\":\"{legacy_generation_id}\"}}"),
+        )
+        .unwrap();
 
         // Ontology and hash sidecar
         std::fs::write(
@@ -201,11 +217,18 @@ mod migration_binary_tests {
             loose_jsonl.is_empty(),
             "no *.jsonl file may remain loose directly under .lcg/wal/, found: {loose_jsonl:?}"
         );
-        // FR-007: the .wal-generation.json sidecar (issue #431) must land under the group
-        // directory, not loose at the WAL root.
+        // FR-007/Acceptance Scenario 2: the pre-existing `.wal-generation.json` sidecar (issue
+        // #431) must be *relocated*, not stamped over, so its content must survive byte-for-byte
+        // under the group directory — checking only existence would also pass for a fresh mint
+        // that silently discarded the original legacy generation id.
+        let migrated_generation =
+            std::fs::read_to_string(group_wal_dir.join(".wal-generation.json"))
+                .expect(".wal-generation.json must exist under .lcg/wal/liminis/");
         assert!(
-            group_wal_dir.join(".wal-generation.json").exists(),
-            ".wal-generation.json must be stamped under .lcg/wal/liminis/"
+            migrated_generation.contains(legacy_generation_id),
+            ".wal-generation.json under .lcg/wal/liminis/ must be the relocated legacy sidecar \
+             (containing {legacy_generation_id}), not a freshly minted one — found: \
+             {migrated_generation}"
         );
         assert!(
             !new_dir.join("wal").join(".wal-generation.json").exists(),
