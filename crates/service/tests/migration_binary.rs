@@ -1,10 +1,11 @@
 // Binary-level migration integration test (SC-001, SC-002, FR-002).
 //
-// Spawns the real binary against a legacy .graphiti/ workspace, waits for the
-// service to become ready (migration ran + socket bound), then asserts:
-// 1. The correct post-migration file layout under .lcg/
-// 2. The service is not degraded and responds to IPC
-// 3. Entity counts match the pre-migration state (0, since the legacy DB was empty)
+// Spawns the real binary against a legacy .graphiti/ workspace, waits for the socket to bind,
+// then confirms migration has actually completed via a blocking IPC round-trip (socket-bound
+// alone is not sufficient — see the comment at that call site), then asserts:
+// 1. The service is not degraded and responds to IPC
+// 2. Entity counts match the pre-migration state (0, since the legacy DB was empty)
+// 3. The correct post-migration file layout under .lcg/
 
 #[cfg(unix)]
 mod migration_binary_tests {
@@ -76,18 +77,23 @@ mod migration_binary_tests {
         port
     }
 
-    // FR-001, FR-002, FR-003, SC-001, SC-002:
+    // FR-001, FR-002, FR-003, FR-006, FR-007, SC-001, SC-002:
     // Binary migrates a legacy .graphiti/ workspace to .lcg/ on startup and then
     // serves IPC requests normally without data loss.
     //
-    // Quarantined: #437. The per-group WAL migration (main.rs:520) runs before the
-    // .graphiti/->.lcg/ move (main.rs:1001), so at relocation time there is no .lcg/wal
-    // yet and it correctly no-ops; the legacy WAL file then lands loose at .lcg/wal/ and
-    // is never relocated into .lcg/wal/liminis/, failing the assertion below. This is a
-    // genuine startup-ordering defect, not a test-infra flake — see #437 for the fix.
-    // Un-ignore this test once #437 lands.
+    // Regression guard for #437: `migration::migrate_workspace` (the .graphiti/->.lcg/ move)
+    // must complete before `bootstrap_app_state`'s per-group WAL-root migration
+    // (`wal_group::migrate_wal_root_if_needed`) inspects `.lcg/wal` for loose files to
+    // relocate — otherwise, for a .graphiti-era workspace, `.lcg/wal` doesn't exist yet at
+    // that point, the per-group migration no-ops on the missing directory, and the legacy
+    // WAL content that migrate_workspace moves in afterward is left loose at .lcg/wal/'s
+    // top level forever (invisible to this process — see the comments at both call sites in
+    // main.rs). Uses a 5-file corpus, not a single file, to distinguish "one file happens to
+    // relocate correctly" from "every file in the set is relocated," and includes a pre-existing
+    // .wal-generation.json sidecar (issue #431) with a known id in the legacy fixture so the
+    // assertions can confirm it is *relocated* (its content survives) under the group directory
+    // rather than loose at the root or silently replaced by a fresh mint.
     #[test]
-    #[ignore = "#437: per-group WAL migration runs before the .graphiti/->.lcg/ move on startup"]
     fn binary_migrates_legacy_workspace_on_startup() {
         let dir = TempDir::new().unwrap();
         let workspace = dir.path();
@@ -105,10 +111,36 @@ mod migration_binary_tests {
         let db = Db::open(legacy_db_path.to_str().unwrap()).unwrap();
         drop(db);
 
-        // Application WAL directory with a dummy JSONL file
+        // Application WAL directory with several dummy JSONL files (FR-007: a more realistic
+        // multi-file corpus than a single file, to catch a fix that only relocates the first
+        // entry it sees rather than every loose file at the root).
         let wal_dir = legacy.join("wal");
         std::fs::create_dir(&wal_dir).unwrap();
-        std::fs::write(wal_dir.join("001.jsonl"), b"{\"type\":\"test\"}\n").unwrap();
+        let wal_file_names = [
+            "001.jsonl",
+            "002.jsonl",
+            "003.jsonl",
+            "004.jsonl",
+            "005.jsonl",
+        ];
+        for name in wal_file_names {
+            std::fs::write(wal_dir.join(name), b"{\"type\":\"test\"}\n").unwrap();
+        }
+
+        // FR-007/Acceptance Scenario 2: a pre-existing `.wal-generation.json` sidecar in the
+        // legacy fixture, with a known generation id, so the post-migration assertions below can
+        // distinguish "migration relocated the original sidecar" (this id survives, byte-for-byte)
+        // from "migration only stamped a fresh one" (a different id would appear) — the two are
+        // indistinguishable by an existence-only check. `wal_group::migrate_wal_root_if_needed`
+        // relocates any loose `.wal-generation.json` at the WAL root ahead of minting a new one
+        // (see its doc comment), so a genuine legacy sidecar, once it lands loose at `.lcg/wal/`
+        // via the whole-directory `.graphiti/wal` -> `.lcg/wal` rename, must win over a fresh mint.
+        let legacy_generation_id = "11111111-1111-1111-1111-111111111111";
+        std::fs::write(
+            wal_dir.join(".wal-generation.json"),
+            format!("{{\"generation\":\"{legacy_generation_id}\"}}"),
+        )
+        .unwrap();
 
         // Ontology and hash sidecar
         std::fs::write(
@@ -145,46 +177,18 @@ mod migration_binary_tests {
             panic!("service did not become ready within 30s — migration may have failed");
         }
 
-        // ── Assert post-migration file layout (FR-002) ────────────────────────
-        let new_dir = workspace.join(".lcg");
-        assert!(
-            !legacy.exists(),
-            ".graphiti/ must be removed after migration"
-        );
-        assert!(
-            new_dir.join("db").is_dir(),
-            ".lcg/db/ must be a directory, not a file"
-        );
-        assert!(
-            new_dir.join("db").join("liminis.db").is_file(),
-            ".lcg/db/liminis.db must exist"
-        );
-        assert!(
-            new_dir.join("wal").is_dir(),
-            ".lcg/wal/ must be a directory"
-        );
-        // .lcg/wal/ is a WAL root with one subdirectory per group_id (issue #378): the legacy
-        // .graphiti/->.lcg/ migration above lands 001.jsonl loose at .lcg/wal/'s top level,
-        // which the #378 root migration then relocates into the default group's subdirectory
-        // on the same startup, before the socket is ready.
-        assert!(
-            new_dir
-                .join("wal")
-                .join("liminis")
-                .join("001.jsonl")
-                .exists(),
-            "WAL files must be migrated to .lcg/wal/liminis/ (issue #378 WAL-root layout)"
-        );
-        assert!(
-            new_dir.join("ontology.yaml").exists(),
-            "ontology.yaml must be migrated to .lcg/"
-        );
-        assert!(
-            new_dir.join("ontology-hash.json").exists(),
-            "ontology-hash.json must be migrated to .lcg/"
-        );
-
         // ── Assert IPC is functional post-migration ───────────────────────────
+        // Deliberately performed *before* the filesystem assertions below. `wait_for_socket`
+        // only proves the socket is bound — main.rs binds it, and prints "listening on ...",
+        // before calling `bootstrap_app_state` (ADR-0009: this lets health_check/recovery IPC
+        // work even in a degraded state). `bootstrap_app_state` is what runs the per-group WAL
+        // migration this test exists to guard (#437), so a socket-bound check alone races
+        // against it: the OS accepts connect() into the listen backlog as soon as bind()
+        // returns, whether or not the server has called accept() yet, let alone finished
+        // migrating. A blocking `knowledge_status` round-trip only returns once
+        // `run_socket_service` is actually processing requests, which happens after
+        // `bootstrap_app_state().await` resolves — so a successful response here is the
+        // earliest point at which the filesystem assertions below are safe to make.
         let mut stream =
             UnixStream::connect(&socket_path).expect("failed to connect to service socket");
         stream
@@ -228,6 +232,73 @@ mod migration_binary_tests {
         );
 
         drop(reader);
+
+        // ── Assert post-migration file layout (FR-002) ────────────────────────
+        let new_dir = workspace.join(".lcg");
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after migration"
+        );
+        assert!(
+            new_dir.join("db").is_dir(),
+            ".lcg/db/ must be a directory, not a file"
+        );
+        assert!(
+            new_dir.join("db").join("liminis.db").is_file(),
+            ".lcg/db/liminis.db must exist"
+        );
+        assert!(
+            new_dir.join("wal").is_dir(),
+            ".lcg/wal/ must be a directory"
+        );
+        // .lcg/wal/ is a WAL root with one subdirectory per group_id (issue #378): the legacy
+        // .graphiti/->.lcg/ migration above lands the WAL files loose at .lcg/wal/'s top level,
+        // which the #378 per-group migration then relocates into the default group's
+        // subdirectory on the same startup, before the socket is ready (#437: this only works
+        // because migrate_workspace runs first — see main.rs).
+        let group_wal_dir = new_dir.join("wal").join("liminis");
+        for name in wal_file_names {
+            assert!(
+                group_wal_dir.join(name).exists(),
+                "WAL file {name} must be migrated to .lcg/wal/liminis/ (issue #378 WAL-root layout)"
+            );
+        }
+        // FR-002/SC-001: no *.jsonl file may remain loose directly under .lcg/wal/.
+        let loose_jsonl: Vec<_> = std::fs::read_dir(new_dir.join("wal"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect();
+        assert!(
+            loose_jsonl.is_empty(),
+            "no *.jsonl file may remain loose directly under .lcg/wal/, found: {loose_jsonl:?}"
+        );
+        // FR-007/Acceptance Scenario 2: the pre-existing `.wal-generation.json` sidecar (issue
+        // #431) must be *relocated*, not stamped over, so its content must survive byte-for-byte
+        // under the group directory — checking only existence would also pass for a fresh mint
+        // that silently discarded the original legacy generation id.
+        let migrated_generation =
+            std::fs::read_to_string(group_wal_dir.join(".wal-generation.json"))
+                .expect(".wal-generation.json must exist under .lcg/wal/liminis/");
+        assert!(
+            migrated_generation.contains(legacy_generation_id),
+            ".wal-generation.json under .lcg/wal/liminis/ must be the relocated legacy sidecar \
+             (containing {legacy_generation_id}), not a freshly minted one — found: \
+             {migrated_generation}"
+        );
+        assert!(
+            !new_dir.join("wal").join(".wal-generation.json").exists(),
+            ".wal-generation.json must not remain loose at .lcg/wal/"
+        );
+        assert!(
+            new_dir.join("ontology.yaml").exists(),
+            "ontology.yaml must be migrated to .lcg/"
+        );
+        assert!(
+            new_dir.join("ontology-hash.json").exists(),
+            "ontology-hash.json must be migrated to .lcg/"
+        );
 
         // ── Clean shutdown ────────────────────────────────────────────────────
         send_sigterm(child.id());
