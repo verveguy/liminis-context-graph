@@ -116,6 +116,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -151,6 +152,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -194,6 +196,7 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -230,6 +233,7 @@ fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppStat
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -258,6 +262,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -488,6 +493,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -518,6 +524,7 @@ fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
     (state, capture)
 }
@@ -546,6 +553,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -620,6 +628,7 @@ fn make_state_with_ontology_and_extractor(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -1368,6 +1377,7 @@ fn make_state_with_extractor(db: Arc<Db>, extractor: Arc<dyn Extractor>) -> Arc<
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

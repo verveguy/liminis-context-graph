@@ -99,6 +99,7 @@ fn make_state(db: Arc<Db>, ontology: Option<Arc<Ontology>>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -136,6 +137,7 @@ fn make_state_with_wal(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -174,6 +176,7 @@ fn make_state_with_name_map_embedder(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

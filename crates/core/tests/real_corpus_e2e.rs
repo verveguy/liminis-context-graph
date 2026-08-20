@@ -218,6 +218,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, TempDir, CallCounts) {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
     (
         state,

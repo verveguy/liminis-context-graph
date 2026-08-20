@@ -66,6 +66,7 @@ fn make_state_without_indices(dim: usize) -> (Arc<AppState>, TempDir) {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
     (state, dir)
 }

@@ -64,6 +64,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppStat
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -1069,6 +1070,7 @@ async fn story6_dump_wal_always_mints_a_new_generation() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let target_dir = dir.path().join("dump-out");

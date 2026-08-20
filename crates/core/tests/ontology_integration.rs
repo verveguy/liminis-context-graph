@@ -65,6 +65,7 @@ fn make_state(db: Arc<Db>, ontology: Option<Ontology>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: ontology.map(Arc::new),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -96,6 +97,7 @@ fn make_state_with_extractor(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: ontology.map(Arc::new),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -1854,6 +1856,7 @@ async fn knowledge_status_surfaces_drift_when_ontology_is_none() {
             drifted: true,
             drift_summary: Some("entity types removed: [Person]".to_string()),
         })),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let resp = handlers::dispatch(req(1, "knowledge_status", json!({})), state, None).await;
