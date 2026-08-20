@@ -269,6 +269,10 @@ enum StatusOutcome {
 }
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    // Deliberately reports the workspace-wide ontology/drift, not any group's resolved ontology
+    // (issue #446): this summary has no group_id in its request shape, drift detection stays
+    // workspace-scoped for this issue (see ADR-0446), and a per-group breakdown here would be a
+    // knowledge_status IPC protocol change this issue's Plan explicitly chose not to make.
     let ontology_summary = {
         let drift = state
             .ontology_drift
@@ -2409,6 +2413,12 @@ async fn handle_rebuild_from_wal(
         });
 
         // After a successful non-dry-run WAL replay the graph is fully under the current ontology.
+        // Deliberately reads state.ontology (the workspace-wide ontology), not any group's
+        // resolved ontology (issue #446): this records "the graph is now consistent with the
+        // *workspace* ontology," a workspace-scoped concept this issue's drift detection doesn't
+        // extend per-group (see ADR-0446). A group replayed here that only has a per-group
+        // ontology gets no drift tracking from this write — a documented v1 limitation, not a
+        // miss.
         if !dry_run {
             if let Some(ref root) = state.workspace_root {
                 let ontology_ref = state.ontology.as_deref();
@@ -2840,6 +2850,10 @@ async fn handle_rebuild_from_wal(
                         job_result["cross_group_rebind"] = json!(cross_group_rebind);
                         job.result = Some(job_result);
                         // Update the sidecar so drift clears after a successful WAL rebuild.
+                        // Deliberately uses bg_ontology (the workspace-wide state.ontology snapshot
+                        // captured above), not any group's resolved ontology (issue #446) — same
+                        // rationale as the streaming replay path above: drift detection stays
+                        // workspace-scoped for this issue (see ADR-0446).
                         if !dry_run {
                             if let Some(ref root) = bg_workspace_root {
                                 let ontology_ref = bg_ontology.as_deref();
