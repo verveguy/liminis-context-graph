@@ -13,6 +13,56 @@ Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 
 **Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
 
+## Per-group ontologies
+
+A single lcg instance can hold many co-resident `group_id`s (multi-group hydrate), and those
+groups often want different vocabularies — a content channel's `Person`/`Organization` ontology
+should not constrain an unrelated catalog group co-resident in the same workspace. Place a
+group-specific ontology at:
+
+```
+{workspace}/.lcg/ontology/<group_id>.yaml
+```
+
+using the same file format described above. A `group_id` containing characters unsafe as a
+filesystem path component (anything outside ASCII alphanumerics, `_`, and `-`) is percent-encoded
+using the same bijective scheme already applied to per-group WAL directory names — every byte
+outside that safe set becomes `%XX` (uppercase hex). A `group_id` that's already a safe path
+component (e.g. `catalog`, `content-v2`) is used as the filename unchanged.
+
+**Resolution and fallback.** For a given `group_id`:
+
+1. If `{workspace}/.lcg/ontology/<group_id>.yaml` exists and parses successfully, it governs
+   extraction, `mode` (including strict validation), canonicalization, and reprocessing
+   (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`) for that group only.
+2. Otherwise, the workspace-wide `{workspace}/.lcg/ontology.yaml` (described above) governs that
+   group, exactly as it did before per-group ontologies existed.
+3. If neither exists, that group extracts free-form, same as an ontology-less workspace today.
+
+A malformed or unreadable per-group file falls back to step 2 (the workspace-wide ontology) rather
+than to "no ontology" or a startup failure — a bad per-group file degrades gracefully to the one
+ontology already known to be valid, and the failure is logged so it's observable rather than
+silent. Like the workspace-wide file, per-group files are loaded once (on that group's first use
+in the running process) and cached — restart the service to pick up a changed file.
+
+**Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
+arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
+governs *extraction-guided* groups (`knowledge_add_episode` and the maintenance operations above).
+
+**`canonicalize_relations`/`backfill_relation_types`** apply per-group ontology resolution too,
+scoped to the `group_id` each call already requires. `backfill_relation_types` in particular has no
+ontology dependency at all — it derives pseudo relation types from edge fact text, not from a
+declared vocabulary — so per-group resolution has nothing to change there.
+
+**Published ontology is documentation, not policy.** When a group's stream is published (the
+existing whole-directory copy described in [Operations](operations.md)), the ontology that guided
+that group's extraction travels alongside it as `.wal-ontology.json` — informational only. A
+consumer hydrating that stream can inspect it to see what vocabulary produced the graph, but it is
+never applied to the consumer's own extraction, `mode: strict` validation, canonicalization, or
+reprocessing for that group — the consumer's own local configuration (per-group file, workspace
+file, or neither) is always what governs. A stream published without this file still replays and
+behaves identically; only the documentation available to the consumer is degraded.
+
 ## Format
 
 ```yaml
