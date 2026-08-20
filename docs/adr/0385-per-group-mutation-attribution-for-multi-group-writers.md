@@ -30,10 +30,14 @@ premise #378 exists to establish: a group's stream must be independently replaya
 every mutation that changes its data and no others.
 
 This ADR covers only the two handlers above — the two of ADR-0378's four FR-004-exempted call
-sites that mutate specific, identifiable non-default groups. The other two
-(`backfill.rs`/`canonicalize.rs`'s database-wide maintenance passes, and `handle_query_cypher`'s
-arbitrary-Cypher escape hatch) have no fixed set of groups in scope at all and remain under the
-original FR-004 rationale — see ADR-0378's FR-004 section, narrowed by this ADR.
+sites that mutate specific, identifiable non-default groups. Of the other two,
+`handle_query_cypher`'s arbitrary-Cypher escape hatch has no fixed set of groups in scope at all
+and remains under the original FR-004 rationale. `backfill.rs`/`canonicalize.rs`'s maintenance
+passes were also originally left exempted here, but #447 later gave both a required `group_id`
+parameter — narrower than what this ADR's per-mutation-boundary draining solves, since a call now
+touches exactly one known group rather than an unbounded set — so they route directly to that
+group's writer without needing this ADR's mechanism. See ADR-0378's FR-004 section, narrowed by
+this ADR and by #447.
 
 ## Decision
 
@@ -198,9 +202,11 @@ whether flush order is meaningful; it isn't.
   independent defect on the same flush path, explicitly out of scope for this issue. The two
   don't fix each other: this ADR changes *which* group each mutation is attributed to, not
   whether `applied_seq` is bumped afterward.
-- `backfill.rs`, `canonicalize.rs`, and `handle_query_cypher` are unchanged and continue routing
-  to the default group under ADR-0378's original FR-004 rationale (narrowed, not repealed, by
-  this ADR) — see that ADR's FR-004 section as amended.
+- `handle_query_cypher` is unchanged and continues routing to the default group under ADR-0378's
+  original FR-004 rationale (narrowed, not repealed, by this ADR) — see that ADR's FR-004 section
+  as amended. `backfill.rs` and `canonicalize.rs` were also unchanged when this ADR shipped, but
+  #447 later gave both a required `group_id` and routed them to that group's own writer directly —
+  see ADR-0378's FR-004 section for the #447 correction.
 
 ## Alternatives Considered
 

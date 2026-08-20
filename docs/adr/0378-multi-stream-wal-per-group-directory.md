@@ -226,6 +226,17 @@ passes (no `group_id` filter at all — there is no small known set of groups to
 `handle_query_cypher`'s arbitrary-Cypher escape hatch (no group attribution possible by design).
 This is accepted as a documented limitation for these three, not treated as a defect.
 
+**Correction (#447, 2026-08-20): `backfill.rs` and `canonicalize.rs` are no longer FR-004-exempted.**
+Both now take a required `group_id` parameter, scope their `RelatesToNode_` candidate selection to
+that one group, and flush mutations directly to that group's own writer — the same
+known-single-group-at-the-flush-site shape #385 established for `handle_delete_by_group` and
+`knowledge_rebind_pointers`, not the per-mutation-boundary draining #385 needed for a call spanning
+multiple groups. An omitted, `null`, or empty `group_id` is rejected outright rather than falling
+back to a database-wide rewrite or the default group, since neither operation ever had a legitimate
+caller for "every group in this workspace" (see the issue's deployment-invariant discussion).
+`handle_query_cypher` remains the sole call site still exempted under this section's original
+rationale — an arbitrary-Cypher escape hatch has no group attribution to derive by design.
+
 ### FR-006: `knowledge_rebuild_from_wal`'s `force_clear` stops wiping the whole DB file
 
 The pre-378 `force_clear` path (`clear_db_for_rebuild`) deleted and reopened the entire lbug DB —
@@ -337,19 +348,20 @@ call reports the same, correctly-backfilled position.
 
 ### Negative / Residual risks
 
-- The FR-004-exempted call sites (`backfill.rs`'s and `canonicalize.rs`'s database-wide
-  `RelatesToNode_` passes, and raw Cypher via `handle_query_cypher`) have WAL-replay coverage that
-  doesn't match their actual data's group. This is a deliberate, documented gap (the DB write
-  itself is never affected), but it means a full rebuild of a non-default group from its own WAL
-  directory alone will not reproduce a maintenance-pass mutation that happened to touch that
-  group's data — only a rebuild that includes the default group's stream will. Found during
-  Review: `reprocess_relation_types` (`reprocess_relations.rs`) was originally routed through
-  `DEFAULT_GROUP_ID` alongside these three, but unlike them it is genuinely single-group scoped —
-  its Phase A candidate selection already filters by `params.group_id` via
-  `list_edges_for_scope` — so it was corrected to route to that group directly; it does not belong
-  on this list. (Group-scoped purge's foreign-group rebind was originally on this list too, but
-  #385/[ADR-0385](0385-per-group-mutation-attribution-for-multi-group-writers.md) corrected its
-  routing — see this ADR's FR-004 section as amended.)
+- The sole remaining FR-004-exempted call site, raw Cypher via `handle_query_cypher`, has
+  WAL-replay coverage that doesn't match its actual data's group. This is a deliberate, documented
+  gap (the DB write itself is never affected), but it means a full rebuild of a non-default group
+  from its own WAL directory alone will not reproduce an arbitrary-Cypher mutation that happened to
+  touch that group's data — only a rebuild that includes the default group's stream will. Found
+  during Review: `reprocess_relation_types` (`reprocess_relations.rs`) was originally routed
+  through `DEFAULT_GROUP_ID` alongside `backfill.rs`/`canonicalize.rs`, but unlike them it was
+  genuinely single-group scoped from the start — its Phase A candidate selection already filters by
+  `params.group_id` via `list_edges_for_scope` — so it was corrected to route to that group
+  directly; it never belonged on this list. (Group-scoped purge's foreign-group rebind was
+  originally on this list too, but #385/[ADR-0385](0385-per-group-mutation-attribution-for-multi-group-writers.md)
+  corrected its routing — see this ADR's FR-004 section as amended. `backfill.rs` and
+  `canonicalize.rs` themselves were removed from this list by #447 — see the FR-004 section's
+  dated correction.)
 - The non-fallback ("checkpoint-drop") branch of `run_full_recovery_sequence` only catches up the
   default group's own app-WAL tail. `attempt_checkpoint_drop` renames aside lbug's own
   engine-level `.wal` file, which is shared across every group's not-yet-durable writes, not just
@@ -433,8 +445,10 @@ usable directory without that trap.
 - `crates/core/src/handlers.rs` — `resolve_group_wal_dir`, `group_id_param`,
   `handle_knowledge_status`'s per-group `wal_groups` map (FR-007), `clear_group_for_rebuild`
   (FR-006), the three `handle_wal_mark_*` functions (FR-012).
-- `crates/core/src/backfill.rs`, `canonicalize.rs`, `reprocess_relations.rs` — the FR-004
-  default-group WAL-flush routing.
+- `crates/core/src/backfill.rs`, `canonicalize.rs`, `reprocess_relations.rs` — all three now
+  require `group_id` and route their WAL flush directly to that group's own writer; none remain
+  FR-004-exempted (`backfill.rs`/`canonicalize.rs` corrected by #447, `reprocess_relations.rs` by
+  the Review finding noted above).
 - `crates/service/src/mcp/tools.rs` — `group_id` schema additions on the three checkpoint tools
   and `knowledge_rebuild_from_wal`.
 - `crates/core/tests/wal_root_migration.rs` — SC-005 end-to-end migration regression test.
