@@ -387,7 +387,8 @@ async fn test_backfill_two_group_isolation_scoped_to_group_a() {
         conn.insert_entity(&b_dst).unwrap();
 
         let a_edge = make_edge_in_group(&a_src.uuid, &a_dst.uuid, None, "Alice knows Bob", GROUP_A);
-        let b_edge = make_edge_in_group(&b_src.uuid, &b_dst.uuid, None, "Carol knows Dave", GROUP_B);
+        let b_edge =
+            make_edge_in_group(&b_src.uuid, &b_dst.uuid, None, "Carol knows Dave", GROUP_B);
         a_edge_uuid = a_edge.uuid.clone();
         b_edge_uuid = b_edge.uuid.clone();
         conn.insert_relates_to_edge(&a_edge).unwrap();
@@ -410,7 +411,11 @@ async fn test_backfill_two_group_isolation_scoped_to_group_a() {
     )
     .await;
     assert_eq!(result["group_id"], json!(GROUP_A));
-    assert_eq!(result["total_edges"], json!(1), "must only see group A's edge");
+    assert_eq!(
+        result["total_edges"],
+        json!(1),
+        "must only see group A's edge"
+    );
     assert_eq!(result["backfilled"], json!(1));
 
     let conn = db.connect().unwrap();

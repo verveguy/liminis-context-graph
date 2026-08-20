@@ -824,8 +824,10 @@ async fn test_two_group_isolation_scoped_to_group_a() {
 
         // Both groups get a mappable "WROTE" edge — if isolation is broken, B's edge would
         // also be rewritten to AUTHORED, making the leak observable.
-        let a_edge = make_edge_with_rt_in_group(&a_src.uuid, &a_dst.uuid, "WROTE", None, "", GROUP_A);
-        let b_edge = make_edge_with_rt_in_group(&b_src.uuid, &b_dst.uuid, "WROTE", None, "", GROUP_B);
+        let a_edge =
+            make_edge_with_rt_in_group(&a_src.uuid, &a_dst.uuid, "WROTE", None, "", GROUP_A);
+        let b_edge =
+            make_edge_with_rt_in_group(&b_src.uuid, &b_dst.uuid, "WROTE", None, "", GROUP_B);
         a_edge_uuid = a_edge.uuid.clone();
         b_edge_uuid = b_edge.uuid.clone();
         conn.insert_relates_to_edge(&a_edge).unwrap();
@@ -848,7 +850,11 @@ async fn test_two_group_isolation_scoped_to_group_a() {
     )
     .await;
     assert_eq!(result["group_id"], json!(GROUP_A));
-    assert_eq!(result["total_edges"], json!(1), "must only see group A's edge");
+    assert_eq!(
+        result["total_edges"],
+        json!(1),
+        "must only see group A's edge"
+    );
     assert_eq!(result["mapped_count"], json!(1));
 
     let conn = db.connect().unwrap();
