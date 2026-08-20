@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-447`
 **Created**: 2026-08-20
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "`knowledge_canonicalize_relations` and `knowledge_backfill_relation_types`
 select candidates database-wide with no `group_id` filter and flush their mutations to the default
 group's WAL stream. On a multi-group workspace both behaviours are wrong, and they are the two
@@ -61,6 +61,24 @@ separate, larger question — it requires representing ownership, which lcg does
 same gap that surfaced around generation minting in #431). That is not needed to fix this issue:
 scoping the operation to a named group removes the collateral damage regardless of who owns what
 (see Assumptions and Out of Scope).
+
+### Release timing
+
+Triage (2026-08-20) found that no deployment invokes either operation today, but the downstream
+consumers intend to start. The exposure is therefore entirely prospective — nothing is corrupted
+yet. That reframes this issue from "repair existing damage" to "land the fix before the first
+multi-group workspace turns either operation on": once that happens, the corruption described above
+is silent, cross-tenant, and invisible at the point of harm (see the invariant above), so there is
+no natural moment at which anyone notices and stops.
+
+This settles the release-channel question raised in the original report: **this fix must ship in
+0.13.3**, and consumers should not enable `knowledge_canonicalize_relations` or
+`knowledge_backfill_relation_types` on any multi-group workspace until they are running a build that
+contains it.
+
+It also changes FR-005's cost: because no deployment invokes either operation today, requiring an
+explicit `group_id` breaks no existing caller. The parameter can be required from the outset, with
+no deprecation window or compatible-default period to design around.
 
 ### Relationship to #446
 
@@ -153,11 +171,11 @@ state on disk.
   (FR-005), a single call touches exactly one group's data and one group's WAL stream; no
   per-group flush-splitting is needed, unlike `delete_by_group`, which spans groups by design.
 - **FR-004**: Neither operation may write to any group other than the one named by `group_id`.
-- **FR-005**: `group_id` is a required parameter for both operations. Omitting it (absent, `null`,
-  or empty) MUST return an error and MUST NOT run the operation database-wide, and MUST NOT fall
-  back to the default group. This is a breaking change for any existing caller relying on the
-  current unscoped behavior — per the deployment invariant (Background), that behavior has no
-  legitimate use case to preserve, so there is no compatible fallback worth keeping.
+- **FR-005**: `group_id` is a required parameter for both operations, from the outset. Omitting it
+  (absent, `null`, or empty) MUST return an error and MUST NOT run the operation database-wide, and
+  MUST NOT fall back to the default group. No known deployment invokes either operation today
+  (Release timing), so this requirement introduces no deprecation window or compatible-default
+  period — it applies immediately, with no transition case to support.
 - **FR-006**: Tests MUST demonstrate that canonicalizing group A leaves group B's edges
   byte-identical and B's WAL stream (`applied_seq`, contents) untouched, asserted on disk — the
   property that caught #385. Equivalent tests MUST cover `backfill_relation_types`.
@@ -200,6 +218,9 @@ state on disk.
 - Per #413's established rule ("reads default to all groups; writes and deletes require an explicit
   scope"), both operations here are writes, so requiring an explicit `group_id` is consistent with
   existing precedent, not a new policy invented for this issue.
+- The specific canonicalization/backfill scenarios the downstream consumers intend to run are not
+  yet documented in this issue. Research should gather that intent directly from them to inform
+  FR-006's test design, rather than inventing hypothetical fixtures.
 
 ## Out of Scope
 
@@ -207,18 +228,6 @@ state on disk.
   own. A larger, separate effort (Background); noted as related to the ownership gap that also
   surfaced in #431.
 - Per-group ontology (#446) — this issue is a prerequisite for it but does not implement it.
-- Deciding the release channel (patch release vs. normal 0.14.0 cycle) for this fix — see Open
-  Questions.
-
-## Open Questions
-
-- [ ] **Is this urgent enough to ship as a patch release ahead of 0.14.0, or does it follow the
-  normal release cycle?** No data loss has been reported to date. The exposure is real for any
-  workspace that hydrates multiple groups and invokes either operation — which describes the
-  orac/zen deployment — so the triage question is whether those deployments actually call
-  `knowledge_canonicalize_relations` or `knowledge_backfill_relation_types` today. This does not
-  block the technical requirements above, but should be resolved before this issue moves to
-  Research so the implementation's target release is clear.
 
 ## Prior art
 
