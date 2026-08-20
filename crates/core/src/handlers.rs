@@ -3860,9 +3860,12 @@ async fn handle_reprocess_entity_types(
 
 // ── Relation canonicalization handler ────────────────────────────────────────
 
-/// Runs the relation canonicalization pass over all edges in the workspace graph.
+/// Runs the relation canonicalization pass over one group's edges in the workspace graph.
 ///
 /// Parameters (from req.params):
+/// - `group_id: String` (required) — restricts candidate selection and WAL attribution to this
+///   group only (#447). Omitted, null, or empty is rejected rather than falling back to
+///   database-wide or the default group.
 /// - `dry_run: bool` (default false) — report coverage without mutating the graph or WAL.
 /// - `embedding_threshold: f32` (default 0.7) — cosine similarity threshold for embedding fallback.
 ///
@@ -3873,6 +3876,9 @@ async fn handle_canonicalize_relations(
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
+    // #447: validate group_id before any other work, including the ontology check below.
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+
     // FR-013: fail fast if no ontology with relation_types is loaded
     let ontology = state
         .ontology
@@ -3896,6 +3902,7 @@ async fn handle_canonicalize_relations(
     let embedding_threshold = req.params["embedding_threshold"].as_f64().map(|v| v as f32);
 
     let params = canonicalize::CanonicalizeParams {
+        group_id,
         dry_run,
         embedding_threshold,
     };
@@ -3903,13 +3910,19 @@ async fn handle_canonicalize_relations(
     canonicalize::canonicalize_relations(state, params, progress_tx, ontology).await
 }
 
+/// Parameters (from req.params):
+/// - `group_id: String` (required) — restricts candidate selection and WAL attribution to this
+///   group only (#447). Omitted, null, or empty is rejected rather than falling back to
+///   database-wide or the default group.
+/// - `dry_run: bool` (default false) — report coverage without mutating the graph or WAL.
 async fn handle_backfill_relation_types(
     req: &IpcRequest,
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
-    let params = backfill::BackfillParams { dry_run };
+    let params = backfill::BackfillParams { group_id, dry_run };
     backfill::backfill_relation_types(state, params, progress_tx).await
 }
 
@@ -4494,6 +4507,22 @@ fn extract_optional_group_ids_preserve_empty(v: &Value) -> Option<Vec<String>> {
         Value::String(s) => Some(vec![s.clone()]),
         _ => None,
     }
+}
+
+/// Returns a non-empty `group_id` string, or an actionable error naming `group_id` when the
+/// value is absent, null, or an empty string.
+///
+/// Singular sibling of [`extract_required_group_ids`] (plural, array-based) — used by operations
+/// scoped to exactly one group (`knowledge_canonicalize_relations`,
+/// `knowledge_backfill_relation_types`) rather than a set. Per #447, an omitted `group_id` must
+/// never be interpreted as "every group in the workspace."
+fn extract_required_group_id(v: &Value) -> Result<String, Error> {
+    v.as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            Error::Ipc("group_id is required and must be a non-empty string".to_string())
+        })
 }
 
 /// Returns a deduplicated (first-seen order preserved), non-empty list of group_ids, or an

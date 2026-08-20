@@ -3333,7 +3333,7 @@ async fn parity_canonicalize_no_ontology_error_shape() {
     let v = dispatch_val(
         60,
         "knowledge_canonicalize_relations",
-        json!({ "dry_run": true }),
+        json!({ "group_id": "any-group", "dry_run": true }),
         state,
     )
     .await;
@@ -3426,7 +3426,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
     let v = dispatch_val(
         70,
         "knowledge_canonicalize_relations",
-        json!({ "dry_run": false }),
+        json!({ "group_id": "cnde-group", "dry_run": false }),
         state,
     )
     .await;
@@ -3490,7 +3490,7 @@ async fn parity_canonicalize_relations_shape() {
     let v = dispatch_val(
         61,
         "knowledge_canonicalize_relations",
-        json!({ "dry_run": true }),
+        json!({ "group_id": "any-group", "dry_run": true }),
         state,
     )
     .await;
@@ -3525,7 +3525,7 @@ async fn parity_backfill_relation_types_shape() {
     let v = dispatch_val(
         80,
         "knowledge_backfill_relation_types",
-        json!({ "dry_run": true }),
+        json!({ "group_id": "any-group", "dry_run": true }),
         state,
     )
     .await;
@@ -3612,7 +3612,7 @@ async fn parity_backfill_dry_run_counts() {
     let v = dispatch_val(
         81,
         "knowledge_backfill_relation_types",
-        json!({ "dry_run": true }),
+        json!({ "group_id": "bfdr-group", "dry_run": true }),
         state,
     )
     .await;
@@ -3711,7 +3711,7 @@ async fn parity_backfill_live_fills_empty() {
     let v = dispatch_val(
         82,
         "knowledge_backfill_relation_types",
-        json!({ "dry_run": false }),
+        json!({ "group_id": "bflv-group", "dry_run": false }),
         state,
     )
     .await;
@@ -3816,7 +3816,7 @@ async fn parity_backfill_idempotent() {
     let v1 = dispatch_val(
         83,
         "knowledge_backfill_relation_types",
-        json!({ "dry_run": false }),
+        json!({ "group_id": "bfid-group", "dry_run": false }),
         state1,
     )
     .await;
@@ -3831,7 +3831,7 @@ async fn parity_backfill_idempotent() {
     let v2 = dispatch_val(
         84,
         "knowledge_backfill_relation_types",
-        json!({ "dry_run": false }),
+        json!({ "group_id": "bfid-group", "dry_run": false }),
         state2,
     )
     .await;

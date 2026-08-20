@@ -476,42 +476,61 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_canonicalize_relations",
             description: "Canonicalize relationship types against the workspace ontology's \
-                           declared relation_types. Supports MCP progress notifications when \
-                           called with a progress token.",
+                           declared relation_types, restricted to group_id's own edges (#447) — \
+                           never any other group's. group_id is required; omitted, null, or \
+                           empty is rejected rather than falling back to a database-wide rewrite \
+                           or the default group, since a hydrated, read-only group must never be \
+                           mutated as a side effect of canonicalizing the group this node owns. \
+                           Mutations are attributed to group_id's own WAL stream, never the \
+                           default group's. Supports MCP progress notifications when called with \
+                           a progress token.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "Restricts candidate selection and WAL attribution to this group only (required; no default — #447)."
+                        },
                         "dry_run": {"type": "boolean", "default": false, "description": "Preview without writing."},
                         "embedding_threshold": {
                             "type": "number",
                             "description": "Optional similarity threshold override for matching relation types."
                         }
-                    }
+                    },
+                    "required": ["group_id"]
                 })
             },
         },
         ToolSpec {
             name: "knowledge_backfill_relation_types",
             description: "DEPRECATED — does not classify against the ontology. For each edge \
-                           with a null/empty relation_type, this mints a pseudo-type by \
-                           uppercasing and underscore-joining the first few words of the edge's \
-                           fact sentence (e.g. THE_SPECIFICATION_DOCUMENT_DEFINES), producing \
-                           near-unique labels rather than a real taxonomy. Running it pollutes \
-                           the relation_type space and is only reversible by re-nulling the \
-                           field. Use knowledge_reprocess_relation_types with scope: \"untyped\" \
-                           instead — it performs genuine fact-based classification against the \
-                           ontology's declared relation types, with honest UNCLASSIFIED \
-                           abstention. Retained for backward compatibility; supports MCP \
+                           with a null/empty relation_type in group_id, this mints a pseudo-type \
+                           by uppercasing and underscore-joining the first few words of the \
+                           edge's fact sentence (e.g. THE_SPECIFICATION_DOCUMENT_DEFINES), \
+                           producing near-unique labels rather than a real taxonomy. Running it \
+                           pollutes the relation_type space and is only reversible by re-nulling \
+                           the field. Use knowledge_reprocess_relation_types with scope: \
+                           \"untyped\" instead — it performs genuine fact-based classification \
+                           against the ontology's declared relation types, with honest \
+                           UNCLASSIFIED abstention. group_id is required; omitted, null, or empty \
+                           is rejected rather than falling back to a database-wide rewrite or the \
+                           default group (#447), and mutations are attributed to group_id's own \
+                           WAL stream. Retained for backward compatibility; supports MCP \
                            progress notifications when called with a progress token.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "Restricts candidate selection and WAL attribution to this group only (required; no default — #447)."
+                        },
                         "dry_run": {"type": "boolean", "default": false, "description": "Preview without writing."}
-                    }
+                    },
+                    "required": ["group_id"]
                 })
             },
         },

@@ -20,7 +20,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     app_state::AppState, db::value_as_string, error::Error, ontology::normalize_relation_type,
-    wal_exec, wal_group::DEFAULT_GROUP_ID,
+    wal_exec,
 };
 
 const PAGE_SIZE: usize = 500;
@@ -30,10 +30,12 @@ const PROGRESS_EVERY: usize = 5000;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct BackfillParams {
+    pub group_id: String,
     pub dry_run: bool,
 }
 
 pub struct BackfillReport {
+    pub group_id: String,
     pub total_edges: usize,
     pub backfilled: usize,
     pub dry_run: bool,
@@ -42,6 +44,7 @@ pub struct BackfillReport {
 impl BackfillReport {
     fn to_json(&self) -> Value {
         json!({
+            "group_id": self.group_id,
             "total_edges": self.total_edges,
             "backfilled": self.backfilled,
             "dry_run": self.dry_run,
@@ -115,6 +118,7 @@ pub async fn backfill_relation_types(
         .ok_or_else(|| Error::DbUnavailable("DB unavailable".to_string()))?;
     let _read_guard = state.write_lock.read().await;
     let db_a = Arc::clone(&db);
+    let group_id_a = params.group_id.clone();
 
     let (total_edges, candidates): (usize, Vec<EdgeCandidate>) =
         tokio::task::spawn_blocking(move || {
@@ -124,7 +128,7 @@ pub async fn backfill_relation_types(
             let mut offset = 0;
             loop {
                 let rows = conn
-                    .dump_relatos_page(None, offset, PAGE_SIZE)
+                    .dump_relatos_page(Some(&group_id_a), offset, PAGE_SIZE)
                     .map_err(|e| Error::Ipc(format!("read edges page: {e}")))?;
                 let count = rows.len();
                 for row in &rows {
@@ -153,6 +157,7 @@ pub async fn backfill_relation_types(
     // ── Phase B: dry_run early return ─────────────────────────────────────────
     if params.dry_run {
         return Ok(BackfillReport {
+            group_id: params.group_id.clone(),
             total_edges,
             backfilled: backfill_count,
             dry_run: true,
@@ -177,6 +182,7 @@ pub async fn backfill_relation_types(
 
         let db_c = Arc::clone(&db);
         let state_c = Arc::clone(&state);
+        let gid_c = params.group_id.clone();
         let _write_guard = state.write_lock.write().await;
 
         let processed = batch_idx * WRITE_BATCH_SIZE;
@@ -204,12 +210,10 @@ pub async fn backfill_relation_types(
                     json!({ "uuid": uuid, "rt": rt }),
                 )?;
             }
-            // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
-            // routes through the default group's writer, a documented limitation rather than
-            // mutation-level attribution.
-            let seq =
-                wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
+            // Candidate selection and mutation are both scoped to group_id (#447): a single call
+            // touches exactly one group's data and routes to that group's own WAL stream.
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &gid_c, seq);
             Ok(())
         })
         .await??;
@@ -217,6 +221,7 @@ pub async fn backfill_relation_types(
     }
 
     Ok(BackfillReport {
+        group_id: params.group_id.clone(),
         total_edges,
         backfilled: backfill_count,
         dry_run: false,

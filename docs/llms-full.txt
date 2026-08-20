@@ -514,9 +514,14 @@ forward-only replay noted above.
 Three tools populate an edge's `relation_type`, with different tradeoffs:
 
 **`knowledge_canonicalize_relations`** maps each edge's **existing raw predicate** onto your
-ontology's declared `relation_types`. Its behavior has three caveats worth knowing before you
+ontology's declared `relation_types`. Its behavior has four caveats worth knowing before you
 rely on it:
 
+- **`group_id` is required** (issue #447) — candidate selection and the resulting WAL mutations
+  are both restricted to that one group; no other group's edges or WAL stream are ever touched. An
+  omitted, `null`, or empty `group_id` is rejected before any candidate selection or write, rather
+  than falling back to a database-wide rewrite or the default group — there is no supported way to
+  canonicalize every group in one call.
 - **The primary pass is lexical, over the predicate — not the `fact`.** It matches the edge's
   predicate / current `relation_type` against ontology type names, aliases, and keywords. It does
   **not** read the edge's `fact` sentence, so an edge whose `relation_type` was cleared cannot be
@@ -539,6 +544,9 @@ rely on it:
 uppercased fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
 `relation_type`, rather than matching against the ontology. Avoid it for building a typed
 taxonomy; prefer `knowledge_reprocess_relation_types` below, which supersedes it for that purpose.
+Like `knowledge_canonicalize_relations`, **`group_id` is required** (issue #447): candidate
+selection and WAL attribution are both restricted to that one group, and an omitted, `null`, or
+empty `group_id` is rejected rather than running database-wide or against the default group.
 
 **`knowledge_reprocess_relation_types`** is the relation-side twin of
 `knowledge_reprocess_entity_types`: for each in-scope edge, it sends the edge's `fact` and the
