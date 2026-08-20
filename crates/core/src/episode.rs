@@ -191,7 +191,11 @@ pub async fn add_episode(
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
-    let ontology_ref = state.ontology.as_deref();
+    // Resolves this group's own ontology file if one exists, else falls back to the
+    // workspace-wide ontology (FR-001, FR-002, FR-005) — governs extraction guidance, strict-mode
+    // validation, and (via `ancestor_map` below) canonicalization for this group only.
+    let resolved_ontology = state.resolve_ontology(group_id);
+    let ontology_ref = resolved_ontology.as_deref();
     let extract_opts = ExtractOptions {
         episode_body: body,
         group_id,
@@ -894,6 +898,32 @@ pub async fn add_episode(
             );
         } else if let Ok(mut guard) = state.ontology_drift.lock() {
             *guard = OntologyDriftState::default();
+        }
+    }
+
+    // Publish the ontology that guided this episode's extraction as a documentation-only sidecar
+    // in the group's own WAL directory (FR-007) — travels automatically under the existing
+    // whole-directory publish contract (see docs/operations.md). No lcg code path ever reads this
+    // file back (FR-008): it can only ever inform a consumer inspecting the stream, never govern
+    // their own extraction, validation, canonicalization, or reprocessing. Best-effort like the
+    // workspace sidecar write above: a missed write only degrades documentation, never replay
+    // (FR-009).
+    if let Some(root) = state.wal_root.as_deref() {
+        match crate::wal_group::group_wal_dir(root, group_id) {
+            Ok(gid_dir) => {
+                if let Err(e) = ontology_sidecar::write_wal_ontology_sidecar(&gid_dir, ontology_ref)
+                {
+                    eprintln!(
+                        "liminis-context-graph: ontology-sidecar: failed to write published ontology sidecar for group {group_id:?} at {:?}: {} — documentation only, replay unaffected",
+                        gid_dir, e
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "liminis-context-graph: ontology-sidecar: cannot resolve WAL directory for group {group_id:?}: {e} — skipping published ontology sidecar"
+                );
+            }
         }
     }
 

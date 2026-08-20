@@ -251,19 +251,22 @@ impl AppState {
     /// already logs the failure loudly, so silently using the one ontology already known to be
     /// valid is the least-surprising degradation (see the issue's Plan stage for the tradeoff).
     ///
-    /// Returns `None` (rather than caching) if `workspace_root` isn't configured — matches
-    /// `load_ontology`'s own "no root, no ontology" behavior, and avoids caching an answer that
-    /// would be wrong once a root is configured.
+    /// When `workspace_root` isn't configured, per-group file lookup is skipped (there's no root
+    /// to look under) and this always falls through to the workspace-wide `ontology` field
+    /// unchanged — this keeps direct-construction callers (tests, or any future caller that sets
+    /// `ontology` without a `workspace_root`) working exactly as `state.ontology` did before this
+    /// method existed.
     pub fn resolve_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
-        let root = self.workspace_root.as_deref()?;
-
         if let Ok(guard) = self.group_ontologies.lock() {
             if let Some(cached) = guard.get(group_id) {
                 return cached.clone();
             }
         }
 
-        let resolved = crate::ontology::load_group_ontology(root, group_id)
+        let resolved = self
+            .workspace_root
+            .as_deref()
+            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
             .map(Arc::new)
             .or_else(|| self.ontology.clone());
 
