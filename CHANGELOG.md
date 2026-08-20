@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.14.0] - Unreleased
+
+### Added
+
+- **Per-group ontology support.** A `group_id` can now have its own extraction/validation
+  vocabulary, independent of every other co-resident group in the same workspace. Place a
+  group-specific ontology at `{workspace}/.lcg/ontology/<group_id>.yaml` (using the existing
+  ontology YAML format); a `group_id` unsafe as a bare filesystem path component is
+  percent-encoded with the same bijective scheme already used for per-group WAL directory names.
+  A group with no per-group file falls back to the existing workspace-wide `.lcg/ontology.yaml`,
+  exactly as before this feature — a workspace that hasn't adopted per-group ontologies behaves
+  identically to pre-0.14.0. The resolved per-group ontology governs, for that group only,
+  extraction guidance, `mode: strict` validation, canonicalization, and reprocessing
+  (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). A malformed or
+  unreadable per-group file falls back to the workspace-wide ontology (logged), rather than
+  silently degrading to no ontology or failing the group's extraction outright. Direct-assert
+  (`knowledge_assert_entity`/`knowledge_assert_relationship`) is unaffected, as before. When a
+  group's stream is published, the ontology that guided its extraction now travels alongside it
+  as `.wal-ontology.json` — a new, purely informational addition to the publish contract (see
+  [Operations](docs/operations.md)): a consumer can inspect it as documentation, but it is never
+  applied to the consumer's own extraction, validation, canonicalization, or reprocessing, and its
+  absence never affects replay or correctness. See [Ontology](docs/ontology.md#per-group-ontologies)
+  for the full resolution/fallback contract. (#446)
+
 ## [0.13.3] - Unreleased
 
 A patch release fixing a regression 0.13.2 introduced on the upgrade path: the per-group WAL
