@@ -13,6 +13,13 @@
 //!
 //! Progress streaming: pass a `progress_tx` and include `_progress_token` in the IPC request
 //! to receive `{"type":"progress", ...}` events during a large backfill pass.
+//!
+//! Issue #446 FR-006 names this operation alongside `canonicalize_relations` as needing
+//! per-group ontology-vocabulary scoping. It requires no change here: this module derives a
+//! pseudo relation type from each edge's `fact` text (see [`derive_relation_type`]) and never
+//! consults an [`crate::ontology::Ontology`]'s declared vocabulary at all. FR-006's mutation-
+//! scoping concern is already fully satisfied by `group_id` being required on every call
+//! (issue #447) — there is no vocabulary-selection step left to scope further.
 use std::sync::Arc;
 
 use serde_json::{json, Value};
