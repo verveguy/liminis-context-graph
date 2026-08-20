@@ -4509,14 +4509,6 @@ fn extract_optional_group_ids_preserve_empty(v: &Value) -> Option<Vec<String>> {
     }
 }
 
-/// Returns a deduplicated (first-seen order preserved), non-empty list of group_ids, or an
-/// actionable error naming `group_ids` when the value is absent, null, an empty array, or
-/// contains any non-string / empty-string element.
-///
-/// Used by destructive, explicitly group-scoped operations (`knowledge_delete_by_group`,
-/// `knowledge_delete_chunk_episode`, `knowledge_delete_by_source`) where a missing scope must
-/// never be interpreted as "all groups" (issue #406) — unlike `extract_optional_group_ids`,
-/// there is no "absent" case that resolves to anything but an error.
 /// Returns a non-empty `group_id` string, or an actionable error naming `group_id` when the
 /// value is absent, null, or an empty string.
 ///
@@ -4533,6 +4525,14 @@ fn extract_required_group_id(v: &Value) -> Result<String, Error> {
         })
 }
 
+/// Returns a deduplicated (first-seen order preserved), non-empty list of group_ids, or an
+/// actionable error naming `group_ids` when the value is absent, null, an empty array, or
+/// contains any non-string / empty-string element.
+///
+/// Used by destructive, explicitly group-scoped operations (`knowledge_delete_by_group`,
+/// `knowledge_delete_chunk_episode`, `knowledge_delete_by_source`) where a missing scope must
+/// never be interpreted as "all groups" (issue #406) — unlike `extract_optional_group_ids`,
+/// there is no "absent" case that resolves to anything but an error.
 fn extract_required_group_ids(v: &Value) -> Result<Vec<String>, Error> {
     v.as_array()
         .filter(|arr| {
