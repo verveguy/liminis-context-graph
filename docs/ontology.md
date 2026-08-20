@@ -39,11 +39,13 @@ component (e.g. `catalog`, `content-v2`) is used as the filename unchanged.
    group, exactly as it did before per-group ontologies existed.
 3. If neither exists, that group extracts free-form, same as an ontology-less workspace today.
 
-A malformed or unreadable per-group file falls back to step 2 (the workspace-wide ontology) rather
-than to "no ontology" or a startup failure — a bad per-group file degrades gracefully to the one
-ontology already known to be valid, and the failure is logged so it's observable rather than
-silent. Like the workspace-wide file, per-group files are loaded once (on that group's first use
-in the running process) and cached — restart the service to pick up a changed file.
+A malformed or unreadable per-group file is treated exactly like a missing one: resolution falls
+through to step 2 (the workspace-wide ontology) if one exists, or step 3 (free-form extraction) if
+it doesn't — never a startup failure or a hard error for that group. This degrades gracefully to
+whatever ontology this workspace already has validated (which may be none at all), and the failure
+is logged so it's observable rather than silent. Like the workspace-wide file, per-group files are
+loaded once (on that group's first use in the running process) and cached — restart the service to
+pick up a changed file.
 
 **Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
