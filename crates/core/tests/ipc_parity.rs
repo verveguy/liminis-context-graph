@@ -29,7 +29,7 @@ use lcg_core::{
     extractor::{ExtractOptions, Extractor, MockExtractor},
     handlers,
     ipc::IpcRequest,
-    ontology::{EntityTypeDef, OntologyMode, RelationTypeDef},
+    ontology::{group_ontology_path, EntityTypeDef, OntologyMode, RelationTypeDef},
     pointer::{self, read_merged_into},
     telemetry::{CaptureSink, NoopSink, TelemetryEvent, TelemetrySink},
     types::{ExtractedEntity, ExtractionOutcome, ExtractionResult},
@@ -3951,6 +3951,47 @@ async fn test_reprocess_scope_invalid() {
     );
 }
 
+/// issue #446 FR-005: `scope=off_ontology` succeeds for a group with its own per-group ontology
+/// file, even though the workspace has no workspace-wide `.lcg/ontology.yaml` at all — and a
+/// co-resident group with no per-group file still gets the "requires an ontology" error, proving
+/// resolution is scoped per `group_id`, not a shared/workspace-wide toggle.
+#[tokio::test]
+async fn test_reprocess_scope_off_ontology_resolves_per_group_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let path = group_ontology_path(workspace.path(), "grp-a").unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "mode: strict\nentity_types:\n  - name: Person\n").unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+
+    let v_a = dispatch_val(
+        104,
+        "knowledge_reprocess_entity_types",
+        json!({"group_id": "grp-a", "scope": "off_ontology"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v_a, 104);
+    assert_eq!(
+        v_a["result"]["success"], true,
+        "group grp-a has its own per-group ontology file and must succeed: {v_a}"
+    );
+
+    let v_b = dispatch_val(
+        105,
+        "knowledge_reprocess_entity_types",
+        json!({"group_id": "grp-b", "scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v_b, 105);
+    assert_eq!(
+        v_b["result"]["success"], false,
+        "group grp-b has no per-group file and no workspace ontology, and must not see \
+         grp-a's per-group ontology: {v_b}"
+    );
+}
+
 /// `dry_run: true` with `scope=off_ontology` returns a plan but mutates nothing.
 #[tokio::test]
 async fn test_reprocess_dry_run_returns_plan() {
@@ -4290,6 +4331,48 @@ async fn test_reprocess_relation_scope_untyped_requires_ontology() {
     assert!(
         v["result"]["error"].is_string(),
         "error field must be a string: {v}"
+    );
+}
+
+/// issue #446 FR-005: `scope=off_ontology` succeeds for a group with its own per-group ontology
+/// file declaring relation_types, even with no workspace-wide ontology — a co-resident group
+/// with no per-group file still gets the "requires an ontology" error (A1: relation
+/// classification has no open-ended fallback for any scope), proving resolution is scoped per
+/// `group_id`.
+#[tokio::test]
+async fn test_reprocess_relation_scope_off_ontology_resolves_per_group_ontology() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let path = group_ontology_path(workspace.path(), "grp-a").unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "mode: open\nrelation_types:\n  - name: AUTHORED\n").unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+
+    let v_a = dispatch_val(
+        106,
+        "knowledge_reprocess_relation_types",
+        json!({"group_id": "grp-a", "scope": "off_ontology"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v_a, 106);
+    assert_eq!(
+        v_a["result"]["success"], true,
+        "group grp-a has its own per-group ontology file with relation_types and must succeed: {v_a}"
+    );
+
+    let v_b = dispatch_val(
+        107,
+        "knowledge_reprocess_relation_types",
+        json!({"group_id": "grp-b", "scope": "off_ontology"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v_b, 107);
+    assert_eq!(
+        v_b["result"]["success"], false,
+        "group grp-b has no per-group file and no workspace ontology, and must not see \
+         grp-a's per-group ontology: {v_b}"
     );
 }
 
