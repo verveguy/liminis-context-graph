@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::error::Error;
+
 // ── Serde deserialization types (YAML schema) ─────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -258,6 +260,76 @@ pub fn load_ontology(workspace_root: Option<&Path>) -> Option<Ontology> {
         ontology.entity_types.len(),
         ontology.relation_types.len(),
         ontology.mode,
+        path
+    );
+    Some(ontology)
+}
+
+/// Resolves the path a per-group ontology file would live at for `group_id`, per FR-003/FR-004:
+/// `{workspace_root}/.lcg/ontology/<encoded_group_id>.yaml`. Does not check whether the file
+/// exists — callers use this both to probe for the file and to know where to look.
+///
+/// `group_id` is encoded with [`crate::wal_group::encode_group_dir_name`], the same bijective
+/// percent-encoding already used for per-group WAL directory names (FR-004), so a `group_id`
+/// unsafe as a filesystem path component gets identical treatment here as it does for WAL
+/// storage. Returns `Err` only when `group_id` itself is invalid (empty, or too long once
+/// encoded) — the same cases `encode_group_dir_name` rejects.
+pub fn group_ontology_path(workspace_root: &Path, group_id: &str) -> Result<PathBuf, Error> {
+    let encoded = crate::wal_group::encode_group_dir_name(group_id)?;
+    Ok(workspace_root
+        .join(".lcg")
+        .join("ontology")
+        .join(format!("{encoded}.yaml")))
+}
+
+/// Loads and parses a per-group ontology file for `group_id`, if one exists (FR-001).
+///
+/// Mirrors [`load_ontology`]'s silent-fallback behavior: returns `None` if the file doesn't
+/// exist, is empty, is malformed (logged as a warning; does not panic), or declares no entity
+/// types and no relation types. Callers are responsible for falling back to the workspace-wide
+/// ontology when this returns `None` (FR-002) — this function only answers "does group_id have
+/// its own ontology," not "what ontology should govern group_id."
+pub fn load_group_ontology(workspace_root: &Path, group_id: &str) -> Option<Ontology> {
+    let path = group_ontology_path(workspace_root, group_id).ok()?;
+    if !path.exists() {
+        return None;
+    }
+
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: ontology: failed to read per-group ontology {:?} for group {:?}: {} — falling back to workspace ontology",
+                path, group_id, e
+            );
+            return None;
+        }
+    };
+
+    // An empty or whitespace-only file is intentionally "no per-group ontology" — don't log a
+    // parse error, just fall back like a missing file would.
+    if text.trim().is_empty() {
+        return None;
+    }
+
+    let file: OntologyFile = match serde_yaml::from_str(&text) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: ontology: YAML parse error in per-group ontology {:?} for group {:?}: {} — falling back to workspace ontology",
+                path, group_id, e
+            );
+            return None;
+        }
+    };
+
+    let ontology = build_ontology(file, None)?;
+    eprintln!(
+        "liminis-context-graph: ontology: loaded {} entity type(s), {} relation type(s), mode={} for group {:?} from {:?}",
+        ontology.entity_types.len(),
+        ontology.relation_types.len(),
+        ontology.mode,
+        group_id,
         path
     );
     Some(ontology)
@@ -743,6 +815,98 @@ relation_types:
         .unwrap();
         let ontology = load_ontology(Some(dir.path())).expect("should load from .graphiti");
         assert_eq!(ontology.entity_types.len(), 1);
+    }
+
+    // ── group_ontology_path / load_group_ontology ────────────────────────────
+
+    fn write_group_ontology(dir: &TempDir, group_id: &str, content: &str) -> PathBuf {
+        let path = group_ontology_path(dir.path(), group_id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn group_ontology_path_uses_encoded_group_id() {
+        let dir = TempDir::new().unwrap();
+        let path = group_ontology_path(dir.path(), "safe-group_1").unwrap();
+        assert_eq!(
+            path,
+            dir.path()
+                .join(".lcg")
+                .join("ontology")
+                .join("safe-group_1.yaml")
+        );
+    }
+
+    #[test]
+    fn group_ontology_path_percent_encodes_unsafe_group_id() {
+        let dir = TempDir::new().unwrap();
+        let path = group_ontology_path(dir.path(), "acme/prod").unwrap();
+        assert_eq!(
+            path,
+            dir.path()
+                .join(".lcg")
+                .join("ontology")
+                .join("acme%2Fprod.yaml")
+        );
+    }
+
+    #[test]
+    fn group_ontology_path_rejects_empty_group_id() {
+        let dir = TempDir::new().unwrap();
+        assert!(group_ontology_path(dir.path(), "").is_err());
+    }
+
+    #[test]
+    fn load_group_ontology_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(load_group_ontology(dir.path(), "group-a").is_none());
+    }
+
+    #[test]
+    fn load_group_ontology_empty_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        write_group_ontology(&dir, "group-a", "");
+        assert!(load_group_ontology(dir.path(), "group-a").is_none());
+    }
+
+    #[test]
+    fn load_group_ontology_malformed_yaml_returns_none_no_panic() {
+        let dir = TempDir::new().unwrap();
+        write_group_ontology(&dir, "group-a", "not: valid: yaml: [{{\n");
+        assert!(load_group_ontology(dir.path(), "group-a").is_none());
+    }
+
+    #[test]
+    fn load_group_ontology_valid_file_returns_some() {
+        let dir = TempDir::new().unwrap();
+        write_group_ontology(
+            &dir,
+            "group-a",
+            "mode: strict\nentity_types:\n  - name: KnowledgeChannel\n",
+        );
+        let ontology = load_group_ontology(dir.path(), "group-a").expect("should load");
+        assert_eq!(ontology.mode, OntologyMode::Strict);
+        assert_eq!(ontology.entity_types[0].name, "KnowledgeChannel");
+    }
+
+    #[test]
+    fn load_group_ontology_does_not_read_another_groups_file() {
+        let dir = TempDir::new().unwrap();
+        write_group_ontology(&dir, "group-a", "entity_types:\n  - name: Person\n");
+        assert!(load_group_ontology(dir.path(), "group-b").is_none());
+    }
+
+    #[test]
+    fn load_group_ontology_percent_encoded_group_id_round_trips() {
+        let dir = TempDir::new().unwrap();
+        write_group_ontology(&dir, "acme/prod", "entity_types:\n  - name: Person\n");
+        let ontology =
+            load_group_ontology(dir.path(), "acme/prod").expect("should load encoded file");
+        assert_eq!(ontology.entity_types[0].name, "Person");
+        // A different, unsafe group_id that happens to share the same encoded prefix must not collide.
+        assert!(load_group_ontology(dir.path(), "acme").is_none());
     }
 
     // ── load_ontology_from_path ───────────────────────────────────────────────
