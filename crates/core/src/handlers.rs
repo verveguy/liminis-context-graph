@@ -3563,12 +3563,17 @@ async fn handle_reprocess_entity_types(
     };
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
 
+    // issue #446 FR-005: resolve this group's own ontology (falling back to the workspace-wide
+    // one) rather than reading state.ontology directly, so reprocessing only ever constrains
+    // classification to this group's own vocabulary.
+    let resolved_ontology = state.resolve_ontology(&group_id);
+
     // Scopes that constrain classification to the ontology require an ontology to be loaded.
     let requires_ontology = matches!(
         scope,
         corrections::ReprocessScope::OffOntology | corrections::ReprocessScope::All
     );
-    if requires_ontology && state.ontology.is_none() {
+    if requires_ontology && resolved_ontology.is_none() {
         return Ok(json!({
             "success": false,
             "error": format!(
@@ -3583,13 +3588,12 @@ async fn handle_reprocess_entity_types(
     }
 
     // Pre-extract ancestor_map and allowed type names before async/spawn_blocking boundaries.
-    let ancestor_map: HashMap<String, Vec<String>> = state
-        .ontology
+    let ancestor_map: HashMap<String, Vec<String>> = resolved_ontology
         .as_deref()
         .map(|o| o.ancestor_map.clone())
         .unwrap_or_default();
     let ontology_type_names: Option<std::collections::HashSet<String>> = if requires_ontology {
-        let names = state.ontology.as_deref().unwrap().entity_type_names();
+        let names = resolved_ontology.as_deref().unwrap().entity_type_names();
         if names.is_empty() {
             return Ok(json!({
                 "success": false,
@@ -3879,18 +3883,17 @@ async fn handle_canonicalize_relations(
     // #447: validate group_id before any other work, including the ontology check below.
     let group_id = extract_required_group_id(&req.params["group_id"])?;
 
-    // FR-013: fail fast if no ontology with relation_types is loaded
-    let ontology = state
-        .ontology
-        .as_ref()
-        .ok_or_else(|| {
-            Error::Ipc(
-                "knowledge_canonicalize_relations requires a workspace ontology with relation_types \
-                 defined in .lcg/ontology.yaml"
-                    .to_string(),
-            )
-        })?
-        .clone();
+    // FR-013 / issue #446 FR-005: resolve this group's own ontology (falling back to the
+    // workspace-wide one) rather than reading state.ontology directly, so canonicalization only
+    // ever applies this group's vocabulary to this group's edges.
+    let ontology = state.resolve_ontology(&group_id).ok_or_else(|| {
+        Error::Ipc(
+            "knowledge_canonicalize_relations requires a resolved ontology with relation_types \
+             defined — either a per-group .lcg/ontology/<group_id>.yaml or a workspace-wide \
+             .lcg/ontology.yaml"
+                .to_string(),
+        )
+    })?;
     if !ontology.has_relation_types() {
         return Err(Error::Ipc(
             "knowledge_canonicalize_relations requires at least one relation_type in the ontology"
@@ -3958,8 +3961,10 @@ async fn handle_reprocess_relation_types(
 
     // FR-002: every scope requires a declared ontology relation-type menu — relation
     // classification has no open-ended/unconstrained mode (A1).
-    let ontology = match state.ontology.as_ref() {
-        Some(o) if o.has_relation_types() => Arc::clone(o),
+    // issue #446 FR-005: resolve this group's own ontology (falling back to the workspace-wide
+    // one) rather than reading state.ontology directly.
+    let ontology = match state.resolve_ontology(&group_id) {
+        Some(o) if o.has_relation_types() => o,
         Some(_) => {
             return Ok(json!({
                 "success": false,
@@ -3970,8 +3975,9 @@ async fn handle_reprocess_relation_types(
         None => {
             return Ok(json!({
                 "success": false,
-                "error": "knowledge_reprocess_relation_types requires a workspace ontology with \
-                          relation_types defined in .lcg/ontology.yaml",
+                "error": "knowledge_reprocess_relation_types requires a resolved ontology with \
+                          relation_types defined — either a per-group \
+                          .lcg/ontology/<group_id>.yaml or a workspace-wide .lcg/ontology.yaml",
             }));
         }
     };
