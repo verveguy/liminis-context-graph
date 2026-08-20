@@ -47,6 +47,19 @@ recovery, or #398's documented rollback procedure needs to rebuild from.
   invoked either operation before this fix, so the required parameter breaks no existing caller.
   See ADR-0378's FR-004 section and ADR-0385's Context section, both amended by this issue. (#447)
 
+### Changed
+
+- **BREAKING: `group_id` is now a required, non-empty parameter on
+  `knowledge_canonicalize_relations` and `knowledge_backfill_relation_types`, on both the MCP and
+  IPC surfaces.** The MCP tool schemas for both methods move `group_id` from optional into
+  `required`. A caller that previously omitted `group_id` (absent, `null`, or empty) got a
+  successful — and, per the `### Fixed` entry above, cross-group — rewrite; it now receives an
+  error naming the missing parameter instead, and no rows are read or written. The remedy is to
+  pass the caller's own group explicitly; there is no default to fall back to, because a silent
+  default (the default group) is the defect this release fixes. Unlike #406's equivalent change,
+  no known deployment invokes either operation today, so this breaks no existing caller in
+  practice — see the issue's Release timing discussion. (#447)
+
 ## [0.13.2] - 2026-08-16
 
 A patch release hardening the group boundary in both directions. Deletes could reach across every
