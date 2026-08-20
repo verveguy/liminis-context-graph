@@ -21,8 +21,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   identically to pre-0.14.0. The resolved per-group ontology governs, for that group only,
   extraction guidance, `mode: strict` validation, canonicalization, and reprocessing
   (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). A malformed or
-  unreadable per-group file falls back to the workspace-wide ontology (logged), rather than
-  silently degrading to no ontology or failing the group's extraction outright. Direct-assert
+  unreadable per-group file falls back to the workspace-wide ontology when one exists, or to no
+  ontology otherwise (logged either way), rather than failing the group's extraction outright.
+  Direct-assert
   (`knowledge_assert_entity`/`knowledge_assert_relationship`) is unaffected, as before. When a
   group's stream is published, the ontology that guided its extraction now travels alongside it
   as `.wal-ontology.json` — a new, purely informational addition to the publish contract (see

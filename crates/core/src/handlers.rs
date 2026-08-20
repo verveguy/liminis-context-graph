@@ -3903,8 +3903,8 @@ async fn handle_canonicalize_relations(
     let ontology = state.resolve_ontology(&group_id).ok_or_else(|| {
         Error::Ipc(
             "knowledge_canonicalize_relations requires a resolved ontology with relation_types \
-             defined — either a per-group .lcg/ontology/<group_id>.yaml or a workspace-wide \
-             .lcg/ontology.yaml"
+             defined — either a per-group .lcg/ontology/<group_id>.yaml (percent-encoded if \
+             group_id needs it — see docs/ontology.md) or a workspace-wide .lcg/ontology.yaml"
                 .to_string(),
         )
     })?;
@@ -3991,7 +3991,8 @@ async fn handle_reprocess_relation_types(
                 "success": false,
                 "error": "knowledge_reprocess_relation_types requires a resolved ontology with \
                           relation_types defined — either a per-group \
-                          .lcg/ontology/<group_id>.yaml or a workspace-wide .lcg/ontology.yaml",
+                          .lcg/ontology/<group_id>.yaml (percent-encoded if group_id needs it \
+                          — see docs/ontology.md) or a workspace-wide .lcg/ontology.yaml",
             }));
         }
     };

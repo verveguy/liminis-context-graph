@@ -123,3 +123,13 @@ received ontology operatively. This ADR's Decision 4 is the reason that audit it
 - Per-group ontology resolution requires no additional operator action for a single-group
   deployment: with no `.lcg/ontology/` directory present, every group falls through to the
   existing workspace-wide `ontology` field exactly as before this issue (SC-002).
+- **A known v1 gap, deliberately not closed by this issue**: `group_ontology_path`/
+  `load_group_ontology` do not apply `wal_group::check_no_case_insensitive_collision`, unlike
+  `AppState::with_wal_writer`'s WAL directory creation. Two already-safe `group_id`s differing
+  only by ASCII case (e.g. `Catalog`/`catalog`) resolve to the same filename on a
+  case-insensitive filesystem (macOS APFS, Windows NTFS), so one group's ontology could silently
+  load for the other on those platforms — the one cross-group-leakage vector this issue does not
+  structurally close. Closing it requires either reusing the WAL guard against a per-group
+  ontology directory listing of files rather than subdirectories, or a dedicated variant; left as
+  a follow-up rather than folded into this issue's diff. See `docs/ontology.md`'s "Known v1
+  limitation" note.

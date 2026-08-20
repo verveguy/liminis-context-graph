@@ -118,9 +118,11 @@ informational metadata.
   ontology file path must not break or collide.
 - A workspace has neither a per-group ontology file nor a workspace-wide `ontology.yaml` for a given
   group — extraction proceeds with no ontology, as it does today for ontology-less workspaces.
-- `canonicalize_relations` and `backfill_relation_types` are not yet group-scoped (tracked in #447);
-  until that lands, per-group ontology resolution for those two operations cannot be fully enforced
-  without risking one group's vocabulary being applied to another group's edges.
+- `canonicalize_relations` and `backfill_relation_types` needed to be group-scoped before per-group
+  ontology resolution could apply to them without risking one group's vocabulary being applied to
+  another group's edges — #447 delivered that group-scoping (merged prior to this feature's
+  implementation). `canonicalize_relations` now resolves and applies the target group's own
+  ontology; `backfill_relation_types` has no ontology dependency to scope at all (see FR-006).
 - A consumer already has its own operative ontology for a group and hydrates a stream published by a
   different producer for that same group — the received ontology must not overwrite or merge into
   the consumer's local configuration; adopting it requires a deliberate, separate action by the
@@ -146,10 +148,12 @@ informational metadata.
   `mode` (including strict validation), canonicalization, and reprocessing (`reprocess_entity_types`,
   `reprocess_relation_types`).
 - **FR-006**: `canonicalize_relations` and `backfill_relation_types` MUST select candidates and apply
-  vocabulary only within the target group's own resolved ontology, once those operations are
-  group-scoped (tracked in #447). This feature MUST NOT apply per-group ontology enforcement to those
-  two operations in a way that leaves them mutating another group's edges under a different group's
-  vocabulary.
+  vocabulary only within the target group's own resolved ontology. This feature MUST NOT apply
+  per-group ontology enforcement to those two operations in a way that leaves them mutating another
+  group's edges under a different group's vocabulary. Delivered: `canonicalize_relations` resolves
+  and applies the target group's own ontology (building on #447's group-scoping); `backfill_relation_types`
+  derives pseudo relation types from edge fact text and has no ontology dependency at all, so there
+  is no vocabulary-selection step for this FR to scope there.
 - **FR-007**: When a group's stream is published, the ontology used to guide extraction for that
   group MUST be included in the stream's dot-namespace as an informational item, alongside the
   existing `.wal-generation.json` and `.wal-bounds.json` artifacts.
@@ -190,12 +194,13 @@ informational metadata.
 
 ## Assumptions
 
-- **#447 is a prerequisite for FR-006.** `canonicalize_relations` and `backfill_relation_types`
-  currently select candidates database-wide with no `group_id` filter. Per-group ontologies layered
-  on top of that today would apply one group's vocabulary to another group's edges — strictly worse
-  than current behavior. #447 (group-scoping those two operations) must land before, or alongside,
-  full enforcement of FR-006; the rest of this feature (FR-001 through FR-005, FR-007 through
-  FR-011) does not depend on it.
+- **#447 was a prerequisite for FR-006, and has landed.** Before #447, `canonicalize_relations` and
+  `backfill_relation_types` selected candidates database-wide with no `group_id` filter; per-group
+  ontologies layered on top of that would have applied one group's vocabulary to another group's
+  edges — strictly worse than prior behavior. #447 (group-scoping those two operations) merged
+  ahead of this feature's implementation, so FR-006 is fully enforced for `canonicalize_relations`
+  at delivery. The rest of this feature (FR-001 through FR-005, FR-007 through FR-011) never
+  depended on #447.
 - **Runtime hot-set of a group's ontology without restart (originally proposed Option 3) is
   deferred.** It is valuable for a long-lived multi-tenant worker adding channels on the fly, but is
   a substantially larger change (today's ontology is `Option<Arc<Ontology>>`, read once at startup
@@ -203,16 +208,19 @@ informational metadata.
   in-flight-extraction questions). It is out of scope for this issue and may be filed as a follow-up.
 - **In-file multi-group scoping (originally proposed Option 2) was considered and rejected** in
   favor of per-group files, because the ontology drift sidecar (`.lcg/ontology-hash.json`) is
-  workspace-scoped and single-valued; per-group files give per-group drift hashes naturally, while
-  one file carrying several groups' vocabularies does not.
+  workspace-scoped and single-valued, and one file carrying several groups' vocabularies would make
+  a future per-group drift design harder to retrofit than separate per-group files would. Note that
+  this feature, as delivered, keeps drift detection workspace-scoped for all groups regardless of
+  ontology shape — per-group files make a future per-group drift design *possible*, but do not by
+  themselves produce per-group drift hashes today (see ADR-0446, Decision 3).
 
 ## Out of Scope
 
 - Runtime/hot per-group ontology replacement without a restart (originally proposed Option 3).
 - In-file multi-group ontology scoping (originally proposed Option 2).
-- Group-scoping `canonicalize_relations` and `backfill_relation_types` themselves — tracked
-  separately in #447; this issue depends on that work for full FR-006 enforcement but does not
-  implement it.
+- Group-scoping `canonicalize_relations` and `backfill_relation_types` themselves — that work was
+  tracked and delivered separately in #447 (merged ahead of this feature); this issue built FR-006
+  enforcement on top of it but did not implement the group-scoping itself.
 - Automatic adoption of a producer's published ontology into a consumer's own operative
   configuration — a consumer that wants to use a producer's vocabulary must copy it into its own
   configuration deliberately.

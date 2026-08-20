@@ -20,7 +20,7 @@ groups often want different vocabularies — a content channel's `Person`/`Organ
 should not constrain an unrelated catalog group co-resident in the same workspace. Place a
 group-specific ontology at:
 
-```
+```text
 {workspace}/.lcg/ontology/<group_id>.yaml
 ```
 
@@ -29,6 +29,15 @@ filesystem path component (anything outside ASCII alphanumerics, `_`, and `-`) i
 using the same bijective scheme already applied to per-group WAL directory names — every byte
 outside that safe set becomes `%XX` (uppercase hex). A `group_id` that's already a safe path
 component (e.g. `catalog`, `content-v2`) is used as the filename unchanged.
+
+**Known v1 limitation: no case-insensitive collision guard.** Two already-safe `group_id`s that
+differ only by ASCII case (e.g. `Catalog` and `catalog`) resolve to the same filename on a
+case-insensitive filesystem (the default for macOS APFS and Windows NTFS). Per-group WAL
+directories guard against this exact case with an explicit, loudly-failing check
+(`wal_group::check_no_case_insensitive_collision`, invoked when a group's WAL writer is first
+created); per-group ontology file resolution does not yet apply the same guard, so on an
+affected filesystem one group's ontology could silently load for the other. Avoid `group_id`s
+that differ from another co-resident group's only by letter case until this is closed.
 
 **Resolution and fallback.** For a given `group_id`:
 
@@ -51,10 +60,10 @@ pick up a changed file.
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
 governs *extraction-guided* groups (`knowledge_add_episode` and the maintenance operations above).
 
-**`canonicalize_relations`/`backfill_relation_types`** apply per-group ontology resolution too,
-scoped to the `group_id` each call already requires. `backfill_relation_types` in particular has no
-ontology dependency at all — it derives pseudo relation types from edge fact text, not from a
-declared vocabulary — so per-group resolution has nothing to change there.
+**`canonicalize_relations`** resolves and applies the target group's own ontology, scoped to the
+`group_id` the call already requires. **`backfill_relation_types`** is ontology-independent — it
+derives pseudo relation types from edge fact text, not from a declared vocabulary — so per-group
+ontology resolution has nothing to change there.
 
 **Published ontology is documentation, not policy.** When a group's stream is published (the
 existing whole-directory copy described in [Operations](operations.md)), the ontology that guided

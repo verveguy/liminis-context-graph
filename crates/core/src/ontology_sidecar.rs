@@ -118,7 +118,11 @@ pub fn write_wal_ontology_sidecar(
     let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
 
     let path = wal_ontology_path(wal_dir);
-    let tmp_path = path.with_extension("json.tmp");
+    // Unique per call: two concurrent same-group `add_episode` calls can reach this function
+    // with no write lock held, so a shared temp name would let one writer's `File::create`
+    // truncate a file the other hasn't finished writing, and one `rename` could publish the
+    // truncated result.
+    let tmp_path = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
     {
         let mut f = std::fs::File::create(&tmp_path)?;
         f.write_all(json.as_bytes())?;
