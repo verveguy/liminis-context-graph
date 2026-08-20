@@ -34,6 +34,18 @@ recovery, or #398's documented rollback procedure needs to rebuild from.
   disk, so the message can no longer assume which one applies. It now states both: republish the
   stream's full directory if it came from a publisher, or hand-create `.wal-generation.json` for a
   local workspace with no publisher. (#431)
+- **`knowledge_canonicalize_relations` and `knowledge_backfill_relation_types` now require a
+  `group_id` and are fully group-scoped.** Both previously selected `RelatesToNode_` candidates
+  database-wide with no group filter and flushed every mutation to the default group's WAL
+  stream, regardless of which group's data they actually touched. On a multi-group workspace, the
+  *correct, intended* use of either operation — canonicalizing the one group a node owns — rewrote
+  every co-resident group's edges as a side effect and misattributed the resulting mutations to
+  the default group's stream. This is the same failure class as #368/#406 (cross-group mutation)
+  and #385 (WAL misattribution), previously left as a documented exception for these two
+  operations. `group_id` is now required from the outset — omitted, `null`, or empty is rejected
+  rather than falling back to a database-wide rewrite or the default group. No known deployment
+  invoked either operation before this fix, so the required parameter breaks no existing caller.
+  See ADR-0378's FR-004 section and ADR-0385's Context section, both amended by this issue. (#447)
 
 ## [0.13.2] - 2026-08-16
 
