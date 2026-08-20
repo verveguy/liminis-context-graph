@@ -24,7 +24,6 @@ use crate::{
     error::Error,
     ontology::{normalize_relation_type, Ontology},
     wal_exec,
-    wal_group::DEFAULT_GROUP_ID,
 };
 
 const DEFAULT_EMBEDDING_THRESHOLD: f32 = 0.7;
@@ -35,11 +34,13 @@ const PROGRESS_EVERY: usize = 5000;
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct CanonicalizeParams {
+    pub group_id: String,
     pub dry_run: bool,
     pub embedding_threshold: Option<f32>,
 }
 
 pub struct CanonicalizeReport {
+    pub group_id: String,
     pub total_edges: usize,
     pub mapped_count: usize,
     pub noise_count: usize,
@@ -52,6 +53,7 @@ impl CanonicalizeReport {
     fn to_json(&self) -> Value {
         let total = self.total_edges as f64;
         json!({
+            "group_id": self.group_id,
             "total_edges": self.total_edges,
             "mapped_count": self.mapped_count,
             "noise_count": self.noise_count,
@@ -230,13 +232,14 @@ pub async fn canonicalize_relations(
         .ok_or_else(|| Error::DbUnavailable("DB unavailable".to_string()))?;
     let _read_guard = state.write_lock.read().await;
     let db_a = Arc::clone(&db);
+    let group_id_a = params.group_id.clone();
     let edges: Vec<EdgeRecord> = tokio::task::spawn_blocking(move || {
         let conn = db_a.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         let mut all = Vec::new();
         let mut offset = 0;
         loop {
             let rows = conn
-                .dump_relatos_page(None, offset, PAGE_SIZE)
+                .dump_relatos_page(Some(&group_id_a), offset, PAGE_SIZE)
                 .map_err(|e| Error::Ipc(format!("read edges page: {e}")))?;
             let count = rows.len();
             for row in &rows {
@@ -384,6 +387,7 @@ pub async fn canonicalize_relations(
     }
 
     let report = CanonicalizeReport {
+        group_id: params.group_id.clone(),
         total_edges,
         mapped_count,
         noise_count,
@@ -414,6 +418,7 @@ pub async fn canonicalize_relations(
 
         let db_d = Arc::clone(&db);
         let state_c = Arc::clone(&state);
+        let gid_c = params.group_id.clone();
         let _write_guard = state.write_lock.write().await;
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let conn = db_d.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
@@ -465,12 +470,10 @@ pub async fn canonicalize_relations(
             }
             // Always flush whatever succeeded before any failure — the DB already committed
             // those mutations; skipping the WAL flush would leave DB/WAL out of sync.
-            // Selects RelatesToNode_ candidates database-wide with no group_id filter (FR-004):
-            // routes through the default group's writer, a documented limitation rather than
-            // mutation-level attribution.
-            let seq =
-                wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
+            // Candidate selection and mutation are both scoped to group_id (#447): a single call
+            // touches exactly one group's data and routes to that group's own WAL stream.
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &gid_c, seq);
             exec_result
         })
         .await??;

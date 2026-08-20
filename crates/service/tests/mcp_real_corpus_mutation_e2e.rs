@@ -1263,7 +1263,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
 
         let first = client.call_tool_with_progress(
             "knowledge_canonicalize_relations",
-            json!({}),
+            json!({"group_id": group_id}),
             "us3b-canonicalize-1",
             Duration::from_secs(300),
         );
@@ -1271,7 +1271,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
 
         let second = client.call_tool_with_progress(
             "knowledge_canonicalize_relations",
-            json!({}),
+            json!({"group_id": group_id}),
             "us3b-canonicalize-2",
             Duration::from_secs(300),
         );
