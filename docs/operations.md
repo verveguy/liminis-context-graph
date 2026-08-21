@@ -238,13 +238,25 @@ variables, and [IPC & MCP Reference](ipc-mcp-reference.md#mcp-over-stdio-transpo
 
 The service binds its socket **before** opening the database, so a corrupted store leaves it
 reachable in degraded mode rather than dead ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md)).
-Autonomous startup recovery ([ADR-0027](adr/0027-autonomous-wal-startup-recovery.md)) then reopens
-at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
-Recovery progress is observable via the [`wal_auto_recovery` telemetry event](telemetry.md#wal_auto_recovery),
+This same pre-open window also covers legacy workspace migration and the issue #378 WAL-root
+relocation (`migrate_wal_root_if_needed()`): both run after the socket is already bound and
+before `Db::open()`. Autonomous startup recovery ([ADR-0027](adr/0027-autonomous-wal-startup-recovery.md))
+then reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without
+intervention. Recovery progress is observable via the [`wal_auto_recovery` telemetry event](telemetry.md#wal_auto_recovery),
 whose `phase` field steps through `corruption_detected` → `checkpoint_drop_complete` →
 `cursor_derived` → `replay_complete` → `index_build_complete` → `recovery_complete` (or
 `fallback_triggered`, if automatic recovery gives up and manual intervention via
 `knowledge_recover`/`knowledge_recover_full` is needed).
+
+**Readiness: a successful connect is not readiness.** Because the socket is bound before the
+database opens, a bare `connect()` to `.lcg/service.sock` can succeed while the service is still
+migrating the workspace or replaying WAL — before it has started actually serving graph requests.
+The correct readiness signal is a `health_check` request/response round-trip reporting
+`"healthy"`: `handle_health_check` can only return `healthy` once `Db::open()` has succeeded,
+which is after both legacy-workspace migration and WAL-root migration have completed. A client
+that treats connect-success as readiness and immediately issues requests can observe a transient
+`degraded` state, or race the WAL-root migration described above — poll `health_check` (or
+`knowledge_status`) until it reports healthy before sending real work.
 
 ## `knowledge_status` health fields
 
