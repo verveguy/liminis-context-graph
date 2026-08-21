@@ -189,12 +189,29 @@ always cleared in full exactly as before):
    the group(s), raised before any clear happens — the same fail-fast pattern this guard already
    uses for its sibling refusals (dry-run, no-`force_clear`), and observable from the rebuild
    call's own error response with no new response shape needed.
+4. **Split, otherwise row-scope-clearable (case 2 above), but the DB currently has a live
+   two-hop `RELATES_TO` connection from one of that group's `create_uuids` into a
+   `RelatesToNode_` row that is itself *not* in `create_uuids`** — added after review found that
+   case 2's row-scoped `DETACH DELETE` can silently sever that connection. An `Entity`'s
+   `DETACH DELETE` removes every incident relationship, including a hop into a surviving
+   `RelatesToNode_` this replay does not also recreate (its own `CREATE` — and therefore its
+   connecting hop `CREATE` — lives in the group's other, un-replayed stream, the same split
+   condition that makes case 2 exist at all). `purge_group_rows`'s forced-rebind pass does not
+   repair this: it only re-resolves `RelatesToNode_` rows carrying a genuine cross-group pointer
+   (`crate::pointer::CrossGroupPointer`), not an ordinary same-group edge created directly by
+   `db::Conn::insert_relates_to_edge`. Detected via
+   `db::Conn::find_relates_to_dangling_after_uuid_purge`, checked both in the initial (unlocked)
+   classification and again in the locked freshness re-check immediately before the purge; a hit
+   in either refuses the rebuild with the same fail-fast `Error::Ipc` pattern as case 3, just
+   naming the severed-connection cause rather than a mutating-Cypher-line one.
 
 `cross_group::rebind_pointers_forced`'s forced-rebind pass, reused unchanged by
 `purge_group_rows`, needed no logic change for the partial-purge case: its actual mechanism
 (`resolve_endpoint`, a real per-pointer existence re-check) is correct regardless of whether the
 source group was emptied in full or only partially — only the function's doc comment, written for
-the whole-group case, needed a wording correction.
+the whole-group case, needed a wording correction. That mechanism is unrelated to case 4 above,
+though: pointers and ordinary two-hop edges are two different mechanisms, and only case 4's
+caller-side check protects the latter.
 
 This amendment does not reopen anything this ADR's original "Rejected alternatives" section
 already settled — it narrows *how much* of a referenced group's data gets cleared, not *which*

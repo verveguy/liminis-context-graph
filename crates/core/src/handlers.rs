@@ -2055,6 +2055,13 @@ struct RebuildClearPlan {
     /// refuses the whole rebuild before any clear happens, regardless of `dry_run`/
     /// `force_clear`.
     blocked_groups: Vec<String>,
+    /// Split foreign groups whose row-scoped clear would sever a live two-hop `RELATES_TO`
+    /// connection into a `RelatesToNode_` this replay won't also recreate (issue #462's own new
+    /// row-scoped purge, not #432's original whole-group case) — see
+    /// `db::Conn::find_relates_to_dangling_after_uuid_purge`'s doc comment. A second, distinct
+    /// FR-004 refusal trigger from `blocked_groups`, kept separate so the error message names
+    /// the real cause rather than a mutating-Cypher-line claim that wouldn't be true here.
+    topology_blocked_groups: Vec<String>,
 }
 
 async fn handle_rebuild_from_wal(
@@ -2233,6 +2240,7 @@ async fn handle_rebuild_from_wal(
             let mut whole_group_targets = Vec::new();
             let mut split_target_group_ids: Vec<String> = Vec::new();
             let mut blocked_groups = Vec::new();
+            let mut topology_blocked_groups = Vec::new();
 
             for gid in &referenced {
                 // An unqueryable label (older/partially-initialised schema missing the
@@ -2287,6 +2295,24 @@ async fn handle_rebuild_from_wal(
                     blocked_groups.push(gid.clone());
                     continue;
                 }
+                // Row-scoping this group's clear to its create_uuids is only safe if doing so
+                // won't sever a live two-hop RELATES_TO connection into a RelatesToNode_ this
+                // replay won't also recreate (see find_relates_to_dangling_after_uuid_purge's
+                // doc comment) — otherwise a row-scoped "safe" clear silently corrupts topology
+                // in this same group's own, un-replayed stream. Same FR-004 refusal as above,
+                // just a different trigger condition.
+                if let Some(uuids) =
+                    content.map(|c| c.create_uuids.iter().cloned().collect::<Vec<String>>())
+                {
+                    if conn
+                        .find_relates_to_dangling_after_uuid_purge(gid, &uuids)
+                        .unwrap_or(None)
+                        .is_some()
+                    {
+                        topology_blocked_groups.push(gid.clone());
+                        continue;
+                    }
+                }
                 // create_uuids isn't captured here — clear_groups_for_rebuild re-derives it
                 // (and re-checks has_unsafe_mutation) from a fresh, locked scan of its own; see
                 // RebuildClearPlan::split_target_group_ids's doc comment.
@@ -2298,6 +2324,7 @@ async fn handle_rebuild_from_wal(
                 whole_group_targets,
                 split_target_group_ids,
                 blocked_groups,
+                topology_blocked_groups,
             })
         })
         .await??;
@@ -2320,6 +2347,28 @@ async fn handle_rebuild_from_wal(
                  knowledge_delete_by_group, or by consolidating its WAL streams before \
                  rebuilding.",
                 plan.blocked_groups
+            )));
+        }
+
+        if !plan.topology_blocked_groups.is_empty() {
+            // A different FR-004 trigger from the one above: each of these groups has no
+            // mutating Cypher line, but its WAL-content-derived create_uuids set would sever a
+            // live two-hop RELATES_TO connection into a RelatesToNode_ this replay does not
+            // also recreate — an ordinary same-group edge, not a cross-group pointer, so
+            // purge_group_rows's forced-rebind pass does not repair it (see
+            // db::Conn::find_relates_to_dangling_after_uuid_purge). Refusing here, before any
+            // clear happens, is the only way to avoid silently corrupting that edge's topology.
+            return Err(Error::Ipc(format!(
+                "knowledge_rebuild_from_wal: group(s) {:?} cannot be safely cleared for this \
+                 rebuild — each has rows in a separate WAL stream this replay will not touch, \
+                 and row-scope-clearing only the rows this replay will recreate would sever a \
+                 live relationship connection into a row that survives in that other stream \
+                 (the connecting edge is not itself part of what this replay recreates). \
+                 Clearing the whole group would destroy that other stream's data instead; \
+                 leaving the connection uncleared would corrupt it silently. Resolve this by \
+                 clearing the group manually first with knowledge_delete_by_group, or by \
+                 consolidating its WAL streams before rebuilding.",
+                plan.topology_blocked_groups
             )));
         }
 
@@ -3183,6 +3232,26 @@ async fn clear_groups_for_rebuild(
                 )));
             }
             let uuids: Vec<String> = content.create_uuids.into_iter().collect();
+            if uuids.is_empty() {
+                // Every line referencing this group in wal_dir is a hop line
+                // (`MATCH ... CREATE`), not a bare `CREATE` — nothing to clear. Skip the
+                // purge entirely rather than run a no-op delete plus a forced rebind and a
+                // full name-index rebuild for a group whose rows were never touched.
+                continue;
+            }
+            // Same re-check as the "unsafe mutation" one above, for the same freshness reason,
+            // against the DB's actual current topology rather than WAL content: row-scoping
+            // this clear to `uuids` must not sever a live two-hop RELATES_TO connection into a
+            // surviving RelatesToNode_ (see db::Conn::find_relates_to_dangling_after_uuid_purge).
+            if let Some(dangling) = conn.find_relates_to_dangling_after_uuid_purge(gid, &uuids)? {
+                return Err(Error::Ipc(format!(
+                    "knowledge_rebuild_from_wal: group {gid:?} became unsafe to row-scope-clear \
+                     between the initial scan and this rebuild's clear step — clearing its \
+                     create_uuids now would sever relates_to node {dangling:?}'s connection to \
+                     a row that survives outside this replay's reach. No data for this group \
+                     was touched — retry the rebuild."
+                )));
+            }
             let split_grouped = group_purge::purge_group_rows(&conn, gid, &uuids, &ts)?;
             for (owning_gid, mutations) in split_grouped {
                 grouped.entry(owning_gid).or_default().extend(mutations);

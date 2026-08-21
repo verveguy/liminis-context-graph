@@ -1471,7 +1471,7 @@ async fn purge_group_rows_leaves_untouched_episodic_and_relates_to_in_same_group
     let dir = TempDir::new().unwrap();
     let db = Arc::new(open_db(&dir));
 
-    let (entity_uuid, episodic_uuid, edge_uuid) = {
+    let (entity_uuid, a2_uuid, episodic_uuid, edge_uuid) = {
         let conn = db.connect().unwrap();
         let a1 = make_entity("A-One", GROUP_A, TS);
         let a2 = make_entity("A-Two", GROUP_A, TS);
@@ -1510,7 +1510,7 @@ async fn purge_group_rows_leaves_untouched_episodic_and_relates_to_in_same_group
         };
         conn.insert_episodic(&episodic).unwrap();
 
-        (a1.uuid, episodic.uuid, edge.uuid)
+        (a1.uuid, a2.uuid, episodic.uuid, edge.uuid)
     };
 
     // Only the entity's uuid is targeted — the episodic and the relates_to edge, both in the
@@ -1539,6 +1539,22 @@ async fn purge_group_rows_leaves_untouched_episodic_and_relates_to_in_same_group
         1,
         "the relates_to edge in the same group must survive a row-scoped purge that didn't \
          name it"
+    );
+    // purge_group_rows performs no topology safety check of its own (see its own doc comment's
+    // "Precondition" paragraph) — DETACH DELETEing entity_uuid severed this edge's hop to it,
+    // leaving the surviving RelatesToNode_ row dangling on that side. This assertion documents
+    // why handlers.rs's classification (both the unlocked pass and the locked freshness
+    // re-check) must call db::Conn::find_relates_to_dangling_after_uuid_purge and refuse the
+    // rebuild before ever reaching this function in a case like this one — not that calling
+    // purge_group_rows directly, as this test does, was itself safe.
+    assert_eq!(
+        edges[0].source_node_uuid, "",
+        "the edge's hop to the deleted entity must be severed (dangling), confirming why the \
+         caller-side topology guard exists"
+    );
+    assert_eq!(
+        edges[0].target_node_uuid, a2_uuid,
+        "the edge's hop to the untouched sibling entity must remain intact"
     );
 }
 

@@ -2144,6 +2144,112 @@ async fn test_rebuild_from_wal_split_stream_unsafe_mutation_refuses_rebuild() {
     );
 }
 
+/// Row-scoped clearing must not silently sever topology for rows it doesn't touch. Here
+/// `topology-embedded`'s `CREATE` is in the directory being replayed (so it's a row-scope-clear
+/// target), but the `RelatesToNode_` connecting it to `topology-partner` (same group) has its
+/// own `CREATE` only in apollo_program's own, independent stream — never replayed by this
+/// request. `DETACH DELETE`ing `topology-embedded` would sever the live two-hop `RELATES_TO`
+/// connection into that surviving edge, and `purge_group_rows`'s forced-rebind pass does not
+/// repair it (it only handles cross-group pointers, not this ordinary same-group edge). FR-004
+/// requires the rebuild to refuse rather than silently corrupt that edge's topology.
+#[tokio::test]
+async fn test_rebuild_from_wal_split_stream_topology_hazard_refuses_rebuild() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'topology-embedded', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'topology-partner', group_id: 'apollo_program', \
+             name: 'partner', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'partner', attributes: '{}'})",
+        )
+        .unwrap();
+        // Simulates an edge whose own CREATE lives only in apollo_program's own independent
+        // stream: present in the DB (as that stream's own prior replay would have produced),
+        // but never referenced by the "liminis" directory's content below.
+        let edge = lcg_core::types::RelatesToEdge {
+            uuid: "topology-edge".to_string(),
+            name: "KNOWS".to_string(),
+            source_node_uuid: "topology-embedded".to_string(),
+            target_node_uuid: "topology-partner".to_string(),
+            group_id: "apollo_program".to_string(),
+            fact: "embedded knows partner".to_string(),
+            fact_embedding: vec![0.0, 0.0, 0.0, 0.0],
+            created_at: "2026-05-22T00:00:00Z".to_string(),
+            valid_at: None,
+            invalid_at: None,
+            attributes: "{}".to_string(),
+            relation_type: None,
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        };
+        conn.insert_relates_to_edge(&edge).unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_qqq462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "topology-embedded", "apollo_program") + "\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("apollo_program")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("apollo_program")
+            .join("20260701_000000_rrr462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "topology-partner", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        43,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected an explicit refusal: row-scope-clearing topology-embedded would sever its \
+         live connection to topology-edge, which apollo_program's own independent stream — not \
+         this replay — owns: {v}"
+    );
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("apollo_program"),
+        "error must name the blocked group: {v}"
+    );
+
+    // Fail-fast must occur before any clear or delete.
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        2,
+        "no clear must have happened — both pre-existing apollo_program entities must remain \
+         untouched: {v}"
+    );
+    assert_eq!(
+        conn.get_relates_to_by_uuids(&["topology-edge".to_string()])
+            .unwrap()
+            .len(),
+        1,
+        "the relates_to edge must remain untouched: {v}"
+    );
+}
+
 // ── Issue #283 / FR-004: knowledge_query_cypher proactively rebuilds the NameIndex ─────
 
 /// A raw-Cypher `CREATE` issued through `knowledge_query_cypher` bypasses every

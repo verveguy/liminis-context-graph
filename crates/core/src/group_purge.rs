@@ -181,11 +181,23 @@ pub fn purge_groups(
 /// passing the full mixed set to all three is a safe no-op superset match for the two that don't
 /// apply.
 ///
-/// Deletion order mirrors [`purge_groups`]'s per-group loop and for the same reason: same-group
-/// `RelatesToNode_` rows first (never touches a foreign group's own `RelatesToNode_`, by
-/// construction of the uuid set), then `Entity` (a `DETACH DELETE` here can sever a hop into a
-/// *surviving* foreign group's `RelatesToNode_`, which is exactly what the forced-rebind pass
-/// below needs to observe and repair), then `Episodic`.
+/// Deletion order mirrors [`purge_groups`]'s per-group loop: same-group `RelatesToNode_` rows
+/// first (never touches a foreign group's own `RelatesToNode_`, by construction of the uuid
+/// set), then `Entity`, then `Episodic`.
+///
+/// **Precondition — the caller must already have ruled out topology damage.** `DETACH DELETE`ing
+/// an `Entity` in `uuids` removes every incident relationship, including a live two-hop
+/// `Entity↔RelatesToNode_` connection into a `RelatesToNode_` *not* in `uuids` (a row this call
+/// leaves untouched). `rebind_pointers_forced` below does **not** repair that: its mechanism only
+/// re-resolves `RelatesToNode_` rows carrying a [`crate::pointer::CrossGroupPointer`] (an edge
+/// created via the foreign-endpoint path), not an ordinary same-group edge created by
+/// [`crate::db::Conn::insert_relates_to_edge`]. Silently severing that connection is exactly the
+/// data-loss-adjacent failure this whole function exists to avoid, just relocated from "group"
+/// granularity to "edge" granularity — so the caller (`handlers.rs`'s classification, both the
+/// initial unlocked pass and the locked freshness re-check) must call
+/// [`crate::db::Conn::find_relates_to_dangling_after_uuid_purge`] first and refuse the rebuild
+/// (FR-004) rather than invoke this function when it finds a hit. This function itself performs
+/// no such check — it trusts `uuids` is already safe to delete as given.
 ///
 /// Runs inside its own `BEGIN TRANSACTION`/`COMMIT` — a failure partway through rolls back this
 /// call's deletes, though see `handlers.rs`'s `clear_groups_for_rebuild` doc comment ("Cross-call
@@ -198,6 +210,8 @@ pub fn purge_groups(
 /// per-pointer `resolve_endpoint` re-check, not an assumption that the source group is entirely
 /// empty (see its own doc comment) — so a pointer into a `uuid` this call did *not* delete
 /// simply re-resolves `Bound` again, and only a pointer into a deleted `uuid` resolves `Unbound`.
+/// This is unrelated to — and does not substitute for — the ordinary-edge topology precondition
+/// above; pointers and two-hop edges are two different mechanisms.
 pub fn purge_group_rows(
     conn: &Conn,
     group_id: &str,
