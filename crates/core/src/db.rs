@@ -1006,6 +1006,92 @@ impl<'db> Conn<'db> {
         )
     }
 
+    // ── Row-scoped delete (issue #462) ──────────────────────────────────────────
+    //
+    // Unlike the `*_by_group_ids` trio above, these delete by `uuid` alone, not `group_id` —
+    // used by `group_purge::purge_group_rows` (the split-stream case: a `group_id` referenced
+    // by a `force_clear` rebuild's WAL directory content that also has independent rows in a
+    // separate, un-replayed WAL stream elsewhere). Deleting only the exact `uuid`s this
+    // rebuild's replay will recreate — never the whole group — is what leaves the
+    // independently-maintained rows in the other stream untouched (FR-001), while still
+    // clearing the rows this replay owns so it doesn't hit a duplicate-primary-key collision
+    // (FR-002). Each is already type-scoped by its own `MATCH (x:Label)` clause, so passing a
+    // mixed-type uuid set to all three is a safe no-op superset match — no need to bucket
+    // uuids by node type before calling.
+
+    /// `DETACH DELETE`s every `Entity` node whose `uuid` is in `uuids`, regardless of
+    /// `group_id`. Callers MUST also invalidate/rebuild the `NameIndex` afterward, same as
+    /// [`Self::delete_entities_by_group_ids`].
+    pub fn delete_entities_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids DETACH DELETE e",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `Episodic` node whose `uuid` is in `uuids`.
+    pub fn delete_episodics_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `RelatesToNode_` node whose `uuid` is in `uuids`.
+    pub fn delete_relates_to_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids DETACH DELETE rn",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// Returns the `uuid` of a `RelatesToNode_` in `group_id` that would be left dangling by a
+    /// row-scoped purge of exactly `uuids` — i.e. a `RelatesToNode_` NOT itself in `uuids` (so
+    /// it survives the purge) whose two-hop connection (`Entity-[:RELATES_TO]->RelatesToNode_`
+    /// or the reverse — the only pattern any read uses, per `schema.rs`'s
+    /// `create_edge_tables`) reaches an `Entity` that IS in `uuids`.
+    ///
+    /// `Entity`'s `DETACH DELETE` removes every incident relationship, including this hop —
+    /// `cross_group::rebind_pointers_forced` (run right after, by `group_purge::purge_group_rows`)
+    /// does not repair it, because it only re-resolves `RelatesToNode_` rows carrying a
+    /// [`crate::pointer::CrossGroupPointer`] (an edge created via the foreign-endpoint path), not
+    /// an ordinary same-group edge created by [`Self::insert_relates_to_edge`]. If the caller's
+    /// replay does not also recreate this hop (it won't, when the surviving `RelatesToNode_`'s
+    /// own `CREATE` — and therefore its connecting hop `CREATE` — lives in a different,
+    /// un-replayed WAL stream, exactly the split-stream case issue #462 introduces row-scoped
+    /// purging for), the row survives as a node but permanently loses this connection: every
+    /// read that reaches it via the two-hop pattern silently stops seeing this side. Returns
+    /// `Ok(None)` when no such row exists — a row-scoped purge of `uuids` is safe.
+    pub fn find_relates_to_dangling_after_uuid_purge(
+        &self,
+        group_id: &str,
+        uuids: &[String],
+    ) -> Result<Option<String>, Error> {
+        if uuids.is_empty() {
+            return Ok(None);
+        }
+        let params = serde_json::json!({ "group_id": group_id, "uuids": uuids });
+        let outbound = self.query_params(
+            "MATCH (rn:RelatesToNode_ {group_id: $group_id})-[:RELATES_TO]->(e:Entity) \
+             WHERE NOT rn.uuid IN $uuids AND e.uuid IN $uuids \
+             RETURN rn.uuid LIMIT 1",
+            params.clone(),
+        )?;
+        if let Some(row) = outbound.into_iter().next() {
+            return Ok(Some(value_as_string(&row[0])));
+        }
+        let inbound = self.query_params(
+            "MATCH (e:Entity)-[:RELATES_TO]->(rn:RelatesToNode_ {group_id: $group_id}) \
+             WHERE NOT rn.uuid IN $uuids AND e.uuid IN $uuids \
+             RETURN rn.uuid LIMIT 1",
+            params,
+        )?;
+        Ok(inbound
+            .into_iter()
+            .next()
+            .map(|row| value_as_string(&row[0])))
+    }
+
     /// Returns all Entity nodes in the given group_ids, or every group when `group_ids` is
     /// `None`. `Some(&[])` is a real, non-`None` filter and matches no groups.
     pub fn get_entities_by_group_ids(

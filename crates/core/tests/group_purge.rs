@@ -1423,3 +1423,229 @@ async fn clear_group_for_rebuild_routes_forced_rebind_to_owning_group_not_defaul
          group's own stream: {layer_cyphers:?}"
     );
 }
+
+// ── Issue #462: group_purge::purge_group_rows — row-scoped purge for the split-stream case ──
+//
+// Unlike `purge_groups` (whole-group), `purge_group_rows` deletes only the exact uuids named,
+// leaving every other row in the same group untouched — the primitive `clear_groups_for_rebuild`
+// uses when a `force_clear` rebuild's WAL content references a foreign group that also has an
+// independent, un-replayed stream elsewhere (FR-001), while still clearing the rows that
+// specific replay owns (FR-002).
+
+#[tokio::test]
+async fn purge_group_rows_deletes_only_named_uuids() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+
+    let (target, sibling) = {
+        let conn = db.connect().unwrap();
+        let target = make_entity("Target", GROUP_A, TS);
+        let sibling = make_entity("Sibling", GROUP_A, TS);
+        conn.insert_entity(&target).unwrap();
+        conn.insert_entity(&sibling).unwrap();
+        (target, sibling)
+    };
+
+    {
+        let conn = db.connect().unwrap();
+        group_purge::purge_group_rows(&conn, GROUP_A, std::slice::from_ref(&target.uuid), TS)
+            .unwrap();
+    }
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid(&target.uuid).unwrap().is_none(),
+        "the named uuid must be deleted"
+    );
+    assert!(
+        conn.get_entity_by_uuid(&sibling.uuid).unwrap().is_some(),
+        "a sibling row in the same group not named in uuids must survive — this is the whole \
+         point of row-scoped over whole-group purge"
+    );
+    let (ent_count, _, _) = group_counts(&db, GROUP_A);
+    assert_eq!(ent_count, 1, "only the sibling should remain in the group");
+}
+
+#[tokio::test]
+async fn purge_group_rows_leaves_untouched_episodic_and_relates_to_in_same_group() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+
+    let (entity_uuid, a2_uuid, episodic_uuid, edge_uuid) = {
+        let conn = db.connect().unwrap();
+        let a1 = make_entity("A-One", GROUP_A, TS);
+        let a2 = make_entity("A-Two", GROUP_A, TS);
+        conn.insert_entity(&a1).unwrap();
+        conn.insert_entity(&a2).unwrap();
+
+        let edge = lcg_core::types::RelatesToEdge {
+            uuid: Uuid::new_v4().to_string(),
+            name: "KNOWS".to_string(),
+            source_node_uuid: a1.uuid.clone(),
+            target_node_uuid: a2.uuid.clone(),
+            group_id: GROUP_A.to_string(),
+            fact: "A-One knows A-Two".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            created_at: TS.to_string(),
+            valid_at: None,
+            invalid_at: None,
+            attributes: "{}".to_string(),
+            relation_type: None,
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        };
+        conn.insert_relates_to_edge(&edge).unwrap();
+
+        let episodic = lcg_core::types::EpisodicRow {
+            uuid: Uuid::new_v4().to_string(),
+            name: "chunk-1".to_string(),
+            group_id: GROUP_A.to_string(),
+            created_at: TS.to_string(),
+            source: "text".to_string(),
+            source_description: "test".to_string(),
+            content: "hello".to_string(),
+            content_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: TS.to_string(),
+            entity_edges: vec![],
+        };
+        conn.insert_episodic(&episodic).unwrap();
+
+        (a1.uuid, a2.uuid, episodic.uuid, edge.uuid)
+    };
+
+    // Only the entity's uuid is targeted — the episodic and the relates_to edge, both in the
+    // same group, are not named and must survive.
+    {
+        let conn = db.connect().unwrap();
+        group_purge::purge_group_rows(&conn, GROUP_A, std::slice::from_ref(&entity_uuid), TS)
+            .unwrap();
+    }
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid(&entity_uuid).unwrap().is_none(),
+        "the named entity must be deleted"
+    );
+    let episodics = conn.retrieve_episodes(GROUP_A, 10).unwrap();
+    assert!(
+        episodics.iter().any(|e| e.uuid == episodic_uuid),
+        "the episodic in the same group must survive a row-scoped purge that didn't name it"
+    );
+    let edges = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge_uuid))
+        .unwrap();
+    assert_eq!(
+        edges.len(),
+        1,
+        "the relates_to edge in the same group must survive a row-scoped purge that didn't \
+         name it"
+    );
+    // purge_group_rows performs no topology safety check of its own (see its own doc comment's
+    // "Precondition" paragraph) — DETACH DELETEing entity_uuid severed this edge's hop to it,
+    // leaving the surviving RelatesToNode_ row dangling on that side. This assertion documents
+    // why handlers.rs's classification (both the unlocked pass and the locked freshness
+    // re-check) must call db::Conn::find_relates_to_dangling_after_uuid_purge and refuse the
+    // rebuild before ever reaching this function in a case like this one — not that calling
+    // purge_group_rows directly, as this test does, was itself safe.
+    assert_eq!(
+        edges[0].source_node_uuid, "",
+        "the edge's hop to the deleted entity must be severed (dangling), confirming why the \
+         caller-side topology guard exists"
+    );
+    assert_eq!(
+        edges[0].target_node_uuid, a2_uuid,
+        "the edge's hop to the untouched sibling entity must remain intact"
+    );
+}
+
+#[tokio::test]
+async fn purge_group_rows_forced_rebind_correctness_under_partial_emptying() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(open_db(&dir));
+
+    let (bob_uuid, carol_uuid) = {
+        let conn = db.connect().unwrap();
+        let alice = make_entity("Alice", GROUP_LAYER, TS);
+        let bob = make_entity("Bob", GROUP_A, TS);
+        let carol = make_entity("Carol", GROUP_A, TS);
+        conn.insert_entity(&alice).unwrap();
+        conn.insert_entity(&bob).unwrap();
+        conn.insert_entity(&carol).unwrap();
+
+        // Two layer-owned cross-group pointers into group A: one at Bob (will be deleted below),
+        // one at Carol (will survive) — partial emptying, not a whole-group purge.
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(alice.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_A.to_string(),
+                    endpoint_name: "Bob".to_string(),
+                },
+                group_id: GROUP_LAYER.to_string(),
+                fact: "Alice knows Bob".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "KNOWS".to_string(),
+                source: EndpointSpec::Uuid(alice.uuid.clone()),
+                target: EndpointSpec::Foreign {
+                    source_group_id: GROUP_A.to_string(),
+                    endpoint_name: "Carol".to_string(),
+                },
+                group_id: GROUP_LAYER.to_string(),
+                fact: "Alice knows Carol".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap();
+
+        (bob.uuid, carol.uuid)
+    };
+
+    let state = make_state(Arc::clone(&db), None);
+    let status_before = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_before["result"]["cross_group_pointers"]["bound"], 2,
+        "{status_before}"
+    );
+
+    // Row-scoped purge of only Bob — Carol (same group, not named) must remain resolvable.
+    {
+        let conn = db.connect().unwrap();
+        group_purge::purge_group_rows(&conn, GROUP_A, std::slice::from_ref(&bob_uuid), TS).unwrap();
+    }
+
+    let conn = db.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid(&bob_uuid).unwrap().is_none(),
+        "Bob must be deleted"
+    );
+    assert!(
+        conn.get_entity_by_uuid(&carol_uuid).unwrap().is_some(),
+        "Carol (same group, not named) must survive the row-scoped purge"
+    );
+
+    let status_after = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        status_after["result"]["cross_group_pointers"]["unbound"], 1,
+        "only Bob's pointer should have transitioned to unbound: {status_after}"
+    );
+    assert_eq!(
+        status_after["result"]["cross_group_pointers"]["bound"], 1,
+        "Carol's pointer must still resolve Bound — `rebind_pointers_forced`'s real \
+         per-pointer re-resolution must not treat a partial (row-scoped) purge as though the \
+         whole source group were emptied: {status_after}"
+    );
+}

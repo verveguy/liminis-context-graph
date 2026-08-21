@@ -836,35 +836,58 @@ pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
     None
 }
 
-/// Scans every `*.jsonl` file in `wal_dir` and returns the distinct `group_id` values found in
-/// each line's `params` object — the set of groups this WAL directory's content actually targets
-/// when replayed, which is not always the same as the single group_id the directory happens to be
-/// stored under (see the `migrate_wal_root_if_needed` docs in `wal_group.rs`: a pre-#378 flat
-/// stream can carry rows for a group_id other than the directory it was relocated into).
+/// One `group_id`'s content, as discovered by [`scan_wal_content_by_group`] scanning a single
+/// WAL directory — everything the `force_clear` guard (`handlers.rs`) needs to decide how (or
+/// whether) to clear that group before replay (issue #462).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct GroupWalContent {
+    /// `params.uuid` from every bare `CREATE` line (see [`tokens_are_bare_create`]) referencing this
+    /// group — the exact rows this directory's replay will recreate for this group. A row-scoped
+    /// purge targets exactly this set, never more.
+    pub create_uuids: std::collections::HashSet<String>,
+    /// Whether any line referencing this group contains a `SET`/`DELETE`/`DETACH`/`REMOVE` token
+    /// (see [`tokens_contain_unsafe_mutation`]) — such a line implies this replay can't safely
+    /// row-scope-clear the group (FR-004's refusal trigger).
+    pub has_unsafe_mutation: bool,
+}
+
+/// Scans every `*.jsonl` file in `wal_dir` and returns, per distinct `group_id` found in each
+/// line's `params` object, that group's [`GroupWalContent`] — the set of groups this WAL
+/// directory's content actually targets when replayed, which is not always the same as the
+/// single group_id the directory happens to be stored under (see the
+/// `migrate_wal_root_if_needed` docs in `wal_group.rs`: a pre-#378 flat stream can carry rows for
+/// a group_id other than the directory it was relocated into).
 ///
 /// `to_seq`, when `Some`, excludes any line with `seq > to_seq` from consideration — mirroring
 /// `ReplayOptions::to_seq`'s own filter in `replay.rs` (`replay_opts` skips those exact lines),
-/// so this scan only ever reports group_ids the caller's bounded replay will actually touch. This
-/// matters because the guard that calls this function may, with `force_clear: true`, purge every
-/// group_id this scan reports — a group_id whose only rows live past `to_seq` would then be
-/// cleared without ever being recreated by the bounded replay that follows, a genuine data-loss
-/// gap for the documented `{from_seq: 0, to_seq: n}` bounded-full-rebuild call shape.
+/// so this scan only ever reports group_ids and rows the caller's bounded replay will actually
+/// touch (FR-003). This matters because the guard that calls this function may, with
+/// `force_clear: true`, purge what this scan reports — a group_id or row whose only occurrence
+/// lives past `to_seq` would then be cleared without ever being recreated by the bounded replay
+/// that follows, a genuine data-loss gap for the documented `{from_seq: 0, to_seq: n}`
+/// bounded-full-rebuild call shape.
 ///
 /// Unlike `first_seq_in_file`, this reads every line of every file rather than stopping at the
 /// first parseable one, since distinct lines can carry distinct `group_id` values (a legacy
 /// stream that mixed multiple groups before per-group directories existed). Tolerates a corrupt
 /// line, a line whose `params.group_id` is missing or not a string, and an unreadable file or
 /// directory by skipping it and continuing — mirroring `first_seq_in_file`'s tolerance model, so
-/// one malformed row can't turn this guard into a hard failure for the whole rebuild.
-pub(crate) fn scan_wal_content_group_ids(
+/// one malformed row can't turn this guard into a hard failure for the whole rebuild. A bare
+/// `CREATE` line whose `params.uuid` is missing or not a string is skipped for `create_uuids`
+/// purposes only (same tolerance model): that row is left out of the row-scoped clear, so a
+/// split group with such a row could still hit a duplicate-primary-key failure on replay for
+/// that one row — surfaced through `replay.rs`'s existing, general-purpose `fidelity_warning`,
+/// not a mechanism specific to this scan.
+pub(crate) fn scan_wal_content_by_group(
     wal_dir: &Path,
     to_seq: Option<u64>,
-) -> std::collections::HashSet<String> {
-    let mut group_ids = std::collections::HashSet::new();
+) -> std::collections::HashMap<String, GroupWalContent> {
+    let mut by_group: std::collections::HashMap<String, GroupWalContent> =
+        std::collections::HashMap::new();
 
     let entries = match fs::read_dir(wal_dir) {
         Ok(entries) => entries,
-        Err(_) => return group_ids,
+        Err(_) => return by_group,
     };
     let files: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -895,13 +918,25 @@ pub(crate) fn scan_wal_content_group_ids(
                     continue;
                 }
             }
-            if let Some(gid) = wal_line.params.get("group_id").and_then(|v| v.as_str()) {
-                group_ids.insert(gid.to_string());
+            let Some(gid) = wal_line.params.get("group_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            // Tokenized once and reused for both checks below, rather than tokenizing every
+            // line's Cypher twice in this hot scan loop.
+            let tokens = cypher_tokens(&wal_line.cypher);
+            let entry = by_group.entry(gid.to_string()).or_default();
+            if tokens_contain_unsafe_mutation(&tokens) {
+                entry.has_unsafe_mutation = true;
+            }
+            if tokens_are_bare_create(&tokens) {
+                if let Some(uuid) = wal_line.params.get("uuid").and_then(|v| v.as_str()) {
+                    entry.create_uuids.insert(uuid.to_string());
+                }
             }
         }
     }
 
-    group_ids
+    by_group
 }
 
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
@@ -973,6 +1008,19 @@ pub(crate) fn is_index_ddl(cypher: &str) -> bool {
 /// index DDL specifically (see `is_index_ddl`) should check that first, since this function
 /// alone would classify `CREATE INDEX ...` as a mutation.
 pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
+    cypher_tokens(cypher).iter().any(|t| {
+        matches!(
+            t.as_str(),
+            "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
+        )
+    })
+}
+
+/// Splits `cypher` into uppercased, quote-stripped, paren-boundary-aware tokens — the shared
+/// tokenization step behind [`looks_like_mutation`] and [`is_unsafe_non_create_mutation`]. See
+/// `looks_like_mutation`'s doc comment for why quote-stripping and paren-splitting are both
+/// needed.
+fn cypher_tokens(cypher: &str) -> Vec<String> {
     let upper = cypher.to_uppercase();
     let stripped = strip_quoted_literals(&upper);
     let spaced: String = stripped
@@ -985,12 +1033,48 @@ pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
             }
         })
         .collect();
-    spaced.split_whitespace().any(|t| {
-        matches!(
-            t,
-            "CREATE" | "MERGE" | "SET" | "DELETE" | "DETACH" | "DROP" | "REMOVE"
-        )
-    })
+    spaced.split_whitespace().map(str::to_string).collect()
+}
+
+/// Whether `cypher` contains a token that can silently mutate or remove a row it doesn't create
+/// — `SET`, `DELETE`, `DETACH`, or `REMOVE` — as opposed to a plain `CREATE` (or a `MATCH ...
+/// CREATE` relationship-hop line, which only links existing nodes by uuid and is not flagged).
+/// `MERGE` is deliberately excluded too: every `MERGE`-based statement in `db.rs` (the
+/// cross-group pointer rebind path) only creates-or-matches a hop/rel by uuid, the same "link,
+/// don't mutate" shape as a hop-creation `CREATE` line.
+///
+/// Used by `scan_wal_content_by_group` (issue #462) to classify a foreign group_id's content as
+/// safe to row-scope-clear (only `CREATE` and link-only lines) versus one that must block the
+/// rebuild outright (FR-004) because a mutating line implies this replay can't be sure it either
+/// fully owns or should leave alone the row it touches. `scan_wal_content_by_group` itself calls
+/// [`tokens_contain_unsafe_mutation`] directly on an already-tokenized line rather than this
+/// `&str`-based wrapper — this exists for tests to exercise the check without needing to
+/// construct a token vector by hand.
+#[cfg(test)]
+fn is_unsafe_non_create_mutation(cypher: &str) -> bool {
+    tokens_contain_unsafe_mutation(&cypher_tokens(cypher))
+}
+
+/// Token-level core of [`is_unsafe_non_create_mutation`], split out so
+/// `scan_wal_content_by_group`'s hot loop can tokenize a line's Cypher once and reuse the tokens
+/// for both this check and [`tokens_are_bare_create`], rather than tokenizing twice per line.
+fn tokens_contain_unsafe_mutation(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .any(|t| matches!(t.as_str(), "SET" | "DELETE" | "DETACH" | "REMOVE"))
+}
+
+/// Whether a token stream's first token is `CREATE` — i.e. a bare node-creating statement
+/// (`db.rs`'s `insert_entity`/`insert_episodic`/`insert_relates_to_edge`'s/
+/// `insert_cross_group_edge`'s first statement), as opposed to a `MATCH ... CREATE`
+/// relationship-hop line. Used to decide which lines' `params.uuid` belongs in
+/// [`GroupWalContent::create_uuids`] — a row-scoped purge only ever needs to delete rows a bare
+/// `CREATE` line actually created; a hop line's uuid is already covered by the node-creating
+/// line for the same uuid. Takes already-tokenized input — see [`tokens_contain_unsafe_mutation`]
+/// for why `scan_wal_content_by_group` tokenizes a line's Cypher once and reuses it for both this
+/// check and that one, instead of each re-tokenizing its own `&str`.
+fn tokens_are_bare_create(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|t| t == "CREATE")
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
@@ -1858,13 +1942,19 @@ mod tests {
         .unwrap();
     }
 
+    fn group_ids_of(
+        by_group: &std::collections::HashMap<String, GroupWalContent>,
+    ) -> std::collections::HashSet<String> {
+        by_group.keys().cloned().collect()
+    }
+
     #[test]
-    fn scan_wal_content_group_ids_merges_across_multiple_files() {
+    fn scan_wal_content_by_group_merges_group_ids_across_multiple_files() {
         let tmp = tempfile::tempdir().unwrap();
         write_wal_line_with_group(tmp.path(), "0000.jsonl", 0, "apollo_program");
         write_wal_line_with_group(tmp.path(), "0001.jsonl", 1, "liminis");
 
-        let mut ids: Vec<String> = scan_wal_content_group_ids(tmp.path(), None)
+        let mut ids: Vec<String> = group_ids_of(&scan_wal_content_by_group(tmp.path(), None))
             .into_iter()
             .collect();
         ids.sort();
@@ -1875,7 +1965,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_wal_content_group_ids_respects_to_seq_bound() {
+    fn scan_wal_content_by_group_respects_to_seq_bound_for_group_ids() {
         let tmp = tempfile::tempdir().unwrap();
         write_wal_line_with_group(tmp.path(), "0000.jsonl", 0, "apollo_program");
         write_wal_line_with_group(tmp.path(), "0001.jsonl", 1, "liminis");
@@ -1884,12 +1974,12 @@ mod tests {
         // row lives past to_seq — that group's data would never be recreated by the bounded
         // replay that follows, so it must not be reported as referenced (and hence never
         // force-cleared).
-        let ids = scan_wal_content_group_ids(tmp.path(), Some(0));
+        let ids = group_ids_of(&scan_wal_content_by_group(tmp.path(), Some(0)));
         assert_eq!(ids, ["apollo_program".to_string()].into_iter().collect());
     }
 
     #[test]
-    fn scan_wal_content_group_ids_skips_malformed_lines_without_stopping() {
+    fn scan_wal_content_by_group_skips_malformed_lines_without_stopping() {
         let tmp = tempfile::tempdir().unwrap();
         let line = WalLine {
             seq: 1,
@@ -1904,12 +1994,12 @@ mod tests {
         );
         fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
 
-        let ids = scan_wal_content_group_ids(tmp.path(), None);
+        let ids = group_ids_of(&scan_wal_content_by_group(tmp.path(), None));
         assert_eq!(ids, ["apollo_program".to_string()].into_iter().collect());
     }
 
     #[test]
-    fn scan_wal_content_group_ids_ignores_missing_or_non_string_group_id() {
+    fn scan_wal_content_by_group_ignores_missing_or_non_string_group_id() {
         let tmp = tempfile::tempdir().unwrap();
         let no_group = WalLine {
             seq: 0,
@@ -1932,13 +2022,149 @@ mod tests {
         );
         fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
 
-        assert!(scan_wal_content_group_ids(tmp.path(), None).is_empty());
+        assert!(scan_wal_content_by_group(tmp.path(), None).is_empty());
     }
 
     #[test]
-    fn scan_wal_content_group_ids_is_empty_for_missing_dir() {
+    fn scan_wal_content_by_group_is_empty_for_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        assert!(scan_wal_content_group_ids(&missing, None).is_empty());
+        assert!(scan_wal_content_by_group(&missing, None).is_empty());
+    }
+
+    fn write_wal_line_custom(
+        dir: &Path,
+        file_name: &str,
+        seq: u64,
+        cypher: &str,
+        params: serde_json::Value,
+    ) {
+        let line = WalLine {
+            seq,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: cypher.to_string(),
+            params,
+        };
+        let mut content = String::new();
+        if let Ok(existing) = fs::read_to_string(dir.join(file_name)) {
+            content.push_str(&existing);
+        }
+        content.push_str(&serde_json::to_string(&line).unwrap());
+        content.push('\n');
+        fs::write(dir.join(file_name), content).unwrap();
+    }
+
+    #[test]
+    fn is_unsafe_non_create_mutation_flags_set_delete_detach_remove() {
+        assert!(is_unsafe_non_create_mutation(
+            "MATCH (w:WalPosition {id: $gid}) SET w.applied_seq = $seq"
+        ));
+        assert!(is_unsafe_non_create_mutation(
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) DELETE r"
+        ));
+        assert!(is_unsafe_non_create_mutation("MATCH (n)DETACH DELETE n"));
+        assert!(is_unsafe_non_create_mutation(
+            "MATCH (n) REMOVE n.attributes"
+        ));
+    }
+
+    #[test]
+    fn is_unsafe_non_create_mutation_ignores_bare_and_hop_create_and_merge() {
+        assert!(!is_unsafe_non_create_mutation(
+            "CREATE (:Entity {uuid: $uuid, name: $name})"
+        ));
+        assert!(!is_unsafe_non_create_mutation(
+            "MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) \
+             CREATE (src)-[:RELATES_TO {uuid: $uuid}]->(dst)"
+        ));
+        assert!(!is_unsafe_non_create_mutation(
+            "MATCH (src:Entity {uuid: $src}), (rn:RelatesToNode_ {uuid: $rn}) \
+             MERGE (src)-[:RELATES_TO]->(rn)"
+        ));
+    }
+
+    #[test]
+    fn scan_wal_content_by_group_captures_create_uuids_only_from_bare_create_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            0,
+            "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id})",
+            serde_json::json!({"uuid": "e1", "name": "n", "group_id": "apollo_program"}),
+        );
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            1,
+            "MATCH (src:Entity {uuid: $src}), (dst:Entity {uuid: $dst}) \
+             CREATE (src)-[:RELATES_TO {uuid: $uuid, group_id: $group_id}]->(dst)",
+            serde_json::json!({"src": "e1", "dst": "e2", "uuid": "rel1", "group_id": "apollo_program"}),
+        );
+
+        let by_group = scan_wal_content_by_group(tmp.path(), None);
+        let content = by_group.get("apollo_program").unwrap();
+        assert_eq!(
+            content.create_uuids,
+            ["e1".to_string()].into_iter().collect()
+        );
+        assert!(!content.has_unsafe_mutation);
+    }
+
+    #[test]
+    fn scan_wal_content_by_group_flags_unsafe_mutation_per_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            0,
+            "CREATE (:Entity {uuid: $uuid, group_id: $group_id})",
+            serde_json::json!({"uuid": "e1", "group_id": "apollo_program"}),
+        );
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            1,
+            "MATCH (n:Entity {uuid: $uuid}) SET n.name = $name",
+            serde_json::json!({"uuid": "e1", "name": "renamed", "group_id": "apollo_program"}),
+        );
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            2,
+            "CREATE (:Entity {uuid: $uuid, group_id: $group_id})",
+            serde_json::json!({"uuid": "l1", "group_id": "liminis"}),
+        );
+
+        let by_group = scan_wal_content_by_group(tmp.path(), None);
+        assert!(by_group.get("apollo_program").unwrap().has_unsafe_mutation);
+        assert!(!by_group.get("liminis").unwrap().has_unsafe_mutation);
+    }
+
+    #[test]
+    fn scan_wal_content_by_group_respects_to_seq_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            0,
+            "CREATE (:Entity {uuid: $uuid, group_id: $group_id})",
+            serde_json::json!({"uuid": "e1", "group_id": "apollo_program"}),
+        );
+        write_wal_line_custom(
+            tmp.path(),
+            "0000.jsonl",
+            1,
+            "CREATE (:Entity {uuid: $uuid, group_id: $group_id})",
+            serde_json::json!({"uuid": "e2", "group_id": "apollo_program"}),
+        );
+
+        let by_group = scan_wal_content_by_group(tmp.path(), Some(0));
+        let content = by_group.get("apollo_program").unwrap();
+        assert_eq!(
+            content.create_uuids,
+            ["e1".to_string()].into_iter().collect()
+        );
     }
 }

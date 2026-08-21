@@ -147,6 +147,52 @@ fn entity_wal_line_with_group(seq: u64, uuid: &str, group_id: &str) -> String {
     line.to_string()
 }
 
+/// A bare `CREATE` `Entity` WAL line — mirrors `db.rs`'s `insert_entity` byte-for-byte (a
+/// literal `CREATE`, never `MERGE`). Unlike `entity_wal_line_with_group`'s `MERGE ... ON CREATE
+/// SET` shape (which contains a `SET` token and would misclassify as an FR-004 "unsafe
+/// mutation" line for issue #462's split-group detection), this is what
+/// `wal::scan_wal_content_by_group`'s `is_bare_create`/`create_uuids` capture actually needs to
+/// exercise the split-group *row-scoped clear* path rather than the refusal path.
+fn bare_create_entity_wal_line(seq: u64, uuid: &str, group_id: &str) -> String {
+    let line = json!({
+        "seq": seq,
+        "ts": "2026-05-22T00:00:00.000000+00:00",
+        "db": "",
+        "cypher": "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
+             labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
+             summary: $summary, attributes: $attributes})",
+        "params": {
+            "uuid": uuid,
+            "name": uuid,
+            "group_id": group_id,
+            "labels": ["Entity", "t"],
+            "created_at": "2026-05-22T00:00:00.000000+00:00",
+            "name_embedding": [1.0, 0.0, 0.0, 0.0],
+            "summary": "s",
+            "attributes": "{}",
+        },
+    });
+    line.to_string()
+}
+
+/// A `MATCH ... SET` line referencing `group_id` (issue #462's FR-004 refusal trigger) — a
+/// mutating non-`CREATE` line that implies a replay can't safely tell whether it's safe to
+/// row-scope-clear a split group or must clear the whole thing.
+fn unsafe_set_wal_line_with_group(seq: u64, uuid: &str, group_id: &str) -> String {
+    let line = json!({
+        "seq": seq,
+        "ts": "2026-05-22T00:00:00.000000+00:00",
+        "db": "",
+        "cypher": "MATCH (n:Entity {uuid: $uuid}) SET n.summary = $summary",
+        "params": {
+            "uuid": uuid,
+            "summary": "edited",
+            "group_id": group_id,
+        },
+    });
+    line.to_string()
+}
+
 /// A standalone `RelatesToNode_` WAL line (param-bound, mirroring the
 /// `timestamps_in_params.jsonl` fixture shape). Search queries these nodes directly by
 /// property (no two-hop `RELATES_TO` connectivity required), so this is sufficient to
@@ -1878,6 +1924,329 @@ async fn test_rebuild_from_wal_common_case_embedded_group_matches_request_unaffe
             .unwrap()
             .is_some(),
         "the WAL-replayed entity must exist after the clean rebuild"
+    );
+}
+
+// ── Issue #462: force_clear must not clear a group's data outside the replay it's about to
+// run — a group referenced by the replayed directory's content can also have independent rows
+// in a separate, un-replayed WAL stream elsewhere ──────────────────────────────────────────
+
+/// SC-003: content for group `apollo_program` exists in the directory being replayed
+/// ("liminis", a migrated-legacy layout), and additional rows for `apollo_program` exist in a
+/// separate, independent WAL stream (`apollo_program`'s own post-#378 directory) that this
+/// rebuild never touches. A `force_clear: true` rebuild against "liminis" must still clear and
+/// correctly recreate the embedded legacy row (#432's collision guard, FR-002) without
+/// destroying the independently-streamed row that lives only in the other directory (FR-001).
+#[tokio::test]
+async fn test_rebuild_from_wal_split_stream_force_clear_preserves_independent_stream() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        // Stale data for the uuid the "liminis" directory's replay will recreate — proves
+        // FR-002 (the collision guard) still holds for the split case: it must be cleared
+        // before replay, not left to collide.
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'legacy-embedded', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+        // Data that only lives in apollo_program's own independent stream — this replay must
+        // never touch it (FR-001).
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'independent-stream-row', group_id: 'apollo_program', \
+             name: 'independent', labels: ['Entity'], \
+             created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'independent', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    // The directory being replayed: owned by "liminis" (migrated-legacy layout, as in #432's
+    // scenario), but its content embeds apollo_program via a bare CREATE line.
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_mmm462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "legacy-embedded", "apollo_program") + "\n",
+    )
+    .unwrap();
+    // apollo_program's own, independent, post-#378 stream — never replayed by this request.
+    // Its mere existence (not its content) is what makes apollo_program "split" for issue #462
+    // purposes; `independent-stream-row` above was written directly to the DB to simulate what
+    // this stream's own prior replay would have produced.
+    std::fs::create_dir_all(wal_dir.path().join("apollo_program")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("apollo_program")
+            .join("20260701_000000_nnn462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "independent-stream-row", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        40,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(
+        v["result"]["success"], true,
+        "force_clear:true must allow the rebuild to proceed: {v}"
+    );
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            41,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => {
+                assert_eq!(
+                    status_v["result"]["result"]["failed_lines"], 0,
+                    "the guard must have row-scope-cleared only legacy-embedded before replay, \
+                     so there must be zero duplicate-key failures: {status_v}"
+                );
+                break;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    let recreated = conn
+        .get_entity_by_uuid("legacy-embedded")
+        .unwrap()
+        .expect("the WAL-replayed embedded entity must exist after the clean rebuild");
+    assert_eq!(
+        recreated.summary, "s",
+        "legacy-embedded's fields must come from the WAL replay, not the stale pre-existing \
+         row (stale summary was 'stale', the WAL line's is 's')"
+    );
+    assert!(
+        conn.get_entity_by_uuid("independent-stream-row")
+            .unwrap()
+            .is_some(),
+        "the row that lives only in apollo_program's own independent stream must survive a \
+         force_clear rebuild of the unrelated liminis directory — this is the exact data loss \
+         issue #462 exists to fix"
+    );
+}
+
+/// SC-004: same split-stream setup as the test above, but the "liminis" directory's content
+/// embeds a mutating non-`CREATE` (`SET`) line referencing `apollo_program`, not just `CREATE`
+/// lines. This replay can't tell whether it's safe to clear only the rows it will recreate or
+/// the whole group — FR-004 requires the rebuild to refuse outright, observably from the
+/// response, rather than silently resolve the ambiguity in either direction. No data may be
+/// touched.
+#[tokio::test]
+async fn test_rebuild_from_wal_split_stream_unsafe_mutation_refuses_rebuild() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'blocked-embedded', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'blocked-independent', group_id: 'apollo_program', \
+             name: 'independent', labels: ['Entity'], \
+             created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'independent', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    let content = [
+        bare_create_entity_wal_line(0, "blocked-embedded", "apollo_program"),
+        unsafe_set_wal_line_with_group(1, "blocked-embedded", "apollo_program"),
+    ]
+    .join("\n")
+        + "\n";
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_ooo462_0000.jsonl"),
+        content,
+    )
+    .unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("apollo_program")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("apollo_program")
+            .join("20260701_000000_ppp462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "blocked-independent", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        42,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected an explicit refusal: apollo_program is split and its embedded content is not \
+         safely clearable: {v}"
+    );
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("apollo_program"),
+        "error must name the blocked group: {v}"
+    );
+
+    // Fail-fast must occur before any clear.
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        2,
+        "no clear must have happened — both pre-existing apollo_program entities must remain \
+         untouched: {v}"
+    );
+}
+
+/// Row-scoped clearing must not silently sever topology for rows it doesn't touch. Here
+/// `topology-embedded`'s `CREATE` is in the directory being replayed (so it's a row-scope-clear
+/// target), but the `RelatesToNode_` connecting it to `topology-partner` (same group) has its
+/// own `CREATE` only in apollo_program's own, independent stream — never replayed by this
+/// request. `DETACH DELETE`ing `topology-embedded` would sever the live two-hop `RELATES_TO`
+/// connection into that surviving edge, and `purge_group_rows`'s forced-rebind pass does not
+/// repair it (it only handles cross-group pointers, not this ordinary same-group edge). FR-004
+/// requires the rebuild to refuse rather than silently corrupt that edge's topology.
+#[tokio::test]
+async fn test_rebuild_from_wal_split_stream_topology_hazard_refuses_rebuild() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'topology-embedded', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'topology-partner', group_id: 'apollo_program', \
+             name: 'partner', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'partner', attributes: '{}'})",
+        )
+        .unwrap();
+        // Simulates an edge whose own CREATE lives only in apollo_program's own independent
+        // stream: present in the DB (as that stream's own prior replay would have produced),
+        // but never referenced by the "liminis" directory's content below.
+        let edge = lcg_core::types::RelatesToEdge {
+            uuid: "topology-edge".to_string(),
+            name: "KNOWS".to_string(),
+            source_node_uuid: "topology-embedded".to_string(),
+            target_node_uuid: "topology-partner".to_string(),
+            group_id: "apollo_program".to_string(),
+            fact: "embedded knows partner".to_string(),
+            fact_embedding: vec![0.0, 0.0, 0.0, 0.0],
+            created_at: "2026-05-22T00:00:00Z".to_string(),
+            valid_at: None,
+            invalid_at: None,
+            attributes: "{}".to_string(),
+            relation_type: None,
+            episode_uuids: vec![],
+            source_descriptions: vec![],
+        };
+        conn.insert_relates_to_edge(&edge).unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_qqq462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "topology-embedded", "apollo_program") + "\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("apollo_program")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("apollo_program")
+            .join("20260701_000000_rrr462_0000.jsonl"),
+        bare_create_entity_wal_line(0, "topology-partner", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        43,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected an explicit refusal: row-scope-clearing topology-embedded would sever its \
+         live connection to topology-edge, which apollo_program's own independent stream — not \
+         this replay — owns: {v}"
+    );
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("apollo_program"),
+        "error must name the blocked group: {v}"
+    );
+
+    // Fail-fast must occur before any clear or delete.
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        2,
+        "no clear must have happened — both pre-existing apollo_program entities must remain \
+         untouched: {v}"
+    );
+    assert_eq!(
+        conn.get_relates_to_by_uuids(&["topology-edge".to_string()])
+            .unwrap()
+            .len(),
+        1,
+        "the relates_to edge must remain untouched: {v}"
     );
 }
 
