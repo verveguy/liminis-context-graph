@@ -85,6 +85,15 @@ impl EmbedderContext {
 /// Content-addressed, in-memory-only embedding cache. Safe to share across threads via `Arc`;
 /// internally guarded by a single `Mutex` since `AppState.write_lock` already serializes writes
 /// across the whole instance (see its doc comment) — a coarse lock here adds no new contention.
+///
+/// **Known limitation: unbounded growth, no eviction.** `entries` has no capacity cap, TTL, or
+/// `clear()` — every distinct `(model, dim, text)` triple embedded across the process's lifetime
+/// (every `knowledge_rebuild_from_wal` call, startup recovery, `Db::open_or_rebuild`) accumulates
+/// permanently, reclaimed only by a process restart. Acceptable for now: FR-004 requires the
+/// cache be safe to discard, not bounded, and it exists to avoid redundant embedder calls within
+/// a single rebuild/recovery, not to serve as a long-lived cross-session store. If a deployment's
+/// distinct-text pool or rebuild frequency makes this a real memory concern, add a capacity bound
+/// (e.g. LRU) — no consumer of `get_or_compute` depends on unbounded retention today.
 #[derive(Default)]
 pub struct EmbeddingCache {
     entries: Mutex<HashMap<[u8; 32], Vec<f32>>>,

@@ -95,7 +95,7 @@ and know what each entry in the dot-namespace costs you if you omit it anyway:
 | `.wal-bounds.json` (issue #375) | MAY be omitted | not wrong, just slow — a cache; the consumer regenerates it by rescanning every `*.jsonl` file on next read |
 | `.wal-ontology.json` (issue #446) | MAY be omitted — informational | not wrong, not slow either — replay and correctness are entirely unaffected; the consumer just loses the ability to see what vocabulary produced this group's graph. Never applied to the consumer's own extraction, validation, canonicalization, or reprocessing even when present (see [Ontology](ontology.md#per-group-ontologies)) — it is provenance, not policy |
 | `.checkpoints/` (issue #365) | MAY be excluded | local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation |
-| `.wal-embedding-model.json` (issue #440) | MAY be omitted, but you lose a diagnostic | diagnostic-only, unlike `.wal-generation.json` above — recompute (FR-001) never reads it, so replay and rebuild are unaffected either way, and nothing hard-fails the way a missing generation can. Losing it only silences the replay-time `[WAL WARN] embedding-model mismatch: ...` check (FR-006): a missing sidecar reads as "unknown" (never a false mismatch), so a genuine embedder change for that stream goes undetected at replay time until the next `knowledge_status` call surfaces it via `embedding_model_status` instead |
+| `.wal-embedding-model.json` (issue #440) | MAY be omitted, but you lose a diagnostic permanently | diagnostic-only, unlike `.wal-generation.json` above — recompute (FR-001) never reads it, so replay and rebuild are unaffected either way, and nothing hard-fails the way a missing generation can. Losing it silences the replay-time `[WAL WARN] embedding-model mismatch: ...` check (FR-006) for good: a missing sidecar reads as "unknown" (never a false mismatch), and there is no other place that reads the *WAL's own* claimed identity, so a genuine embedder change for that stream stays undetectable via FR-006 once the sidecar is gone. `knowledge_status`'s `embedding_model_status` (FR-007) is a separate, independent comparison — the *graph's currently-applied* vectors' identity against the running embedder — and does not read this sidecar either; it only happens to also read "mismatch" if the graph's applied identity itself differs from the runner (e.g. a prior rebuild under a different embedder, or a rebuild whose recompute attempts failed), not as a substitute diagnostic for the missing sidecar |
 
 Only `.wal-generation.json` is load-bearing — every other entry is safe to omit deliberately, but
 never safe to omit *by accident* as a side effect of a glob pattern that was only ever meant to
@@ -103,7 +103,8 @@ select `*.jsonl` files. `.wal-bounds.json` and `.checkpoints/` degrade performan
 recovery convenience if dropped; `.wal-ontology.json` degrades only documentation — a stream
 published with it present must never have it change the consumer's own behavior (issue #446);
 `.wal-embedding-model.json` degrades only a diagnostic — recompute never reads it, so replay and
-rebuild are unaffected, and only the replay-time mismatch warning goes silent (issue #440).
+rebuild are unaffected, but the replay-time mismatch warning is permanently silenced, since
+nothing else reads the WAL's own claimed identity (issue #440).
 
 ## WAL administration
 
