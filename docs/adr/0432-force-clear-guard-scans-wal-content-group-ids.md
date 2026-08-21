@@ -132,3 +132,73 @@ slice to the full referenced set adds no *new* category of cost there.
   unaffected by this issue) or any other WAL/group-scoped operation that doesn't share this
   guard's request-group-vs-content-group assumption (`knowledge_delete_by_group`, `group_purge`
   itself, etc. were not found to share this defect during Research).
+
+## Amendment (issue #462): clearing a referenced group in full is not always correct
+
+This ADR's original decision clears **every** referenced group_id's data in full via
+`group_purge::purge_groups`, with no regard for where else that group's data lives. That is
+correct only when the referenced group's *entire* footprint lives inside the directory being
+replayed — the migrated-legacy scenario this ADR was written for. It is not correct when the
+referenced group also has rows in a **separate, independent WAL stream directory** that this
+replay does not touch: a post-#378 per-group directory the group has been written to normally
+since migration, or another migrated legacy location entirely. A whole-group purge in that case
+destroys the independent stream's rows — this replay can never recreate them, because it never
+reads that stream. This was caught by
+`mcp_real_corpus_mutation_e2e::mcp_write_path_over_real_corpus_fixture` regressing between #432's
+and #442's merges: the real-corpus fixture is exactly this ADR's scenario (a pre-#378 flat stream
+migrated into `liminis`, embedding `group_id: "apollo_program"`), and a chunk written afterward
+directly into `apollo_program`'s own post-#378 stream was silently dropped by a subsequent
+`force_clear: true` rebuild of `liminis` — entity count 1507 → 1506.
+
+The underlying invariant this ADR's guard exists to serve was always "clear exactly what the
+imminent replay is about to recreate" — this amendment makes the clear match that invariant
+exactly, rather than approximating it at group granularity.
+
+### Amended decision
+
+For each group_id referenced by the WAL directory's content (other than the request's own —
+which, by construction of `resolve_group_wal_dir`, never has data split across directories and is
+always cleared in full exactly as before):
+
+1. **Not split** — the referenced group has no separate, non-empty WAL directory elsewhere
+   (`wal_group::group_wal_dir(wal_root, gid)` differs from the directory being replayed, and
+   either doesn't exist or has no `.jsonl` content). Cleared in full via `purge_groups`, unchanged
+   from this ADR's original decision — this remains the common migrated-legacy case, and its
+   existing regression coverage (`handlers_wal_admin.rs`'s
+   `test_rebuild_from_wal_migrated_legacy_stream_force_clear_clears_embedded_group`) continues to
+   pass unmodified.
+2. **Split, and every line in the replayed directory referencing that group is a bare `CREATE`**
+   (never `SET`/`DELETE`/`DETACH`/`REMOVE`) — cleared via a new row-scoped purge,
+   `group_purge::purge_group_rows`, which deletes only the exact `uuid`s a bare `CREATE` line
+   creates for that group (`wal::scan_wal_content_by_group`'s `GroupWalContent::create_uuids`,
+   itself bounded by `to_seq` exactly as this ADR's original `scan_wal_content_group_ids` was).
+   This clears precisely the replay restore set for that group: no more (the independent stream's
+   rows are never named, so they survive), and no less (the rows this replay *will* recreate are
+   still cleared first, so #432's duplicate-primary-key collision does not return). `MATCH ...
+   CREATE` relationship-hop lines (the two-hop/direct-rel shape every edge insert also emits) are
+   not required to be bare `CREATE` — they only link existing nodes by uuid, never mutate or
+   remove a row this replay doesn't own, so their presence doesn't change a group's classification
+   here.
+3. **Split, and some line referencing that group is a mutating non-`CREATE`
+   (`SET`/`DELETE`/`DETACH`/`REMOVE`)** — such a line implies this replay might reach into a row
+   it doesn't fully own (e.g. a legacy `SET` on a row actually still maintained by the group's
+   independent stream). Clearing either the whole group (risking the independent stream's data)
+   or just the row-scoped set (risking a duplicate-primary-key collision on replay, since the
+   `SET` line's own history wouldn't have been cleared) is unsafe in a way this guard cannot
+   resolve silently in either direction. The rebuild is refused outright — an `Error::Ipc` naming
+   the group(s), raised before any clear happens — the same fail-fast pattern this guard already
+   uses for its sibling refusals (dry-run, no-`force_clear`), and observable from the rebuild
+   call's own error response with no new response shape needed.
+
+`cross_group::rebind_pointers_forced`'s forced-rebind pass, reused unchanged by
+`purge_group_rows`, needed no logic change for the partial-purge case: its actual mechanism
+(`resolve_endpoint`, a real per-pointer existence re-check) is correct regardless of whether the
+source group was emptied in full or only partially — only the function's doc comment, written for
+the whole-group case, needed a wording correction.
+
+This amendment does not reopen anything this ADR's original "Rejected alternatives" section
+already settled — it narrows *how much* of a referenced group's data gets cleared, not *which*
+groups get discovered or *why* the content scan is necessary in the first place.
+
+See `docs/operations.md`'s "Bounded rebuild" section for the operator-facing description of the
+resulting behavior, including the new refusal case and its remedy.

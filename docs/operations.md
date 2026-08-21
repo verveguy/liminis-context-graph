@@ -123,6 +123,24 @@ have it change the consumer's own behavior (issue #446).
   replay. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
   indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
   afterward — `knowledge_build_indices` is not normally required.
+  - **A referenced group's data outside the directory being replayed is never cleared (issue
+    #462).** A referenced group_id can itself have rows split across more than one physical WAL
+    stream — most commonly a migrated legacy stream (above) whose embedded group_id has since
+    also been written to normally, through its own separate post-#378 directory. `force_clear`
+    clears exactly what this replay is about to recreate for that group, never more: if the
+    referenced group's entire footprint lives inside the directory being replayed, it is cleared
+    in full, exactly as issue #432 established; if the group also has independent rows in a
+    separate stream this replay never touches, only the rows this replay will actually recreate
+    are cleared, and the independent stream's rows survive untouched. If the content being
+    replayed also contains a mutating line (`SET`/`DELETE`/`DETACH`/`REMOVE`, not just `CREATE`)
+    referencing a group that *is* split this way, the rebuild refuses outright with an explicit
+    error naming the group — this situation cannot be resolved safely in either direction
+    (clearing the whole group risks destroying the independent stream's data; clearing only the
+    replayed rows risks a duplicate-key collision replaying the mutating line). The remedy is the
+    same as the plain non-empty-group refusal above: clear the named group manually first with
+    `knowledge_delete_by_group`, or consolidate its WAL streams before rebuilding. See
+    [ADR-0432](adr/0432-force-clear-guard-scans-wal-content-group-ids.md)'s "Amendment (issue
+    #462)" section for the full mechanism.
 - **Unknown-generation refusal (issue #414).** Before comparing anything, `knowledge_rebuild_from_wal`
   checks whether the group already has a previously recorded position (`applied_seq` not null —
   note a `knowledge_status` call can itself cause this to become true via its own backfill, so
