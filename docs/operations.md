@@ -13,9 +13,11 @@ Everything the service manages lives under `.lcg/` in the workspace:
 .lcg/
 ├── wal/                    # WAL root — one subdirectory per group_id (issue #378)
 │   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json,
-│                            #   .wal-generation.json
+│                            #   .wal-generation.json, .wal-ontology.json (issue #446)
 ├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL
-├── ontology.yaml           # optional extraction vocabulary (yours to edit)
+├── ontology.yaml           # optional workspace-wide extraction vocabulary (yours to edit)
+├── ontology/                # optional per-group extraction vocabulary (issue #446)
+│   └── <group_id>.yaml      #   one file per group_id, overrides ontology.yaml for that group
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
@@ -90,11 +92,15 @@ and know what each entry in the dot-namespace costs you if you omit it anyway:
 |---|---|---|
 | `.wal-generation.json` (issue #387) | **MUST travel** — load-bearing | reset detection can never run for this stream again; every consumer that already recorded a position for this group starts hard-failing `knowledge_rebuild_from_wal` (issue #414, below) until the stream is republished with its generation intact |
 | `.wal-bounds.json` (issue #375) | MAY be omitted | not wrong, just slow — a cache; the consumer regenerates it by rescanning every `*.jsonl` file on next read |
+| `.wal-ontology.json` (issue #446) | MAY be omitted — informational | not wrong, not slow either — replay and correctness are entirely unaffected; the consumer just loses the ability to see what vocabulary produced this group's graph. Never applied to the consumer's own extraction, validation, canonicalization, or reprocessing even when present (see [Ontology](ontology.md#per-group-ontologies)) — it is provenance, not policy |
 | `.checkpoints/` (issue #365) | MAY be excluded | local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation |
 
-Only `.wal-generation.json` is load-bearing. The other two are safe to omit deliberately; they are
+Only `.wal-generation.json` is load-bearing — every other entry is safe to omit deliberately, but
 never safe to omit *by accident* as a side effect of a glob pattern that was only ever meant to
-select `*.jsonl` files.
+select `*.jsonl` files. `.wal-bounds.json` and `.checkpoints/` degrade performance or local
+recovery convenience if dropped; `.wal-ontology.json` degrades only documentation — a fourth,
+distinct bucket from the other three, since even a stream published with it present must never
+have it change the consumer's own behavior (issue #446).
 
 ## WAL administration
 

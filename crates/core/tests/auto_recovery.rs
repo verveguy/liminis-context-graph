@@ -76,6 +76,7 @@ fn make_degraded_state(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -109,6 +110,7 @@ fn make_healthy_state(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState>
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

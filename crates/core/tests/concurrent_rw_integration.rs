@@ -144,6 +144,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let s1 = Arc::clone(&state);

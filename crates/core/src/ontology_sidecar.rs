@@ -69,6 +69,78 @@ pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std:
     Ok(())
 }
 
+/// File name (not full path — the record lives alongside a group's `.jsonl` files, same as
+/// `.wal-generation.json` and `.wal-bounds.json`) of the published-ontology informational
+/// sidecar (FR-007). Written into `<wal_root>/<group_id>/` right after an extraction guided by
+/// that group's resolved ontology, so it travels automatically under the existing whole-directory
+/// publish contract (see `docs/operations.md`).
+pub const WAL_ONTOLOGY_FILE: &str = ".wal-ontology.json";
+
+/// Resolves the path of the published-ontology sidecar within a group's WAL directory.
+pub fn wal_ontology_path(wal_dir: &Path) -> PathBuf {
+    wal_dir.join(WAL_ONTOLOGY_FILE)
+}
+
+/// Writes the published-ontology informational sidecar into a group's WAL directory (FR-007).
+///
+/// This file is **documentation only** (FR-008, FR-009): nothing in this codebase ever reads it
+/// back, on either the producer or consumer side — there is no hydrate/replay code path that
+/// consults it, so it can never drive a consumer's extraction, `mode: strict` validation,
+/// canonicalization, or reprocessing. Its absence never blocks replay or affects correctness; it
+/// only means a consumer inspecting the stream has no record of the vocabulary that produced it.
+///
+/// Reuses [`OntologySidecar`]'s existing shape rather than a second schema, since the two sidecars
+/// (`.lcg/ontology-hash.json` for drift, `.wal-ontology.json` for publish provenance) record the
+/// same information about an ontology, just at different scopes (workspace vs. per-group stream).
+pub fn write_wal_ontology_sidecar(
+    wal_dir: &Path,
+    ontology: Option<&Ontology>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(wal_dir)?;
+
+    let hash = content_hash(ontology);
+    let (mode, entity_types, relation_types) = match ontology {
+        Some(o) => (
+            Some(o.mode.to_string()),
+            o.entity_types.iter().map(|e| e.name.clone()).collect(),
+            o.relation_types.iter().map(|r| r.name.clone()).collect(),
+        ),
+        None => (None, vec![], vec![]),
+    };
+
+    let sidecar = OntologySidecar {
+        hash,
+        mode,
+        entity_types,
+        relation_types,
+    };
+
+    let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
+
+    let path = wal_ontology_path(wal_dir);
+    // Unique per call: two concurrent same-group `add_episode` calls can reach this function
+    // with no write lock held, so a shared temp name would let one writer's `File::create`
+    // truncate a file the other hasn't finished writing, and one `rename` could publish the
+    // truncated result.
+    let tmp_path = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(json.as_bytes())?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
+/// Reads the published-ontology informational sidecar from a group's WAL directory, if present.
+/// Documentation-only per [`write_wal_ontology_sidecar`] — provided for external tooling/tests
+/// that want to inspect it, not consulted by any lcg extraction/validation/reprocessing path.
+pub fn read_wal_ontology_sidecar(wal_dir: &Path) -> Option<OntologySidecar> {
+    let path = wal_ontology_path(wal_dir);
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str::<OntologySidecar>(&text).ok()
+}
+
 /// Computes the drift state by comparing the current ontology's hash against the persisted sidecar.
 ///
 /// `has_prior_data`: true when no sidecar exists but the DB already contains ingested nodes
@@ -222,5 +294,70 @@ fn build_drift_summary(sidecar: &OntologySidecar, current: Option<&Ontology>) ->
         "descriptions or structure updated".to_string()
     } else {
         parts.join("; ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ontology::{EntityTypeDef, OntologyMode};
+    use tempfile::TempDir;
+
+    fn sample_ontology() -> Ontology {
+        Ontology {
+            mode: OntologyMode::Strict,
+            entity_types: vec![EntityTypeDef {
+                name: "KnowledgeChannel".to_string(),
+                description: None,
+                parent: None,
+            }],
+            relation_types: vec![],
+            ancestor_map: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn wal_ontology_path_lives_alongside_wal_files() {
+        let dir = TempDir::new().unwrap();
+        let path = wal_ontology_path(dir.path());
+        assert_eq!(path, dir.path().join(".wal-ontology.json"));
+    }
+
+    #[test]
+    fn write_then_read_wal_ontology_sidecar_round_trips_some() {
+        let dir = TempDir::new().unwrap();
+        let ontology = sample_ontology();
+        write_wal_ontology_sidecar(dir.path(), Some(&ontology)).unwrap();
+
+        let sidecar = read_wal_ontology_sidecar(dir.path()).expect("sidecar should be present");
+        assert_eq!(sidecar.mode.as_deref(), Some("strict"));
+        assert_eq!(sidecar.entity_types, vec!["KnowledgeChannel".to_string()]);
+        assert_eq!(sidecar.hash, content_hash(Some(&ontology)));
+    }
+
+    #[test]
+    fn write_then_read_wal_ontology_sidecar_round_trips_none() {
+        let dir = TempDir::new().unwrap();
+        write_wal_ontology_sidecar(dir.path(), None).unwrap();
+
+        let sidecar = read_wal_ontology_sidecar(dir.path()).expect("sidecar should be present");
+        assert_eq!(sidecar.mode, None);
+        assert!(sidecar.entity_types.is_empty());
+        assert_eq!(sidecar.hash, content_hash(None));
+    }
+
+    #[test]
+    fn read_wal_ontology_sidecar_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(read_wal_ontology_sidecar(dir.path()).is_none());
+    }
+
+    #[test]
+    fn write_wal_ontology_sidecar_creates_wal_dir_if_missing() {
+        let dir = TempDir::new().unwrap();
+        let wal_dir = dir.path().join("group-a");
+        assert!(!wal_dir.exists());
+        write_wal_ontology_sidecar(&wal_dir, None).unwrap();
+        assert!(wal_ontology_path(&wal_dir).exists());
     }
 }

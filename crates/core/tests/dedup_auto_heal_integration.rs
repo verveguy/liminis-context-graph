@@ -162,6 +162,7 @@ fn make_state_without_indices(extractor: Arc<dyn Extractor>) -> (Arc<AppState>, 
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
     (state, dir)
 }

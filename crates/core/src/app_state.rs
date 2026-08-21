@@ -84,6 +84,15 @@ pub struct AppState {
     /// Drift state computed at startup by comparing the current ontology's hash against the
     /// persisted `.lcg/ontology-hash.json` sidecar. Cleared after each successful ingest write.
     pub ontology_drift: Arc<Mutex<OntologyDriftState>>,
+    /// Per-group ontology resolution cache (issue #446), keyed by `group_id`. Populated lazily
+    /// by [`AppState::resolve_ontology`] on first use per group, mirroring `wal_writers`'
+    /// lazy-populate pattern rather than an eager startup scan of `.lcg/ontology/*.yaml` — a
+    /// group this process never touches never pays the file read. The cached value is already
+    /// the *fully resolved* ontology for that group (a per-group file if one exists and is
+    /// valid, otherwise the workspace-wide `ontology` above), so callers never need to
+    /// re-apply the fallback themselves. Like `ontology`, requires a restart to pick up
+    /// changes — hot-reload is out of scope (see the issue's Assumptions).
+    pub group_ontologies: Arc<Mutex<HashMap<String, Option<Arc<Ontology>>>>>,
 }
 
 impl AppState {
@@ -227,7 +236,51 @@ impl AppState {
             cancelled_chunks: Arc::new(AtomicUsize::new(0)),
             ontology,
             ontology_drift,
+            group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Resolves the operative ontology for `group_id` (FR-001, FR-002, FR-005): a per-group
+    /// ontology file at `.lcg/ontology/<encoded_group_id>.yaml` if one exists and is valid,
+    /// otherwise the workspace-wide `ontology` field, otherwise `None`.
+    ///
+    /// Lazily loads and caches the result per `group_id` on first call (mirrors
+    /// `with_wal_writer`'s lazy-populate pattern) — later calls for the same group are a
+    /// `HashMap` lookup, not a disk read. A malformed or unreadable per-group file falls back to
+    /// the workspace ontology rather than to `None` or a hard error: `load_group_ontology`
+    /// already logs the failure loudly, so silently using the one ontology already known to be
+    /// valid is the least-surprising degradation (see the issue's Plan stage for the tradeoff).
+    ///
+    /// When `workspace_root` isn't configured, per-group file lookup is skipped (there's no root
+    /// to look under) and this always falls through to the workspace-wide `ontology` field
+    /// unchanged — this keeps direct-construction callers (tests, or any future caller that sets
+    /// `ontology` without a `workspace_root`) working exactly as `state.ontology` did before this
+    /// method existed.
+    pub fn resolve_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
+        if let Ok(guard) = self.group_ontologies.lock() {
+            if let Some(cached) = guard.get(group_id) {
+                return cached.clone();
+            }
+        }
+
+        let resolved = self
+            .workspace_root
+            .as_deref()
+            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
+            .map(Arc::new)
+            .or_else(|| self.ontology.clone());
+
+        match self.group_ontologies.lock() {
+            Ok(mut guard) => {
+                guard.insert(group_id.to_string(), resolved.clone());
+            }
+            Err(e) => {
+                eprintln!(
+                    "liminis-context-graph: group_ontologies: lock poisoned for group {group_id:?}: {e}"
+                );
+            }
+        }
+        resolved
     }
 
     /// Locks `wal_writers`, lazily creating `group_id`'s writer (and its WAL directory) on

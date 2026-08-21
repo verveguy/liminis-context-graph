@@ -99,6 +99,7 @@ fn make_state(db: Arc<Db>, ontology: Option<Arc<Ontology>>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -136,6 +137,7 @@ fn make_state_with_wal(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -174,7 +176,55 @@ fn make_state_with_name_map_embedder(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
+}
+
+/// Like `make_state_with_wal`, but sets `workspace_root` (with no fixed workspace-wide
+/// `ontology`) so `AppState::resolve_ontology` will look for per-group `.lcg/ontology/<group_id>.yaml`
+/// files under it (issue #446).
+fn make_state_with_workspace_and_wal(
+    db: Arc<Db>,
+    workspace_root: &std::path::Path,
+    wal_dir: &std::path::Path,
+) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    let wal_writer = WalWriter::new(wal_dir, 10_000, 0).ok();
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(DIM)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_root: Some(wal_dir.to_path_buf()),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::new(Mutex::new(
+            wal_writer
+                .into_iter()
+                .map(|w| ("liminis".to_string(), w))
+                .collect(),
+        )),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: Some(workspace_root.to_path_buf()),
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+    })
+}
+
+fn write_group_ontology(workspace_root: &std::path::Path, group_id: &str, content: &str) {
+    let path = lcg_core::ontology::group_ontology_path(workspace_root, group_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
 }
 
 fn make_entity(name: &str) -> EntityRow {
@@ -886,6 +936,98 @@ async fn test_two_group_isolation_scoped_to_group_a() {
     assert_eq!(
         b_wal_lines_before, b_wal_lines_after,
         "group B's WAL stream must be untouched by a call scoped to group A"
+    );
+}
+
+// ── Test 10b: per-group *ontology* isolation (issue #446 FR-005, FR-006) ─────
+
+/// Group A and group B each have their own per-group ontology file, with different vocabulary
+/// for the exact same alias. If canonicalize_relations ever read a workspace-wide ontology (or
+/// leaked one group's resolved ontology into another's call), the two calls below would produce
+/// the same mapped relation_type for both groups' identical "WROTE" edges — instead each group's
+/// own resolved ontology must govern its own call, so the two calls produce different results.
+#[tokio::test]
+async fn test_per_group_ontology_isolation_scoped_to_own_vocabulary() {
+    const GROUP_A: &str = "group_a";
+    const GROUP_B: &str = "group_b";
+
+    let workspace_dir = TempDir::new().unwrap();
+    write_group_ontology(
+        workspace_dir.path(),
+        GROUP_A,
+        "mode: open\n\
+         relation_types:\n  \
+         - name: AUTHORED\n    \
+           aliases: [WROTE]\n",
+    );
+    write_group_ontology(
+        workspace_dir.path(),
+        GROUP_B,
+        "mode: open\n\
+         relation_types:\n  \
+         - name: MANAGES\n    \
+           aliases: [WROTE]\n",
+    );
+
+    let dir = TempDir::new().unwrap();
+    let wal_dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    let a_src = make_entity_in_group("Alice", GROUP_A);
+    let a_dst = make_entity_in_group("Acme", GROUP_A);
+    let b_src = make_entity_in_group("Carol", GROUP_B);
+    let b_dst = make_entity_in_group("Baxter", GROUP_B);
+
+    let a_edge_uuid;
+    let b_edge_uuid;
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&a_src).unwrap();
+        conn.insert_entity(&a_dst).unwrap();
+        conn.insert_entity(&b_src).unwrap();
+        conn.insert_entity(&b_dst).unwrap();
+
+        // Same alias "WROTE" in both groups — only their per-group ontologies differ.
+        let a_edge =
+            make_edge_with_rt_in_group(&a_src.uuid, &a_dst.uuid, "WROTE", None, "", GROUP_A);
+        let b_edge =
+            make_edge_with_rt_in_group(&b_src.uuid, &b_dst.uuid, "WROTE", None, "", GROUP_B);
+        a_edge_uuid = a_edge.uuid.clone();
+        b_edge_uuid = b_edge.uuid.clone();
+        conn.insert_relates_to_edge(&a_edge).unwrap();
+        conn.insert_relates_to_edge(&b_edge).unwrap();
+    }
+
+    let state = make_state_with_workspace_and_wal(db.clone(), workspace_dir.path(), wal_dir.path());
+
+    let result_a = dispatch(
+        "knowledge_canonicalize_relations",
+        json!({ "group_id": GROUP_A, "dry_run": false }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_a["mapped_count"], json!(1));
+
+    let result_b = dispatch(
+        "knowledge_canonicalize_relations",
+        json!({ "group_id": GROUP_B, "dry_run": false }),
+        state,
+    )
+    .await;
+    assert_eq!(result_b["mapped_count"], json!(1));
+
+    let conn = db.connect().unwrap();
+    let a_edges = conn.get_edges_by_uuids(&[a_edge_uuid.as_str()]).unwrap();
+    assert_eq!(
+        a_edges[0].relation_type.as_deref(),
+        Some("AUTHORED"),
+        "group A's own ontology must govern group A's edge"
+    );
+    let b_edges = conn.get_edges_by_uuids(&[b_edge_uuid.as_str()]).unwrap();
+    assert_eq!(
+        b_edges[0].relation_type.as_deref(),
+        Some("MANAGES"),
+        "group B's own ontology (not group A's) must govern group B's identical-alias edge"
     );
 }
 

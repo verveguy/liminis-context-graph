@@ -112,6 +112,7 @@ async fn wal_repopulated_after_recreate() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     // Step 1: Recreate (preserve_wal: false) — clears DB and WAL directory.

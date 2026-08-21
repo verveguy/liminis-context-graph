@@ -67,6 +67,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppStat
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -101,6 +102,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 

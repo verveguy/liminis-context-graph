@@ -60,6 +60,7 @@ fn make_degraded_state_with_capture(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
@@ -319,6 +320,7 @@ async fn test_recovery_rebuild_from_workspace_wal() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let recover_resp = dispatch_val(
@@ -554,6 +556,7 @@ async fn test_recovery_unknown_strategy() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let resp = dispatch_val(
@@ -600,6 +603,7 @@ async fn test_recovery_missing_strategy() {
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;

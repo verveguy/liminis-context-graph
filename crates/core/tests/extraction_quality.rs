@@ -73,6 +73,7 @@ fn make_state(
         cancelled_chunks: Arc::new(AtomicUsize::new(0)),
         ontology: ontology.map(Arc::new),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
     })
 }
 
