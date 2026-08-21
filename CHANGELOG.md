@@ -7,38 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [0.14.0] - Unreleased
+## [0.13.3] - 2026-08-21
 
-### Added
-
-- **Per-group ontology support.** A `group_id` can now have its own extraction/validation
-  vocabulary, independent of every other co-resident group in the same workspace. Place a
-  group-specific ontology at `{workspace}/.lcg/ontology/<group_id>.yaml` (using the existing
-  ontology YAML format); a `group_id` unsafe as a bare filesystem path component is
-  percent-encoded with the same bijective scheme already used for per-group WAL directory names.
-  A group with no per-group file falls back to the existing workspace-wide `.lcg/ontology.yaml`,
-  exactly as before this feature — a workspace that hasn't adopted per-group ontologies behaves
-  identically to pre-0.14.0. The resolved per-group ontology governs, for that group only,
-  extraction guidance, `mode: strict` validation, canonicalization, and reprocessing
-  (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). A malformed or
-  unreadable per-group file falls back to the workspace-wide ontology when one exists, or to no
-  ontology otherwise (logged either way), rather than failing the group's extraction outright.
-  Direct-assert
-  (`knowledge_assert_entity`/`knowledge_assert_relationship`) is unaffected, as before. When a
-  group's stream is published, the ontology that guided its extraction now travels alongside it
-  as `.wal-ontology.json` — a new, purely informational addition to the publish contract (see
-  [Operations](docs/operations.md)): a consumer can inspect it as documentation, but it is never
-  applied to the consumer's own extraction, validation, canonicalization, or reprocessing, and its
-  absence never affects replay or correctness. See [Ontology](docs/ontology.md#per-group-ontologies)
-  for the full resolution/fallback contract. (#446)
-
-## [0.13.3] - Unreleased
-
-A patch release fixing a regression 0.13.2 introduced on the upgrade path: the per-group WAL
-migration never stamped a generation for the legacy stream it relocated, so #414's
-unknown-generation guard refused `knowledge_rebuild_from_wal` on every workspace upgraded from a
-pre-0.13.0 flat WAL — exactly the state a lost or corrupted database, an ADR-0009 degraded-mode
-recovery, or #398's documented rollback procedure needs to rebuild from.
+A patch release closing the upgrade-path regression 0.13.2 introduced, scoping the last two
+ontology-driven maintenance operations to a single group, and adding per-group ontologies. The
+group boundary work that began in 0.13.0 is now consistent across reads, writes, deletes and
+maintenance: **an operation names the group it acts on, and touches nothing else.**
 
 ### Fixed
 
@@ -84,6 +58,46 @@ recovery, or #398's documented rollback procedure needs to rebuild from.
   default (the default group) is the defect this release fixes. Unlike #406's equivalent change,
   no known deployment invokes either operation today, so this breaks no existing caller in
   practice — see the issue's Release timing discussion. (#447)
+
+### Added
+
+- **Per-group ontology support.** A `group_id` can now have its own extraction/validation
+  vocabulary, independent of every other co-resident group in the same workspace. Place a
+  group-specific ontology at `{workspace}/.lcg/ontology/<group_id>.yaml` (using the existing
+  ontology YAML format); a `group_id` unsafe as a bare filesystem path component is
+  percent-encoded with the same bijective scheme already used for per-group WAL directory names.
+  A group with no per-group file falls back to the existing workspace-wide `.lcg/ontology.yaml`,
+  exactly as before this feature — a workspace that hasn't adopted per-group ontologies behaves
+  identically to pre-0.13.3. The resolved per-group ontology governs, for that group only,
+  extraction guidance, `mode: strict` validation, canonicalization, and reprocessing
+  (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). A malformed or
+  unreadable per-group file falls back to the workspace-wide ontology when one exists, or to no
+  ontology otherwise (logged either way), rather than failing the group's extraction outright.
+  Direct-assert
+  (`knowledge_assert_entity`/`knowledge_assert_relationship`) is unaffected, as before. When a
+  group's stream is published, the ontology that guided its extraction now travels alongside it
+  as `.wal-ontology.json` — a new, purely informational addition to the publish contract (see
+  [Operations](docs/operations.md)): a consumer can inspect it as documentation, but it is never
+  applied to the consumer's own extraction, validation, canonicalization, or reprocessing, and its
+  absence never affects replay or correctness. See [Ontology](docs/ontology.md#per-group-ontologies)
+  for the full resolution/fallback contract. (#446)
+
+### Internal
+
+- **The required CI test gate could not fail.** The `test` job piped `cargo test` through `tee`
+  without `pipefail`, so the pipeline reported `tee`'s exit status and a failing suite still went
+  green. Any test that broke on `main` was invisible to the gate that exists to catch it. (#430)
+- **Four tests that had been failing behind that masked gate were fixed** once it started
+  reporting honestly — stale fixtures and assertions that had drifted from current behaviour,
+  not new breakage. (#429)
+- **Startup migration ordering is now documented and regression-tested.** The `.graphiti` → `.lcg`
+  workspace move must run before the per-group WAL relocation, or a `.graphiti`-era workspace ends
+  up with its WAL files loose at the root and invisible to the process. The ordering was already
+  correct via the call graph — it was diagnosed as broken from textual line order in `main.rs`,
+  which the fix's own comments now warn against trusting — so this hardens an implicit dependency
+  with explicit preconditions at both call sites and un-quarantines the regression test #430 had
+  parked. A distinct gap found during review, that `migrate_workspace` ignores
+  `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR`, is tracked separately as #442. (#437)
 
 ## [0.13.2] - 2026-08-16
 
