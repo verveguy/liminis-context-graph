@@ -842,13 +842,24 @@ pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
 /// stored under (see the `migrate_wal_root_if_needed` docs in `wal_group.rs`: a pre-#378 flat
 /// stream can carry rows for a group_id other than the directory it was relocated into).
 ///
+/// `to_seq`, when `Some`, excludes any line with `seq > to_seq` from consideration — mirroring
+/// `ReplayOptions::to_seq`'s own filter in `replay.rs` (`replay_opts` skips those exact lines),
+/// so this scan only ever reports group_ids the caller's bounded replay will actually touch. This
+/// matters because the guard that calls this function may, with `force_clear: true`, purge every
+/// group_id this scan reports — a group_id whose only rows live past `to_seq` would then be
+/// cleared without ever being recreated by the bounded replay that follows, a genuine data-loss
+/// gap for the documented `{from_seq: 0, to_seq: n}` bounded-full-rebuild call shape.
+///
 /// Unlike `first_seq_in_file`, this reads every line of every file rather than stopping at the
 /// first parseable one, since distinct lines can carry distinct `group_id` values (a legacy
 /// stream that mixed multiple groups before per-group directories existed). Tolerates a corrupt
 /// line, a line whose `params.group_id` is missing or not a string, and an unreadable file or
 /// directory by skipping it and continuing — mirroring `first_seq_in_file`'s tolerance model, so
 /// one malformed row can't turn this guard into a hard failure for the whole rebuild.
-pub(crate) fn scan_wal_content_group_ids(wal_dir: &Path) -> std::collections::HashSet<String> {
+pub(crate) fn scan_wal_content_group_ids(
+    wal_dir: &Path,
+    to_seq: Option<u64>,
+) -> std::collections::HashSet<String> {
     let mut group_ids = std::collections::HashSet::new();
 
     let entries = match fs::read_dir(wal_dir) {
@@ -879,6 +890,11 @@ pub(crate) fn scan_wal_content_group_ids(wal_dir: &Path) -> std::collections::Ha
             let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) else {
                 continue;
             };
+            if let Some(to_seq) = to_seq {
+                if wal_line.seq > to_seq {
+                    continue;
+                }
+            }
             if let Some(gid) = wal_line.params.get("group_id").and_then(|v| v.as_str()) {
                 group_ids.insert(gid.to_string());
             }
@@ -1848,12 +1864,28 @@ mod tests {
         write_wal_line_with_group(tmp.path(), "0000.jsonl", 0, "apollo_program");
         write_wal_line_with_group(tmp.path(), "0001.jsonl", 1, "liminis");
 
-        let mut ids: Vec<String> = scan_wal_content_group_ids(tmp.path()).into_iter().collect();
+        let mut ids: Vec<String> = scan_wal_content_group_ids(tmp.path(), None)
+            .into_iter()
+            .collect();
         ids.sort();
         assert_eq!(
             ids,
             vec!["apollo_program".to_string(), "liminis".to_string()]
         );
+    }
+
+    #[test]
+    fn scan_wal_content_group_ids_respects_to_seq_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line_with_group(tmp.path(), "0000.jsonl", 0, "apollo_program");
+        write_wal_line_with_group(tmp.path(), "0001.jsonl", 1, "liminis");
+
+        // A bounded rebuild ({from_seq: 0, to_seq: 0}) must not discover a group_id whose only
+        // row lives past to_seq — that group's data would never be recreated by the bounded
+        // replay that follows, so it must not be reported as referenced (and hence never
+        // force-cleared).
+        let ids = scan_wal_content_group_ids(tmp.path(), Some(0));
+        assert_eq!(ids, ["apollo_program".to_string()].into_iter().collect());
     }
 
     #[test]
@@ -1872,7 +1904,7 @@ mod tests {
         );
         fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
 
-        let ids = scan_wal_content_group_ids(tmp.path());
+        let ids = scan_wal_content_group_ids(tmp.path(), None);
         assert_eq!(ids, ["apollo_program".to_string()].into_iter().collect());
     }
 
@@ -1900,13 +1932,13 @@ mod tests {
         );
         fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
 
-        assert!(scan_wal_content_group_ids(tmp.path()).is_empty());
+        assert!(scan_wal_content_group_ids(tmp.path(), None).is_empty());
     }
 
     #[test]
     fn scan_wal_content_group_ids_is_empty_for_missing_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("does-not-exist");
-        assert!(scan_wal_content_group_ids(&missing).is_empty());
+        assert!(scan_wal_content_group_ids(&missing, None).is_empty());
     }
 }

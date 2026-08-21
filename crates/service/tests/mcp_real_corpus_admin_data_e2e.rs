@@ -106,9 +106,12 @@ fn count_wal_lines(wal_dir: &Path) -> usize {
             if path.is_dir() {
                 walk(&path, total);
             } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                let content =
-                    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-                *total += content.lines().filter(|l| !l.trim().is_empty()).count();
+                let file =
+                    std::fs::File::open(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+                *total += std::io::BufRead::lines(std::io::BufReader::new(file))
+                    .map(|l| l.unwrap_or_else(|e| panic!("read {path:?}: {e}")))
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
             }
         }
     }

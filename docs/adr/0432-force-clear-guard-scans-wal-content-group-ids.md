@@ -49,15 +49,22 @@ The guard now determines emptiness — and, if `force_clear: true`, performs the
 **every `group_id` actually referenced by the WAL directory's own content**, not only the
 request's own `group_id`.
 
-Concretely: `wal::scan_wal_content_group_ids(wal_dir)` reads every `*.jsonl` file in the directory
-and collects the distinct `params.group_id` string values found across every line (tolerating a
-malformed line or unreadable file by skipping it, mirroring `first_seq_in_file`'s tolerance
-model). This set, unioned with the request's own `group_id`, becomes the group of candidates the
-emptiness check runs against (`count_entities_by_group_ids`/`count_episodics_by_group_ids`/
-`count_relates_to_by_group_ids`, unchanged — already `&[&str]`-shaped, called once per candidate
-instead of once total). The three existing response branches (dry-run refusal, no-`force_clear`
-refusal, `force_clear`-triggered clear) key off *which* groups in that union are non-empty, and
-their error messages enumerate every colliding group rather than naming only the request's own.
+Concretely: `wal::scan_wal_content_group_ids(wal_dir, to_seq)` reads every `*.jsonl` file in the
+directory and collects the distinct `params.group_id` string values found across every line
+(tolerating a malformed line or unreadable file by skipping it, mirroring `first_seq_in_file`'s
+tolerance model). The scan is bounded by the request's own `to_seq` when set: a line with
+`seq > to_seq` is excluded, mirroring `ReplayOptions::to_seq`'s own filter in `replay.rs`. This
+matters for the documented bounded-full-rebuild call shape (`{from_seq: 0, to_seq: n}`, see
+`docs/operations.md`'s "Bounded rebuild" section) — without the bound, the scan could discover a
+group_id whose only rows live past `to_seq`, and `force_clear: true` would then purge that
+group's real data even though the bounded replay that follows will never recreate it, a genuine
+data-loss gap the bound closes. This set, unioned with the request's own `group_id`, becomes the
+group of candidates the emptiness check runs against (`count_entities_by_group_ids`/
+`count_episodics_by_group_ids`/`count_relates_to_by_group_ids`, unchanged — already
+`&[&str]`-shaped, called once per candidate instead of once total). The three existing response
+branches (dry-run refusal, no-`force_clear` refusal, `force_clear`-triggered clear) key off
+*which* groups in that union are non-empty, and their error messages enumerate every colliding
+group rather than naming only the request's own.
 
 `clear_group_for_rebuild` is generalized to `clear_groups_for_rebuild`, purging the full
 referenced set via the existing `group_purge::purge_groups` (already `&[&str]`-shaped — issue

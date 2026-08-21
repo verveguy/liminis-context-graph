@@ -2133,6 +2133,7 @@ async fn handle_rebuild_from_wal(
         let db_for_check = load_db(&state)?;
         let gid_check = group_id.clone();
         let wal_dir_for_scan = wal_dir.clone();
+        let to_seq_for_scan = to_seq;
         let (referenced_group_ids, non_empty_groups) =
             tokio::task::spawn_blocking(move || -> Result<(Vec<String>, Vec<String>), Error> {
                 let conn = db_for_check.connect()?;
@@ -2140,9 +2141,12 @@ async fn handle_rebuild_from_wal(
                 // embedded in the WAL directory's own content, unioned with the request's own
                 // group_id (the directory's owning group) so the common, non-legacy case — where
                 // content group_id always equals the directory's owning group_id — is checked
-                // exactly as it was before this fix (FR-007).
+                // exactly as it was before this fix (FR-007). Bounded by to_seq (when set) so a
+                // bounded full rebuild ({from_seq: 0, to_seq: n}) never discovers — and, with
+                // force_clear: true, never purges — a group_id whose only rows live past to_seq,
+                // which the bounded replay that follows would never recreate.
                 let mut referenced: std::collections::HashSet<String> =
-                    crate::wal::scan_wal_content_group_ids(&wal_dir_for_scan);
+                    crate::wal::scan_wal_content_group_ids(&wal_dir_for_scan, to_seq_for_scan);
                 referenced.insert(gid_check.clone());
                 let mut referenced: Vec<String> = referenced.into_iter().collect();
                 referenced.sort();
