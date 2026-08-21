@@ -934,7 +934,6 @@ pub(crate) fn scan_wal_content_by_group(
     by_group
 }
 
-
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
 /// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
 /// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
@@ -1057,9 +1056,7 @@ pub(crate) fn is_unsafe_non_create_mutation(cypher: &str) -> bool {
 /// `CREATE` line actually created; a hop line's uuid is already covered by the node-creating
 /// line for the same uuid.
 fn is_bare_create(cypher: &str) -> bool {
-    cypher_tokens(cypher)
-        .first()
-        .is_some_and(|t| t == "CREATE")
+    cypher_tokens(cypher).first().is_some_and(|t| t == "CREATE")
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
@@ -2049,7 +2046,9 @@ mod tests {
             "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) DELETE r"
         ));
         assert!(is_unsafe_non_create_mutation("MATCH (n)DETACH DELETE n"));
-        assert!(is_unsafe_non_create_mutation("MATCH (n) REMOVE n.attributes"));
+        assert!(is_unsafe_non_create_mutation(
+            "MATCH (n) REMOVE n.attributes"
+        ));
     }
 
     #[test]

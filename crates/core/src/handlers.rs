@@ -2209,96 +2209,92 @@ async fn handle_rebuild_from_wal(
         let wal_root_for_scan = state.wal_root.clone().ok_or_else(|| {
             Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string())
         })?;
-        let plan = tokio::task::spawn_blocking(
-            move || -> Result<RebuildClearPlan, Error> {
-                let conn = db_for_check.connect()?;
-                // The full set of group_ids this rebuild could collide with: every group_id
-                // embedded in the WAL directory's own content, unioned with the request's own
-                // group_id (the directory's owning group) so the common, non-legacy case — where
-                // content group_id always equals the directory's owning group_id — is checked
-                // exactly as it was before this fix (FR-007). Bounded by to_seq (when set) so a
-                // bounded full rebuild ({from_seq: 0, to_seq: n}) never discovers — and, with
-                // force_clear: true, never purges — a group_id or row whose only occurrence
-                // lives past to_seq, which the bounded replay that follows would never recreate.
-                let by_group =
-                    crate::wal::scan_wal_content_by_group(&wal_dir_for_scan, to_seq_for_scan);
-                let mut referenced: Vec<String> = by_group.keys().cloned().collect();
-                if !referenced.contains(&gid_check) {
-                    referenced.push(gid_check.clone());
+        let plan = tokio::task::spawn_blocking(move || -> Result<RebuildClearPlan, Error> {
+            let conn = db_for_check.connect()?;
+            // The full set of group_ids this rebuild could collide with: every group_id
+            // embedded in the WAL directory's own content, unioned with the request's own
+            // group_id (the directory's owning group) so the common, non-legacy case — where
+            // content group_id always equals the directory's owning group_id — is checked
+            // exactly as it was before this fix (FR-007). Bounded by to_seq (when set) so a
+            // bounded full rebuild ({from_seq: 0, to_seq: n}) never discovers — and, with
+            // force_clear: true, never purges — a group_id or row whose only occurrence
+            // lives past to_seq, which the bounded replay that follows would never recreate.
+            let by_group =
+                crate::wal::scan_wal_content_by_group(&wal_dir_for_scan, to_seq_for_scan);
+            let mut referenced: Vec<String> = by_group.keys().cloned().collect();
+            if !referenced.contains(&gid_check) {
+                referenced.push(gid_check.clone());
+            }
+            referenced.sort();
+
+            let mut non_empty_groups = Vec::new();
+            let mut whole_group_targets = Vec::new();
+            let mut split_targets: Vec<(String, Vec<String>)> = Vec::new();
+            let mut blocked_groups = Vec::new();
+
+            for gid in &referenced {
+                // An unqueryable label (older/partially-initialised schema missing the
+                // table) is treated as empty, not a hard error — this guard's only job is
+                // "is there data I would collide with?", and erroring here would make the
+                // rebuild/recovery tool unusable in exactly the degraded situation an
+                // operator reaches for it (mirrors recovery.rs's group-scoped emptiness
+                // check precedent).
+                let gids = [gid.as_str()];
+                let entity = conn.count_entities_by_group_ids(&gids).unwrap_or(0);
+                let episodic = conn.count_episodics_by_group_ids(&gids).unwrap_or(0);
+                let relates = conn.count_relates_to_by_group_ids(&gids).unwrap_or(0);
+                if entity == 0 && episodic == 0 && relates == 0 {
+                    continue;
                 }
-                referenced.sort();
+                non_empty_groups.push(gid.clone());
 
-                let mut non_empty_groups = Vec::new();
-                let mut whole_group_targets = Vec::new();
-                let mut split_targets: Vec<(String, Vec<String>)> = Vec::new();
-                let mut blocked_groups = Vec::new();
-
-                for gid in &referenced {
-                    // An unqueryable label (older/partially-initialised schema missing the
-                    // table) is treated as empty, not a hard error — this guard's only job is
-                    // "is there data I would collide with?", and erroring here would make the
-                    // rebuild/recovery tool unusable in exactly the degraded situation an
-                    // operator reaches for it (mirrors recovery.rs's group-scoped emptiness
-                    // check precedent).
-                    let gids = [gid.as_str()];
-                    let entity = conn.count_entities_by_group_ids(&gids).unwrap_or(0);
-                    let episodic = conn.count_episodics_by_group_ids(&gids).unwrap_or(0);
-                    let relates = conn.count_relates_to_by_group_ids(&gids).unwrap_or(0);
-                    if entity == 0 && episodic == 0 && relates == 0 {
-                        continue;
-                    }
-                    non_empty_groups.push(gid.clone());
-
-                    // The request's own WAL directory owning group is never split (issue #378:
-                    // `resolve_group_wal_dir` is a deterministic function of group_id, so no
-                    // *other* directory can also be gid_check's own) — always whole-group,
-                    // exactly as before this fix (FR-007).
-                    if *gid == gid_check {
-                        whole_group_targets.push(gid.clone());
-                        continue;
-                    }
-
-                    // Split iff a foreign group_id discovered in this directory's content also
-                    // has its own separate, non-empty WAL directory elsewhere (issue #462) — the
-                    // independent stream this replay will never touch and therefore can never
-                    // recreate (FR-001).
-                    let is_split = match wal_group::group_wal_dir(&wal_root_for_scan, gid) {
-                        Ok(own_dir) => {
-                            own_dir != wal_dir_for_scan
-                                && own_dir.exists()
-                                && has_jsonl_files(&own_dir)
-                        }
-                        Err(_) => false,
-                    };
-                    if !is_split {
-                        // Not split — the migrated-legacy case ADR-0432 exists for: this
-                        // group's entire footprint lives inside the directory being replayed,
-                        // so a full purge is correct and matches #432's original behavior byte
-                        // for byte (FR-002/SC-002).
-                        whole_group_targets.push(gid.clone());
-                        continue;
-                    }
-
-                    let content = by_group.get(gid.as_str()).cloned().unwrap_or_default();
-                    if content.has_unsafe_mutation {
-                        // A mutating (SET/DELETE/DETACH/REMOVE) line referencing a split group
-                        // means this replay can't tell whether it's safe to clear only the rows
-                        // it will recreate or the whole group — surfaced to the caller rather
-                        // than resolved silently in either direction (FR-004).
-                        blocked_groups.push(gid.clone());
-                        continue;
-                    }
-                    split_targets.push((gid.clone(), content.create_uuids.into_iter().collect()));
+                // The request's own WAL directory owning group is never split (issue #378:
+                // `resolve_group_wal_dir` is a deterministic function of group_id, so no
+                // *other* directory can also be gid_check's own) — always whole-group,
+                // exactly as before this fix (FR-007).
+                if *gid == gid_check {
+                    whole_group_targets.push(gid.clone());
+                    continue;
                 }
 
-                Ok(RebuildClearPlan {
-                    non_empty_groups,
-                    whole_group_targets,
-                    split_targets,
-                    blocked_groups,
-                })
-            },
-        )
+                // Split iff a foreign group_id discovered in this directory's content also
+                // has its own separate, non-empty WAL directory elsewhere (issue #462) — the
+                // independent stream this replay will never touch and therefore can never
+                // recreate (FR-001).
+                let is_split = match wal_group::group_wal_dir(&wal_root_for_scan, gid) {
+                    Ok(own_dir) => {
+                        own_dir != wal_dir_for_scan && own_dir.exists() && has_jsonl_files(&own_dir)
+                    }
+                    Err(_) => false,
+                };
+                if !is_split {
+                    // Not split — the migrated-legacy case ADR-0432 exists for: this
+                    // group's entire footprint lives inside the directory being replayed,
+                    // so a full purge is correct and matches #432's original behavior byte
+                    // for byte (FR-002/SC-002).
+                    whole_group_targets.push(gid.clone());
+                    continue;
+                }
+
+                let content = by_group.get(gid.as_str()).cloned().unwrap_or_default();
+                if content.has_unsafe_mutation {
+                    // A mutating (SET/DELETE/DETACH/REMOVE) line referencing a split group
+                    // means this replay can't tell whether it's safe to clear only the rows
+                    // it will recreate or the whole group — surfaced to the caller rather
+                    // than resolved silently in either direction (FR-004).
+                    blocked_groups.push(gid.clone());
+                    continue;
+                }
+                split_targets.push((gid.clone(), content.create_uuids.into_iter().collect()));
+            }
+
+            Ok(RebuildClearPlan {
+                non_empty_groups,
+                whole_group_targets,
+                split_targets,
+                blocked_groups,
+            })
+        })
         .await??;
 
         if !plan.blocked_groups.is_empty() {
