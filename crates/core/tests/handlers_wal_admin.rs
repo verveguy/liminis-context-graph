@@ -119,6 +119,34 @@ fn entity_wal_line(seq: u64, uuid: &str) -> String {
     )
 }
 
+/// A param-bound `Entity` WAL line — mirrors the real production WAL-content shape (see
+/// `db.rs`'s `insert_entity`, which always binds `group_id` via `$group_id`, never a Cypher
+/// string literal). Unlike `entity_wal_line`'s literal-Cypher/empty-`params` simplification,
+/// this is the shape `wal::scan_wal_content_group_ids` actually needs to discover the embedded
+/// `group_id` (issue #432).
+fn entity_wal_line_with_group(seq: u64, uuid: &str, group_id: &str) -> String {
+    let line = json!({
+        "seq": seq,
+        "ts": "2026-05-22T00:00:00.000000+00:00",
+        "db": "",
+        "cypher": "MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, \
+             n.group_id = $group_id, n.labels = $labels, n.created_at = $created_at, \
+             n.name_embedding = $name_embedding, n.summary = $summary, \
+             n.attributes = $attributes",
+        "params": {
+            "uuid": uuid,
+            "name": uuid,
+            "group_id": group_id,
+            "labels": ["Entity", "t"],
+            "created_at": "2026-05-22T00:00:00.000000+00:00",
+            "name_embedding": [1.0, 0.0, 0.0, 0.0],
+            "summary": "s",
+            "attributes": "{}",
+        },
+    });
+    line.to_string()
+}
+
 /// A standalone `RelatesToNode_` WAL line (param-bound, mirroring the
 /// `timestamps_in_params.jsonl` fixture shape). Search queries these nodes directly by
 /// property (no two-hop `RELATES_TO` connectivity required), so this is sufficient to
