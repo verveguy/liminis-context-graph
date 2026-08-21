@@ -180,9 +180,9 @@ jobs:
       # Stages exactly the six binaries the five e2e jobs need (FR-002/FR-004) under
       # fixed names, so the artifact transferred below is tens/hundreds of MB, not the
       # ~2.7GB full `target/release` tree. Fails loudly (not silently short) if any of
-      # the five expected test targets didn't produce an executable in the json stream —
+      # the six expected test targets didn't produce an executable in the json stream —
       # e.g. because a rename in Cargo.toml or the test file itself broke discovery.
-      - name: Stage e2e artifacts (5 test binaries + service binary)
+      - name: Stage e2e artifacts (6 test binaries + service binary)
         run: |
           set -euo pipefail
           mkdir -p target/release/e2e-artifacts
@@ -193,6 +193,7 @@ jobs:
             mcp_real_corpus_mutation_e2e \
             mcp_real_corpus_admin_data_e2e \
             mcp_real_corpus_admin_lifecycle_e2e \
+            wal_root_migration \
           ; do
             exe=$(jq -r --arg name "$name" \
               'select(.reason=="compiler-artifact" and .executable != null and (.target.kind[]? == "test") and .target.name == $name) | .executable' \
@@ -205,7 +206,7 @@ jobs:
           done
 
           # Left at its original build path (target/release/liminis-context-graph), NOT
-          # copied into e2e-artifacts/: the five test binaries embed
+          # copied into e2e-artifacts/: the six test binaries embed
           # env!("CARGO_BIN_EXE_liminis-context-graph") as a compile-time absolute path
           # constant pointing at that exact location, so the consuming job must restore
           # the service binary there, not to an arbitrary renamed path.
@@ -428,6 +429,51 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
+      # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
+      # by itself stop a future change from invoking `cargo` after the artifact download.
+      - name: Assert no workspace code compiled during this job (FR-006)
+        run: |
+          if grep -q "Compiling " /tmp/e2e-run.log; then
+            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
+            grep "Compiling " /tmp/e2e-run.log
+            exit 1
+          fi
+          echo "OK: no recompilation detected in this job's output"
+
+  # wal_root_migration's SC-001 acceptance test (#431) drives the real 74MB/12,481-seq legacy
+  # fixture through `migrate_wal_root_if_needed` and asserts parity with 0.13.1's rebuild output.
+  # It is #[ignore]d for the same reason as its siblings above — too slow for the default
+  # `cargo test` gate and the local pre-commit budget in CLAUDE.md — but unlike them it was never
+  # wired into a CI job, so until #460 it ran only when someone typed the command by hand. That is
+  # the deepest test of the pre-0.13.0 upgrade path, which accumulated five defects in one week
+  # (#431, #432, #436, #437, #442); leaving its acceptance test ungated is what let them
+  # accumulate. Measured at ~63s locally in release mode — cheaper than three of the five jobs
+  # above.
+  wal-root-migration-e2e:
+    name: wal_root_migration (ubuntu-latest)
+    runs-on: ubuntu-latest
+    needs: [changes, build-release]
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Download e2e artifacts (test binary + service binary)
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-artifacts
+          path: target/release
+
+      - name: Mark binaries executable
+        run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
+
+      - name: wal_root_migration -- --ignored
+        env:
+          RUST_TEST_THREADS: "4"
+        run: ./target/release/e2e-artifacts/wal_root_migration --ignored 2>&1 | tee /tmp/e2e-run.log
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
