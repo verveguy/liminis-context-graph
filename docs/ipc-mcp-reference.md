@@ -40,6 +40,11 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
+`knowledge_status`'s WAL fields — including `wal.hydration_status` (issue #456), which
+distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
+field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
+rather than here.
+
 Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
