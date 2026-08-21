@@ -44,6 +44,28 @@ Every long-running method above (the five WAL/recovery/reclassification operatio
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
 
+### Readiness
+
+A successful connection to `.lcg/service.sock` is **not** evidence the service is ready. The
+socket is bound before the database opens — deliberately, so `health_check` and recovery IPC stay
+reachable during degraded-mode recovery ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md))
+— and issue #378's WAL-root migration also runs in that same pre-open window, after the bind.
+(Legacy `.graphiti/`→`.lcg/` workspace migration runs earlier still, before the socket is even
+bound.) The process's own accept loop only starts once startup work has fully resolved, so a
+request sent immediately after `connect()` queues in the kernel rather than racing the migration
+with stale state — the real risk is a client that treats `connect()` succeeding as readiness by
+itself and acts on that assumption (e.g. inspecting on-disk state) without waiting for a
+`health_check` round-trip.
+
+The correct readiness signal is a `health_check` round-trip reporting `"healthy"`:
+`handle_health_check` only returns `healthy` once `Db::open()` has succeeded, which is after
+migration has completed. Poll `health_check` until it reports `healthy` (or `knowledge_status`
+until `connected` and `queryable` are both `true` and `initializing` is `false` —
+`knowledge_status` has no `healthy` field of its own) before sending real work; see
+[Operations: Self-healing and degraded mode](operations.md#self-healing-and-degraded-mode)
+for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
+outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
