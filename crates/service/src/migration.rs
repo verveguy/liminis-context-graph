@@ -458,8 +458,13 @@ fn merge_wal_dir_into_root(
             // after the copy and before the source removal, leaving identical content at both
             // paths. That is a completed move, not a collision, so finish it here instead of
             // leaving a `.graphiti/wal` entry that blocks Step 9 on every subsequent restart.
-            if same_file_contents(&entry.path(), &dest)? {
-                std::fs::remove_file(entry.path()).map_err(read_err)?;
+            if same_tree_contents(&entry.path(), &dest)? {
+                let remove_result = if entry.path().is_dir() {
+                    std::fs::remove_dir_all(entry.path())
+                } else {
+                    std::fs::remove_file(entry.path())
+                };
+                remove_result.map_err(read_err)?;
                 continue;
             }
             // A genuine name collision: leave in place; see doc comment above on why it isn't
@@ -518,6 +523,52 @@ fn same_file_contents(a: &Path, b: &Path) -> Result<bool, MigrationError> {
             return Ok(true);
         }
     }
+}
+
+/// True when `a` and `b` are byte-for-byte identical — either both regular files with matching
+/// contents ([`same_file_contents`]), or both directories containing the exact same set of entry
+/// names, each pair itself identical (recursively). `merge_wal_dir_into_root` uses this instead
+/// of `same_file_contents` directly because `copy_and_remove_cross_device`'s directory branch
+/// (`copy_dir_recursive` + `remove_dir_all`) can be interrupted after the copy but before the
+/// source removal, leaving a whole directory — not just a file — duplicated at both
+/// `legacy_wal_dir` and `wal_root` (a CodeRabbit finding on PR #453: `same_file_contents` alone
+/// always returns `false` for a directory, so that scenario would be permanently misreported as
+/// a genuine collision instead of a completed move, wedging Step 9's `remove_dir` forever).
+/// `.graphiti/wal` is flat in practice — no subdirectories — so this only matters as
+/// defense-in-depth, not for routine operation.
+fn same_tree_contents(a: &Path, b: &Path) -> Result<bool, MigrationError> {
+    let err = |path: &Path, source: io::Error| MigrationError::MoveFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    let (ma, mb) = (
+        std::fs::symlink_metadata(a).map_err(|e| err(a, e))?,
+        std::fs::symlink_metadata(b).map_err(|e| err(b, e))?,
+    );
+    if !ma.is_dir() || !mb.is_dir() {
+        return same_file_contents(a, b);
+    }
+    let entry_names = |dir: &Path| -> Result<Vec<std::ffi::OsString>, MigrationError> {
+        let mut names = std::fs::read_dir(dir)
+            .map_err(|e| err(dir, e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| err(dir, e))?
+            .into_iter()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        Ok(names)
+    };
+    let (names_a, names_b) = (entry_names(a)?, entry_names(b)?);
+    if names_a != names_b {
+        return Ok(false);
+    }
+    for name in names_a {
+        if !same_tree_contents(&a.join(&name), &b.join(&name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Fix `.lcg/` that has the old layout left by the simple-rename migration (#64).
@@ -1294,6 +1345,79 @@ mod tests {
         assert!(
             phases(&sink).iter().any(|p| p == "wal_merge_collision"),
             "a genuine collision must be reported via telemetry: {:?}",
+            phases(&sink)
+        );
+    }
+
+    #[test]
+    fn merge_wal_dir_into_root_self_heals_interrupted_cross_device_directory_copy() {
+        // Simulates `copy_and_remove_cross_device`'s directory branch (`copy_dir_recursive` +
+        // `remove_dir_all`) crashing after the copy but before the source removal — an entire
+        // nested subdirectory, not just a file, duplicated identically at both paths. Must be
+        // recognized as a completed move, not a permanent collision (CodeRabbit finding on PR
+        // #453: `same_file_contents` alone always returns `false` for a directory).
+        let tmp = TempDir::new().unwrap();
+        let legacy_wal_dir = tmp.path().join("legacy-wal");
+        let legacy_subdir = legacy_wal_dir.join("liminis");
+        std::fs::create_dir_all(&legacy_subdir).unwrap();
+        std::fs::write(legacy_subdir.join("001.jsonl"), b"a").unwrap();
+        std::fs::write(legacy_subdir.join("002.jsonl"), b"b").unwrap();
+
+        let wal_root = tmp.path().join("wal-root");
+        let dest_subdir = wal_root.join("liminis");
+        std::fs::create_dir_all(&dest_subdir).unwrap();
+        std::fs::write(dest_subdir.join("001.jsonl"), b"a").unwrap();
+        std::fs::write(dest_subdir.join("002.jsonl"), b"b").unwrap();
+
+        let sink = noop();
+        merge_wal_dir_into_root(&legacy_wal_dir, &wal_root, &sink).expect("merge failed");
+
+        assert!(
+            !legacy_wal_dir.exists(),
+            "legacy_wal_dir must be fully drained and removed once the interrupted directory \
+             copy is recognized as already-completed"
+        );
+        assert_eq!(std::fs::read(dest_subdir.join("001.jsonl")).unwrap(), b"a");
+        assert_eq!(std::fs::read(dest_subdir.join("002.jsonl")).unwrap(), b"b");
+        assert!(
+            phases(&sink).iter().all(|p| p != "wal_merge_collision"),
+            "a self-healed interrupted directory copy must not be reported as a collision: {:?}",
+            phases(&sink)
+        );
+    }
+
+    #[test]
+    fn merge_wal_dir_into_root_leaves_genuine_directory_collision_in_place() {
+        // A directory sharing a name but with genuinely different contents at the two paths
+        // must be left in place, not merged or deleted — mirrors the file-level collision test
+        // above, but for `same_tree_contents`'s directory branch.
+        let tmp = TempDir::new().unwrap();
+        let legacy_wal_dir = tmp.path().join("legacy-wal");
+        let legacy_subdir = legacy_wal_dir.join("liminis");
+        std::fs::create_dir_all(&legacy_subdir).unwrap();
+        std::fs::write(legacy_subdir.join("001.jsonl"), b"legacy").unwrap();
+
+        let wal_root = tmp.path().join("wal-root");
+        let dest_subdir = wal_root.join("liminis");
+        std::fs::create_dir_all(&dest_subdir).unwrap();
+        std::fs::write(dest_subdir.join("001.jsonl"), b"different").unwrap();
+
+        let sink = noop();
+        merge_wal_dir_into_root(&legacy_wal_dir, &wal_root, &sink).expect("merge failed");
+
+        assert_eq!(
+            std::fs::read(legacy_subdir.join("001.jsonl")).unwrap(),
+            b"legacy",
+            "colliding source directory must be left in place, not dropped"
+        );
+        assert_eq!(
+            std::fs::read(dest_subdir.join("001.jsonl")).unwrap(),
+            b"different",
+            "colliding destination directory must not be overwritten"
+        );
+        assert!(
+            phases(&sink).iter().any(|p| p == "wal_merge_collision"),
+            "a genuine directory collision must be reported via telemetry: {:?}",
             phases(&sink)
         );
     }
