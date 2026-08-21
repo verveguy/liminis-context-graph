@@ -185,7 +185,13 @@ impl Db {
                 // (issue #387) — `None` for a pre-#387 stream, matching FR-009's adopt-on-first-
                 // encounter semantics.
                 let generation = crate::wal_generation::read_generation(wal_dir_path);
-                let embedding_identity = embedder.as_ref().map(|ctx| ctx.identity());
+                // issue #440 FR-006/FR-008: only claim the running embedder's identity if
+                // no recompute attempt actually failed during this replay — see
+                // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
+                let embedding_identity = embedder
+                    .as_ref()
+                    .filter(|_| stats.embeddings_recompute_had_no_failures())
+                    .map(|ctx| ctx.identity());
                 if let Err(e) = conn.set_wal_position(
                     crate::wal_group::DEFAULT_GROUP_ID,
                     seq,

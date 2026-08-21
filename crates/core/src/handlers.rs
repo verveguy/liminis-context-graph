@@ -2517,6 +2517,13 @@ async fn handle_rebuild_from_wal(
                     // rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
                         warn_on_rebuild_seq_gap(&conn, &gid_c, from_seq, "reload");
+                        // issue #440 FR-006/FR-008: only claim the running embedder's identity
+                        // for this group's vectors if no recompute attempt actually failed — a
+                        // failed embed call left at least one stale, un-recomputed vector in
+                        // place, so persisting `Some(identity)` here would make
+                        // embedding_model_status silently over-claim "match".
+                        let embedding_identity = embedding_identity
+                            .filter(|_| stats.embeddings_recompute_had_no_failures());
                         match conn.set_wal_position(
                             &gid_c,
                             seq,
@@ -2951,6 +2958,10 @@ async fn handle_rebuild_from_wal(
                     // write doesn't undo the rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
                         warn_on_rebuild_seq_gap(&conn, &bg_gid, from_seq, "reload(bg)");
+                        // issue #440 FR-006/FR-008: same "only claim match if no recompute
+                        // attempt failed" gate as the streaming path above.
+                        let embedding_identity = embedding_identity
+                            .filter(|_| stats.embeddings_recompute_had_no_failures());
                         match conn.set_wal_position(
                             &bg_gid,
                             seq,
@@ -4588,11 +4599,17 @@ async fn recover_rebuild_from_workspace_wal(
                 )?;
                 if let Some(seq) = stats.last_committed_seq {
                     let generation = crate::wal_generation::read_generation(&dir);
+                    // issue #440 FR-006/FR-008: only claim the running embedder's identity for
+                    // this group if no recompute attempt actually failed — see
+                    // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
+                    let group_embedding_identity = stats
+                        .embeddings_recompute_had_no_failures()
+                        .then_some((embedding_identity.0.as_str(), embedding_identity.1));
                     if let Err(e) = conn.set_wal_position(
                         &gid,
                         seq,
                         generation.as_deref(),
-                        Some((embedding_identity.0.as_str(), embedding_identity.1)),
+                        group_embedding_identity,
                     ) {
                         eprintln!(
                             "liminis-context-graph: rebuild_from_workspace_wal: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
