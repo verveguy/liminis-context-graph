@@ -2174,7 +2174,7 @@ async fn handle_rebuild_from_wal(
                 // preview a rebuild before committing to one, so it must surface this problem
                 // rather than silently preview a "clean" run that would fail for real.
                 return Err(Error::Ipc(format!(
-                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contain \
+                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contains \
                      data and from_seq: 0 is a full rebuild. A dry run cannot preview this \
                      cleanly — replaying against a populated group would fail with a \
                      duplicate-primary-key error for every existing node. Clear the group(s) \
@@ -2184,7 +2184,7 @@ async fn handle_rebuild_from_wal(
             }
             if !force_clear {
                 return Err(Error::Ipc(format!(
-                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contain \
+                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contains \
                      data and from_seq: 0 is a full rebuild. Replaying now would fail with a \
                      duplicate-primary-key error for every existing node. Pass force_clear: true \
                      to clear the group(s) before replaying, or clear them first with \

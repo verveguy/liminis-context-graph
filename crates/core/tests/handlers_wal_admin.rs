@@ -1622,6 +1622,265 @@ async fn test_rebuild_from_wal_non_empty_db_from_seq_gt_zero_unaffected() {
     );
 }
 
+// ── Issue #432: force_clear guard must check the WAL content's embedded group_id(s), not
+// only the request's own group_id (the WAL directory's owning group) ──────────────────────
+
+/// Reproduces the issue: a WAL directory owned by `liminis` (the request's default group_id)
+/// whose content is a migrated legacy stream carrying rows for a *different* embedded
+/// `group_id` (`apollo_program`) that already has pre-existing data sharing the same uuid the
+/// WAL line recreates. Before the fix, the guard only checked `liminis` (empty), so
+/// `force_clear: true` cleared nothing and replay collided with the pre-existing
+/// `apollo_program` entity, producing a duplicate-primary-key failure. After the fix, the guard
+/// discovers `apollo_program` by scanning the WAL content, finds it non-empty, and clears it
+/// before replay — so the rebuild completes with zero failures (SC-001).
+#[tokio::test]
+async fn test_rebuild_from_wal_migrated_legacy_stream_force_clear_clears_embedded_group() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        // Pre-existing data lives under the *embedded* group_id, not the WAL directory's own
+        // owning group_id ("liminis") — simulating a prior full rebuild of this same migrated
+        // legacy content.
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'shared-uuid', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+
+    // The WAL directory is owned by "liminis" (the request's default group_id — this is where
+    // migrate_wal_root_if_needed would have relocated a pre-#378 flat stream), but its content's
+    // params.group_id is "apollo_program", the same uuid as the pre-existing entity above.
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_jjj432_0000.jsonl"),
+        entity_wal_line_with_group(0, "shared-uuid", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        35,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(
+        v["result"]["success"], true,
+        "force_clear:true must allow the rebuild to proceed: {v}"
+    );
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            36,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => {
+                assert_eq!(
+                    status_v["result"]["result"]["failed_lines"], 0,
+                    "the guard must have cleared the embedded apollo_program group before \
+                     replay, so there must be zero duplicate-key failures: {status_v}"
+                );
+                break;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    let entity = conn
+        .get_entity_by_uuid("shared-uuid")
+        .unwrap()
+        .expect("the WAL-replayed entity must exist after the clean rebuild");
+    assert_eq!(
+        entity.summary, "s",
+        "the entity's fields must come from the WAL replay, not the stale pre-existing row \
+         (the stale row's summary was 'stale', the WAL line's is 's')"
+    );
+}
+
+/// FR-004 companion: same setup as the force_clear test above, but `force_clear` is omitted.
+/// The refusal error must name the *embedded* colliding group (`apollo_program`), not only the
+/// request's own group_id (`liminis`, which is actually empty) — otherwise an operator reading
+/// the error would look at entirely the wrong group.
+#[tokio::test]
+async fn test_rebuild_from_wal_migrated_legacy_stream_no_force_clear_names_embedded_group() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'shared-uuid-2', group_id: 'apollo_program', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_kkk432_0000.jsonl"),
+        entity_wal_line_with_group(0, "shared-uuid-2", "apollo_program") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        37,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert!(
+        v.get("error").is_some(),
+        "expected an explicit error: the embedded group_id already contains data: {v}"
+    );
+    let msg = v["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("apollo_program"),
+        "error must name the embedded colliding group_id, not only the request's own \
+         (empty) group_id: {v}"
+    );
+    assert!(
+        msg.contains("force_clear") || msg.contains("knowledge_delete_by_group"),
+        "error must state the corrective action: {v}"
+    );
+
+    // Fail-fast must occur before any write.
+    let conn = db.connect().unwrap();
+    assert_eq!(
+        conn.count_nodes("Entity").unwrap(),
+        1,
+        "no replay must have happened — entity count must be untouched"
+    );
+}
+
+/// FR-007/SC-003 regression guard: when the WAL content's embedded `group_id` already equals
+/// the request's own group_id (the common, non-legacy case), behavior must be unchanged from
+/// today — a single group is checked and cleared, exactly as before this fix.
+#[tokio::test]
+async fn test_rebuild_from_wal_common_case_embedded_group_matches_request_unaffected() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(
+            "CREATE (:Entity {uuid: 'stale-common-case', group_id: 'liminis', \
+             name: 'stale', labels: ['Entity'], created_at: timestamp('2026-05-22 00:00:00'), \
+             name_embedding: [0.0, 0.0, 0.0, 0.0], summary: 'stale', attributes: '{}'})",
+        )
+        .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_lll432_0000.jsonl"),
+        entity_wal_line_with_group(0, "common-case-entity", "liminis") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db.clone(), wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        38,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            39,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => {
+                assert_eq!(
+                    status_v["result"]["result"]["failed_lines"], 0,
+                    "{status_v}"
+                );
+                break;
+            }
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    assert!(
+        conn.get_entity_by_uuid("stale-common-case")
+            .unwrap()
+            .is_none(),
+        "the stale pre-existing entity in the request's own group must have been cleared"
+    );
+    assert!(
+        conn.get_entity_by_uuid("common-case-entity")
+            .unwrap()
+            .is_some(),
+        "the WAL-replayed entity must exist after the clean rebuild"
+    );
+}
+
 // ── Issue #283 / FR-004: knowledge_query_cypher proactively rebuilds the NameIndex ─────
 
 /// A raw-Cypher `CREATE` issued through `knowledge_query_cypher` bypasses every
