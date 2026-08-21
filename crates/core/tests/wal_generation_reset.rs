@@ -65,6 +65,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppStat
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -895,7 +896,7 @@ async fn story3_cross_group_pointer_rebinds_to_new_generation_after_reset() {
             ..Default::default()
         })
         .unwrap();
-        conn.set_wal_position(LAYER, 999, None).unwrap();
+        conn.set_wal_position(LAYER, 999, None, None).unwrap();
     }
 
     let wal_dir = TempDir::new().unwrap();
@@ -1071,6 +1072,7 @@ async fn story6_dump_wal_always_mints_a_new_generation() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     let target_dir = dir.path().join("dump-out");

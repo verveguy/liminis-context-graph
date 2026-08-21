@@ -308,6 +308,12 @@ async fn bootstrap_app_state(
         )),
     };
 
+    // Content-addressed embedding cache (issue #440, FR-003) — constructed once, right after the
+    // embedder is resolved/probed, and threaded into both the startup recovery call below and
+    // AppState::from_env, so cache warmth survives the recovery → serving transition rather than
+    // starting cold on the first post-recovery rebuild.
+    let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
+
     // ── Record/replay cassette resolution (#232, FR-002/FR-007) ────────────────────
     // Read before any provider resolution below: replay mode bypasses provider resolution
     // entirely (FR-002 — zero network access, no credentials needed, by construction — see
@@ -628,6 +634,11 @@ async fn bootstrap_app_state(
                     let recovery_db_path = db_path.clone();
                     let recovery_wal_root = startup_wal_root.clone();
                     let recovery_sink = Arc::clone(&telemetry_sink);
+                    let recovery_embedder_ctx = lcg_core::EmbedderContext {
+                        embedder: Arc::clone(&embedder),
+                        model: embedding_model_probed.clone(),
+                        cache: Arc::clone(&embedding_cache),
+                    };
                     let recovery_result = tokio::task::spawn_blocking(move || {
                         lcg_core::recovery::run_full_recovery_sequence(
                             &recovery_db_path,
@@ -635,6 +646,7 @@ async fn bootstrap_app_state(
                             &recovery_wal_root,
                             embedding_dim,
                             recovery_sink,
+                            Some(recovery_embedder_ctx),
                         )
                     })
                     .await;
@@ -712,6 +724,7 @@ async fn bootstrap_app_state(
         embedder,
         embedding_model_probed,
         extractor,
+        embedding_cache,
     ));
     // FR-008: reflect the eager build performed above (direct-open or post-recovery) so
     // knowledge_status reports indices_built: true before the socket accepts any request,

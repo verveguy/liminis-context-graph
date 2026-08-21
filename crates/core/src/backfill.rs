@@ -220,7 +220,7 @@ pub async fn backfill_relation_types(
             // Candidate selection and mutation are both scoped to group_id (#447): a single call
             // touches exactly one group's data and routes to that group's own WAL stream.
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
             Ok(())
         })
         .await??;

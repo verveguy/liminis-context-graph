@@ -92,11 +92,19 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // stream reset can be detected as "different generation" rather than misread as forward
     // progress. See ADR-0387 for why this lives on the same row instead of a separate table or
     // sidecar file.
+    // `embedding_model`/`embedding_dim` (issue #440, FR-007) record the embedder identity under
+    // which this group's currently-applied vectors were computed — compared at query/startup
+    // time against the running embedder's identity to surface a mismatch (FR-008), independent
+    // of the write-time `.wal-embedding-model.json` sidecar (`wal_embedding_identity`), which
+    // answers a different question ("what did this WAL claim") from this one ("what does the
+    // graph actually contain now").
     conn.raw_query(
         "CREATE NODE TABLE IF NOT EXISTS WalPosition (\
          id STRING PRIMARY KEY, \
          applied_seq INT64, \
-         generation STRING\
+         generation STRING, \
+         embedding_model STRING, \
+         embedding_dim INT64\
          )",
     )?;
     Ok(())
@@ -241,6 +249,24 @@ pub fn migrate(conn: &Conn<'_>) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD generation STRING") {
             eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD generation STRING: {e} (non-fatal)");
+        }
+    }
+    // WalPosition gained `embedding_model`/`embedding_dim` (issue #440, FR-007) to record the
+    // embedder identity under which this group's currently-applied vectors were computed.
+    if conn
+        .raw_query("MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.embedding_model LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD embedding_model STRING") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD embedding_model STRING: {e} (non-fatal)");
+        }
+    }
+    if conn
+        .raw_query("MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.embedding_dim LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD embedding_dim INT64") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD embedding_dim INT64: {e} (non-fatal)");
         }
     }
 }

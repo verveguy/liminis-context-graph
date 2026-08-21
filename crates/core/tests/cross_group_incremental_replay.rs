@@ -72,6 +72,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppStat
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -207,7 +208,7 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
         // anything group B will reach — proves the rebind below keys off B's position, not L's
         // (a bug that compared against the wrong group's position would still "work" here only
         // by accident if it happened to use a smaller number).
-        conn.set_wal_position(GROUP_LAYER, 999, None).unwrap();
+        conn.set_wal_position(GROUP_LAYER, 999, None, None).unwrap();
     }
 
     let wal_dir = TempDir::new().unwrap();
@@ -248,7 +249,7 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
     {
         let db1 = state.db.load_full().unwrap();
         let conn = db1.connect().unwrap();
-        conn.set_wal_position(GROUP_LAYER, 999, None).unwrap();
+        conn.set_wal_position(GROUP_LAYER, 999, None, None).unwrap();
     }
 
     // Group B now receives its first WAL content — a genuinely incremental replay (from_seq: 0

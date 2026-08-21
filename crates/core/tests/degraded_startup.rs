@@ -2,6 +2,7 @@
 // FR-010: recovery from degraded mode via drop_lbug_wal strategy
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +13,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::MockEmbedder,
+    embedder::{MockEmbedder, NameMapEmbedder},
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
@@ -61,6 +62,7 @@ fn make_degraded_state_with_capture(
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -321,6 +323,7 @@ async fn test_recovery_rebuild_from_workspace_wal() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     let recover_resp = dispatch_val(
@@ -342,6 +345,92 @@ async fn test_recovery_rebuild_from_workspace_wal() {
             .load(std::sync::atomic::Ordering::Acquire),
         "indices_built should be true after successful rebuild_from_workspace_wal recovery"
     );
+}
+
+/// issue #440 FR-001/FR-006/FR-007: `knowledge_recover {strategy: "rebuild_from_workspace_wal"}`
+/// wipes and replays the *entire* embedded DB from WAL — this is a review-comment fix for a
+/// fourth replay-into-fresh-DB call site (`recover_rebuild_from_workspace_wal`) that was missed
+/// by the original PR and still bound the WAL's stored vectors verbatim. Recompute must apply
+/// here exactly as it does for `Db::open_or_rebuild`/`knowledge_rebuild_from_wal`, and the
+/// recomputing embedder's identity must be persisted alongside `applied_seq`.
+#[tokio::test]
+async fn test_recovery_rebuild_from_workspace_wal_recomputes_embeddings() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("recovery.db").to_str().unwrap().to_string();
+    let wal_root = dir.path().join("wal");
+    // recover_rebuild_from_workspace_wal discovers groups by directory name under wal_root
+    // (wal_group::list_group_wal_dirs), not by the WAL records' own "group_id" param — place the
+    // fixture under the default group's directory name directly.
+    let group_dir = wal_root.join(lcg_core::DEFAULT_GROUP_ID);
+    std::fs::create_dir_all(&group_dir).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wal/python_produced.jsonl"),
+        group_dir.join("20260519_000000_aaa111_0000.jsonl"),
+    )
+    .unwrap();
+
+    // entity-0's stored name_embedding is [1.0, 0.0, 0.0, 0.0] (see the fixture); map its name to
+    // a clearly distinct vector so a recomputed value is unmistakable in the result.
+    let mut map = HashMap::new();
+    map.insert("Entity Zero".to_string(), vec![9.0, 8.0, 7.0, 6.0]);
+
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(None),
+        degraded_reason: Arc::new(Mutex::new(Some("lbug_wal_corrupt".to_string()))),
+        embedder: Arc::new(NameMapEmbedder::new(4, map)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink: sink as Arc<dyn TelemetrySink>,
+        db_path,
+        wal_root: Some(wal_root),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "test-model".to_string(),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
+    });
+
+    let recover_resp = dispatch_val(
+        21,
+        "knowledge_recover",
+        json!({"strategy": "rebuild_from_workspace_wal"}),
+        Arc::clone(&state),
+    )
+    .await;
+    let result = &recover_resp["result"];
+    assert_eq!(
+        result["success"], true,
+        "rebuild_from_workspace_wal recovery should succeed: {result}"
+    );
+
+    let db = state.db.load_full().expect("db must be reopened");
+    let conn = db.connect().unwrap();
+    let entity = conn
+        .get_entity_by_uuid("entity-0")
+        .expect("cypher ok")
+        .expect("entity-0 must exist");
+    assert_eq!(
+        entity.name_embedding,
+        vec![9.0f32, 8.0, 7.0, 6.0],
+        "name_embedding should reflect the recomputed vector [9,8,7,6], not the WAL's stored \
+         [1,0,0,0]"
+    );
+
+    // FR-007: the recomputing embedder's identity is persisted alongside applied_seq.
+    let pos = conn.get_wal_position(lcg_core::DEFAULT_GROUP_ID).unwrap();
+    assert_eq!(pos.embedding_model.as_deref(), Some("test-model"));
+    assert_eq!(pos.embedding_dim, Some(4));
 }
 
 /// issue #297: knowledge_recover with restore_from_backup reopens an existing, already-indexed
@@ -557,6 +646,7 @@ async fn test_recovery_unknown_strategy() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     let resp = dispatch_val(
@@ -604,6 +694,7 @@ async fn test_recovery_missing_strategy() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     let resp = dispatch_val(1, "knowledge_recover", json!({}), Arc::clone(&state)).await;
