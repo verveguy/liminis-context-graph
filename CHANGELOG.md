@@ -31,6 +31,14 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   applied to the consumer's own extraction, validation, canonicalization, or reprocessing, and its
   absence never affects replay or correctness. See [Ontology](docs/ontology.md#per-group-ontologies)
   for the full resolution/fallback contract. (#446)
+- **`knowledge_status` reports a new `hydration_status` field**, alongside the existing
+  `applied_seq`/`max_seq` values, in both the flat `wal` object and every `wal_groups[*]` entry:
+  `"hydrated"` (the database is caught up with its WAL), `"wal_ahead"` (the WAL holds content the
+  database has not applied — e.g. a wiped or fresh database beside a populated WAL directory), or
+  `"not_applicable"` (the group has no WAL content at all). Previously, a genuinely empty group and
+  a group whose WAL was simply ahead of the DB were indistinguishable unless a caller manually
+  compared `applied_seq` against `max_seq` itself. Purely additive — `applied_seq`/`max_seq` are
+  unchanged, and `handle_health`'s `healthy`/`degraded` determination is unaffected. (#456)
 
 ## [0.13.3] - Unreleased
 

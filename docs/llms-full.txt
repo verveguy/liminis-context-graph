@@ -385,6 +385,11 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
+`knowledge_status`'s WAL fields — including `wal.hydration_status` (issue #456), which
+distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
+field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
+rather than here.
+
 Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
@@ -1548,8 +1553,8 @@ mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
-(`{applied_seq, max_seq, generation, generation_status}`). This is the multi-group view; the flat
-`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status` fields described next remain present and
+(`{applied_seq, max_seq, generation, generation_status, hydration_status}`). This is the multi-group view; the flat
+`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status` fields described next remain present and
 **pinned specifically to the default `"liminis"` group**, unchanged in meaning from a pre-378
 single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
 written before this issue) needs no change. If the default group has no WAL directory at all
@@ -1605,8 +1610,26 @@ refuse once a position has been recorded for that group (see Unknown-generation 
 checking this field before calling rebuild lets an operator see the condition coming rather than
 discovering it as an abrupt failure.
 
+**`wal.hydration_status`** (issue #456; also scoped to the default group, and mirrored per-group
+inside `wal_groups`) — a sibling string field alongside `applied_seq`/`max_seq`, classifying
+whether the group's database contents are caught up with its WAL, so a caller no longer needs to
+compare the two fields itself to tell "genuinely empty" apart from "not yet hydrated." Pure
+comparison of `applied_seq`/`max_seq`, no new I/O — an absent or never-backfilled `applied_seq` is
+treated as `0` for the comparison:
+
+| `hydration_status` | meaning |
+|---|---|
+| `"not_applicable"` | the group has no WAL content at all (`max_seq` is zero or absent) — there is nothing to be behind on, regardless of `applied_seq` |
+| `"wal_ahead"` | the WAL holds content the database has not applied (`max_seq` is nonzero and exceeds the effective `applied_seq`) — this is the state that motivated the issue: a wiped or fresh database beside a populated WAL directory must not be mistaken for an authoritative empty corpus |
+| `"hydrated"` | the database is caught up with its WAL (`applied_seq >= max_seq`, and `max_seq` is nonzero) — this includes `applied_seq > max_seq` (e.g. following a generation reset elsewhere), which is deliberately classified as caught-up rather than as a distinct anomaly state |
+
+`hydration_status` does not change `handle_health`'s `healthy`/`degraded` determination in any
+way: a `wal_ahead` group is a normal, fully-queryable state from the process's own point of view
+(it can still serve reads over whatever content it does hold) — the hydration question is per-group
+data state, not process health, and is answered here rather than by `health_check`.
+
 The consumer decision, comparing the two fields — check both for `null` before any numeric
-comparison:
+comparison (`hydration_status` above is the documented shortcut for this same comparison):
 
 | `applied_seq` | `max_seq` | Meaning | Action |
 |---|---|---|---|
