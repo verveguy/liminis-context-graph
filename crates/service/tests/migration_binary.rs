@@ -466,6 +466,10 @@ mod migration_binary_tests {
             "no *.jsonl file may remain loose directly under the configured LCG_WAL_DIR, found: \
              {loose_at_custom_root:?}"
         );
+        assert!(
+            !custom_wal_root.join(".wal-generation.json").exists(),
+            ".wal-generation.json must not remain loose at the configured LCG_WAL_DIR"
+        );
 
         // ── Clean shutdown ────────────────────────────────────────────────────
         send_sigterm(child.id());

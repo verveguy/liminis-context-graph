@@ -453,7 +453,24 @@ fn merge_wal_dir_into_root(
     for entry in entries {
         let dest = wal_root.join(entry.file_name());
         if dest.exists() {
-            // Leave in place; see doc comment above on why a collision isn't auto-resolved.
+            // A prior cross-device copy (`copy_and_remove_cross_device`) can be interrupted
+            // after the copy and before the source removal, leaving identical content at both
+            // paths. That is a completed move, not a collision, so finish it here instead of
+            // leaving a `.graphiti/wal` entry that blocks Step 9 on every subsequent restart.
+            if same_file_contents(&entry.path(), &dest)? {
+                std::fs::remove_file(entry.path()).map_err(read_err)?;
+                continue;
+            }
+            // A genuine name collision: leave in place; see doc comment above on why it isn't
+            // auto-resolved.
+            sink.emit(TelemetryEvent::WorkspaceMigration {
+                ts_ms: now_ms(),
+                phase: "wal_merge_collision".to_string(),
+                detail: Some(json!({
+                    "source": entry.path().display().to_string(),
+                    "dest": dest.display().to_string(),
+                })),
+            });
             continue;
         }
         move_path(&entry.path(), &dest, sink)?;
@@ -468,6 +485,24 @@ fn merge_wal_dir_into_root(
         Err(e) => return Err(read_err(e)),
     }
     Ok(())
+}
+
+/// True when both paths are regular files with identical length and bytes. Used to recognize a
+/// cross-device copy that was interrupted before its source removal (see
+/// `copy_and_remove_cross_device`), which is a completed move rather than a name collision.
+fn same_file_contents(a: &Path, b: &Path) -> Result<bool, MigrationError> {
+    let err = |path: &Path, source: io::Error| MigrationError::MoveFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    let (ma, mb) = (
+        std::fs::symlink_metadata(a).map_err(|e| err(a, e))?,
+        std::fs::symlink_metadata(b).map_err(|e| err(b, e))?,
+    );
+    if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
+        return Ok(false);
+    }
+    Ok(std::fs::read(a).map_err(|e| err(a, e))? == std::fs::read(b).map_err(|e| err(b, e))?)
 }
 
 /// Fix `.lcg/` that has the old layout left by the simple-rename migration (#64).
