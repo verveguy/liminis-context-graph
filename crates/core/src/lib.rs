@@ -11,6 +11,7 @@ pub mod db;
 pub mod dedup_adapter;
 pub(crate) mod dump;
 pub mod embedder;
+pub mod embedding_cache;
 pub mod env;
 pub mod episode;
 pub mod error;
@@ -36,6 +37,7 @@ pub mod telemetry;
 pub mod token_budget;
 pub mod types;
 pub mod wal;
+pub mod wal_embedding_identity;
 pub(crate) mod wal_exec;
 pub mod wal_generation;
 pub mod wal_group;
@@ -45,6 +47,7 @@ pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, Replaying
 pub use db::{Conn, Db, WalPositionRecord};
 pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
+pub use embedding_cache::{EmbedderContext, EmbeddingCache};
 pub use error::Error;
 pub use extraction_failures::{
     ExtractionFailureRecord, ExtractionFailureSink, ExtractionFailureWriter,

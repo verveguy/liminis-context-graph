@@ -117,6 +117,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -153,6 +154,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -197,6 +199,7 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -234,6 +237,7 @@ fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppStat
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -263,6 +267,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -494,6 +499,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -525,6 +531,7 @@ fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
     (state, capture)
 }
@@ -554,6 +561,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -629,6 +637,7 @@ fn make_state_with_ontology_and_extractor(
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -1382,6 +1391,7 @@ fn make_state_with_extractor(db: Arc<Db>, extractor: Arc<dyn Extractor>) -> Arc<
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -3020,7 +3030,7 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
         // an absent position: every pointer is re-resolved on every pass rather than gated,
         // since there is no position to compare a cached bound_at_seq against). Without this,
         // the second dispatch below could never observe a gated no-op.
-        conn.set_wal_position("source-a", 1, None).unwrap();
+        conn.set_wal_position("source-a", 1, None, None).unwrap();
     }
 
     let rebind = dispatch_val(
@@ -5206,7 +5216,7 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 42, None).unwrap();
+        conn.set_wal_position("liminis", 42, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let group_dir = wal_dir.path().join("liminis");
@@ -5271,7 +5281,7 @@ async fn wal_mark_create_rejects_case_insensitive_collision_with_existing_group_
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("acme", 0, None).unwrap();
+        conn.set_wal_position("acme", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     // "Acme" already has a directory on disk (e.g. from an earlier write to that group), but no
@@ -5419,7 +5429,7 @@ async fn wal_mark_create_rejects_duplicate_active_name() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5456,7 +5466,7 @@ async fn wal_mark_create_applied_seq_zero_empty_graph_records_seq_none() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5489,7 +5499,7 @@ async fn wal_mark_create_applied_seq_zero_nonempty_graph_records_seq_some_zero()
     {
         let conn = db.connect().unwrap();
         seed_entity(&conn, "first-chunk-entity");
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5542,7 +5552,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
         seed_entity(&conn, "low-marker");
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let v_low = dispatch_val(
         1,
@@ -5556,7 +5566,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 10, None).unwrap();
+        conn.set_wal_position("liminis", 10, None, None).unwrap();
     }
     let v_high = dispatch_val(
         2,
@@ -5603,7 +5613,7 @@ async fn wal_mark_list_excludes_deleted_checkpoints() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 3, None).unwrap();
+        conn.set_wal_position("liminis", 3, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5650,7 +5660,7 @@ async fn wal_mark_delete_of_already_deleted_name_fails() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5679,7 +5689,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5723,7 +5733,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 77, None).unwrap();
+        conn.set_wal_position("liminis", 77, None, None).unwrap();
     }
     let recreated = dispatch_val(
         3,
@@ -5754,7 +5764,7 @@ async fn wal_mark_list_and_delete_work_when_db_degraded_but_create_does_not() {
     let (db, _dbdir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let healthy_state =
         make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5806,7 +5816,7 @@ async fn wal_mark_create_concurrent_same_name_exactly_one_wins() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());

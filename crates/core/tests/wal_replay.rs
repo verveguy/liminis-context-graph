@@ -1,4 +1,7 @@
-use lcg_core::{schema, Db, EntityRow, ReplayOptions, ReplayProgress, WalReplayer};
+use lcg_core::{
+    schema, Db, EmbedderContext, EmbeddingCache, EntityRow, NameMapEmbedder, ReplayOptions,
+    ReplayProgress, WalReplayer,
+};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -194,8 +197,13 @@ fn test_open_or_rebuild_from_wal() {
     .unwrap();
 
     // DB does not exist yet; open_or_rebuild should replay the WAL.
-    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
-        .expect("open_or_rebuild");
+    let (db, stats) = Db::open_or_rebuild(
+        db_path.to_str().unwrap(),
+        wal_dir.to_str().unwrap(),
+        4,
+        None,
+    )
+    .expect("open_or_rebuild");
     let stats = stats.expect("a rebuild ran, so ReplayStats must be returned (FR-001)");
 
     let conn = db.connect().expect("connect");
@@ -214,6 +222,74 @@ fn test_open_or_rebuild_from_wal() {
         stats.last_committed_seq,
         "open_or_rebuild must persist applied_seq at the replay's last_committed_seq"
     );
+}
+
+/// issue #440 FR-001/FR-007: `open_or_rebuild` with an embedder configured recomputes
+/// `name_embedding` from the co-located `name` field rather than binding the WAL's stored
+/// value verbatim, and persists the recomputing embedder's identity alongside `applied_seq`.
+#[test]
+fn test_open_or_rebuild_recomputes_embeddings_when_embedder_configured() {
+    let root = TempDir::new().unwrap();
+    let db_path = root.path().join("graph.db");
+    let wal_dir = root.path().join("wal");
+    fs::create_dir_all(&wal_dir).unwrap();
+
+    fs::copy(
+        fixture_path("python_produced.jsonl"),
+        wal_dir.join("20260519_000000_aaa111_0000.jsonl"),
+    )
+    .unwrap();
+
+    // entity-0's stored name_embedding is [1.0, 0.0, 0.0, 0.0] (see the fixture); map its name
+    // to a clearly distinct vector so a recomputed value is unmistakable in the result.
+    let mut map = std::collections::HashMap::new();
+    map.insert("Entity Zero".to_string(), vec![9.0, 8.0, 7.0, 6.0]);
+    let embedder: Arc<dyn lcg_core::Embedder> = Arc::new(NameMapEmbedder::new(4, map));
+    let ctx = EmbedderContext {
+        embedder,
+        model: "test-model".to_string(),
+        cache: Arc::new(EmbeddingCache::new()),
+    };
+
+    let (db, stats) = Db::open_or_rebuild(
+        db_path.to_str().unwrap(),
+        wal_dir.to_str().unwrap(),
+        4,
+        Some(ctx),
+    )
+    .expect("open_or_rebuild");
+    let stats = stats.expect("a rebuild ran, so ReplayStats must be returned (FR-001)");
+    assert!(
+        stats.embeddings_recomputed > 0,
+        "recompute must have run for at least one row when an embedder is configured"
+    );
+
+    let conn = db.connect().expect("connect");
+    let rows = conn
+        .cypher_query("MATCH (n:Entity {uuid: 'entity-0'}) RETURN n.name_embedding")
+        .expect("cypher ok");
+    assert!(!rows.is_empty(), "entity-0 must exist");
+    let emb_str = &rows[0][0];
+    let floats: Vec<f64> = emb_str
+        .trim_matches(|c: char| c == '[' || c == ']')
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<f64>().unwrap_or_else(|_| {
+                panic!("embedding component must parse as a float: {emb_str:?}")
+            })
+        })
+        .collect();
+    assert_eq!(
+        floats,
+        vec![9.0, 8.0, 7.0, 6.0],
+        "name_embedding should be exactly the recomputed vector [9,8,7,6], not the WAL's stored \
+         [1,0,0,0], got: {emb_str:?}"
+    );
+
+    // FR-007: the recomputing embedder's identity is persisted alongside applied_seq.
+    let pos = conn.get_wal_position("liminis").unwrap();
+    assert_eq!(pos.embedding_model.as_deref(), Some("test-model"));
+    assert_eq!(pos.embedding_dim, Some(4));
 }
 
 /// SC-001: a WAL whose mutations entirely fail to `prepare()` against the schema must not
@@ -235,8 +311,13 @@ fn test_open_or_rebuild_surfaces_fidelity_warning_on_schema_gap() {
     )
     .unwrap();
 
-    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
-        .expect("open_or_rebuild must not error even when replay fails to prepare");
+    let (db, stats) = Db::open_or_rebuild(
+        db_path.to_str().unwrap(),
+        wal_dir.to_str().unwrap(),
+        4,
+        None,
+    )
+    .expect("open_or_rebuild must not error even when replay fails to prepare");
 
     let stats = stats.expect("a rebuild ran, so stats must be Some (FR-001)");
     assert!(
@@ -269,8 +350,13 @@ fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
     // Create the DB up front so open_or_rebuild sees it as already existing.
     Db::open(db_path.to_str().unwrap()).expect("initial open");
 
-    let (db, stats) = Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4)
-        .expect("open_or_rebuild");
+    let (db, stats) = Db::open_or_rebuild(
+        db_path.to_str().unwrap(),
+        wal_dir.to_str().unwrap(),
+        4,
+        None,
+    )
+    .expect("open_or_rebuild");
 
     assert!(
         stats.is_none(),
@@ -3138,6 +3224,7 @@ fn throughput_half2_vs_half1_flat() {
                 batch_size: None,
                 log_interval_override: None,
                 progress_log_fn: None,
+                recompute_embed_fn: None,
             },
         )
         .expect("replay must succeed");

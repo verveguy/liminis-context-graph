@@ -104,6 +104,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0398](0398-openssl-linkage-for-release-artifacts.md) | Link OpenSSL Statically So Release Artifacts Stay Self-Contained | 2026-08-15 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
+| [0440](0440-recompute-embeddings-on-wal-replay.md) | Recompute Embeddings on WAL Replay, With a Sync Bridge and a Two-Mechanism Identity Split | 2026-08-19 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
 | [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
