@@ -1228,4 +1228,73 @@ mod tests {
             ".graphiti/ must be removed after resumed migration completes"
         );
     }
+
+    #[test]
+    fn merge_wal_dir_into_root_self_heals_interrupted_cross_device_copy() {
+        // Simulates `copy_and_remove_cross_device` having copied the file to `wal_root` but
+        // crashing before removing it from `legacy_wal_dir` — identical content at both paths,
+        // which must be recognized as a completed move (not a name collision) and finished by
+        // removing the stale source (handarbeit-pruefer finding on PR #453).
+        let tmp = TempDir::new().unwrap();
+        let legacy_wal_dir = tmp.path().join("legacy-wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"identical-content").unwrap();
+
+        let wal_root = tmp.path().join("wal-root");
+        std::fs::create_dir_all(&wal_root).unwrap();
+        std::fs::write(wal_root.join("001.jsonl"), b"identical-content").unwrap();
+
+        let sink = noop();
+        merge_wal_dir_into_root(&legacy_wal_dir, &wal_root, &sink).expect("merge failed");
+
+        assert!(
+            !legacy_wal_dir.exists(),
+            "legacy_wal_dir must be fully drained and removed once the interrupted copy is \
+             recognized as already-completed"
+        );
+        assert_eq!(
+            std::fs::read(wal_root.join("001.jsonl")).unwrap(),
+            b"identical-content",
+            "destination content must be untouched by the self-heal"
+        );
+        assert!(
+            phases(&sink).iter().all(|p| p != "wal_merge_collision"),
+            "a self-healed interrupted copy must not be reported as a collision: {:?}",
+            phases(&sink)
+        );
+    }
+
+    #[test]
+    fn merge_wal_dir_into_root_leaves_genuine_collision_in_place_and_emits_telemetry() {
+        // Two different-content files sharing a name is a real conflict, not an interrupted
+        // copy — must be left in place at both paths (FR-005) and reported via telemetry
+        // (handarbeit-pruefer finding on PR #453), rather than silently dropped or overwritten.
+        let tmp = TempDir::new().unwrap();
+        let legacy_wal_dir = tmp.path().join("legacy-wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"legacy-content").unwrap();
+
+        let wal_root = tmp.path().join("wal-root");
+        std::fs::create_dir_all(&wal_root).unwrap();
+        std::fs::write(wal_root.join("001.jsonl"), b"different-content").unwrap();
+
+        let sink = noop();
+        merge_wal_dir_into_root(&legacy_wal_dir, &wal_root, &sink).expect("merge failed");
+
+        assert_eq!(
+            std::fs::read(legacy_wal_dir.join("001.jsonl")).unwrap(),
+            b"legacy-content",
+            "colliding source file must be left in place, not dropped"
+        );
+        assert_eq!(
+            std::fs::read(wal_root.join("001.jsonl")).unwrap(),
+            b"different-content",
+            "colliding destination file must not be overwritten"
+        );
+        assert!(
+            phases(&sink).iter().any(|p| p == "wal_merge_collision"),
+            "a genuine collision must be reported via telemetry: {:?}",
+            phases(&sink)
+        );
+    }
 }
