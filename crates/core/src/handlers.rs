@@ -2933,11 +2933,6 @@ async fn handle_rebuild_from_wal(
     }))
 }
 
-/// Clears the lbug database (never the WAL directory — the caller is about to replay it) so a
-/// `from_seq: 0` `knowledge_rebuild_from_wal` call can proceed without duplicate-primary-key
-/// collisions (FR-005). Mirrors `recover_rebuild_from_workspace_wal`'s DB-file-delete + reopen +
-/// `state.db` ArcSwap hot-swap pattern (ADR-0003), scoped identically: only the lbug DB file/dir
-/// and its `.wal`/`.lock` sidecars are removed.
 /// Clears every group in `referenced_group_ids`' own graph data (never any other group's, and
 /// never the WAL directory — the caller is about to replay it) so a `from_seq: 0`
 /// `knowledge_rebuild_from_wal` call can proceed without duplicate-primary-key collisions
