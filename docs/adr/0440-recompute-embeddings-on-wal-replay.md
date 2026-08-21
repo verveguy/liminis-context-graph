@@ -232,3 +232,28 @@ whole issue exists to eliminate everywhere else in the system.
   FR-005/FR-006 and FR-007 stay two separate mechanisms; this fix doesn't blur that boundary, it
   only changes how often FR-007's own mechanism is refreshed. `docs/operations.md`'s
   `embedding_model_status` section carries the operator-facing version of this caveat.
+- **A replay/rebuild only persists the running embedder's identity if no recompute attempt
+  actually failed during it.** All four replay call sites originally derived the identity to
+  persist from `EmbedderContext::identity()` alone — the *configured* embedder — with no check of
+  the replay's own outcome. If recompute failed for some or all rows during that specific rebuild
+  (e.g. the embedder sidecar was transiently unreachable), the stored, un-recomputed vector stayed
+  bound, yet `WalPosition.embedding_model`/`embedding_dim` — and therefore
+  `embedding_model_status` — still reported `"match"`: the exact silent-divergence case FR-006/
+  FR-008 exist to close, occurring in the one family of code paths (explicit rebuilds) whose whole
+  purpose is to fix stale vectors. `handarbeit-pruefer` flagged this on the PR, initially framing
+  it as "recompute failed OR the row had no co-located text to recompute from." The latter half
+  turned out to be over-broad: `crates/core/tests/fixtures/wal/python_produced.jsonl` (used by
+  `test_recovery_rebuild_from_workspace_wal_recomputes_embeddings`) contains legitimate `SET`-only
+  mutations that update `content_embedding`/`fact_embedding` without re-supplying the source text
+  — normal, ongoing WAL shape (FR-002), not a defect — and gating on that too made the fixed test
+  fail, since a rebuild that recomputed cleanly everywhere it could still reported `"unknown"`
+  because of these structurally-textless rows. Fixed by `ReplayStats::
+  embeddings_recompute_had_no_failures()` — true when `embeddings_recompute_failed == 0`,
+  deliberately independent of `embeddings_recompute_fallback` — gating the identity write at every
+  call site: `Db::open_or_rebuild` and `handle_rebuild_from_wal`'s two replay paths filter the
+  single group's identity on the replay's own stats; `recover_rebuild_from_workspace_wal` and
+  `run_full_recovery_sequence` (which each replay several groups per call) carry a per-group flag
+  alongside `(seq, generation)` so one group's failure doesn't suppress another group's
+  legitimately-confirmed identity. A gated write persists `None`, which reads as `"unknown"`
+  rather than falsely `"match"` — an accurate, if less informative, signal, consistent with the
+  "best-effort marker" framing above.

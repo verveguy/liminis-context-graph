@@ -373,7 +373,12 @@ pub fn run_full_recovery_sequence(
             total += group_stats.lines_replayed;
             if let Some(seq) = group_stats.last_committed_seq {
                 let generation = crate::wal_generation::read_generation(&dir);
-                positions.push((gid, seq, generation));
+                positions.push((
+                    gid,
+                    seq,
+                    generation,
+                    group_stats.embeddings_recompute_had_no_failures(),
+                ));
             }
         }
         (total, positions)
@@ -398,7 +403,12 @@ pub fn run_full_recovery_sequence(
             .last_committed_seq
             .map(|seq| {
                 let generation = crate::wal_generation::read_generation(&wal_dir);
-                vec![(group_id.to_string(), seq, generation)]
+                vec![(
+                    group_id.to_string(),
+                    seq,
+                    generation,
+                    stats.embeddings_recompute_had_no_failures(),
+                )]
             })
             .unwrap_or_default();
         (stats.lines_replayed, positions)
@@ -432,15 +442,17 @@ pub fn run_full_recovery_sequence(
         // `knowledge_status` rely on elsewhere — a caller reading a non-null `applied_seq` after
         // a failed rebuild would wrongly skip re-deriving it. Each write is independently
         // non-fatal: a missed write doesn't undo the recovery that already succeeded.
-        for (gid, seq, generation) in &positions_to_persist {
-            if let Err(e) = conn.set_wal_position(
-                gid,
-                *seq,
-                generation.as_deref(),
-                embedding_identity
-                    .as_ref()
-                    .map(|(model, dim)| (model.as_str(), *dim)),
-            ) {
+        for (gid, seq, generation, fully_recomputed) in &positions_to_persist {
+            // issue #440 FR-006/FR-008: only claim the running embedder's identity for a group
+            // whose replay had no failed recompute attempt — see
+            // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
+            let group_embedding_identity = embedding_identity
+                .as_ref()
+                .filter(|_| *fully_recomputed)
+                .map(|(model, dim)| (model.as_str(), *dim));
+            if let Err(e) =
+                conn.set_wal_position(gid, *seq, generation.as_deref(), group_embedding_identity)
+            {
                 eprintln!(
                     "liminis-context-graph: startup recovery: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
                 );

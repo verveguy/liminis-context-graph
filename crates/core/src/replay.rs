@@ -195,6 +195,23 @@ impl ReplayStats {
     pub fn lines_skipped(&self) -> u64 {
         self.unrecognised_lines + self.failed_lines + self.unparseable_lines
     }
+
+    /// True when no embedding recompute *attempt* failed during this replay
+    /// (`embeddings_recompute_failed == 0`) — e.g. the embedder sidecar was never unreachable,
+    /// no recomputed vector had the wrong dimension, none was non-finite. Deliberately does
+    /// **not** require `embeddings_recompute_fallback == 0`: a row with no co-located source
+    /// text (FR-002 — e.g. a `SET`-only mutation that updates a field without re-supplying the
+    /// text an already-recomputed vector on that node was derived from) is normal, ongoing WAL
+    /// shape, not a defect, and is common enough on real corpora that requiring zero fallbacks
+    /// would make a replay/rebuild almost never confirm a match. A replay call site persisting
+    /// an embedding identity (issue #440, FR-006/FR-007) alongside `applied_seq` should gate
+    /// that write on this: persisting `Some(identity)` after a real recompute failure would make
+    /// `embedding_model_status` read `"match"` for a group that silently kept stale vectors
+    /// because the embedder couldn't be reached — the exact silent-divergence FR-008 exists to
+    /// prevent. `embeddings_recompute_fallback` remains a purely informational counter.
+    pub fn embeddings_recompute_had_no_failures(&self) -> bool {
+        self.embeddings_recompute_failed == 0
+    }
 }
 
 /// Callback invoked during replay to emit progress; returning `false` aborts cleanly.
@@ -1486,6 +1503,53 @@ mod replay_tests {
         assert_eq!(stats.embeddings_recompute_fallback, 1);
         assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
+    }
+
+    // --- ReplayStats::embeddings_recompute_had_no_failures (issue #440, FR-006/FR-008 gate) ---
+
+    #[test]
+    fn embeddings_recompute_had_no_failures_true_when_all_rows_recomputed_cleanly() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32]));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), serde_json::json!("Alice"));
+        params.insert("name_embedding".to_string(), serde_json::json!([9.0]));
+
+        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+
+        assert!(stats.embeddings_recompute_had_no_failures());
+    }
+
+    #[test]
+    fn embeddings_recompute_had_no_failures_true_despite_a_fallback() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![9.0]));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        // No co-located "fact" text present → FR-002 fallback, not a failure. This is normal,
+        // ongoing WAL shape (e.g. a SET-only mutation), not evidence the embedder failed —
+        // must not suppress a call site's identity persistence on its own.
+        params.insert("fact_embedding".to_string(), serde_json::json!([1.0, 2.0]));
+
+        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+
+        assert!(stats.embeddings_recompute_had_no_failures());
+    }
+
+    #[test]
+    fn embeddings_recompute_had_no_failures_false_after_an_embed_failure() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|_text: &str| Err(Error::Ipc("embedder unreachable".to_string())));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        params.insert("content".to_string(), serde_json::json!("some content"));
+        params.insert(
+            "content_embedding".to_string(),
+            serde_json::json!([3.0, 4.0]),
+        );
+
+        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+
+        assert!(!stats.embeddings_recompute_had_no_failures());
     }
 
     #[test]
