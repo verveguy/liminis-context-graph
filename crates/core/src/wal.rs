@@ -841,12 +841,12 @@ pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
 /// whether) to clear that group before replay (issue #462).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct GroupWalContent {
-    /// `params.uuid` from every bare `CREATE` line (see [`is_bare_create`]) referencing this
+    /// `params.uuid` from every bare `CREATE` line (see [`tokens_are_bare_create`]) referencing this
     /// group — the exact rows this directory's replay will recreate for this group. A row-scoped
     /// purge targets exactly this set, never more.
     pub create_uuids: std::collections::HashSet<String>,
     /// Whether any line referencing this group contains a `SET`/`DELETE`/`DETACH`/`REMOVE` token
-    /// (see [`is_unsafe_non_create_mutation`]) — such a line implies this replay can't safely
+    /// (see [`tokens_contain_unsafe_mutation`]) — such a line implies this replay can't safely
     /// row-scope-clear the group (FR-004's refusal trigger).
     pub has_unsafe_mutation: bool,
 }
@@ -874,8 +874,10 @@ pub(crate) struct GroupWalContent {
 /// directory by skipping it and continuing — mirroring `first_seq_in_file`'s tolerance model, so
 /// one malformed row can't turn this guard into a hard failure for the whole rebuild. A bare
 /// `CREATE` line whose `params.uuid` is missing or not a string is skipped for `create_uuids`
-/// purposes only (same tolerance model) — see `handlers.rs`'s guard for the resulting
-/// `fidelity_warning` fallback.
+/// purposes only (same tolerance model): that row is left out of the row-scoped clear, so a
+/// split group with such a row could still hit a duplicate-primary-key failure on replay for
+/// that one row — surfaced through `replay.rs`'s existing, general-purpose `fidelity_warning`,
+/// not a mechanism specific to this scan.
 pub(crate) fn scan_wal_content_by_group(
     wal_dir: &Path,
     to_seq: Option<u64>,
@@ -919,11 +921,14 @@ pub(crate) fn scan_wal_content_by_group(
             let Some(gid) = wal_line.params.get("group_id").and_then(|v| v.as_str()) else {
                 continue;
             };
+            // Tokenized once and reused for both checks below, rather than tokenizing every
+            // line's Cypher twice in this hot scan loop.
+            let tokens = cypher_tokens(&wal_line.cypher);
             let entry = by_group.entry(gid.to_string()).or_default();
-            if is_unsafe_non_create_mutation(&wal_line.cypher) {
+            if tokens_contain_unsafe_mutation(&tokens) {
                 entry.has_unsafe_mutation = true;
             }
-            if is_bare_create(&wal_line.cypher) {
+            if tokens_are_bare_create(&tokens) {
                 if let Some(uuid) = wal_line.params.get("uuid").and_then(|v| v.as_str()) {
                     entry.create_uuids.insert(uuid.to_string());
                 }
@@ -1041,22 +1046,35 @@ fn cypher_tokens(cypher: &str) -> Vec<String> {
 /// Used by `scan_wal_content_by_group` (issue #462) to classify a foreign group_id's content as
 /// safe to row-scope-clear (only `CREATE` and link-only lines) versus one that must block the
 /// rebuild outright (FR-004) because a mutating line implies this replay can't be sure it either
-/// fully owns or should leave alone the row it touches.
-pub(crate) fn is_unsafe_non_create_mutation(cypher: &str) -> bool {
-    cypher_tokens(cypher)
+/// fully owns or should leave alone the row it touches. `scan_wal_content_by_group` itself calls
+/// [`tokens_contain_unsafe_mutation`] directly on an already-tokenized line rather than this
+/// `&str`-based wrapper — this exists for tests to exercise the check without needing to
+/// construct a token vector by hand.
+#[cfg(test)]
+fn is_unsafe_non_create_mutation(cypher: &str) -> bool {
+    tokens_contain_unsafe_mutation(&cypher_tokens(cypher))
+}
+
+/// Token-level core of [`is_unsafe_non_create_mutation`], split out so
+/// `scan_wal_content_by_group`'s hot loop can tokenize a line's Cypher once and reuse the tokens
+/// for both this check and [`tokens_are_bare_create`], rather than tokenizing twice per line.
+fn tokens_contain_unsafe_mutation(tokens: &[String]) -> bool {
+    tokens
         .iter()
         .any(|t| matches!(t.as_str(), "SET" | "DELETE" | "DETACH" | "REMOVE"))
 }
 
-/// Whether `cypher`'s first token is `CREATE` — i.e. a bare node-creating statement
+/// Whether a token stream's first token is `CREATE` — i.e. a bare node-creating statement
 /// (`db.rs`'s `insert_entity`/`insert_episodic`/`insert_relates_to_edge`'s/
 /// `insert_cross_group_edge`'s first statement), as opposed to a `MATCH ... CREATE`
 /// relationship-hop line. Used to decide which lines' `params.uuid` belongs in
 /// [`GroupWalContent::create_uuids`] — a row-scoped purge only ever needs to delete rows a bare
 /// `CREATE` line actually created; a hop line's uuid is already covered by the node-creating
-/// line for the same uuid.
-fn is_bare_create(cypher: &str) -> bool {
-    cypher_tokens(cypher).first().is_some_and(|t| t == "CREATE")
+/// line for the same uuid. Takes already-tokenized input — see [`tokens_contain_unsafe_mutation`]
+/// for why `scan_wal_content_by_group` tokenizes a line's Cypher once and reuses it for both this
+/// check and that one, instead of each re-tokenizing its own `&str`.
+fn tokens_are_bare_create(tokens: &[String]) -> bool {
+    tokens.first().is_some_and(|t| t == "CREATE")
 }
 
 /// Returns the `seq` from the last parseable non-empty line in the file, or `None`.
