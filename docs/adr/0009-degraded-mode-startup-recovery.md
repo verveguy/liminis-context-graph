@@ -32,11 +32,11 @@ let state = AppState::from_env(sink, maybe_db, degraded_reason, db_path);
 
 Binding the socket first means the binary can always serve IPC requests. When DB open fails recoverably, the process enters degraded mode instead of exiting. The `health_check`, `knowledge_status`, `knowledge_recover`, and `knowledge_close` methods remain available; all other methods return error code `-32001`.
 
-Legacy workspace migration and, since issue #378, per-group WAL-root migration
-(`migrate_wal_root_if_needed()`) also run in this same pre-`Db::open()` window, after the socket
-is already bound. A consumer must not treat a successful socket connect as readiness for this
-reason — see [IPC & MCP Reference: Readiness](../ipc-mcp-reference.md#readiness) for the
-`health_check`-round-trip signal to use instead.
+Since issue #378, per-group WAL-root migration (`migrate_wal_root_if_needed()`) also runs in this
+same pre-`Db::open()` window, after the socket is already bound. (Legacy workspace migration runs
+earlier still, before the bind.) A consumer must not treat a successful socket connect as
+readiness for this reason — see [IPC & MCP Reference: Readiness](../ipc-mcp-reference.md#readiness)
+for the `health_check`-round-trip signal to use instead.
 
 ## Decision 2: Error classification by Display-string matching
 

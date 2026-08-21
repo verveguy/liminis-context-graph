@@ -49,8 +49,9 @@ before the terminal result — see [Progress notifications](#progress-notificati
 A successful connection to `.lcg/service.sock` is **not** evidence the service is ready. The
 socket is bound before the database opens — deliberately, so `health_check` and recovery IPC stay
 reachable during degraded-mode recovery ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md))
-— and legacy workspace migration and issue #378's WAL-root migration also run in that same
-pre-open window. A client that connects and immediately issues requests can race that migration.
+— and issue #378's WAL-root migration also runs in that same pre-open window, after the bind.
+(Legacy `.graphiti/`→`.lcg/` workspace migration runs earlier still, before the socket is even
+bound.) A client that connects and immediately issues requests can race the WAL-root migration.
 
 The correct readiness signal is a `health_check` round-trip reporting `"healthy"`:
 `handle_health_check` only returns `healthy` once `Db::open()` has succeeded, which is after
