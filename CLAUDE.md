@@ -62,6 +62,12 @@ This applies in every stage — Implement, Review, Validate, and direct collabor
 
 An agent's foreground shell call is capped at **10 minutes**. When a check you'd otherwise run will exceed that, work through these options **in order**:
 
+0. **If you already ran it, don't run it again — read the output you kept.** Capture expensive
+   commands to a file once (`cmd > /tmp/out.log 2>&1`) and grep that file for whatever you need
+   next. Re-running an 8-minute suite because you want `grep` instead of `tail` costs another 8
+   minutes and produces identical bytes. This is the single most wasteful mistake available in this
+   repo, and it has happened: one stage spent 26 minutes on three `cargo test` runs that differed
+   only in how they sliced the output.
 1. **Don't run it.** If something else already runs the exact check, let it. CI runs `cargo test --release` and `cargo clippy --release -- -D warnings` on every PR (see the Rust pre-commit checks section below) — a local rerun duplicates that work and gains nothing.
 2. **Run the in-budget subset instead.** A debug-mode build/test pass, or a narrower command scoped to what changed, often gives a fast local signal without hitting the cap. See the pre-commit gate below for the Rust-specific version of this.
 3. **If a long-running result is genuinely required and nothing else provides it (options 1–2 don't apply), background it and poll within the same turn.** Start the command in the background, then check on it with a small number of short, bounded foreground checks with brief pauses between them — staying well under the 10-minute cap for each check — and report the outcome (done, failed, or that it did not finish within the polling budget) before ending the turn. For example: launch a slow local reproduction script or one-off migration in the background redirected to a log file (`long_task.sh > /tmp/task.log 2>&1 & echo $!`), then poll by PID and by tailing that log file (`ps -p <pid>`, `tail /tmp/task.log`) a few minutes apart to see whether it has finished — a raw shell job-control check like `jobs` won't work here, since shell state doesn't persist between separate foreground calls, only the PID and the file on disk do. Report the result either way once you stop polling. (Don't reach for this with `cargo test --release` — that's exactly the case option 1 already covers.)
@@ -95,6 +101,24 @@ CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merg
 > foreground call on a cold worktree, fall back to the "Long-running commands" section's narrower-scope
 > option: split the run per crate (`cargo test -p lcg-core`, then `-p lcg-service`, then `-p
 > lcg-eval`) rather than chaining a longer combined command.
+
+> **Run the suite once, capture it to a file, then query the file.** `cargo test` is ~8.5 minutes;
+> re-running it to look at its output a different way costs another ~8.5 minutes and tells you
+> nothing new. Redirect once and grep the artifact as many times as you like:
+>
+> ```sh
+> cargo test > /tmp/test.log 2>&1; tail -5 /tmp/test.log
+> grep -E "^(test result|failures:)" /tmp/test.log      # summary
+> grep -A 20 "^failures:" /tmp/test.log                 # what failed, and why
+> ```
+>
+> This is not a micro-optimisation. A single Fabrik stage was observed spending **26 minutes on
+> three back-to-back `cargo test` runs whose only difference was `tail -10`, then `tail -5`, then
+> `grep -E`** — roughly 17 minutes re-deriving output it already had. Re-run the suite only after
+> the code changes; never to reformat a result.
+>
+> The same rule applies to any expensive command in this repo: `cargo clippy`, a release build, a
+> corpus e2e binary. Capture once, inspect the capture.
 
 1. `cargo fmt --all` — auto-format. Never commit without running this. Rust treats whitespace as binary pass/fail; even a single misaligned brace fails `cargo fmt --check` in CI.
 2. `cargo test` — compiles lib + tests and runs them, in **debug**. CI runs `cargo test --release` because the ~50 integration-test binaries (crates/core: 37, crates/service: 11, crates/eval: 2 — not "six", a stale figure corrected by #316) require release-mode linking; that is CI's job, not yours (see the budget note above). Measured: compile+link for all ~50 binaries is ~4 minutes, execution ~1 minute — this was never actually the dominant CI cost (see below). If your change touches release-only behavior, say so in the PR body so a reviewer knows CI is the first place it gets exercised — do not run the release suite locally to pre-empt it. Common trap: lib builds while tests fail to compile, because tests are a separate compilation unit — adding a field to a struct used in tests silently breaks the test build until every constructor is updated.
