@@ -70,8 +70,15 @@ impl std::error::Error for MigrationError {
 /// - Both exist, `.lcg/db/liminis.db` absent → `Schism` error (user must resolve)
 ///
 /// See ADR-0019 for the partial-migration-marker invariant.
+///
+/// `wal_root` is the destination for legacy `.graphiti/wal` content (Step 4 below) and MUST be
+/// the same value the caller subsequently passes to `wal_group::migrate_wal_root_if_needed`
+/// (issue #442) — i.e. resolved from `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR`, falling back to
+/// `.lcg/wal` only when neither is set. The two migrations disagree on the destination if this
+/// isn't the same value, and legacy WAL content ends up loose and invisible to the service.
 pub fn migrate_workspace(
     workspace: &Path,
+    wal_root: &Path,
     sink: &dyn TelemetrySink,
 ) -> Result<MigrationOutcome, MigrationError> {
     let legacy = workspace.join(".graphiti");
@@ -163,11 +170,21 @@ pub fn migrate_workspace(
         move_path(&legacy_db_wal, &new_db_wal, sink)?;
     }
 
-    // Step 4: Move .graphiti/wal/ → .lcg/wal/.
+    // Step 4: Move .graphiti/wal/ → `wal_root` (issue #442: the caller-resolved
+    // LCG_WAL_DIR/GRAPHITI_WAL_DIR destination, not a hardcoded `.lcg/wal`).
     let legacy_wal_dir = legacy.join("wal");
-    let new_wal_dir = new_dir.join("wal");
-    if legacy_wal_dir.exists() && !new_wal_dir.exists() {
-        move_path(&legacy_wal_dir, &new_wal_dir, sink)?;
+    if legacy_wal_dir.exists() {
+        if !wal_root.exists() {
+            // Fast path: destination doesn't exist yet, so a single directory rename is safe
+            // and byte-for-byte matches historical behavior for the default (no override) case.
+            move_path(&legacy_wal_dir, wal_root, sink)?;
+        } else {
+            // `wal_root` already has content — e.g. another group already wrote there before
+            // this migration ran, or a prior run partially completed this same merge. POSIX
+            // `rename` of a directory onto an existing non-empty directory fails, so merge
+            // entry-by-entry instead (FR-005, FR-006).
+            merge_wal_dir_into_root(&legacy_wal_dir, wal_root, sink)?;
+        }
     }
 
     // Step 5: Move .graphiti/ontology.yaml → .lcg/ontology.yaml (if present).
@@ -336,6 +353,42 @@ fn move_path(from: &Path, to: &Path, sink: &dyn TelemetrySink) -> Result<(), Mig
     Ok(())
 }
 
+/// Merges the contents of `legacy_wal_dir` into an already-existing `wal_root`, one entry at a
+/// time (issue #442).
+///
+/// Each entry is moved with an atomic `rename` if — and only if — no entry of the same name
+/// already exists at the destination. A genuine name collision is intentionally left in place
+/// rather than silently overwritten or dropped (FR-005): this leaves `legacy_wal_dir`
+/// non-empty, which surfaces loudly via `migrate_workspace`'s Step 9 (`remove_dir(".graphiti")`
+/// failing with `ENOTEMPTY`) instead of a migration that appears to succeed while quietly
+/// discarding a file. This also makes the merge safely resumable — files already relocated by a
+/// prior partial run are found already present at the destination and skipped, not duplicated.
+///
+/// On full success `legacy_wal_dir` is left empty and removed, so `migrate_workspace`'s Step 9
+/// (`remove_dir(".graphiti")`, non-recursive) doesn't fail on a lingering empty `wal` child.
+fn merge_wal_dir_into_root(
+    legacy_wal_dir: &Path,
+    wal_root: &Path,
+    sink: &dyn TelemetrySink,
+) -> Result<(), MigrationError> {
+    let entries = std::fs::read_dir(legacy_wal_dir).map_err(|e| MigrationError::MoveFile {
+        path: legacy_wal_dir.to_path_buf(),
+        source: e,
+    })?;
+    for entry in entries.flatten() {
+        let dest = wal_root.join(entry.file_name());
+        if dest.exists() {
+            // Leave in place; see doc comment above on why a collision isn't auto-resolved.
+            continue;
+        }
+        move_path(&entry.path(), &dest, sink)?;
+    }
+    // Best-effort: only succeeds if every entry above was actually moved (i.e. no collision
+    // was left behind). If it fails because the dir is non-empty, Step 9 will fail loudly.
+    let _ = std::fs::remove_dir(legacy_wal_dir);
+    Ok(())
+}
+
 /// Fix `.lcg/` that has the old layout left by the simple-rename migration (#64).
 ///
 /// The old migration did `rename(".graphiti", ".lcg")`, leaving `.lcg/db` as a flat file
@@ -497,7 +550,7 @@ mod tests {
     fn nothing_to_migrate_on_empty_workspace() {
         let tmp = TempDir::new().unwrap();
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::NothingToMigrate)));
         assert!(phases(&sink).is_empty());
     }
@@ -507,7 +560,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir(tmp.path().join(".lcg")).unwrap();
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::AlreadyMigrated)));
         assert!(phases(&sink).is_empty());
     }
@@ -531,7 +584,7 @@ mod tests {
         );
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(
             matches!(result, Ok(MigrationOutcome::Migrated)),
             "layout fix failed: {result:?}"
@@ -568,7 +621,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join(".lcg")).unwrap();
         // No .lcg/db/liminis.db — schism
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(matches!(result, Err(MigrationError::Schism { .. })));
         assert!(phases(&sink).contains(&"schism".to_string()));
         // Both directories must still exist (not deleted by the error path)
@@ -597,7 +650,7 @@ mod tests {
 
         let sink = noop();
         // Without a db file, validation step is skipped (partial_marker absent).
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(
             matches!(result, Ok(MigrationOutcome::Migrated)),
             "migration failed: {result:?}"
@@ -635,7 +688,7 @@ mod tests {
         std::fs::write(legacy.join("mystery.txt"), b"unknown").unwrap();
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::Migrated)));
 
         let unrecognized = tmp
@@ -665,7 +718,7 @@ mod tests {
         let _listener = UnixListener::bind(&sock_path).unwrap();
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(matches!(result, Ok(MigrationOutcome::Migrated)));
 
         // Socket should NOT appear in .lcg/
@@ -697,7 +750,7 @@ mod tests {
         std::fs::write(legacy.join("ontology.yaml"), b"entities:").unwrap();
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(
             matches!(result, Ok(MigrationOutcome::Migrated)),
             "partial resume failed: {result:?}"
@@ -720,7 +773,7 @@ mod tests {
 
         std::env::set_var("LCG_MIGRATION_KEEP_BACKUP", "1");
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         std::env::remove_var("LCG_MIGRATION_KEEP_BACKUP");
 
         assert!(matches!(result, Ok(MigrationOutcome::Migrated)));
@@ -737,7 +790,7 @@ mod tests {
         std::fs::create_dir(tmp.path().join(".graphiti")).unwrap();
 
         let sink = noop();
-        migrate_workspace(tmp.path(), &sink).unwrap();
+        migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink).unwrap();
 
         let p = phases(&sink);
         assert!(p.contains(&"started".to_string()), "phases: {p:?}");
@@ -772,7 +825,7 @@ mod tests {
         std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
 
         // Restore permissions before assertions so TempDir can clean up.
         std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -794,7 +847,7 @@ mod tests {
 
         // Retry after fixing the permissions — must complete the migration cleanly.
         let sink2 = noop();
-        let result2 = migrate_workspace(tmp.path(), &sink2);
+        let result2 = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink2);
         assert!(
             matches!(result2, Ok(MigrationOutcome::Migrated)),
             "retry after permission fix should succeed: {result2:?}"
@@ -831,7 +884,7 @@ mod tests {
         drop(db);
 
         let sink = noop();
-        let result = migrate_workspace(tmp.path(), &sink);
+        let result = migrate_workspace(tmp.path(), &tmp.path().join(".lcg").join("wal"), &sink);
         assert!(
             matches!(result, Ok(MigrationOutcome::Migrated)),
             "migration with real DB failed: {result:?}"
@@ -848,5 +901,126 @@ mod tests {
         let p = phases(&sink);
         assert!(p.contains(&"db_validated".to_string()), "phases: {p:?}");
         assert!(p.contains(&"complete".to_string()), "phases: {p:?}");
+    }
+
+    // ── Issue #442: custom wal_root destination ────────────────────────────────
+
+    #[test]
+    fn clean_migration_with_custom_wal_root_uses_configured_destination() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join(".graphiti");
+        let legacy_wal_dir = legacy.join("wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"{}").unwrap();
+        std::fs::write(legacy_wal_dir.join(".wal-generation.json"), b"{}").unwrap();
+
+        // A custom wal_root outside the .lcg/ tree entirely.
+        let custom_wal_root = tmp.path().join("custom-wal-root");
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &custom_wal_root, &sink);
+        assert!(
+            matches!(result, Ok(MigrationOutcome::Migrated)),
+            "migration failed: {result:?}"
+        );
+
+        assert!(
+            custom_wal_root.join("001.jsonl").exists(),
+            "legacy WAL file must land at the configured wal_root"
+        );
+        assert!(
+            custom_wal_root.join(".wal-generation.json").exists(),
+            "generation sidecar must land at the configured wal_root"
+        );
+        assert!(
+            !tmp.path().join(".lcg").join("wal").exists(),
+            ".lcg/wal must not be used when a custom wal_root is configured"
+        );
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after migration"
+        );
+    }
+
+    #[test]
+    fn custom_wal_root_merges_with_existing_content_without_overwriting() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join(".graphiti");
+        let legacy_wal_dir = legacy.join("wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"legacy").unwrap();
+
+        // Pre-existing, unrelated content already at the configured wal_root (e.g. a group
+        // directory a fresh .lcg-era instance already wrote there).
+        let custom_wal_root = tmp.path().join("custom-wal-root");
+        std::fs::create_dir_all(custom_wal_root.join("liminis")).unwrap();
+        std::fs::write(
+            custom_wal_root.join("liminis").join("existing.jsonl"),
+            b"pre-existing",
+        )
+        .unwrap();
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &custom_wal_root, &sink);
+        assert!(
+            matches!(result, Ok(MigrationOutcome::Migrated)),
+            "migration failed: {result:?}"
+        );
+
+        // Both the pre-existing content and the newly relocated legacy content must coexist.
+        assert_eq!(
+            std::fs::read(custom_wal_root.join("liminis").join("existing.jsonl")).unwrap(),
+            b"pre-existing",
+            "pre-existing content at wal_root must not be overwritten or lost"
+        );
+        assert_eq!(
+            std::fs::read(custom_wal_root.join("001.jsonl")).unwrap(),
+            b"legacy",
+            "legacy WAL content must be relocated into the (already-existing) wal_root"
+        );
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after migration"
+        );
+    }
+
+    #[test]
+    fn custom_wal_root_partial_merge_resume_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join(".graphiti");
+        let legacy_wal_dir = legacy.join("wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"one").unwrap();
+        std::fs::write(legacy_wal_dir.join("002.jsonl"), b"two").unwrap();
+
+        let custom_wal_root = tmp.path().join("custom-wal-root");
+        // Simulate a crash mid-Step-4: 001.jsonl already relocated to wal_root, 002.jsonl still
+        // sitting in .graphiti/wal, and wal_root already exists (so a prior run took the merge
+        // branch, not the fast-path rename).
+        std::fs::create_dir_all(&custom_wal_root).unwrap();
+        std::fs::write(custom_wal_root.join("001.jsonl"), b"one").unwrap();
+        std::fs::remove_file(legacy_wal_dir.join("001.jsonl")).unwrap();
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &custom_wal_root, &sink);
+        assert!(
+            matches!(result, Ok(MigrationOutcome::Migrated)),
+            "resumed migration failed: {result:?}"
+        );
+
+        assert_eq!(
+            std::fs::read(custom_wal_root.join("001.jsonl")).unwrap(),
+            b"one",
+            "already-relocated file must not be duplicated or corrupted"
+        );
+        assert_eq!(
+            std::fs::read(custom_wal_root.join("002.jsonl")).unwrap(),
+            b"two",
+            "remaining file must be relocated on resume"
+        );
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after resumed migration completes"
+        );
     }
 }
