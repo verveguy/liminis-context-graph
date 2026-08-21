@@ -177,6 +177,16 @@ pub fn migrate_workspace(
         if !wal_root.exists() {
             // Fast path: destination doesn't exist yet, so a single directory rename is safe
             // and byte-for-byte matches historical behavior for the default (no override) case.
+            // `rename` requires the destination's *parent* to exist, though — true by
+            // construction for the default `.lcg/wal` (Step 1 already created `.lcg/db` above),
+            // but not guaranteed for a custom `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR` pointing at a
+            // path nobody has created yet, which is the common case for a first-time override.
+            if let Some(parent) = wal_root.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| MigrationError::MoveFile {
+                    path: parent.to_path_buf(),
+                    source: e,
+                })?;
+            }
             move_path(&legacy_wal_dir, wal_root, sink)?;
         } else {
             // `wal_root` already has content — e.g. another group already wrote there before
@@ -939,6 +949,38 @@ mod tests {
         assert!(
             !legacy.exists(),
             ".graphiti/ must be removed after migration"
+        );
+    }
+
+    #[test]
+    fn clean_migration_with_custom_wal_root_creates_missing_parent_dirs() {
+        // `LCG_WAL_DIR` pointing at a path nobody has created yet (not even its parent
+        // directories) is the common case for a first-time override on a `.graphiti`-era
+        // workspace — `fs::rename` fails with ENOENT unless the destination's parent exists.
+        let tmp = TempDir::new().unwrap();
+        let legacy = tmp.path().join(".graphiti");
+        let legacy_wal_dir = legacy.join("wal");
+        std::fs::create_dir_all(&legacy_wal_dir).unwrap();
+        std::fs::write(legacy_wal_dir.join("001.jsonl"), b"{}").unwrap();
+
+        let custom_wal_root = tmp
+            .path()
+            .join("mnt")
+            .join("fast-disk")
+            .join("custom-wal-root");
+        assert!(!custom_wal_root.parent().unwrap().exists());
+
+        let sink = noop();
+        let result = migrate_workspace(tmp.path(), &custom_wal_root, &sink);
+        assert!(
+            matches!(result, Ok(MigrationOutcome::Migrated)),
+            "migration failed: {result:?}"
+        );
+
+        assert!(
+            custom_wal_root.join("001.jsonl").exists(),
+            "legacy WAL file must land at the configured wal_root even when its parent \
+             directories didn't exist yet"
         );
     }
 
