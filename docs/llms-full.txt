@@ -1414,7 +1414,11 @@ have it change the consumer's own behavior (issue #446).
     referencing a group that *is* split this way, the rebuild refuses outright with an explicit
     error naming the group — this situation cannot be resolved safely in either direction
     (clearing the whole group risks destroying the independent stream's data; clearing only the
-    replayed rows risks a duplicate-key collision replaying the mutating line). The remedy is the
+    replayed rows risks a duplicate-key collision replaying the mutating line). The rebuild
+    refuses the same way, for a different reason, when the rows this replay would clear for a
+    split group currently have a live relationship in the DB pointing into that same group's rows
+    that live only in the other, un-replayed stream — clearing just the replayed rows would
+    silently sever that relationship, since nothing recreates it. The remedy in either case is the
     same as the plain non-empty-group refusal above: clear the named group manually first with
     `knowledge_delete_by_group`, or consolidate its WAL streams before rebuilding. See
     [ADR-0432](adr/0432-force-clear-guard-scans-wal-content-group-ids.md)'s "Amendment (issue
