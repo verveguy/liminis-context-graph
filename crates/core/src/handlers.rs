@@ -517,6 +517,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // its generation is unknown" — both previously collapsed to `generation: null`
                     // above with no way to tell them apart.
                     "generation_status": wal_generation_status(fields.wal_max_seq, fields.wal_generation.as_deref()),
+                    // issue #456 FR-001: distinguishes "empty because there's nothing" from
+                    // "empty because it hasn't been replayed" — both previously required a
+                    // caller to compare applied_seq/max_seq itself.
+                    "hydration_status": wal_hydration_status(fields.wal_applied_seq, fields.wal_max_seq),
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
@@ -578,6 +582,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "max_seq": wal_max_seq,
                 "generation": wal_generation,
                 "generation_status": wal_generation_status(wal_max_seq, wal_generation.as_deref()),
+                "hydration_status": wal_hydration_status(wal_applied_seq, wal_max_seq),
             },
             "wal_groups": wal_group_positions_json(&wal_group_positions),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
@@ -618,6 +623,32 @@ fn wal_generation_status(max_seq: Option<u64>, generation: Option<&str>) -> &'st
     }
 }
 
+/// Classifies a group's hydration state (issue #456 FR-001) by comparing the DB-derived
+/// `applied_seq` against the WAL-derived `max_seq` — the same two values `knowledge_status`
+/// already reads, never previously compared. `"not_applicable"` when the group has no WAL
+/// content at all (`max_seq` zero or absent — a group with no content has nothing to be behind
+/// on, regardless of `applied_seq`); `"wal_ahead"` when the WAL holds content the DB has not
+/// applied yet (an absent/never-backfilled `applied_seq` is treated as `0` for this comparison);
+/// `"hydrated"` when `applied_seq` is at or beyond `max_seq`, including the `applied_seq >
+/// max_seq` case (e.g. following a generation reset elsewhere) which is deliberately not a
+/// distinct anomaly state — see the issue's Assumptions.
+///
+/// Pure classification of values `handle_knowledge_status` already reads — no new filesystem or
+/// database I/O (FR-006).
+fn wal_hydration_status(applied_seq: Option<u64>, max_seq: Option<u64>) -> &'static str {
+    match max_seq {
+        None | Some(0) => "not_applicable",
+        Some(max) => {
+            let applied = applied_seq.unwrap_or(0);
+            if applied >= max {
+                "hydrated"
+            } else {
+                "wal_ahead"
+            }
+        }
+    }
+}
+
 /// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
 /// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
 /// JSON map. `generation_status` (issue #414 FR-001) is a sibling field alongside `generation`,
@@ -634,6 +665,7 @@ fn wal_group_positions_json(positions: &[WalGroupPosition]) -> Value {
                     "max_seq": max,
                     "generation": generation,
                     "generation_status": wal_generation_status(*max, generation.as_deref()),
+                    "hydration_status": wal_hydration_status(*applied, *max),
                 }),
             )
         })
@@ -4738,5 +4770,36 @@ mod tests {
         // it has no content yet (max_seq: None) — this must report "known", not
         // "not_applicable", since a generation genuinely is recorded.
         assert_eq!(wal_generation_status(None, Some("gen-a")), "known");
+    }
+
+    // issue #456 FR-001: the three hydration states a caller must be able to distinguish.
+    #[test]
+    fn wal_hydration_status_not_applicable_when_no_wal_content() {
+        assert_eq!(wal_hydration_status(None, None), "not_applicable");
+        assert_eq!(wal_hydration_status(Some(0), None), "not_applicable");
+        assert_eq!(wal_hydration_status(None, Some(0)), "not_applicable");
+        assert_eq!(wal_hydration_status(Some(5), Some(0)), "not_applicable");
+    }
+
+    #[test]
+    fn wal_hydration_status_wal_ahead_when_applied_never_backfilled() {
+        assert_eq!(wal_hydration_status(None, Some(5)), "wal_ahead");
+    }
+
+    #[test]
+    fn wal_hydration_status_wal_ahead_when_applied_lags_max() {
+        assert_eq!(wal_hydration_status(Some(2), Some(5)), "wal_ahead");
+    }
+
+    #[test]
+    fn wal_hydration_status_hydrated_when_applied_matches_max() {
+        assert_eq!(wal_hydration_status(Some(5), Some(5)), "hydrated");
+    }
+
+    #[test]
+    fn wal_hydration_status_hydrated_when_applied_exceeds_max() {
+        // applied_seq > max_seq (e.g. following a generation reset elsewhere) is treated as
+        // "hydrated", not a distinct anomaly state — see the issue's Assumptions.
+        assert_eq!(wal_hydration_status(Some(9), Some(5)), "hydrated");
     }
 }

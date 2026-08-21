@@ -1165,3 +1165,154 @@ async fn dry_run_mismatch_is_report_only_and_does_not_mutate() {
     assert_eq!(pos.applied_seq, Some(1));
     assert_eq!(pos.generation.as_deref(), Some("gen-1"));
 }
+
+// ── issue #456 FR-001/FR-007: hydration_status distinguishes empty from unhydrated ────────────
+
+#[tokio::test]
+async fn fr001_hydration_status_not_applicable_for_group_with_no_wal_content() {
+    const G: &str = "g-hydration-empty";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    // A group directory exists (so it appears in wal_groups) but holds no *.jsonl content — a
+    // freshly-minted, still-empty stream. max_seq is None, so there is nothing to be "behind" on.
+    set_group_generation(&wal_root, G, "gen-a");
+
+    let state = make_state_with_wal(db, wal_root.clone());
+    let status_v = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(status_v.get("error").is_none(), "{status_v}");
+
+    let groups = &status_v["result"]["wal_groups"];
+    assert_eq!(
+        groups[G]["hydration_status"], "not_applicable",
+        "a group with no WAL content has nothing to be behind on: {status_v}"
+    );
+}
+
+#[tokio::test]
+async fn fr001_hydration_status_wal_ahead_when_applied_seq_never_backfilled() {
+    const G: &str = "g-hydration-wal-ahead";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    // Content written directly to the WAL directory, bypassing episode ingestion entirely, so
+    // applied_seq has never been backfilled before this, the group's very first knowledge_status
+    // call (Edge Cases: the signal must be correct on that first call, not only on a second one).
+    write_group_wal(
+        &wal_root,
+        G,
+        "0000.jsonl",
+        &[
+            entity_wal_line(0, "wa-0", "wa-0", G),
+            entity_wal_line(1, "wa-1", "wa-1", G),
+        ],
+    );
+
+    let state = make_state_with_wal(db, wal_root.clone());
+    let status_v = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(status_v.get("error").is_none(), "{status_v}");
+
+    let groups = &status_v["result"]["wal_groups"];
+    assert_eq!(
+        groups[G]["hydration_status"], "wal_ahead",
+        "an empty DB beside a populated WAL must not be reported as authoritative-empty: {status_v}"
+    );
+}
+
+#[tokio::test]
+async fn fr001_hydration_status_hydrated_when_applied_seq_reaches_max_seq() {
+    const G: &str = "g-hydration-hydrated";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    write_group_wal(
+        &wal_root,
+        G,
+        "0000.jsonl",
+        &[
+            entity_wal_line(0, "hy-0", "hy-0", G),
+            entity_wal_line(1, "hy-1", "hy-1", G),
+        ],
+    );
+
+    let state = make_state_with_wal(db, wal_root.clone());
+    let replay_v =
+        dispatch_rebuild_sync(1, json!({"group_id": G, "from_seq": 0}), Arc::clone(&state)).await;
+    assert_eq!(replay_v["result"]["success"], true, "{replay_v}");
+
+    let status_v = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(status_v.get("error").is_none(), "{status_v}");
+
+    let groups = &status_v["result"]["wal_groups"];
+    assert_eq!(
+        groups[G]["hydration_status"], "hydrated",
+        "a group fully caught up with its WAL must report hydrated: {status_v}"
+    );
+}
+
+#[tokio::test]
+async fn fr007_hydration_status_reports_all_three_states_independently_in_one_call() {
+    const EMPTY: &str = "g-tri-empty";
+    const WAL_AHEAD: &str = "g-tri-wal-ahead";
+    const HYDRATED: &str = "g-tri-hydrated";
+    let (db, _db_dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let wal_root = wal_dir.path().to_path_buf();
+
+    set_group_generation(&wal_root, EMPTY, "gen-empty");
+    // Two lines each (seq 0 and 1) so max_seq is nonzero — a single seq-0 line would leave
+    // max_seq at 0, which FR-001(c) defines as indistinguishable from "no content at all".
+    write_group_wal(
+        &wal_root,
+        WAL_AHEAD,
+        "0000.jsonl",
+        &[
+            entity_wal_line(0, "wa-0", "wa-0", WAL_AHEAD),
+            entity_wal_line(1, "wa-1", "wa-1", WAL_AHEAD),
+        ],
+    );
+    write_group_wal(
+        &wal_root,
+        HYDRATED,
+        "0000.jsonl",
+        &[
+            entity_wal_line(0, "hy-0", "hy-0", HYDRATED),
+            entity_wal_line(1, "hy-1", "hy-1", HYDRATED),
+        ],
+    );
+
+    let state = make_state_with_wal(db, wal_root.clone());
+    let replay_v = dispatch_rebuild_sync(
+        1,
+        json!({"group_id": HYDRATED, "from_seq": 0}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(replay_v["result"]["success"], true, "{replay_v}");
+
+    // Same workspace state exercised against handle_health_check (FR-005/SC-002): this issue
+    // must not change the healthy/degraded determination in any way.
+    let health_v = dispatch_val(2, "health_check", json!({}), Arc::clone(&state)).await;
+    assert_eq!(health_v["result"]["healthy"], true, "{health_v}");
+    assert_eq!(health_v["result"]["state"], "healthy", "{health_v}");
+
+    let status_v = dispatch_val(3, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert!(status_v.get("error").is_none(), "{status_v}");
+
+    let groups = &status_v["result"]["wal_groups"];
+    assert_eq!(
+        groups[EMPTY]["hydration_status"], "not_applicable",
+        "{status_v}"
+    );
+    assert_eq!(
+        groups[WAL_AHEAD]["hydration_status"], "wal_ahead",
+        "{status_v}"
+    );
+    assert_eq!(
+        groups[HYDRATED]["hydration_status"], "hydrated",
+        "{status_v}"
+    );
+}
