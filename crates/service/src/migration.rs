@@ -348,10 +348,23 @@ fn count_entries(dir: &Path) -> usize {
 }
 
 fn move_path(from: &Path, to: &Path, sink: &dyn TelemetrySink) -> Result<(), MigrationError> {
-    std::fs::rename(from, to).map_err(|e| MigrationError::MoveFile {
-        path: from.to_path_buf(),
-        source: e,
-    })?;
+    match std::fs::rename(from, to) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            // Every other `move_path` destination in this file stays under the workspace's own
+            // `.lcg/` tree, so this branch is unreachable for them in practice. Step 4's
+            // caller-configured `wal_root` (issue #442) can legitimately be a separate volume —
+            // the spec's own motivating example — so `rename`'s same-filesystem requirement no
+            // longer holds unconditionally.
+            copy_and_remove_cross_device(from, to)?;
+        }
+        Err(e) => {
+            return Err(MigrationError::MoveFile {
+                path: from.to_path_buf(),
+                source: e,
+            });
+        }
+    }
     sink.emit(TelemetryEvent::WorkspaceMigration {
         ts_ms: now_ms(),
         phase: "step_moved".to_string(),
@@ -360,6 +373,50 @@ fn move_path(from: &Path, to: &Path, sink: &dyn TelemetrySink) -> Result<(), Mig
             "to": to.display().to_string(),
         })),
     });
+    Ok(())
+}
+
+/// Fallback for [`move_path`] when `from` and `to` are on different filesystems and `rename`
+/// fails with `EXDEV`. Copies `from` (a file, or a directory recursively) to `to`, then removes
+/// `from`. Not atomic the way `rename` is — a crash mid-copy can leave a partial copy at `to` —
+/// but `move_path`'s callers only reach this path when `to` didn't already exist (Step 4's fast
+/// path checks `!wal_root.exists()` first), so a partial copy is simply incomplete, not
+/// corrupt, and a retry starts the copy over.
+fn copy_and_remove_cross_device(from: &Path, to: &Path) -> Result<(), MigrationError> {
+    let err = |path: &Path, source: io::Error| MigrationError::MoveFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    let meta = std::fs::symlink_metadata(from).map_err(|e| err(from, e))?;
+    if meta.is_dir() {
+        copy_dir_recursive(from, to)?;
+        std::fs::remove_dir_all(from).map_err(|e| err(from, e))?;
+    } else {
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| err(parent, e))?;
+        }
+        std::fs::copy(from, to).map_err(|e| err(from, e))?;
+        std::fs::remove_file(from).map_err(|e| err(from, e))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), MigrationError> {
+    let err = |path: &Path, source: io::Error| MigrationError::MoveFile {
+        path: path.to_path_buf(),
+        source,
+    };
+    std::fs::create_dir_all(to).map_err(|e| err(to, e))?;
+    for entry in std::fs::read_dir(from).map_err(|e| err(from, e))? {
+        let entry = entry.map_err(|e| err(from, e))?;
+        let file_type = entry.file_type().map_err(|e| err(&entry.path(), e))?;
+        let dest = to.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest).map_err(|e| err(&entry.path(), e))?;
+        }
+    }
     Ok(())
 }
 
@@ -381,11 +438,19 @@ fn merge_wal_dir_into_root(
     wal_root: &Path,
     sink: &dyn TelemetrySink,
 ) -> Result<(), MigrationError> {
-    let entries = std::fs::read_dir(legacy_wal_dir).map_err(|e| MigrationError::MoveFile {
+    let read_err = |e: io::Error| MigrationError::MoveFile {
         path: legacy_wal_dir.to_path_buf(),
         source: e,
-    })?;
-    for entry in entries.flatten() {
+    };
+    // Collect eagerly (not `.flatten()`) so a per-entry `read_dir` error — e.g. a permission
+    // problem on one file — surfaces immediately as a clear error here, rather than silently
+    // skipping that entry and leaving it to be discovered later only as a confusing `ENOTEMPTY`
+    // from Step 9's `remove_dir(".graphiti")`.
+    let entries = std::fs::read_dir(legacy_wal_dir)
+        .map_err(read_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(read_err)?;
+    for entry in entries {
         let dest = wal_root.join(entry.file_name());
         if dest.exists() {
             // Leave in place; see doc comment above on why a collision isn't auto-resolved.
@@ -393,9 +458,15 @@ fn merge_wal_dir_into_root(
         }
         move_path(&entry.path(), &dest, sink)?;
     }
-    // Best-effort: only succeeds if every entry above was actually moved (i.e. no collision
-    // was left behind). If it fails because the dir is non-empty, Step 9 will fail loudly.
-    let _ = std::fs::remove_dir(legacy_wal_dir);
+    // Only succeeds if every entry above was actually moved (i.e. no collision was left
+    // behind) — that expected `DirectoryNotEmpty` case is left for Step 9 to fail loudly on.
+    // Any other error (e.g. a permission problem removing the now-empty directory) is
+    // propagated here instead, where it's clearly attributable to this step.
+    match std::fs::remove_dir(legacy_wal_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+        Err(e) => return Err(read_err(e)),
+    }
     Ok(())
 }
 
@@ -949,6 +1020,48 @@ mod tests {
         assert!(
             !legacy.exists(),
             ".graphiti/ must be removed after migration"
+        );
+    }
+
+    // `copy_and_remove_cross_device`/`copy_dir_recursive` are the fallback `move_path` takes on
+    // `EXDEV` (issue #442 review finding: `wal_root` can now be a separate volume, where a plain
+    // `rename` fails). Genuinely triggering `EXDEV` needs two real filesystems/mounts, which
+    // isn't portable to exercise in CI — so these tests call the copy-then-remove helpers
+    // directly (same-device) to verify their own correctness in isolation, on the assumption
+    // that `move_path`'s `ErrorKind::CrossesDevices` dispatch to them is a one-line, obviously
+    // correct match arm.
+    #[test]
+    fn copy_and_remove_cross_device_moves_a_file() {
+        let tmp = TempDir::new().unwrap();
+        let from = tmp.path().join("src.txt");
+        std::fs::write(&from, b"payload").unwrap();
+        let to = tmp.path().join("nested").join("dst.txt");
+
+        copy_and_remove_cross_device(&from, &to).unwrap();
+
+        assert!(!from.exists(), "source file must be removed after copy");
+        assert_eq!(std::fs::read(&to).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn copy_and_remove_cross_device_moves_a_directory_tree() {
+        let tmp = TempDir::new().unwrap();
+        let from = tmp.path().join("src-dir");
+        std::fs::create_dir_all(from.join("nested")).unwrap();
+        std::fs::write(from.join("a.txt"), b"a").unwrap();
+        std::fs::write(from.join("nested").join("b.txt"), b"b").unwrap();
+        let to = tmp.path().join("dst-dir");
+
+        copy_and_remove_cross_device(&from, &to).unwrap();
+
+        assert!(
+            !from.exists(),
+            "source directory must be removed after copy"
+        );
+        assert_eq!(std::fs::read(to.join("a.txt")).unwrap(), b"a");
+        assert_eq!(
+            std::fs::read(to.join("nested").join("b.txt")).unwrap(),
+            b"b"
         );
     }
 
