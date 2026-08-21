@@ -82,5 +82,5 @@ As a developer integrating a new client against the `liminis-context-graph` serv
 - Failing run: https://github.com/verveguy/liminis-context-graph/actions/runs/32129112344 (job: `test (ubuntu-latest)`, step: `cargo test --release (restored build; captured for recompile-regression check)`)
 - Related: #429 (original fix for the embedder-timing failure mode, closed), #430 (the gate-arming issue that surfaced this flake for the first time since #429 landed), #437 (startup migration-ordering issue whose branch landed commit `068f93a`, which fixes this issue's specific test failure), #456 (constrains `handle_health_check`'s `healthy` semantics independently via its FR-004)
 - `docs/adr/0009-degraded-mode-startup-recovery.md` — the degraded-mode bind-early rationale this issue's fix must not weaken
-- `crates/service/src/main.rs:543` (`migrate_wal_root_if_needed`), `crates/service/src/main.rs:565` (`Db::open`), `crates/service/src/handlers.rs:196-215` (`handle_health_check`)
+- `crates/service/src/main.rs:543` (`migrate_wal_root_if_needed`), `crates/service/src/main.rs:565` (`Db::open`), `crates/core/src/handlers.rs:196-215` (`handle_health_check`)
 - `liminis-app/src/main/context-graph-lifecycle.ts:345,609` (`waitForServiceReady`) — existing correct consumer pattern, confirmed during specification
