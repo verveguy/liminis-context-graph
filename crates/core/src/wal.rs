@@ -836,6 +836,58 @@ pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
     None
 }
 
+/// Scans every `*.jsonl` file in `wal_dir` and returns the distinct `group_id` values found in
+/// each line's `params` object — the set of groups this WAL directory's content actually targets
+/// when replayed, which is not always the same as the single group_id the directory happens to be
+/// stored under (see the `migrate_wal_root_if_needed` docs in `wal_group.rs`: a pre-#378 flat
+/// stream can carry rows for a group_id other than the directory it was relocated into).
+///
+/// Unlike `first_seq_in_file`, this reads every line of every file rather than stopping at the
+/// first parseable one, since distinct lines can carry distinct `group_id` values (a legacy
+/// stream that mixed multiple groups before per-group directories existed). Tolerates a corrupt
+/// line, a line whose `params.group_id` is missing or not a string, and an unreadable file or
+/// directory by skipping it and continuing — mirroring `first_seq_in_file`'s tolerance model, so
+/// one malformed row can't turn this guard into a hard failure for the whole rebuild.
+pub(crate) fn scan_wal_content_group_ids(wal_dir: &Path) -> std::collections::HashSet<String> {
+    let mut group_ids = std::collections::HashSet::new();
+
+    let entries = match fs::read_dir(wal_dir) {
+        Ok(entries) => entries,
+        Err(_) => return group_ids,
+    };
+    let files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+        .collect();
+
+    for path in &files {
+        let file = match fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let reader = std::io::BufReader::new(file);
+        for line in std::io::BufRead::lines(reader) {
+            let raw = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(wal_line) = serde_json::from_str::<WalLine>(trimmed) else {
+                continue;
+            };
+            if let Some(gid) = wal_line.params.get("group_id").and_then(|v| v.as_str()) {
+                group_ids.insert(gid.to_string());
+            }
+        }
+    }
+
+    group_ids
+}
+
 /// Bytes read from the tail of a WAL file before falling back to a full read. Generous even
 /// for a line carrying a large embedding vector; chosen so `scan_max_seq`/`wal_max_seq` stay
 /// cheap to call per `knowledge_status` request at the ~43,820-file scale ADR-0026 documents,
@@ -1773,5 +1825,88 @@ mod tests {
 
         let writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
         assert_eq!(writer.generation(), Some(expected.as_str()));
+    }
+
+    fn write_wal_line_with_group(dir: &Path, file_name: &str, seq: u64, group_id: &str) {
+        let line = WalLine {
+            seq,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "x", "group_id": group_id }),
+        };
+        fs::write(
+            dir.join(file_name),
+            format!("{}\n", serde_json::to_string(&line).unwrap()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_wal_content_group_ids_merges_across_multiple_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_wal_line_with_group(tmp.path(), "0000.jsonl", 0, "apollo_program");
+        write_wal_line_with_group(tmp.path(), "0001.jsonl", 1, "liminis");
+
+        let mut ids: Vec<String> = scan_wal_content_group_ids(tmp.path()).into_iter().collect();
+        ids.sort();
+        assert_eq!(
+            ids,
+            vec!["apollo_program".to_string(), "liminis".to_string()]
+        );
+    }
+
+    #[test]
+    fn scan_wal_content_group_ids_skips_malformed_lines_without_stopping() {
+        let tmp = tempfile::tempdir().unwrap();
+        let line = WalLine {
+            seq: 1,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "x", "group_id": "apollo_program" }),
+        };
+        let content = format!(
+            "not valid json\n{}\n",
+            serde_json::to_string(&line).unwrap()
+        );
+        fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
+
+        let ids = scan_wal_content_group_ids(tmp.path());
+        assert_eq!(ids, ["apollo_program".to_string()].into_iter().collect());
+    }
+
+    #[test]
+    fn scan_wal_content_group_ids_ignores_missing_or_non_string_group_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let no_group = WalLine {
+            seq: 0,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "x" }),
+        };
+        let non_string_group = WalLine {
+            seq: 1,
+            ts: "2026-08-05T00:00:00.000000+00:00".to_string(),
+            db: "default".to_string(),
+            cypher: "MERGE (n:Entity {uuid: $uuid})".to_string(),
+            params: serde_json::json!({ "uuid": "y", "group_id": 42 }),
+        };
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&no_group).unwrap(),
+            serde_json::to_string(&non_string_group).unwrap()
+        );
+        fs::write(tmp.path().join("0000.jsonl"), content).unwrap();
+
+        assert!(scan_wal_content_group_ids(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn scan_wal_content_group_ids_is_empty_for_missing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        assert!(scan_wal_content_group_ids(&missing).is_empty());
     }
 }
