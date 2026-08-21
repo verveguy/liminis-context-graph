@@ -111,8 +111,16 @@ have it change the consumer's own behavior (issue #446).
   pass `force_clear: true` to clear that group's data automatically first (issue #378: this
   clears only the target group via the same primitive `knowledge_delete_by_group` uses, not the
   whole database file), or clear it yourself with `knowledge_delete_by_group` before calling
-  rebuild. Rebuilding one group never touches another group's `WalPosition`, WAL directory, or
-  data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
+  rebuild. This check and clear are not scoped only to `group_id` (the WAL directory's own owning
+  group) — they cover every `group_id` actually referenced by that directory's own WAL content
+  (issue #432). This matters for a directory populated by `migrate_wal_root_if_needed` from a
+  pre-#378 flat/legacy stream (above): such a stream's rows can carry a `group_id` different from
+  the directory it was relocated into, and the guard/clear must follow the content, not the
+  directory, or a duplicate-key collision against that embedded group would go undetected. A
+  rebuild never touches another group's WAL *directory* — only the graph data and `WalPosition` of
+  groups actually referenced by the directory being replayed are ever affected; `WalPosition` is
+  reset only for `group_id` itself, since only it has a physical WAL directory tied to this
+  replay. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
   indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
   afterward — `knowledge_build_indices` is not normally required.
 - **Unknown-generation refusal (issue #414).** Before comparing anything, `knowledge_rebuild_from_wal`
