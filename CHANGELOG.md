@@ -38,7 +38,7 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `"not_applicable"` (the group has no WAL content at all). Previously, a genuinely empty group and
   a group whose WAL was simply ahead of the DB were indistinguishable unless a caller manually
   compared `applied_seq` against `max_seq` itself. Purely additive — `applied_seq`/`max_seq` are
-  unchanged, and `handle_health`'s `healthy`/`degraded` determination is unaffected. (#456)
+  unchanged, and `health_check`'s `healthy`/`degraded` determination is unaffected. (#456)
 
 ## [0.13.3] - Unreleased
 

@@ -367,13 +367,29 @@ treated as `0` for the comparison:
 | `"wal_ahead"` | the WAL holds content the database has not applied (`max_seq` is nonzero and exceeds the effective `applied_seq`) — this is the state that motivated the issue: a wiped or fresh database beside a populated WAL directory must not be mistaken for an authoritative empty corpus |
 | `"hydrated"` | the database is caught up with its WAL (`applied_seq >= max_seq`, and `max_seq` is nonzero) — this includes `applied_seq > max_seq` (e.g. following a generation reset elsewhere), which is deliberately classified as caught-up rather than as a distinct anomaly state |
 
-`hydration_status` does not change `handle_health`'s `healthy`/`degraded` determination in any
+**Known narrow limitation**: `max_seq` is 0-indexed (a group's very first WAL write has `seq: 0`),
+so a group whose entire WAL history is exactly one entry has `max_seq == 0` — indistinguishable,
+via `max_seq` alone, from "no content at all," and reported as `"not_applicable"`. This is the one
+case where a wiped-DB-beside-a-populated-WAL condition (the state this field exists to surface) can
+go unreported; it resolves itself once the group's WAL receives a second write. See the
+`wal_hydration_status` doc comment in `handlers.rs` for why this can't be resolved by classifying
+`max_seq == 0` as content-bearing instead — `applied_seq == 0` is itself an overloaded sentinel for
+both "nothing ever applied" and "genuinely caught up through seq 0," so doing so would trade this
+narrow false `"not_applicable"` for an equally narrow but more actively misleading false
+`"hydrated"` in the same colliding case.
+
+`hydration_status` does not change `health_check`'s `healthy`/`degraded` determination in any
 way: a `wal_ahead` group is a normal, fully-queryable state from the process's own point of view
 (it can still serve reads over whatever content it does hold) — the hydration question is per-group
 data state, not process health, and is answered here rather than by `health_check`.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
-comparison (`hydration_status` above is the documented shortcut for this same comparison):
+comparison. `hydration_status` above is a documented shortcut for the common case, but it treats
+an absent/never-backfilled `applied_seq` the same as `0` (per FR-001(b)); it does not distinguish
+that from the `applied_seq: null` "position unknown, full rebuild required" row below, which is a
+more serious, overriding condition. A caller that needs to detect the unknown-position case
+specifically must still check `applied_seq` for `null` itself — `hydration_status` alone is not a
+complete substitute for this table:
 
 | `applied_seq` | `max_seq` | Meaning | Action |
 |---|---|---|---|

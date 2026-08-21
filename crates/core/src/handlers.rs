@@ -635,6 +635,23 @@ fn wal_generation_status(max_seq: Option<u64>, generation: Option<&str>) -> &'st
 ///
 /// Pure classification of values `handle_knowledge_status` already reads — no new filesystem or
 /// database I/O (FR-006).
+///
+/// **Known narrow limitation**: `wal_max_seq` reports the *literal* highest seq value present
+/// (0-indexed — a group's very first-ever WAL write has `seq: 0`, not `seq: 1`; see
+/// `wal_max_seq_reports_the_literal_highest_seq`), so a group whose entire WAL history is
+/// exactly one entry has `max_seq == Some(0)`. That is indistinguishable, via `max_seq` alone,
+/// from "no WAL content at all" — matching FR-001(c)'s literal text and `wal_generation_status`'s
+/// sibling `(None, None)` case being the only `"not_applicable"` state there. This collapses to
+/// `"not_applicable"` here rather than comparing against `applied_seq`, because `applied_seq == 0`
+/// is *itself* an overloaded sentinel in this codebase (`backfill_applied_seq_if_absent`,
+/// `recovery.rs`) — it means both "genuinely fresh, nothing ever applied" and "genuinely caught
+/// up through WAL seq 0" and the two are indistinguishable once backfilled. Treating `Some(0)`
+/// as content-bearing here would not resolve that ambiguity, only move it from a false
+/// `"not_applicable"` to a false `"hydrated"` for the same colliding case — the latter is a
+/// stronger, more actively misleading claim for exactly the wiped-DB scenario this field exists
+/// to catch (see `wal_hydration_status_not_applicable_for_single_entry_wal_is_a_known_limitation`
+/// below). The window is narrow and self-resolving: it applies only until a group's WAL receives
+/// a second write, after which `max_seq` and `applied_seq` diverge normally.
 fn wal_hydration_status(applied_seq: Option<u64>, max_seq: Option<u64>) -> &'static str {
     match max_seq {
         None | Some(0) => "not_applicable",
@@ -4801,5 +4818,17 @@ mod tests {
         // applied_seq > max_seq (e.g. following a generation reset elsewhere) is treated as
         // "hydrated", not a distinct anomaly state — see the issue's Assumptions.
         assert_eq!(wal_hydration_status(Some(9), Some(5)), "hydrated");
+    }
+
+    #[test]
+    fn wal_hydration_status_not_applicable_for_single_entry_wal_is_a_known_limitation() {
+        // A group whose entire WAL history is exactly one entry has max_seq == Some(0) (seq is
+        // 0-indexed), which is indistinguishable via max_seq alone from "no content at all" —
+        // and a genuinely fresh group's backfilled applied_seq is also Some(0), the same value a
+        // genuinely-caught-up group would have. Neither "not_applicable" nor "hydrated" is
+        // correct for the colliding case; this asserts the deliberate, documented choice (see
+        // wal_hydration_status's doc comment) rather than leaving it as an unverified gap.
+        assert_eq!(wal_hydration_status(Some(0), Some(0)), "not_applicable");
+        assert_eq!(wal_hydration_status(None, Some(0)), "not_applicable");
     }
 }

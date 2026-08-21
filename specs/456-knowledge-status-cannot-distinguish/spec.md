@@ -41,7 +41,7 @@ this state to unhealthy converts a condition that needs an operator or consumer 
 crash-loop, and removes from rotation a service that is fully able to serve reads. `healthy` answers
 "can this process serve requests?" — and it can. The hydration question is per-group data state, and
 belongs where the two numbers being compared already live: `knowledge_status`'s per-group WAL
-reporting, not `handle_health`.
+reporting, not `health_check`.
 
 **Downstream motivation.** This blocks the orac project: a downstream consumer needs to distinguish
 "empty" from "not yet hydrated" to avoid propagating an empty mirror. It was reported while hardening
@@ -81,7 +81,7 @@ of the other two.
 4. **Given** a single workspace containing groups A, B, and C from Scenarios 1-3 all at once, **When**
    `knowledge_status` is called once, **Then** the response reports three different values, one per
    group, each correct independently of the others.
-5. **Given** any of the workspace states in Scenarios 1-4, **When** `handle_health` is called, **Then**
+5. **Given** any of the workspace states in Scenarios 1-4, **When** `health_check` is called, **Then**
    it returns exactly the same `healthy`/`degraded` value it would have returned before this change —
    this change does not alter that determination in any case.
 
@@ -152,7 +152,7 @@ source code.
   `generation_status` fields in the flat `wal` object (which reflects the default group), mirroring
   exactly where `generation_status` was added by #414 — both the flat `wal` object and every
   `wal_groups[*]` entry, not one or the other.
-- **FR-005**: `handle_health`'s `healthy` / `degraded` determination MUST NOT change in any case as a
+- **FR-005**: `health_check`'s `healthy` / `degraded` determination MUST NOT change in any case as a
   result of this issue. See *Why `healthy` must not move* in Background — this is a hard constraint,
   not a preference.
 - **FR-006**: Determining `hydration_status` MUST NOT perform a WAL replay, a database write, or any
@@ -182,7 +182,7 @@ source code.
 - **SC-001**: Given a wiped database beside a populated WAL for group A, `knowledge_status` reports A's
   inconsistency explicitly (`hydration_status: "wal_ahead"`), and a caller can distinguish it from a
   genuinely empty group without independently comparing sequence numbers itself.
-- **SC-002**: `handle_health` returns exactly what it does today, unchanged, in every workspace state
+- **SC-002**: `health_check` returns exactly what it does today, unchanged, in every workspace state
   exercised by this issue's tests.
 - **SC-003**: A workspace with one hydrated group, one unhydrated (`wal_ahead`) group, and one
   genuinely empty group reports three different `hydration_status` values in a single `knowledge_status`
@@ -215,7 +215,7 @@ source code.
 - **Refusing or erroring reads while unhydrated** (#455's option 3). Since #413 an omitted `group_ids`
   means all groups, so refusing a read because one group is unhydrated would break queries over groups
   that are fine.
-- **Changing `handle_health`'s `healthy`/`degraded` semantics** in any way — see FR-005 and Background.
+- **Changing `health_check`'s `healthy`/`degraded` semantics** in any way — see FR-005 and Background.
 - **A distinct anomaly state for `applied_seq > max_seq`** — classified as `hydrated` per Assumptions,
   not surfaced separately.
 - **Any new stored state.** `hydration_status` is computed on read from values already read; nothing
