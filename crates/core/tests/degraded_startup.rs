@@ -416,15 +416,15 @@ async fn test_recovery_rebuild_from_workspace_wal_recomputes_embeddings() {
 
     let db = state.db.load_full().expect("db must be reopened");
     let conn = db.connect().unwrap();
-    let rows = conn
-        .cypher_query("MATCH (n:Entity {uuid: 'entity-0'}) RETURN n.name_embedding")
-        .expect("cypher ok");
-    assert!(!rows.is_empty(), "entity-0 must exist");
-    let emb_str = &rows[0][0];
-    assert!(
-        emb_str.contains('9') && emb_str.contains('8'),
+    let entity = conn
+        .get_entity_by_uuid("entity-0")
+        .expect("cypher ok")
+        .expect("entity-0 must exist");
+    assert_eq!(
+        entity.name_embedding,
+        vec![9.0f32, 8.0, 7.0, 6.0],
         "name_embedding should reflect the recomputed vector [9,8,7,6], not the WAL's stored \
-         [1,0,0,0], got: {emb_str:?}"
+         [1,0,0,0]"
     );
 
     // FR-007: the recomputing embedder's identity is persisted alongside applied_seq.
