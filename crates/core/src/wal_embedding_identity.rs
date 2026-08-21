@@ -153,7 +153,7 @@ pub fn model_identity_mismatch(recorded: Option<(&str, i64)>, running: (&str, i6
 /// mismatch the identity recorded for that WAL (FR-006), or `None` when there's no mismatch
 /// (including "unknown" — no sidecar present, e.g. every WAL written before this issue, FR-009).
 /// Callers decide how to surface the message (`[WAL WARN]` log line, a `knowledge_status` field,
-/// etc.) — this only computes it, so the wording stays consistent across all three replay call
+/// etc.) — this only computes it, so the wording stays consistent across all four replay call
 /// sites without each reimplementing the comparison.
 pub fn check_model_identity_for_replay(wal_dir: &Path, running: (&str, i64)) -> Option<String> {
     let recorded = read_model_identity(wal_dir);

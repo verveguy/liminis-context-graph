@@ -198,6 +198,13 @@ whole issue exists to eliminate everywhere else in the system.
   exercised by this fixture — and the FR-011 benchmark (`real_corpus_replay_perf.rs`) reports the
   hit rate explicitly, with this caveat documented inline, rather than implying the cache "solved"
   replay cost from a single-fixture measurement.
+- **`EmbeddingCache` has no eviction, capacity bound, or TTL** — every distinct `(model, dim,
+  text)` triple embedded over the process's lifetime accumulates permanently, reclaimed only by a
+  restart (flagged by `handarbeit-pruefer` on the PR). Accepted as-is: FR-004 requires the cache
+  be safe to *discard*, not bounded, and its job is avoiding redundant embedder calls within a
+  single rebuild/recovery, not serving as a long-lived store — a capacity bound (e.g. LRU) is a
+  reasonable follow-up if a deployment's distinct-text pool makes this a real concern, not a
+  correctness gap in this issue's scope.
 - **Recompute is not batched.** Each recognized embedding param triggers one `embed()` call; the
   `/v1/embeddings` OpenAI-compatible endpoint the embedder speaks accepts an array of inputs, so
   batching remains available as a follow-up if the measured cost warrants it — out of scope here,
