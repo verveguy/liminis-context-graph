@@ -1006,6 +1006,45 @@ impl<'db> Conn<'db> {
         )
     }
 
+    // ── Row-scoped delete (issue #462) ──────────────────────────────────────────
+    //
+    // Unlike the `*_by_group_ids` trio above, these delete by `uuid` alone, not `group_id` —
+    // used by `group_purge::purge_group_rows` (the split-stream case: a `group_id` referenced
+    // by a `force_clear` rebuild's WAL directory content that also has independent rows in a
+    // separate, un-replayed WAL stream elsewhere). Deleting only the exact `uuid`s this
+    // rebuild's replay will recreate — never the whole group — is what leaves the
+    // independently-maintained rows in the other stream untouched (FR-001), while still
+    // clearing the rows this replay owns so it doesn't hit a duplicate-primary-key collision
+    // (FR-002). Each is already type-scoped by its own `MATCH (x:Label)` clause, so passing a
+    // mixed-type uuid set to all three is a safe no-op superset match — no need to bucket
+    // uuids by node type before calling.
+
+    /// `DETACH DELETE`s every `Entity` node whose `uuid` is in `uuids`, regardless of
+    /// `group_id`. Callers MUST also invalidate/rebuild the `NameIndex` afterward, same as
+    /// [`Self::delete_entities_by_group_ids`].
+    pub fn delete_entities_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids DETACH DELETE e",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `Episodic` node whose `uuid` is in `uuids`.
+    pub fn delete_episodics_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// `DETACH DELETE`s every `RelatesToNode_` node whose `uuid` is in `uuids`.
+    pub fn delete_relates_to_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids DETACH DELETE rn",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
     /// Returns all Entity nodes in the given group_ids, or every group when `group_ids` is
     /// `None`. `Some(&[])` is a real, non-`None` filter and matches no groups.
     pub fn get_entities_by_group_ids(

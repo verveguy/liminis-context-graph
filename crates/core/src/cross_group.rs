@@ -319,10 +319,18 @@ pub fn rebind_pointers(
 /// advances `applied_seq` — so in the common case (purge immediately after pointer creation,
 /// no intervening episode writes elsewhere), the normal gate would see `bound_at_seq >=
 /// current` and silently skip every pointer, leaving them falsely `Bound` at UUIDs that were
-/// just deleted. The purge already guarantees every entity in `source_group_id` is gone before
-/// this runs, so every checked pointer is guaranteed to resolve `Unbound` (never `Bound`) —
-/// forcing the recheck here is safe and is what makes FR-009 (pointers into a purged group are
-/// left `unbound`, not stale) hold.
+/// just deleted. Forcing the recheck here is safe regardless of whether the caller emptied
+/// `source_group_id` entirely ([`purge_groups`](crate::group_purge::purge_groups), the
+/// whole-group case) or only a subset of its rows
+/// ([`purge_group_rows`](crate::group_purge::purge_group_rows), issue #462's row-scoped case):
+/// each candidate pointer is independently re-resolved via [`resolve_endpoint`], a real
+/// existence check against whatever is left in `source_group_id` right now, not an assumption
+/// that the whole group is gone. A whole-group purge happens to guarantee every candidate
+/// resolves `Unbound` (nothing survives to resolve against), which is what makes FR-009
+/// (pointers into a purged group are left `unbound`, not stale) hold in that case; a row-scoped
+/// purge instead re-resolves each candidate against whichever rows the caller *didn't* delete —
+/// a pointer into a still-present uuid simply stays `Bound`, and only a pointer into a deleted
+/// uuid resolves `Unbound`. Both are correct outcomes of the same real per-pointer check.
 pub fn rebind_pointers_forced(
     conn: &Conn,
     source_group_id: &str,

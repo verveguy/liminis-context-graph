@@ -2032,6 +2032,29 @@ fn warn_on_rebuild_seq_gap(
     }
 }
 
+/// The `from_seq: 0`/`force_clear` guard's classification of every group_id referenced by a WAL
+/// directory's content (issue #462), computed once inside `handle_rebuild_from_wal`'s
+/// `spawn_blocking` scan and consumed by the branches immediately below it.
+struct RebuildClearPlan {
+    /// Every referenced group_id (including the request's own) that already has data in the
+    /// DB — used only for the existing dry_run/no-force_clear error messages, unchanged from
+    /// before this fix.
+    non_empty_groups: Vec<String>,
+    /// Non-empty groups safe to purge in full via `group_purge::purge_groups` — the request's
+    /// own group, plus every referenced foreign group_id whose data lives entirely inside the
+    /// directory being replayed (issue #432's original case).
+    whole_group_targets: Vec<String>,
+    /// Non-empty, split foreign groups (rows both inside the replayed directory and in a
+    /// separate, un-replayed stream) that are safe to row-scope-clear: `(group_id,
+    /// create_uuids)`, purged via `group_purge::purge_group_rows`.
+    split_targets: Vec<(String, Vec<String>)>,
+    /// Split foreign groups whose referenced content includes a mutating non-`CREATE` line —
+    /// FR-004's refusal trigger. Always a subset of `non_empty_groups`; a non-empty list here
+    /// refuses the whole rebuild before any clear happens, regardless of `dry_run`/
+    /// `force_clear`.
+    blocked_groups: Vec<String>,
+}
+
 async fn handle_rebuild_from_wal(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -2183,8 +2206,11 @@ async fn handle_rebuild_from_wal(
         let gid_check = group_id.clone();
         let wal_dir_for_scan = wal_dir.clone();
         let to_seq_for_scan = to_seq;
-        let (referenced_group_ids, non_empty_groups) =
-            tokio::task::spawn_blocking(move || -> Result<(Vec<String>, Vec<String>), Error> {
+        let wal_root_for_scan = state.wal_root.clone().ok_or_else(|| {
+            Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string())
+        })?;
+        let plan = tokio::task::spawn_blocking(
+            move || -> Result<RebuildClearPlan, Error> {
                 let conn = db_for_check.connect()?;
                 // The full set of group_ids this rebuild could collide with: every group_id
                 // embedded in the WAL directory's own content, unioned with the request's own
@@ -2192,15 +2218,21 @@ async fn handle_rebuild_from_wal(
                 // content group_id always equals the directory's owning group_id — is checked
                 // exactly as it was before this fix (FR-007). Bounded by to_seq (when set) so a
                 // bounded full rebuild ({from_seq: 0, to_seq: n}) never discovers — and, with
-                // force_clear: true, never purges — a group_id whose only rows live past to_seq,
-                // which the bounded replay that follows would never recreate.
-                let mut referenced: std::collections::HashSet<String> =
-                    crate::wal::scan_wal_content_group_ids(&wal_dir_for_scan, to_seq_for_scan);
-                referenced.insert(gid_check.clone());
-                let mut referenced: Vec<String> = referenced.into_iter().collect();
+                // force_clear: true, never purges — a group_id or row whose only occurrence
+                // lives past to_seq, which the bounded replay that follows would never recreate.
+                let by_group =
+                    crate::wal::scan_wal_content_by_group(&wal_dir_for_scan, to_seq_for_scan);
+                let mut referenced: Vec<String> = by_group.keys().cloned().collect();
+                if !referenced.contains(&gid_check) {
+                    referenced.push(gid_check.clone());
+                }
                 referenced.sort();
 
-                let mut non_empty = Vec::new();
+                let mut non_empty_groups = Vec::new();
+                let mut whole_group_targets = Vec::new();
+                let mut split_targets: Vec<(String, Vec<String>)> = Vec::new();
+                let mut blocked_groups = Vec::new();
+
                 for gid in &referenced {
                     // An unqueryable label (older/partially-initialised schema missing the
                     // table) is treated as empty, not a hard error — this guard's only job is
@@ -2212,36 +2244,108 @@ async fn handle_rebuild_from_wal(
                     let entity = conn.count_entities_by_group_ids(&gids).unwrap_or(0);
                     let episodic = conn.count_episodics_by_group_ids(&gids).unwrap_or(0);
                     let relates = conn.count_relates_to_by_group_ids(&gids).unwrap_or(0);
-                    if entity > 0 || episodic > 0 || relates > 0 {
-                        non_empty.push(gid.clone());
+                    if entity == 0 && episodic == 0 && relates == 0 {
+                        continue;
                     }
-                }
-                Ok((referenced, non_empty))
-            })
-            .await??;
+                    non_empty_groups.push(gid.clone());
 
-        if !non_empty_groups.is_empty() {
+                    // The request's own WAL directory owning group is never split (issue #378:
+                    // `resolve_group_wal_dir` is a deterministic function of group_id, so no
+                    // *other* directory can also be gid_check's own) — always whole-group,
+                    // exactly as before this fix (FR-007).
+                    if *gid == gid_check {
+                        whole_group_targets.push(gid.clone());
+                        continue;
+                    }
+
+                    // Split iff a foreign group_id discovered in this directory's content also
+                    // has its own separate, non-empty WAL directory elsewhere (issue #462) — the
+                    // independent stream this replay will never touch and therefore can never
+                    // recreate (FR-001).
+                    let is_split = match wal_group::group_wal_dir(&wal_root_for_scan, gid) {
+                        Ok(own_dir) => {
+                            own_dir != wal_dir_for_scan
+                                && own_dir.exists()
+                                && has_jsonl_files(&own_dir)
+                        }
+                        Err(_) => false,
+                    };
+                    if !is_split {
+                        // Not split — the migrated-legacy case ADR-0432 exists for: this
+                        // group's entire footprint lives inside the directory being replayed,
+                        // so a full purge is correct and matches #432's original behavior byte
+                        // for byte (FR-002/SC-002).
+                        whole_group_targets.push(gid.clone());
+                        continue;
+                    }
+
+                    let content = by_group.get(gid.as_str()).cloned().unwrap_or_default();
+                    if content.has_unsafe_mutation {
+                        // A mutating (SET/DELETE/DETACH/REMOVE) line referencing a split group
+                        // means this replay can't tell whether it's safe to clear only the rows
+                        // it will recreate or the whole group — surfaced to the caller rather
+                        // than resolved silently in either direction (FR-004).
+                        blocked_groups.push(gid.clone());
+                        continue;
+                    }
+                    split_targets.push((gid.clone(), content.create_uuids.into_iter().collect()));
+                }
+
+                Ok(RebuildClearPlan {
+                    non_empty_groups,
+                    whole_group_targets,
+                    split_targets,
+                    blocked_groups,
+                })
+            },
+        )
+        .await??;
+
+        if !plan.blocked_groups.is_empty() {
+            // Takes priority over the dry_run/force_clear branches below: no value of those
+            // flags makes this situation safe to resolve automatically, so this refusal fires
+            // unconditionally once such a group is discovered, before any clear happens
+            // (FR-004). This is a hard error, not a soft warning, so it's programmatically
+            // observable from the rebuild call's own result (SC-004) without inspecting logs.
+            return Err(Error::Ipc(format!(
+                "knowledge_rebuild_from_wal: group(s) {:?} cannot be safely cleared for this \
+                 rebuild — each has rows in a separate WAL stream this replay will not touch, \
+                 but the content being replayed here also contains a mutating \
+                 (SET/DELETE/DETACH/REMOVE) Cypher line referencing that group, not just \
+                 CREATE. This replay cannot tell whether it is safe to clear only the rows it \
+                 will recreate or the whole group — clearing either risks destroying data \
+                 outside this replay's reach, or leaving stale rows behind to collide with \
+                 replay. Resolve this by clearing the group manually first with \
+                 knowledge_delete_by_group, or by consolidating its WAL streams before \
+                 rebuilding.",
+                plan.blocked_groups
+            )));
+        }
+
+        if !plan.non_empty_groups.is_empty() {
             if dry_run {
                 // A dry run never executes Cypher (see replay_opts), so it can't reproduce the
                 // duplicate-key failure either way — but dry-run is the primary way operators
                 // preview a rebuild before committing to one, so it must surface this problem
                 // rather than silently preview a "clean" run that would fail for real.
                 return Err(Error::Ipc(format!(
-                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contains \
+                    "knowledge_rebuild_from_wal: group(s) {:?} already contains \
                      data and from_seq: 0 is a full rebuild. A dry run cannot preview this \
                      cleanly — replaying against a populated group would fail with a \
                      duplicate-primary-key error for every existing node. Clear the group(s) \
                      first with knowledge_delete_by_group, or re-run with force_clear: true \
-                     (non-dry-run) to clear them automatically before replay."
+                     (non-dry-run) to clear them automatically before replay.",
+                    plan.non_empty_groups
                 )));
             }
             if !force_clear {
                 return Err(Error::Ipc(format!(
-                    "knowledge_rebuild_from_wal: group(s) {non_empty_groups:?} already contains \
+                    "knowledge_rebuild_from_wal: group(s) {:?} already contains \
                      data and from_seq: 0 is a full rebuild. Replaying now would fail with a \
                      duplicate-primary-key error for every existing node. Pass force_clear: true \
                      to clear the group(s) before replaying, or clear them first with \
-                     knowledge_delete_by_group."
+                     knowledge_delete_by_group.",
+                    plan.non_empty_groups
                 )));
             }
             // Refuse to destructively clear the group while a write is in flight — checking
@@ -2259,11 +2363,14 @@ async fn handle_rebuild_from_wal(
             // of those call resync_global_seq_after_rebuild on completion. If
             // clear_groups_for_rebuild ever grows a second caller that doesn't fall through to a
             // replay, that caller needs its own re-derivation call.
-            //
-            // The full referenced set (not just non_empty_groups) is passed here rather than
-            // filtered down further — purging an already-empty group is a documented no-op
-            // (group_purge.rs), so this avoids a redundant second filtering step.
-            clear_groups_for_rebuild(&state, &group_id, &referenced_group_ids, &wal_dir).await?;
+            clear_groups_for_rebuild(
+                &state,
+                &group_id,
+                &plan.whole_group_targets,
+                &plan.split_targets,
+                &wal_dir,
+            )
+            .await?;
         }
     }
 
@@ -2982,27 +3089,33 @@ async fn handle_rebuild_from_wal(
     }))
 }
 
-/// Clears every group in `referenced_group_ids`' own graph data (never any other group's, and
-/// never the WAL directory — the caller is about to replay it) so a `from_seq: 0`
-/// `knowledge_rebuild_from_wal` call can proceed without duplicate-primary-key collisions
-/// against any group actually referenced by `request_group_id`'s WAL directory content (FR-005,
-/// scoped per group by issue #378 FR-006, extended to the full referenced set by issue #432 —
-/// see ADR-0432). `referenced_group_ids` always includes `request_group_id` itself. Unlike the
-/// pre-378 whole-DB-file delete + reopen, this purges via `group_purge::purge_groups` against
-/// the already-open DB — group_purge already handles the forced rebind of any foreign pointer
-/// into the cleared group(s) within the same transaction, so no `state.db` swap or file deletion
-/// is needed here.
+/// Clears every group in `whole_group_targets`' own graph data in full, and exactly the rows
+/// named per group in `split_targets` for the rest (never any other group's, and never the WAL
+/// directory — the caller is about to replay it) so a `from_seq: 0` `knowledge_rebuild_from_wal`
+/// call can proceed without duplicate-primary-key collisions against any group actually
+/// referenced by `request_group_id`'s WAL directory content (FR-005, scoped per group by issue
+/// #378 FR-006, extended to the full referenced set by issue #432 — see ADR-0432 — and split
+/// between whole-group and row-scoped clearing by issue #462, so a group with independent rows
+/// in a separate, un-replayed stream loses only the rows this replay will recreate, never the
+/// rest — FR-001). `whole_group_targets` always includes `request_group_id` itself when it has
+/// data (issue #378: the request's own WAL directory owning group is never split). Unlike the
+/// pre-378 whole-DB-file delete + reopen, this purges via `group_purge::purge_groups`/
+/// `group_purge::purge_group_rows` against the already-open DB — both already handle the forced
+/// rebind of any foreign pointer into the cleared rows within their own transaction, so no
+/// `state.db` swap or file deletion is needed here.
 async fn clear_groups_for_rebuild(
     state: &Arc<AppState>,
     request_group_id: &str,
-    referenced_group_ids: &[String],
+    whole_group_targets: &[String],
+    split_targets: &[(String, Vec<String>)],
     wal_dir: &std::path::Path,
 ) -> Result<(), Error> {
     let _guard = state.write_lock.write().await;
     let db = load_db(state)?;
     let state_c = Arc::clone(state);
     let request_gid = request_group_id.to_string();
-    let referenced: Vec<String> = referenced_group_ids.to_vec();
+    let whole_group_targets: Vec<String> = whole_group_targets.to_vec();
+    let split_targets: Vec<(String, Vec<String>)> = split_targets.to_vec();
     // Read fresh, immediately before the purge: this is the generation request_gid's post-clear
     // position (below) is scoped to, and the one the caller's subsequent full replay will
     // confirm/overwrite via its own last_committed_seq write (issue #387).
@@ -3010,8 +3123,22 @@ async fn clear_groups_for_rebuild(
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
         let ts = chrono::Utc::now().to_rfc3339();
-        let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
-        let (_, mut grouped) = group_purge::purge_groups(&conn, &referenced_refs, &ts, false)?;
+
+        let mut grouped: db::GroupedMutations = db::GroupedMutations::new();
+        if !whole_group_targets.is_empty() {
+            let refs: Vec<&str> = whole_group_targets.iter().map(|s| s.as_str()).collect();
+            let (_, whole_grouped) = group_purge::purge_groups(&conn, &refs, &ts, false)?;
+            for (gid, mutations) in whole_grouped {
+                grouped.entry(gid).or_default().extend(mutations);
+            }
+        }
+        for (gid, uuids) in &split_targets {
+            let split_grouped = group_purge::purge_group_rows(&conn, gid, uuids, &ts)?;
+            for (owning_gid, mutations) in split_grouped {
+                grouped.entry(owning_gid).or_default().extend(mutations);
+            }
+        }
+
         // Every referenced group's own bucket (its own deletions, and any forced-rebind write
         // that happened to land back on its own edges) is deliberately dropped, never flushed —
         // this purge exists solely to clear room for the from_seq: 0 replay of
@@ -3024,7 +3151,10 @@ async fn clear_groups_for_rebuild(
         // the replay was supposed to reconstruct. Any mutation attributed to a group *outside*
         // the referenced set is real, independent history for that group and is unaffected by
         // this replay — it must still be flushed to its own stream (issue #385 / ADR-0385).
-        for gid in &referenced {
+        for gid in whole_group_targets
+            .iter()
+            .chain(split_targets.iter().map(|(gid, _)| gid))
+        {
             grouped.remove(gid.as_str());
         }
         // Every remaining bucket belongs to a genuinely foreign group, so each one advances its

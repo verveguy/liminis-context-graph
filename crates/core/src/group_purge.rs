@@ -162,6 +162,81 @@ pub fn purge_groups(
     ))
 }
 
+/// Row-scoped purge for the split-stream case (issue #462): deletes exactly the rows named by
+/// `uuids` — never a whole group's data — then runs the same forced-rebind pass
+/// [`purge_groups`] runs, attributed to `group_id`.
+///
+/// Used instead of [`purge_groups`] when a `force_clear` rebuild's WAL directory content
+/// references a foreign `group_id` that *also* has rows in a separate, un-replayed WAL stream
+/// elsewhere: a whole-group purge would destroy that independent stream's rows, which this
+/// replay can never recreate (FR-001). Clearing only `uuids` — the exact set this directory's
+/// replay is about to recreate for `group_id` (`GroupWalContent::create_uuids`, see
+/// `wal::scan_wal_content_by_group`) — clears no more than the replay restore set, so nothing
+/// outside this replay's reach is lost, while still avoiding the duplicate-primary-key
+/// collisions [`purge_groups`]/ADR-0432 exist to prevent for the rows this replay *does* own
+/// (FR-002).
+///
+/// `uuids` is not required to be partitioned by node type: each delete call below is already
+/// type-scoped by its own `MATCH (x:Label)` clause (see `db.rs`'s `delete_*_by_uuids`), so
+/// passing the full mixed set to all three is a safe no-op superset match for the two that don't
+/// apply.
+///
+/// Deletion order mirrors [`purge_groups`]'s per-group loop and for the same reason: same-group
+/// `RelatesToNode_` rows first (never touches a foreign group's own `RelatesToNode_`, by
+/// construction of the uuid set), then `Entity` (a `DETACH DELETE` here can sever a hop into a
+/// *surviving* foreign group's `RelatesToNode_`, which is exactly what the forced-rebind pass
+/// below needs to observe and repair), then `Episodic`.
+///
+/// Runs inside its own `BEGIN TRANSACTION`/`COMMIT` — a failure partway through rolls back this
+/// call's deletes, though see the caller's own note on cross-call atomicity when multiple split
+/// groups are purged in the same rebuild. After commit, `NameIndex` is rebuilt (mirrors
+/// `purge_groups`); a rebuild failure is non-fatal and instead marks the index untrusted.
+///
+/// `rebind_pointers_forced` (not the staleness-gated `rebind_pointers`) is correct here even
+/// though this purge is row-scoped rather than whole-group: its actual mechanism is a real
+/// per-pointer `resolve_endpoint` re-check, not an assumption that the source group is entirely
+/// empty (see its own doc comment) — so a pointer into a `uuid` this call did *not* delete
+/// simply re-resolves `Bound` again, and only a pointer into a deleted `uuid` resolves `Unbound`.
+pub fn purge_group_rows(
+    conn: &Conn,
+    group_id: &str,
+    uuids: &[String],
+    ts: &str,
+) -> Result<GroupedMutations, Error> {
+    conn.exec_transaction_control("BEGIN TRANSACTION")?;
+    let mut grouped: GroupedMutations = GroupedMutations::new();
+    let mutate_result = (|| -> Result<(), Error> {
+        conn.delete_relates_to_by_uuids(uuids)?;
+        conn.delete_entities_by_uuids(uuids)?;
+        conn.delete_episodics_by_uuids(uuids)?;
+        conn.drain_mutations_into(&mut grouped, group_id);
+
+        let (_, rebind_grouped) = cross_group::rebind_pointers_forced(conn, group_id, ts)?;
+        for (owning_gid, mutations) in rebind_grouped {
+            grouped.entry(owning_gid).or_default().extend(mutations);
+        }
+        Ok(())
+    })();
+
+    match mutate_result {
+        Ok(()) => conn.exec_transaction_control("COMMIT")?,
+        Err(e) => {
+            let _ = conn.exec_transaction_control("ROLLBACK");
+            return Err(e);
+        }
+    }
+
+    if let Err(e) = conn.rebuild_name_index() {
+        eprintln!(
+            "[NAME INDEX] rebuild_name_index failed after row-scoped group purge (non-fatal, \
+             marking untrusted): {e}"
+        );
+        conn.mark_name_index_untrusted();
+    }
+
+    Ok(grouped)
+}
+
 /// Counts, per owning `group_id` (the `RelatesToNode_`'s own `rn.group_id`, i.e. the layer
 /// group — FR-012's "broken out by the group_id that owns each affected pointer"), how many
 /// live cross-group pointers have a `source_group_id` in `purged_group_ids`.
