@@ -385,9 +385,36 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
+`knowledge_status`'s WAL fields — including `wal.hydration_status` (issue #456), which
+distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
+field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
+rather than here.
+
 Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
+
+### Readiness
+
+A successful connection to `.lcg/service.sock` is **not** evidence the service is ready. The
+socket is bound before the database opens — deliberately, so `health_check` and recovery IPC stay
+reachable during degraded-mode recovery ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md))
+— and issue #378's WAL-root migration also runs in that same pre-open window, after the bind.
+(Legacy `.graphiti/`→`.lcg/` workspace migration runs earlier still, before the socket is even
+bound.) The process's own accept loop only starts once startup work has fully resolved, so a
+request sent immediately after `connect()` queues in the kernel rather than racing the migration
+with stale state — the real risk is a client that treats `connect()` succeeding as readiness by
+itself and acts on that assumption (e.g. inspecting on-disk state) without waiting for a
+`health_check` round-trip.
+
+The correct readiness signal is a `health_check` round-trip reporting `"healthy"`:
+`handle_health_check` only returns `healthy` once `Db::open()` has succeeded, which is after
+migration has completed. Poll `health_check` until it reports `healthy` (or `knowledge_status`
+until `connected` and `queryable` are both `true` and `initializing` is `false` —
+`knowledge_status` has no `healthy` field of its own) before sending real work; see
+[Operations: Self-healing and degraded mode](operations.md#self-healing-and-degraded-mode)
+for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
+outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
 ## MCP-over-stdio transport
 
@@ -1362,8 +1389,16 @@ have it change the consumer's own behavior (issue #446).
   pass `force_clear: true` to clear that group's data automatically first (issue #378: this
   clears only the target group via the same primitive `knowledge_delete_by_group` uses, not the
   whole database file), or clear it yourself with `knowledge_delete_by_group` before calling
-  rebuild. Rebuilding one group never touches another group's `WalPosition`, WAL directory, or
-  data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
+  rebuild. This check and clear are not scoped only to `group_id` (the WAL directory's own owning
+  group) — they cover every `group_id` actually referenced by that directory's own WAL content
+  (issue #432). This matters for a directory populated by `migrate_wal_root_if_needed` from a
+  pre-#378 flat/legacy stream (above): such a stream's rows can carry a `group_id` different from
+  the directory it was relocated into, and the guard/clear must follow the content, not the
+  directory, or a duplicate-key collision against that embedded group would go undetected. A
+  rebuild never touches another group's WAL *directory* — only the graph data and `WalPosition` of
+  groups actually referenced by the directory being replayed are ever affected; `WalPosition` is
+  reset only for `group_id` itself, since only it has a physical WAL directory tied to this
+  replay. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
   indices, so `knowledge_find_entities`/`knowledge_find_relationships` are immediately queryable
   afterward — `knowledge_build_indices` is not normally required.
 - **Unknown-generation refusal (issue #414).** Before comparing anything, `knowledge_rebuild_from_wal`
@@ -1481,13 +1516,31 @@ variables, and [IPC & MCP Reference](ipc-mcp-reference.md#mcp-over-stdio-transpo
 
 The service binds its socket **before** opening the database, so a corrupted store leaves it
 reachable in degraded mode rather than dead ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md)).
-Autonomous startup recovery ([ADR-0027](adr/0027-autonomous-wal-startup-recovery.md)) then reopens
-at the last good checkpoint, replays the WAL tail, and rebuilds indices without intervention.
-Recovery progress is observable via the [`wal_auto_recovery` telemetry event](telemetry.md#wal_auto_recovery),
+Legacy `.graphiti/`→`.lcg/` workspace migration runs *before* the bind; the issue #378 WAL-root
+relocation (`migrate_wal_root_if_needed()`) runs *after* the socket is already bound, in the same
+pre-`Db::open()` window as the DB open itself. Autonomous startup recovery ([ADR-0027](adr/0027-autonomous-wal-startup-recovery.md))
+then reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without
+intervention. Recovery progress is observable via the [`wal_auto_recovery` telemetry event](telemetry.md#wal_auto_recovery),
 whose `phase` field steps through `corruption_detected` → `checkpoint_drop_complete` →
 `cursor_derived` → `replay_complete` → `index_build_complete` → `recovery_complete` (or
 `fallback_triggered`, if automatic recovery gives up and manual intervention via
 `knowledge_recover`/`knowledge_recover_full` is needed).
+
+**Readiness: a successful connect is not readiness.** Because the socket is bound before the
+database opens, a bare `connect()` to `.lcg/service.sock` can succeed while the service is still
+relocating the WAL root or replaying WAL — before it has started actually serving graph requests.
+(The process's own accept loop, in `run_socket_service`, only starts after `bootstrap_app_state()`
+resolves, so a request sent on such a connection queues in the kernel and is not read until
+startup work has already finished — it does not race migration and get served with stale state.
+The actual risk is a client that treats the `connect()` succeeding as sufficient evidence of
+readiness by itself — e.g. proceeding to inspect on-disk WAL state, or reporting "ready" in its
+own UI — without waiting for a `health_check` round-trip.) The correct readiness signal is a
+`health_check` request/response round-trip reporting `"healthy"`: `handle_health_check` can only
+return `healthy` once `Db::open()` has succeeded, which is after both legacy-workspace migration
+(which completes before the bind) and WAL-root migration (which runs after it) have finished.
+Poll `health_check` until it reports `healthy` (or `knowledge_status` until `connected` and
+`queryable` are both `true` and `initializing` is `false` — `knowledge_status` has no `healthy`
+field of its own) before treating the service as ready.
 
 ## `knowledge_status` health fields
 
@@ -1540,8 +1593,8 @@ mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
-(`{applied_seq, max_seq, generation, generation_status}`). This is the multi-group view; the flat
-`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status` fields described next remain present and
+(`{applied_seq, max_seq, generation, generation_status, hydration_status}`). This is the multi-group view; the flat
+`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status` fields described next remain present and
 **pinned specifically to the default `"liminis"` group**, unchanged in meaning from a pre-378
 single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
 written before this issue) needs no change. If the default group has no WAL directory at all
@@ -1597,8 +1650,42 @@ refuse once a position has been recorded for that group (see Unknown-generation 
 checking this field before calling rebuild lets an operator see the condition coming rather than
 discovering it as an abrupt failure.
 
+**`wal.hydration_status`** (issue #456; also scoped to the default group, and mirrored per-group
+inside `wal_groups`) — a sibling string field alongside `applied_seq`/`max_seq`, classifying
+whether the group's database contents are caught up with its WAL, so a caller no longer needs to
+compare the two fields itself to tell "genuinely empty" apart from "not yet hydrated." Pure
+comparison of `applied_seq`/`max_seq`, no new I/O — an absent or never-backfilled `applied_seq` is
+treated as `0` for the comparison:
+
+| `hydration_status` | meaning |
+|---|---|
+| `"not_applicable"` | the group has no WAL content at all (`max_seq` is zero or absent) — there is nothing to be behind on, regardless of `applied_seq` |
+| `"wal_ahead"` | the WAL holds content the database has not applied (`max_seq` is nonzero and exceeds the effective `applied_seq`) — this is the state that motivated the issue: a wiped or fresh database beside a populated WAL directory must not be mistaken for an authoritative empty corpus |
+| `"hydrated"` | the database is caught up with its WAL (`applied_seq >= max_seq`, and `max_seq` is nonzero) — this includes `applied_seq > max_seq` (e.g. following a generation reset elsewhere), which is deliberately classified as caught-up rather than as a distinct anomaly state |
+
+**Known narrow limitation**: `max_seq` is 0-indexed (a group's very first WAL write has `seq: 0`),
+so a group whose entire WAL history is exactly one entry has `max_seq == 0` — indistinguishable,
+via `max_seq` alone, from "no content at all," and reported as `"not_applicable"`. This is the one
+case where a wiped-DB-beside-a-populated-WAL condition (the state this field exists to surface) can
+go unreported; it resolves itself once the group's WAL receives a second write. See the
+`wal_hydration_status` doc comment in `handlers.rs` for why this can't be resolved by classifying
+`max_seq == 0` as content-bearing instead — `applied_seq == 0` is itself an overloaded sentinel for
+both "nothing ever applied" and "genuinely caught up through seq 0," so doing so would trade this
+narrow false `"not_applicable"` for an equally narrow but more actively misleading false
+`"hydrated"` in the same colliding case.
+
+`hydration_status` does not change `health_check`'s `healthy`/`degraded` determination in any
+way: a `wal_ahead` group is a normal, fully-queryable state from the process's own point of view
+(it can still serve reads over whatever content it does hold) — the hydration question is per-group
+data state, not process health, and is answered here rather than by `health_check`.
+
 The consumer decision, comparing the two fields — check both for `null` before any numeric
-comparison:
+comparison. `hydration_status` above is a documented shortcut for the common case, but it treats
+an absent/never-backfilled `applied_seq` the same as `0` (per FR-001(b)); it does not distinguish
+that from the `applied_seq: null` "position unknown, full rebuild required" row below, which is a
+more serious, overriding condition. A caller that needs to detect the unknown-position case
+specifically must still check `applied_seq` for `null` itself — `hydration_status` alone is not a
+complete substitute for this table:
 
 | `applied_seq` | `max_seq` | Meaning | Action |
 |---|---|---|---|
@@ -2837,6 +2924,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
+| [0432](0432-force-clear-guard-scans-wal-content-group-ids.md) | `force_clear` Rebuild Guard Scans WAL Content for Referenced `group_id`s | 2026-08-21 |
 
 ## Historical numbering
 

@@ -40,9 +40,36 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
+`knowledge_status`'s WAL fields — including `wal.hydration_status` (issue #456), which
+distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
+field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
+rather than here.
+
 Every long-running method above (the five WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
+
+### Readiness
+
+A successful connection to `.lcg/service.sock` is **not** evidence the service is ready. The
+socket is bound before the database opens — deliberately, so `health_check` and recovery IPC stay
+reachable during degraded-mode recovery ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md))
+— and issue #378's WAL-root migration also runs in that same pre-open window, after the bind.
+(Legacy `.graphiti/`→`.lcg/` workspace migration runs earlier still, before the socket is even
+bound.) The process's own accept loop only starts once startup work has fully resolved, so a
+request sent immediately after `connect()` queues in the kernel rather than racing the migration
+with stale state — the real risk is a client that treats `connect()` succeeding as readiness by
+itself and acts on that assumption (e.g. inspecting on-disk state) without waiting for a
+`health_check` round-trip.
+
+The correct readiness signal is a `health_check` round-trip reporting `"healthy"`:
+`handle_health_check` only returns `healthy` once `Db::open()` has succeeded, which is after
+migration has completed. Poll `health_check` until it reports `healthy` (or `knowledge_status`
+until `connected` and `queryable` are both `true` and `initializing` is `false` —
+`knowledge_status` has no `healthy` field of its own) before sending real work; see
+[Operations: Self-healing and degraded mode](operations.md#self-healing-and-degraded-mode)
+for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
+outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
 ## MCP-over-stdio transport
 

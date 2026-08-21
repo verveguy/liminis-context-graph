@@ -156,15 +156,11 @@ fn recording_sink(
 ///
 /// Precondition (#437): must only be called after `migration::migrate_workspace` has run for
 /// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call
-/// below needs `.lcg/wal` to already exist for a `.graphiti`-era workspace, or it silently no-ops
-/// and legacy WAL content is left loose and invisible.
-///
-/// Known limitation, tracked separately as #442 (pre-existing, not introduced or fixed by
-/// #437): `migrate_workspace` always moves `.graphiti/wal` to the hardcoded `.lcg/wal`,
-/// ignoring `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR`. If either is set to a non-default path for a
-/// `.graphiti`-era workspace, `startup_wal_root` below resolves to that custom path while the
-/// legacy content actually lands at `.lcg/wal` — so this ordering fix does not, by itself,
-/// cover a configured WAL root on that upgrade path.
+/// below needs the configured WAL root (`startup_wal_root`) to already contain any legacy
+/// content for a `.graphiti`-era workspace, or it silently no-ops and legacy WAL content is left
+/// loose and invisible. As of #442, `async_main` resolves that same WAL root and passes it to
+/// `migrate_workspace`, so the two migrations always agree on one destination regardless of any
+/// `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR` override.
 async fn bootstrap_app_state(
     telemetry_sink: Arc<dyn TelemetrySink>,
     pre_migration_degraded: Option<String>,
@@ -1031,8 +1027,18 @@ async fn async_main(
     // never get another chance, leaving the relocated WAL files loose forever. The dependency
     // is enforced only by this straight-line call order, not by the type system: don't extract a
     // "resolve paths" helper or otherwise move `bootstrap_app_state`'s call ahead of this one.
+    //
+    // #442: `wal_root` is resolved here, once, using the exact same env-var precedence/fallback
+    // `bootstrap_app_state`'s `startup_wal_root` (and `AppState::from_env`'s `wal_root`) also
+    // use, so `migrate_workspace`'s Step 4 destination and the subsequent per-group scan always
+    // agree on one directory. It's resolved independently at each of those call sites (not
+    // threaded further) — the env vars don't change during the process's lifetime, so identical
+    // resolution logic at each site is sufficient to keep them in agreement.
+    let resolved_wal_root = std::path::PathBuf::from(
+        lcg_env_var("LCG_WAL_DIR", "GRAPHITI_WAL_DIR").unwrap_or_else(|_| ".lcg/wal".to_string()),
+    );
     let (pre_migration_degraded, did_migrate) =
-        match migration::migrate_workspace(Path::new("."), &*telemetry_sink) {
+        match migration::migrate_workspace(Path::new("."), &resolved_wal_root, &*telemetry_sink) {
             Ok(migration::MigrationOutcome::Migrated) => (None, true),
             Ok(migration::MigrationOutcome::AlreadyMigrated) => (None, true),
             Ok(migration::MigrationOutcome::NothingToMigrate) => (None, false),

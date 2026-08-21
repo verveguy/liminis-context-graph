@@ -47,6 +47,49 @@ mod migration_binary_tests {
             .expect("kill command failed");
     }
 
+    /// Builds a legacy `.graphiti/` workspace fixture at `workspace` (DB, 5 WAL `*.jsonl` files,
+    /// a `.wal-generation.json` sidecar with a known id, ontology + hash sidecars) — the same
+    /// corpus `binary_migrates_legacy_workspace_on_startup` uses, factored out so the #442
+    /// custom-`LCG_WAL_DIR` regression test below can build an identical fixture without
+    /// duplicating ~40 lines of setup. Returns the WAL file names and the legacy generation id.
+    fn build_legacy_workspace_fixture(workspace: &Path) -> (&'static [&'static str], &'static str) {
+        let legacy = workspace.join(".graphiti");
+        std::fs::create_dir(&legacy).unwrap();
+
+        let legacy_db_path = legacy.join("db");
+        let db = Db::open(legacy_db_path.to_str().unwrap()).unwrap();
+        drop(db);
+
+        let wal_dir = legacy.join("wal");
+        std::fs::create_dir(&wal_dir).unwrap();
+        const WAL_FILE_NAMES: &[&str] = &[
+            "001.jsonl",
+            "002.jsonl",
+            "003.jsonl",
+            "004.jsonl",
+            "005.jsonl",
+        ];
+        for name in WAL_FILE_NAMES {
+            std::fs::write(wal_dir.join(name), b"{\"type\":\"test\"}\n").unwrap();
+        }
+
+        const LEGACY_GENERATION_ID: &str = "11111111-1111-1111-1111-111111111111";
+        std::fs::write(
+            wal_dir.join(".wal-generation.json"),
+            format!("{{\"generation\":\"{LEGACY_GENERATION_ID}\"}}"),
+        )
+        .unwrap();
+
+        std::fs::write(
+            legacy.join("ontology.yaml"),
+            b"entities:\n  - name: Person\n",
+        )
+        .unwrap();
+        std::fs::write(legacy.join("ontology-hash.json"), b"{\"hash\":\"abc123\"}").unwrap();
+
+        (WAL_FILE_NAMES, LEGACY_GENERATION_ID)
+    }
+
     fn spawn_stub_embedder() -> u16 {
         use std::io::{Read, Write};
         use std::net::TcpListener;
@@ -298,6 +341,134 @@ mod migration_binary_tests {
         assert!(
             new_dir.join("ontology-hash.json").exists(),
             "ontology-hash.json must be migrated to .lcg/"
+        );
+
+        // ── Clean shutdown ────────────────────────────────────────────────────
+        send_sigterm(child.id());
+        let status = wait_for_exit(&mut child, Duration::from_secs(10));
+        let status = match status {
+            Some(s) => s,
+            None => {
+                child.kill().ok();
+                panic!("service did not exit within 10s after SIGTERM");
+            }
+        };
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "expected clean exit after migration: {status:?}"
+        );
+    }
+
+    // Issue #442: regression guard for a `.graphiti`-era workspace started with a *custom*
+    // `LCG_WAL_DIR`. Before this fix, `migration::migrate_workspace`'s Step 4 always moved
+    // `.graphiti/wal` to the hardcoded `.lcg/wal`, while `wal_group::migrate_wal_root_if_needed`
+    // (invoked from `bootstrap_app_state`) scanned the env-resolved `LCG_WAL_DIR` instead — so
+    // legacy WAL content ended up loose at `.lcg/wal`, invisible to the running service, which
+    // only reads from `<LCG_WAL_DIR>/<group_id>`. This test is the same fixture and assertions
+    // as `binary_migrates_legacy_workspace_on_startup` above, but with `LCG_WAL_DIR` set to a
+    // path outside `.lcg/` entirely (SC-001, SC-003).
+    #[test]
+    fn binary_migrates_legacy_workspace_with_custom_lcg_wal_dir_on_startup() {
+        let dir = TempDir::new().unwrap();
+        let workspace = dir.path();
+        let (wal_file_names, legacy_generation_id) = build_legacy_workspace_fixture(workspace);
+        let legacy = workspace.join(".graphiti");
+
+        // Custom WAL root outside the .lcg/ tree, as an operator placing the WAL on a separate
+        // volume might configure. Must be absolute — the binary resolves it CWD-relative
+        // otherwise, and cwd is `workspace` here, so a relative custom root would coincidentally
+        // still land inside `workspace` but not exercise a genuinely separate volume.
+        let custom_wal_root = dir.path().join("custom-wal-root");
+
+        let socket_path = workspace.join(".lcg").join("service.sock");
+        let embedder_port = spawn_stub_embedder();
+        let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
+
+        let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
+        let mut child = Command::new(binary)
+            .current_dir(workspace)
+            .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
+            .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
+            .env("LCG_WAL_DIR", custom_wal_root.to_str().unwrap())
+            .args(["--embedder-http", &embedder_url])
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
+            .spawn()
+            .expect("failed to spawn liminis-context-graph");
+
+        let ready = wait_for_socket(&socket_path, Duration::from_secs(30));
+        if !ready {
+            child.kill().ok();
+            panic!("service did not become ready within 30s — migration may have failed");
+        }
+
+        // Same blocking IPC round-trip as the default-path test, and for the same reason: proves
+        // `bootstrap_app_state` (and thus the per-group WAL migration) has actually completed
+        // before the filesystem assertions below run.
+        let mut stream =
+            UnixStream::connect(&socket_path).expect("failed to connect to service socket");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .unwrap();
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"knowledge_status","params":{}}"#;
+        writeln!(stream, "{req}").expect("failed to write knowledge_status request");
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader
+            .read_line(&mut response)
+            .expect("failed to read knowledge_status response");
+        let resp: serde_json::Value =
+            serde_json::from_str(response.trim()).expect("knowledge_status response is not JSON");
+        assert_eq!(
+            resp["result"]["context_graph_initialized"],
+            serde_json::Value::Bool(true),
+            "service must not be in degraded mode after successful migration: {resp}"
+        );
+        drop(reader);
+
+        // ── Assert legacy content landed under the CUSTOM wal_root, not .lcg/wal ──────────
+        assert!(
+            !legacy.exists(),
+            ".graphiti/ must be removed after migration"
+        );
+        let group_wal_dir = custom_wal_root.join("liminis");
+        for name in wal_file_names {
+            assert!(
+                group_wal_dir.join(name).exists(),
+                "WAL file {name} must be migrated to <LCG_WAL_DIR>/liminis/"
+            );
+        }
+        let migrated_generation =
+            std::fs::read_to_string(group_wal_dir.join(".wal-generation.json"))
+                .expect(".wal-generation.json must exist under <LCG_WAL_DIR>/liminis/");
+        assert!(
+            migrated_generation.contains(legacy_generation_id),
+            ".wal-generation.json under <LCG_WAL_DIR>/liminis/ must be the relocated legacy \
+             sidecar (containing {legacy_generation_id}), not a freshly minted one — found: \
+             {migrated_generation}"
+        );
+
+        // ── Assert nothing was left loose at either .lcg/wal or the custom root's top level ──
+        let lcg_wal_dir = workspace.join(".lcg").join("wal");
+        assert!(
+            !lcg_wal_dir.exists(),
+            ".lcg/wal must not be created when a custom LCG_WAL_DIR is configured, found: \
+             {lcg_wal_dir:?}"
+        );
+        let loose_at_custom_root: Vec<_> = std::fs::read_dir(&custom_wal_root)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect();
+        assert!(
+            loose_at_custom_root.is_empty(),
+            "no *.jsonl file may remain loose directly under the configured LCG_WAL_DIR, found: \
+             {loose_at_custom_root:?}"
+        );
+        assert!(
+            !custom_wal_root.join(".wal-generation.json").exists(),
+            ".wal-generation.json must not remain loose at the configured LCG_WAL_DIR"
         );
 
         // ── Clean shutdown ────────────────────────────────────────────────────

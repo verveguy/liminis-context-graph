@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [0.13.3] - 2026-08-21
+## [0.13.3] - 2026-08-22
 
 A patch release closing the upgrade-path regression 0.13.2 introduced, scoping the last two
-ontology-driven maintenance operations to a single group, and adding per-group ontologies. The
-group boundary work that began in 0.13.0 is now consistent across reads, writes, deletes and
-maintenance: **an operation names the group it acts on, and touches nothing else.**
+ontology-driven maintenance operations to a single group, and adding per-group ontologies. The group
+boundary work that began in 0.13.0 is now consistent across reads, writes, deletes and maintenance:
+**an operation names the group it acts on, and touches nothing else.**
 
 ### Fixed
 
@@ -46,6 +46,13 @@ maintenance: **an operation names the group it acts on, and touches nothing else
   invoked either operation before this fix, so the required parameter breaks no existing caller.
   See ADR-0378's FR-004 section and ADR-0385's Context section, both amended by this issue. (#447)
 
+- **The legacy `.graphiti` → `.lcg` workspace migration now honours `LCG_WAL_DIR` /
+  `GRAPHITI_WAL_DIR`.** It always moved `.graphiti/wal` to a hardcoded `.lcg/wal`, so a workspace
+  configured with a custom WAL root had its legacy content land somewhere the service would never
+  read — the WAL was intact on disk and invisible to the process. The move now targets the resolved
+  WAL root, handles a destination on a different filesystem (a custom root often is), and merges into
+  a root that already has content rather than failing. (#442)
+
 ### Changed
 
 - **BREAKING: `group_id` is now a required, non-empty parameter on
@@ -68,7 +75,7 @@ maintenance: **an operation names the group it acts on, and touches nothing else
   percent-encoded with the same bijective scheme already used for per-group WAL directory names.
   A group with no per-group file falls back to the existing workspace-wide `.lcg/ontology.yaml`,
   exactly as before this feature — a workspace that hasn't adopted per-group ontologies behaves
-  identically to pre-0.13.3. The resolved per-group ontology governs, for that group only,
+  identically to pre-0.14.0. The resolved per-group ontology governs, for that group only,
   extraction guidance, `mode: strict` validation, canonicalization, and reprocessing
   (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). A malformed or
   unreadable per-group file falls back to the workspace-wide ontology when one exists, or to no
@@ -81,23 +88,38 @@ maintenance: **an operation names the group it acts on, and touches nothing else
   applied to the consumer's own extraction, validation, canonicalization, or reprocessing, and its
   absence never affects replay or correctness. See [Ontology](docs/ontology.md#per-group-ontologies)
   for the full resolution/fallback contract. (#446)
+- **`knowledge_status` reports a new `hydration_status` field**, alongside the existing
+  `applied_seq`/`max_seq` values, in both the flat `wal` object and every `wal_groups[*]` entry:
+  `"hydrated"` (the database is caught up with its WAL), `"wal_ahead"` (the WAL holds content the
+  database has not applied — e.g. a wiped or fresh database beside a populated WAL directory), or
+  `"not_applicable"` (the group has no WAL content at all). Previously, a genuinely empty group and
+  a group whose WAL was simply ahead of the DB were indistinguishable unless a caller manually
+  compared `applied_seq` against `max_seq` itself. Purely additive — `applied_seq`/`max_seq` are
+  unchanged, and `health_check`'s `healthy`/`degraded` determination is unaffected. (#456)
 
 ### Internal
 
 - **The required CI test gate could not fail.** The `test` job piped `cargo test` through `tee`
-  without `pipefail`, so the pipeline reported `tee`'s exit status and a failing suite still went
-  green. Any test that broke on `main` was invisible to the gate that exists to catch it. (#430)
-- **Four tests that had been failing behind that masked gate were fixed** once it started
-  reporting honestly — stale fixtures and assertions that had drifted from current behaviour,
-  not new breakage. (#429)
-- **Startup migration ordering is now documented and regression-tested.** The `.graphiti` → `.lcg`
-  workspace move must run before the per-group WAL relocation, or a `.graphiti`-era workspace ends
-  up with its WAL files loose at the root and invisible to the process. The ordering was already
-  correct via the call graph — it was diagnosed as broken from textual line order in `main.rs`,
-  which the fix's own comments now warn against trusting — so this hardens an implicit dependency
-  with explicit preconditions at both call sites and un-quarantines the regression test #430 had
-  parked. A distinct gap found during review, that `migrate_workspace` ignores
-  `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR`, is tracked separately as #442. (#437)
+  without `pipefail`, so the pipeline reported `tee`'s status and a failing suite still went green.
+  (#430)
+- **Four tests that had been failing behind that masked gate were fixed** once it started reporting
+  honestly — stale fixtures and drifted assertions, not new breakage. (#429)
+- **Startup migration ordering is documented and regression-tested.** The `.graphiti` → `.lcg` move
+  must precede the per-group WAL relocation, or a `.graphiti`-era workspace leaves its WAL files
+  loose and invisible. The ordering was already correct via the call graph — it was diagnosed as
+  broken from textual line order — so this hardens an implicit dependency with explicit
+  preconditions and un-quarantines the regression test #430 had parked. (#437)
+- **Socket-connectability is documented as *not* a readiness signal.** The socket binds before the
+  database opens, deliberately, so recovery IPC stays reachable in degraded mode (ADR-0009); the
+  correct signal is a `health_check` round-trip reporting `healthy`, which cannot be true until
+  after migration. (#436)
+- **`wal_root_migration`'s legacy-upgrade acceptance test now runs in CI.** It drives the real
+  74MB/12,481-seq fixture through migration and asserts parity with 0.13.1's rebuild, and had run
+  only when invoked by hand — while five defects accumulated on the path it guards. (#460)
+- **The real-corpus fixture's `group_id` now matches the WAL directory it migrates into.** It was
+  captured under a non-default group while committed in the flat pre-0.13.0 layout, so its content
+  and directory disagreed — a shape no deployment has, which was nonetheless read as a product
+  defect. (#469)
 
 ## [0.13.2] - 2026-08-16
 

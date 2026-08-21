@@ -1215,6 +1215,10 @@ async fn test_knowledge_status_not_queryable_includes_wal_seq_fields() {
         r["wal"].get("max_seq").is_some(),
         "expected wal.max_seq key present (even if null) in NotQueryable branch: {v}"
     );
+    assert!(
+        r["wal"].get("hydration_status").is_some(),
+        "expected wal.hydration_status key present in NotQueryable branch: {v}"
+    );
 }
 
 // ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────

@@ -92,6 +92,34 @@ fn spawn_fresh(
     McpClient::spawn(cmd)
 }
 
+/// Counts non-blank lines across every `*.jsonl` file found anywhere under `wal_dir`
+/// (recursively, since `migrate_wal_root_if_needed` relocates a flat legacy stream like this
+/// fixture's into a per-group subdirectory) — the total number of WAL rows a full rebuild must
+/// account for (SC-002, issue #432). Used as the exactness baseline for `mutations_replayed`
+/// instead of a fixture-specific hardcoded constant, so the assertion stays correct if the
+/// fixture's row count ever changes.
+fn count_wal_lines(wal_dir: &Path) -> usize {
+    fn walk(dir: &Path, total: &mut usize) {
+        for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+            let entry = entry.expect("read dir entry");
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, total);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                let file =
+                    std::fs::File::open(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+                *total += std::io::BufRead::lines(std::io::BufReader::new(file))
+                    .map(|l| l.unwrap_or_else(|e| panic!("read {path:?}: {e}")))
+                    .filter(|l| !l.trim().is_empty())
+                    .count();
+            }
+        }
+    }
+    let mut total = 0;
+    walk(wal_dir, &mut total);
+    total
+}
+
 /// Asserts `arr`'s `uuid` fields form a set of exactly `expected_count` distinct values —
 /// mirrors `mcp_real_corpus_e2e.rs`'s enumeration-correctness technique (#217/#234).
 fn assert_exact_uuid_enumeration(v: &Value, key: &str, expected_count: i64, context: &str) {
@@ -385,6 +413,18 @@ fn mcp_admin_data_operations_over_real_corpus_fixture() {
     //    indices_built + immediate golden search, progress notifications observed ────────────
     {
         let fork = base.fork();
+        // The fixture is a pre-#378 flat/legacy WAL stream, migrated wholesale into
+        // `<wal_root>/liminis/` by `migrate_wal_root_if_needed` purely on directory position —
+        // its content's own `params.group_id` is `apollo_program` (`group_id()` below), not
+        // `liminis`. This `force_clear: true` rebuild (no explicit `group_id`, so it defaults to
+        // `liminis`, the directory's owning group) is exactly issue #432's reproduction: the
+        // already-seeded base workspace has ~1,500 `apollo_program`-scoped entities from the
+        // seeding rebuild above, so before the #432 fix the guard checked only the empty
+        // `liminis` group, never cleared `apollo_program`, and replay collided with its
+        // pre-existing data (measured: `mutations_replayed: 8356, failed_lines: 3131` out of
+        // ~11,487 total lines). SC-002 tightens this block's assertions to the exact
+        // `failed_lines`/`mutations_replayed` counts specifically to catch that regression.
+        let total_wal_lines = count_wal_lines(&fork.wal_dir);
         let mut client = fork.spawn_reader(&embedder_url, &[ADMIN_READ_SCOPE]);
         client.initialize();
 
@@ -401,6 +441,33 @@ fn mcp_admin_data_operations_over_real_corpus_fixture() {
             json!(true),
             "full rebuild must report indices_built: true with no intervening \
              knowledge_build_indices call: {rebuild_result}"
+        );
+        // SC-002: the guard must have discovered and cleared `apollo_program` (embedded in the
+        // migrated legacy content, distinct from the request's own `liminis` group) before
+        // replay, so the full rebuild must complete with zero failures and replay every WAL line.
+        assert_eq!(
+            rebuild_result["failed_lines"],
+            json!(0),
+            "force_clear rebuild against the migrated legacy fixture must produce zero \
+             duplicate-primary-key failures now that the guard checks the content's embedded \
+             group_id ({}), not only the request's own (liminis): {rebuild_result}",
+            fork.group_id()
+        );
+        assert_eq!(
+            rebuild_result["unparseable_lines"],
+            json!(0),
+            "{rebuild_result}"
+        );
+        assert_eq!(
+            rebuild_result["legacy_skipped_lines"],
+            json!(0),
+            "{rebuild_result}"
+        );
+        assert_eq!(
+            rebuild_result["mutations_replayed"],
+            json!(total_wal_lines),
+            "with zero failed/unparseable/skipped lines, every one of the fixture's \
+             {total_wal_lines} WAL lines must have been replayed: {rebuild_result}"
         );
         assert!(
             client
