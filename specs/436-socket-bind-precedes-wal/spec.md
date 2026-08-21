@@ -68,10 +68,6 @@ As a developer or CI job that starts the `liminis-context-graph` binary against 
 
 - Changes to ADR-0009's degraded-mode design itself (bind-early for `health_check`/recovery IPC when the DB is in a legitimately degraded state, as opposed to still migrating).
 
-## Open Questions
-
-- [ ] Given that the specific CI failure this issue was filed for is already fixed on `main` (commit `068f93a`, via #437) by changing the *test's* readiness check, and that any client performing a real request/response round-trip is already safe under the current ordering (its request isn't answered until after migration completes) — does #436 still need to change production behavior (e.g. `main.rs`'s startup ordering, or a new explicit readiness signal, per the two directions raised in the corrected-diagnosis comment), or is the remaining risk limited to auditing whether any other consumer (this repo's tooling, or the Electron app's IPC client) relies on bare socket-connectability rather than a request/response check as its readiness signal? If the latter, should #436 scope to that audit rather than a `main.rs` behavior change, or should it close as superseded by #437?
-
 ## Source References
 
 - Failing run: https://github.com/verveguy/liminis-context-graph/actions/runs/32129112344 (job: `test (ubuntu-latest)`, step: `cargo test --release (restored build; captured for recompile-regression check)`)
