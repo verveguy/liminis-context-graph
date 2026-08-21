@@ -3099,6 +3099,19 @@ async fn handle_rebuild_from_wal(
 /// `group_purge::purge_group_rows` against the already-open DB — both already handle the forced
 /// rebind of any foreign pointer into the cleared rows within their own transaction, so no
 /// `state.db` swap or file deletion is needed here.
+///
+/// **Cross-call atomicity note (issue #462):** `whole_group_targets` are purged together inside
+/// one `purge_groups` transaction, but `split_targets` are purged one `purge_group_rows` call —
+/// and one transaction — per group. If a later split group's purge fails after an earlier one has
+/// already committed, this function returns `Err` before the caller's replay runs, leaving that
+/// earlier group's rows cleared but not yet recreated. This is a transient, not a permanent, data
+/// loss: each purge target is independently idempotent from the guard's point of view (the
+/// `from_seq == 0` non-empty scan above re-derives its target set from a fresh DB count on every
+/// call), so simply retrying the same `force_clear: true` rebuild converges — an already-cleared
+/// group is now empty and needs no further purge, and the retry's replay recreates it along with
+/// whatever the failed group still needs cleared. The window between the partial failure and a
+/// retry is real, though: an operator inspecting the DB mid-window sees one split group's rows
+/// missing with no replay having run yet.
 async fn clear_groups_for_rebuild(
     state: &Arc<AppState>,
     request_group_id: &str,

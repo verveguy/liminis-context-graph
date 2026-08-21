@@ -188,8 +188,9 @@ pub fn purge_groups(
 /// below needs to observe and repair), then `Episodic`.
 ///
 /// Runs inside its own `BEGIN TRANSACTION`/`COMMIT` — a failure partway through rolls back this
-/// call's deletes, though see the caller's own note on cross-call atomicity when multiple split
-/// groups are purged in the same rebuild. After commit, `NameIndex` is rebuilt (mirrors
+/// call's deletes, though see `handlers.rs`'s `clear_groups_for_rebuild` doc comment ("Cross-call
+/// atomicity note") for what a failure in a *later* call means when multiple split groups are
+/// purged in the same rebuild. After commit, `NameIndex` is rebuilt (mirrors
 /// `purge_groups`); a rebuild failure is non-fatal and instead marks the index untrusted.
 ///
 /// `rebind_pointers_forced` (not the staleness-gated `rebind_pointers`) is correct here even
