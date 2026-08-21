@@ -1,5 +1,6 @@
 use std::fmt;
 use std::io;
+use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
@@ -502,7 +503,21 @@ fn same_file_contents(a: &Path, b: &Path) -> Result<bool, MigrationError> {
     if !ma.is_file() || !mb.is_file() || ma.len() != mb.len() {
         return Ok(false);
     }
-    Ok(std::fs::read(a).map_err(|e| err(a, e))? == std::fs::read(b).map_err(|e| err(b, e))?)
+    // Compare in fixed-size chunks rather than `std::fs::read`-ing both files fully into
+    // memory — this path can run against arbitrarily large WAL files.
+    let mut ra = io::BufReader::new(std::fs::File::open(a).map_err(|e| err(a, e))?);
+    let mut rb = io::BufReader::new(std::fs::File::open(b).map_err(|e| err(b, e))?);
+    let (mut buf_a, mut buf_b) = ([0u8; 64 * 1024], [0u8; 64 * 1024]);
+    loop {
+        let na = ra.read(&mut buf_a).map_err(|e| err(a, e))?;
+        let nb = rb.read(&mut buf_b).map_err(|e| err(b, e))?;
+        if na != nb || buf_a[..na] != buf_b[..nb] {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 /// Fix `.lcg/` that has the old layout left by the simple-rename migration (#64).
