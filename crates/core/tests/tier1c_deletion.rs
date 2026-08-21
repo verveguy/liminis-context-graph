@@ -63,6 +63,7 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -94,6 +95,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf, db_path: &str)
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 

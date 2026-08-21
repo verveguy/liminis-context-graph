@@ -103,6 +103,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
+| [0440](0440-recompute-embeddings-on-wal-replay.md) | Recompute Embeddings on WAL Replay, With a Sync Bridge and a Two-Mechanism Identity Split | 2026-08-19 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
 | [0432](0432-force-clear-guard-scans-wal-content-group-ids.md) | `force_clear` Rebuild Guard Scans WAL Content for Referenced `group_id`s | 2026-08-21 |
 

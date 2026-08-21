@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use lbug::{LogicalType, Value};
 
@@ -47,6 +47,15 @@ pub struct WalPositionRecord {
     /// with no generation concept yet) — both collapse to "unknown," never treated as a mismatch
     /// (FR-009).
     pub generation: Option<String>,
+    /// The embedding model identifier under which this group's currently-applied vectors were
+    /// computed (issue #440, FR-007). `None` means either no position has ever been recorded, or
+    /// the position was recorded before this issue (or by a call site with recompute disabled) —
+    /// both collapse to "unknown," never treated as a mismatch, mirroring `generation`'s FR-009
+    /// semantics.
+    pub embedding_model: Option<String>,
+    /// The embedding vector dimension paired with `embedding_model`. Always `Some` exactly when
+    /// `embedding_model` is `Some` — both are written together by `set_wal_position`.
+    pub embedding_dim: Option<i64>,
 }
 
 pub struct Conn<'db> {
@@ -102,10 +111,20 @@ impl Db {
     /// `open_or_rebuild` is pure `crates/core` library code with no `TelemetrySink`/logging
     /// framework available, so a bracketed-tag `eprintln!` matches this codebase's existing
     /// `[WAL WARN]`/`[WAL PROGRESS]` convention.
+    ///
+    /// `embedder`, when `Some` (issue #440), enables recompute-on-replay (FR-001): every
+    /// replayed row's recognized embedding vector param is recomputed from its co-located source
+    /// text via the given embedder rather than bound verbatim from the WAL, and the resulting
+    /// model identity is persisted alongside `applied_seq`/`generation` (FR-007). `None` (e.g. a
+    /// caller with no embedder configured, or most existing tests) preserves today's exact
+    /// stored-vector replay behavior. This function has no ambient tokio runtime — its own test
+    /// callers run bare-sync — so a dedicated single-threaded runtime is built internally to
+    /// drive the embedder when recompute is enabled.
     pub fn open_or_rebuild(
         db_path: &str,
         wal_dir: &str,
         embedding_dim: usize,
+        embedder: Option<crate::embedding_cache::EmbedderContext>,
     ) -> Result<(Self, Option<crate::replay::ReplayStats>), Error> {
         let db_exists = Path::new(db_path).exists();
         let wal_dir_path = Path::new(wal_dir);
@@ -124,7 +143,18 @@ impl Db {
         let stats = if !db_exists && has_wal {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
-            let stats = crate::replay::WalReplayer::new(wal_dir).replay(&conn)?;
+
+            if let Some(ctx) = &embedder {
+                warn_on_embedding_model_mismatch(wal_dir_path, ctx);
+            }
+            let recompute_embed_fn = embedder.as_ref().map(build_sync_recompute_fn).transpose()?;
+            let stats = crate::replay::WalReplayer::new(wal_dir).replay_opts(
+                &conn,
+                crate::replay::ReplayOptions {
+                    recompute_embed_fn,
+                    ..Default::default()
+                },
+            )?;
             if let Some(ref warning) = stats.fidelity_warning {
                 eprintln!("[WAL REBUILD WARNING] {warning}");
             }
@@ -145,10 +175,14 @@ impl Db {
                 // (issue #387) — `None` for a pre-#387 stream, matching FR-009's adopt-on-first-
                 // encounter semantics.
                 let generation = crate::wal_generation::read_generation(wal_dir_path);
+                let embedding_identity = embedder.as_ref().map(|ctx| ctx.identity());
                 if let Err(e) = conn.set_wal_position(
                     crate::wal_group::DEFAULT_GROUP_ID,
                     seq,
                     generation.as_deref(),
+                    embedding_identity
+                        .as_ref()
+                        .map(|(model, dim)| (model.as_str(), *dim)),
                 ) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
@@ -205,6 +239,34 @@ impl Db {
             name_index: &self.name_index,
         })
     }
+}
+
+/// `[WAL WARN]`-logs `Db::open_or_rebuild`'s FR-006 embedding-model mismatch check (issue #440)
+/// against `wal_dir`'s recorded identity, if any. No-op (and no log) when there's no mismatch —
+/// see `wal_embedding_identity::check_model_identity_for_replay` for what counts as one.
+fn warn_on_embedding_model_mismatch(wal_dir: &Path, ctx: &crate::embedding_cache::EmbedderContext) {
+    if let Some(msg) = ctx.check_replay_mismatch(wal_dir) {
+        eprintln!("[WAL WARN] {msg}");
+    }
+}
+
+/// Builds a synchronous `RecomputeEmbedFn` (issue #440) for `Db::open_or_rebuild`'s bare-sync
+/// call site — no ambient tokio runtime is guaranteed here (this function's own test callers run
+/// with none), so a dedicated single-threaded runtime is built and owned by the closure itself,
+/// per `replay::RecomputeEmbedFn`'s "each caller bridges its own runtime context" design.
+fn build_sync_recompute_fn(
+    ctx: &crate::embedding_cache::EmbedderContext,
+) -> Result<crate::replay::RecomputeEmbedFn, Error> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::Ipc(format!("failed to build embedding-recompute runtime: {e}")))?;
+    let embedder = Arc::clone(&ctx.embedder);
+    let cache = Arc::clone(&ctx.cache);
+    let (model, dim) = ctx.identity();
+    Ok(Box::new(move |text: &str| {
+        cache.get_or_compute(&model, dim, text, || rt.block_on(embedder.embed(text)))
+    }))
 }
 
 impl<'db> Conn<'db> {
@@ -2023,14 +2085,15 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
-    /// Returns the persisted `(applied_seq, generation)` position for `group_id`, or the default
-    /// (`None`, `None`) if no position has ever been recorded for that group. A `seq`/generation
-    /// from one group's stream must never be compared against another group's row (FR-008 of
-    /// #378) — this always reads exactly one group's `WalPosition` row, selected by its primary
-    /// key.
+    /// Returns the persisted `(applied_seq, generation, embedding_model, embedding_dim)` position
+    /// for `group_id`, or the default (all `None`) if no position has ever been recorded for that
+    /// group. A `seq`/generation/embedding identity from one group's stream must never be
+    /// compared against another group's row (FR-008 of #378) — this always reads exactly one
+    /// group's `WalPosition` row, selected by its primary key.
     pub fn get_wal_position(&self, group_id: &str) -> Result<WalPositionRecord, Error> {
         let rows = self.query_params(
-            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation",
+            "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation, \
+             w.embedding_model, w.embedding_dim",
             serde_json::json!({ "group_id": group_id }),
         )?;
         Ok(rows
@@ -2039,32 +2102,44 @@ impl<'db> Conn<'db> {
             .map(|row| WalPositionRecord {
                 applied_seq: value_as_optional_u64(&row[0]),
                 generation: value_as_optional_string(&row[1]),
+                embedding_model: value_as_optional_string(&row[2]),
+                embedding_dim: value_as_optional_u64(&row[3]).map(|d| d as i64),
             })
             .unwrap_or_default())
     }
 
-    /// Persists `seq` and `generation` as `group_id`'s WAL position (issue #353, made per-group
-    /// by issue #378, generation-scoped by issue #387). Uses `Connection::execute` via a prepared
-    /// statement directly rather than `raw_query`/`exec_params`, so this write is never itself
-    /// recorded into `executed_mutations` and re-logged to the WAL — that would make the position
-    /// immediately stale by the write that just recorded it (a self-referential regress). Same
-    /// non-recording bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a
-    /// parameter, not interpolated, since it is caller-controlled (IPC-supplied).
+    /// Persists `seq`, `generation`, and `embedding_identity` as `group_id`'s WAL position (issue
+    /// #353, made per-group by issue #378, generation-scoped by issue #387, embedding-identity-
+    /// scoped by issue #440 FR-007). Uses `Connection::execute` via a prepared statement directly
+    /// rather than `raw_query`/`exec_params`, so this write is never itself recorded into
+    /// `executed_mutations` and re-logged to the WAL — that would make the position immediately
+    /// stale by the write that just recorded it (a self-referential regress). Same non-recording
+    /// bypass as `exec_transaction_control`/`count_nodes`. `group_id` is bound as a parameter, not
+    /// interpolated, since it is caller-controlled (IPC-supplied).
     ///
     /// `generation: None` is a legitimate value (a legacy pre-#387 stream that has never had a
     /// generation recorded, per FR-009's Story 5) — it is written as an explicit SQL `NULL`, not
     /// skipped, so a later `set_wal_position` call for the same group correctly clears out any
     /// stale generation from a previous write rather than leaving it silently orphaned.
+    /// `embedding_identity: None` is the same kind of legitimate, explicit-clear value — a caller
+    /// that didn't run recompute (recompute disabled, or a legacy pre-#440 call site) records no
+    /// embedding identity for this write, same "unknown" semantics as `generation: None`.
     pub fn set_wal_position(
         &self,
         group_id: &str,
         seq: u64,
         generation: Option<&str>,
+        embedding_identity: Option<(&str, i64)>,
     ) -> Result<(), Error> {
         let mut prepared = self.inner.prepare(
             "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
-             w.generation = $generation",
+             w.generation = $generation, w.embedding_model = $embedding_model, \
+             w.embedding_dim = $embedding_dim",
         )?;
+        let (embedding_model, embedding_dim) = match embedding_identity {
+            Some((model, dim)) => (Value::String(model.to_string()), Value::Int64(dim)),
+            None => (Value::Null(LogicalType::Any), Value::Null(LogicalType::Any)),
+        };
         let bound: Vec<(&str, Value)> = vec![
             ("group_id", Value::String(group_id.to_string())),
             ("seq", Value::Int64(seq as i64)),
@@ -2075,6 +2150,8 @@ impl<'db> Conn<'db> {
                     None => Value::Null(LogicalType::Any),
                 },
             ),
+            ("embedding_model", embedding_model),
+            ("embedding_dim", embedding_dim),
         ];
         self.inner.execute(&mut prepared, bound)?;
         Ok(())
@@ -2112,7 +2189,7 @@ impl<'db> Conn<'db> {
             return Ok(());
         };
         if self.get_wal_position(group_id)?.applied_seq.is_none() {
-            self.set_wal_position(group_id, seq, None)?;
+            self.set_wal_position(group_id, seq, None, None)?;
         }
         let _ = self
             .inner
@@ -3478,7 +3555,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("liminis", 41, None).unwrap();
+        conn.set_wal_position("liminis", 41, None, None).unwrap();
 
         assert_eq!(
             conn.get_wal_position("liminis").unwrap().applied_seq,
@@ -3495,8 +3572,8 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("liminis", 5, None).unwrap();
-        conn.set_wal_position("liminis", 12, None).unwrap();
+        conn.set_wal_position("liminis", 5, None, None).unwrap();
+        conn.set_wal_position("liminis", 12, None, None).unwrap();
 
         assert_eq!(
             conn.get_wal_position("liminis").unwrap().applied_seq,
@@ -3518,7 +3595,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
 
         assert_eq!(
             conn.get_wal_position("liminis").unwrap().applied_seq,
@@ -3537,7 +3614,7 @@ mod applied_seq_tests {
         conn.init_schema(4).unwrap();
         conn.drain_mutations(); // discard init_schema's own recorded DDL
 
-        conn.set_wal_position("liminis", 7, None).unwrap();
+        conn.set_wal_position("liminis", 7, None, None).unwrap();
 
         assert!(
             conn.drain_mutations().is_empty(),
@@ -3555,8 +3632,8 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("group-a", 10, None).unwrap();
-        conn.set_wal_position("group-b", 0, None).unwrap();
+        conn.set_wal_position("group-a", 10, None, None).unwrap();
+        conn.set_wal_position("group-b", 0, None, None).unwrap();
 
         assert_eq!(
             conn.get_wal_position("group-a").unwrap().applied_seq,
@@ -3579,7 +3656,7 @@ mod applied_seq_tests {
         );
 
         // Advancing group-a must not disturb group-b's row (SC-002/SC-003 groundwork).
-        conn.set_wal_position("group-a", 25, None).unwrap();
+        conn.set_wal_position("group-a", 25, None, None).unwrap();
         assert_eq!(
             conn.get_wal_position("group-b").unwrap().applied_seq,
             Some(0)
@@ -3597,12 +3674,14 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("liminis", 5, Some("gen-a")).unwrap();
+        conn.set_wal_position("liminis", 5, Some("gen-a"), None)
+            .unwrap();
         let pos = conn.get_wal_position("liminis").unwrap();
         assert_eq!(pos.applied_seq, Some(5));
         assert_eq!(pos.generation.as_deref(), Some("gen-a"));
 
-        conn.set_wal_position("liminis", 9, Some("gen-b")).unwrap();
+        conn.set_wal_position("liminis", 9, Some("gen-b"), None)
+            .unwrap();
         let pos = conn.get_wal_position("liminis").unwrap();
         assert_eq!(pos.applied_seq, Some(9));
         assert_eq!(
@@ -3621,8 +3700,9 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("liminis", 5, Some("gen-a")).unwrap();
-        conn.set_wal_position("liminis", 6, None).unwrap();
+        conn.set_wal_position("liminis", 5, Some("gen-a"), None)
+            .unwrap();
+        conn.set_wal_position("liminis", 6, None, None).unwrap();
 
         let pos = conn.get_wal_position("liminis").unwrap();
         assert_eq!(pos.applied_seq, Some(6));
@@ -3638,8 +3718,10 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("group-a", 10, Some("gen-a")).unwrap();
-        conn.set_wal_position("group-b", 10, Some("gen-b")).unwrap();
+        conn.set_wal_position("group-a", 10, Some("gen-a"), None)
+            .unwrap();
+        conn.set_wal_position("group-b", 10, Some("gen-b"), None)
+            .unwrap();
 
         assert_eq!(
             conn.get_wal_position("group-a")
@@ -3669,7 +3751,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("singleton", 41, None).unwrap();
+        conn.set_wal_position("singleton", 41, None, None).unwrap();
 
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
@@ -3717,8 +3799,8 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("singleton", 5, None).unwrap();
-        conn.set_wal_position("liminis", 99, None).unwrap();
+        conn.set_wal_position("singleton", 5, None, None).unwrap();
+        conn.set_wal_position("liminis", 99, None, None).unwrap();
 
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
@@ -3743,7 +3825,7 @@ mod applied_seq_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
 
-        conn.set_wal_position("singleton", 7, None).unwrap();
+        conn.set_wal_position("singleton", 7, None, None).unwrap();
         conn.migrate_legacy_singleton_wal_position("liminis")
             .unwrap();
         conn.migrate_legacy_singleton_wal_position("liminis")

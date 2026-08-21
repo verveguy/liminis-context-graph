@@ -68,6 +68,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppStat
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -103,6 +104,7 @@ fn make_state_no_wal(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -244,6 +246,52 @@ async fn test_add_episode_advances_applied_seq_to_chunk_max_seq() {
         conn.get_wal_position("test").unwrap().applied_seq,
         Some(expected_seq),
         "applied_seq must equal the chunk's max WAL seq"
+    );
+}
+
+/// issue #440 FR-007: an ordinary live write (`add_episode`, no WAL replay involved at all) must
+/// stamp `WalPosition.embedding_model`/`embedding_dim` with the running embedder's identity
+/// alongside `applied_seq`, the same way `generation` is already re-derived and persisted on
+/// every write — not only after an explicit rebuild. This is a review-comment fix: the original
+/// PR left every ordinary write passing `None` for this field, so a group fed purely by live
+/// ingestion could never observe a model-change-and-restart mismatch via `embedding_model_status`
+/// (it stayed `"unknown"` forever). Two independent reviewers flagged this on the PR.
+#[tokio::test]
+async fn test_add_episode_stamps_embedding_identity_on_wal_position() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    let v = dispatch(
+        1,
+        "knowledge_add_episode",
+        json!({
+            "name": "embedding-identity-chunk",
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "test",
+            "source_description": "test/source",
+            "reference_time": "2026-01-01 00:00:00",
+            "group_id": "test"
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v.get("result").is_some(), "expected result, got: {v}");
+
+    let conn = db.connect().unwrap();
+    let pos = conn.get_wal_position("test").unwrap();
+    assert_eq!(
+        pos.embedding_model.as_deref(),
+        Some("bge-base-en-v1.5"),
+        "an ordinary live write must stamp the running embedder's model identity, not leave it \
+         null (FR-007) — got position: {pos:?}"
+    );
+    assert_eq!(
+        pos.embedding_dim,
+        Some(EMB_DIM as i64),
+        "an ordinary live write must stamp the running embedder's dimension, not leave it null \
+         (FR-007) — got position: {pos:?}"
     );
 }
 

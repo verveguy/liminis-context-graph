@@ -113,6 +113,7 @@ async fn wal_repopulated_after_recreate() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     // Step 1: Recreate (preserve_wal: false) — clears DB and WAL directory.

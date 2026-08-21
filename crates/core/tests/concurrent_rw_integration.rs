@@ -145,6 +145,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
     let s1 = Arc::clone(&state);

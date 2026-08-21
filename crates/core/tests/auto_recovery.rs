@@ -77,6 +77,7 @@ fn make_degraded_state(
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -111,6 +112,7 @@ fn make_healthy_state(db: Arc<Db>, wal_dir: std::path::PathBuf) -> Arc<AppState>
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -210,7 +212,9 @@ async fn test_run_full_recovery_sequence_torn_wal() {
     let result = tokio::task::spawn_blocking({
         let db_path = db_path.clone();
         let wal_root = wal_root.clone();
-        move || recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink)
+        move || {
+            recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink, None)
+        }
     })
     .await
     .unwrap();

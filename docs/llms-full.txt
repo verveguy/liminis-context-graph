@@ -1291,7 +1291,8 @@ Everything the service manages lives under `.lcg/` in the workspace:
 .lcg/
 ├── wal/                    # WAL root — one subdirectory per group_id (issue #378)
 │   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json,
-│                            #   .wal-generation.json, .wal-ontology.json (issue #446)
+│                            #   .wal-generation.json, .wal-ontology.json (issue #446),
+│                            #   .wal-embedding-model.json (issue #440)
 ├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL
 ├── ontology.yaml           # optional workspace-wide extraction vocabulary (yours to edit)
 ├── ontology/                # optional per-group extraction vocabulary (issue #446)
@@ -1372,13 +1373,15 @@ and know what each entry in the dot-namespace costs you if you omit it anyway:
 | `.wal-bounds.json` (issue #375) | MAY be omitted | not wrong, just slow — a cache; the consumer regenerates it by rescanning every `*.jsonl` file on next read |
 | `.wal-ontology.json` (issue #446) | MAY be omitted — informational | not wrong, not slow either — replay and correctness are entirely unaffected; the consumer just loses the ability to see what vocabulary produced this group's graph. Never applied to the consumer's own extraction, validation, canonicalization, or reprocessing even when present (see [Ontology](ontology.md#per-group-ontologies)) — it is provenance, not policy |
 | `.checkpoints/` (issue #365) | MAY be excluded | local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation |
+| `.wal-embedding-model.json` (issue #440) | MAY be omitted, but you lose a diagnostic | diagnostic-only, unlike `.wal-generation.json` above — recompute (FR-001) never reads it, so replay and rebuild are unaffected either way, and nothing hard-fails the way a missing generation can. Losing it only silences the replay-time `[WAL WARN] embedding-model mismatch: ...` check (FR-006): a missing sidecar reads as "unknown" (never a false mismatch), so a genuine embedder change for that stream goes undetected at replay time until the next `knowledge_status` call surfaces it via `embedding_model_status` instead |
 
 Only `.wal-generation.json` is load-bearing — every other entry is safe to omit deliberately, but
 never safe to omit *by accident* as a side effect of a glob pattern that was only ever meant to
 select `*.jsonl` files. `.wal-bounds.json` and `.checkpoints/` degrade performance or local
-recovery convenience if dropped; `.wal-ontology.json` degrades only documentation — a fourth,
-distinct bucket from the other three, since even a stream published with it present must never
-have it change the consumer's own behavior (issue #446).
+recovery convenience if dropped; `.wal-ontology.json` degrades only documentation — a stream
+published with it present must never have it change the consumer's own behavior (issue #446);
+`.wal-embedding-model.json` degrades only a diagnostic — recompute never reads it, so replay and
+rebuild are unaffected, and only the replay-time mismatch warning goes silent (issue #440).
 
 ## WAL administration
 
@@ -1678,6 +1681,64 @@ narrow false `"not_applicable"` for an equally narrow but more actively misleadi
 way: a `wal_ahead` group is a normal, fully-queryable state from the process's own point of view
 (it can still serve reads over whatever content it does hold) — the hydration question is per-group
 data state, not process health, and is answered here rather than by `health_check`.
+
+**`wal.embedding_model`, `wal.embedding_dim`, and `wal.embedding_model_status`** (issue #440;
+scoped to the default group, and mirrored per-group inside `wal_groups`) — report the embedding
+model identity under which the group's *currently-applied* vectors were computed, alongside
+`applied_seq`/`generation` in the same `WalPosition` row (no extra query). This is distinct from
+replay reconstructing a graph from a WAL captured under a different embedder: as of this issue,
+replay (`knowledge_rebuild_from_wal`, `knowledge_recover` with any strategy that replays WAL
+content, and startup WAL-corruption self-recovery) always **recomputes** each embedding vector
+from its co-located source text
+(`name`/`fact`/`content`) using the *currently running* embedder, rather than binding whatever
+vector the WAL happened to store — so the graph's vectors stay coherent with the process actually
+querying them, and upgrading the embedder is self-healing (rebuild, and search stays consistent).
+A record with no co-located source text (a malformed or pre-recompute-era shape) still falls back
+to the WAL's stored vector verbatim, unchanged from prior behavior. Recomputation failing for a
+record that *does* have source text (embedder unreachable, or a recomputed vector whose length or
+finiteness makes it unbindable) falls back the same way — the stored vector stays bound and replay
+does not fail for that row; each cause is counted separately in `ReplayStats`
+(`embeddings_recompute_fallback` vs. `embeddings_recompute_failed`) so the two are distinguishable.
+
+`embedding_model_status` classifies the comparison between the recorded identity and the
+*currently running* embedder's own `(embedding_model, embedding_dim)` (the top-level fields also
+present on `knowledge_status`) — independent of whether a replay has happened in this session, so
+a restart under a different embedder is caught regardless of whether the group has ever been
+rebuilt. `WalPosition.embedding_model`/`embedding_dim` are re-derived from the running embedder
+and re-stamped on **every** successful WAL-position advance — a full replay/rebuild, and every
+ordinary write (`add_episode`, assertion/merge/rebind/correction handlers, backfill, canonicalize,
+reprocess) alike — the same "re-derived and persisted on every write" treatment `generation`
+already gets, not something limited to replay call sites. This is a best-effort marker, not a
+full-graph audit: a write stamps the identity of the embedder that *ran* it, not a claim that
+every vector currently in the group was computed under that identity — a group that changed
+embedders mid-life without an intervening full rebuild can still carry some stale, un-recomputed
+vectors from before the change even while `embedding_model_status` reads `"match"` (the status
+reflects the most recent write's embedder, and a delete/correction/relabel write stamps the
+running identity the same way a content-embedding write does, even though it touched no vector
+itself). The one case still uncovered is genuinely fresh: a group with an `applied_seq` recorded
+before this issue shipped (or via a caller with recompute unavailable) shows `"unknown"` until its
+next write or an explicit rebuild — never a false `"match"`.
+
+| `embedding_model_status` | meaning |
+|---|---|
+| `"not_applicable"` | nothing has ever been applied for this group (`applied_seq` itself is `null`) |
+| `"unknown"` | a position is recorded, but no embedding identity was recorded alongside it — a pre-#440 write, or a call site with recompute unavailable |
+| `"match"` | the recorded identity equals the running embedder's `(model, dim)` |
+| `"mismatch"` | the recorded identity differs from the running embedder's — by model name, by dimension (e.g. a `LCG_EMBEDDING_DIM` override under the same model name still counts), or both |
+
+A `"mismatch"` is never a hard failure — it is deliberately self-healing, the same way a
+`generation` mismatch triggers a full replay rather than refusing outright: the fix is to rebuild
+(`knowledge_rebuild_from_wal`), which recomputes every vector under the now-running embedder and
+updates the recorded identity to match. Until then, `"mismatch"` is a live signal that vector
+search results may be degraded — the previously-active vectors were computed under a different
+model than the one now serving queries. The service also logs a `[WAL WARN] embedding-model
+mismatch: ...` line at replay time (before a rebuild starts) when the WAL directory's own recorded
+write-time identity (an independent, per-WAL-directory `.wal-embedding-model.json` sidecar,
+mirroring `.wal-generation.json`'s pattern) differs from the running embedder — this is the
+replay-time check (comparing the WAL's stamp against the runner), distinct from
+`embedding_model_status` (comparing the graph's currently-applied vectors against the runner),
+though both answer the same underlying question from different angles and both are populated by
+this issue.
 
 The consumer decision, comparing the two fields — check both for `null` before any numeric
 comparison. `hydration_status` above is a documented shortcut for the common case, but it treats
@@ -2923,6 +2984,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
+| [0440](0440-recompute-embeddings-on-wal-replay.md) | Recompute Embeddings on WAL Replay, With a Sync Bridge and a Two-Mechanism Identity Split | 2026-08-19 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
 | [0432](0432-force-clear-guard-scans-wal-content-group-ids.md) | `force_clear` Rebuild Guard Scans WAL Content for Referenced `group_id`s | 2026-08-21 |
 

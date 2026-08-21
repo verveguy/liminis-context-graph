@@ -218,9 +218,17 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 
 /// Aggregated counts + WAL metadata gathered inside one blocking task, for the healthy
 /// (graph queryable) case.
-/// One group's `(group_id, applied_seq, max_seq, generation)` in `knowledge_status`'s
-/// `wal_groups` breakdown (issue #378 FR-007; generation added by issue #387).
-type WalGroupPosition = (String, Option<u64>, Option<u64>, Option<String>);
+/// One group's `(group_id, applied_seq, max_seq, generation, embedding_model, embedding_dim)` in
+/// `knowledge_status`'s `wal_groups` breakdown (issue #378 FR-007; generation added by issue
+/// #387; embedding_model/embedding_dim added by issue #440 FR-007).
+type WalGroupPosition = (
+    String,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
 
 struct StatusFields {
     entity_count: u64,
@@ -235,10 +243,16 @@ struct StatusFields {
     /// lcg's DB-recorded consumer-side position, mirroring `wal_max_seq`'s "what's actually on
     /// disk right now" role. `None` for a pre-#387 stream that has never had one recorded.
     wal_generation: Option<String>,
-    /// Per-group `(group_id, applied_seq, max_seq, generation)` for every group that has a WAL
-    /// directory (issue #378 FR-007; generation added by issue #387) — additive to the flat
-    /// `wal_applied_seq`/`wal_max_seq`/`wal_generation` fields above, which stay pinned to the
-    /// default group.
+    /// The embedding model identity under which the default group's currently-applied vectors
+    /// were computed (issue #440, FR-007) — `None` when no position has been recorded, or it
+    /// predates this feature, or was recorded with recompute disabled.
+    wal_embedding_model: Option<String>,
+    wal_embedding_dim: Option<i64>,
+    /// Per-group `(group_id, applied_seq, max_seq, generation, embedding_model, embedding_dim)`
+    /// for every group that has a WAL directory (issue #378 FR-007; generation added by issue
+    /// #387; embedding_model/embedding_dim added by issue #440 FR-007) — additive to the flat
+    /// `wal_applied_seq`/`wal_max_seq`/`wal_generation`/`wal_embedding_model`/`wal_embedding_dim`
+    /// fields above, which stay pinned to the default group.
     wal_group_positions: Vec<WalGroupPosition>,
     last_index_time: Option<String>,
     index_created_at: Option<String>,
@@ -262,6 +276,8 @@ enum StatusOutcome {
         wal_applied_seq: Option<u64>,
         wal_max_seq: Option<u64>,
         wal_generation: Option<String>,
+        wal_embedding_model: Option<String>,
+        wal_embedding_dim: Option<i64>,
         wal_group_positions: Vec<WalGroupPosition>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
@@ -385,10 +401,14 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // never fatal to the rest of the status response. If the default group has no WAL
             // directory at all (e.g. a pure replica that only ever hydrated other groups), both
             // stay `null` — a documented signal of "no default group", not an error.
-            let wal_applied_seq = conn
-                .get_wal_position(DEFAULT_GROUP_ID)
-                .unwrap_or_default()
-                .applied_seq;
+            let default_group_position =
+                conn.get_wal_position(DEFAULT_GROUP_ID).unwrap_or_default();
+            let wal_applied_seq = default_group_position.applied_seq;
+            // issue #440 FR-007: the embedding identity under which the default group's
+            // currently-applied vectors were computed — read from the same WalPosition row as
+            // wal_applied_seq/generation, not a separate query.
+            let wal_embedding_model = default_group_position.embedding_model;
+            let wal_embedding_dim = default_group_position.embedding_dim;
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
@@ -408,10 +428,17 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(gid, dir)| {
-                    let applied = conn.get_wal_position(&gid).unwrap_or_default().applied_seq;
+                    let position = conn.get_wal_position(&gid).unwrap_or_default();
                     let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
                     let generation = crate::wal_generation::read_generation(&dir);
-                    (gid, applied, max, generation)
+                    (
+                        gid,
+                        position.applied_seq,
+                        max,
+                        generation,
+                        position.embedding_model,
+                        position.embedding_dim,
+                    )
                 })
                 .collect();
             let name_index_trusted = conn.name_index_trusted();
@@ -454,6 +481,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_applied_seq,
                     wal_max_seq,
                     wal_generation,
+                    wal_embedding_model,
+                    wal_embedding_dim,
                     wal_group_positions,
                     last_index_time,
                     index_created_at,
@@ -472,6 +501,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_applied_seq,
                     wal_max_seq,
                     wal_generation,
+                    wal_embedding_model,
+                    wal_embedding_dim,
                     wal_group_positions,
                     name_index_trusted,
                     name_index_fallback_scans,
@@ -521,12 +552,23 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // "empty because it hasn't been replayed" — both previously required a
                     // caller to compare applied_seq/max_seq itself.
                     "hydration_status": wal_hydration_status(fields.wal_applied_seq, fields.wal_max_seq),
+                    // issue #440 FR-007/FR-008: the embedding identity under which the default
+                    // group's currently-applied vectors were computed, compared against the
+                    // running embedder's identity — independent of whether a replay happened in
+                    // this session (FR-007's "at query time (including startup)").
+                    "embedding_model": fields.wal_embedding_model,
+                    "embedding_dim": fields.wal_embedding_dim,
+                    "embedding_model_status": embedding_model_status(
+                        fields.wal_applied_seq,
+                        fields.wal_embedding_model.as_deref().zip(fields.wal_embedding_dim),
+                        (&embedding_model, embedding_dim as i64),
+                    ),
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
                 // pinned to the default group specifically, so an existing consumer that only
                 // reads them (e.g. orac) requires no change.
-                "wal_groups": wal_group_positions_json(&fields.wal_group_positions),
+                "wal_groups": wal_group_positions_json(&fields.wal_group_positions, (&embedding_model, embedding_dim as i64)),
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
@@ -549,6 +591,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_applied_seq,
             wal_max_seq,
             wal_generation,
+            wal_embedding_model,
+            wal_embedding_dim,
             wal_group_positions,
             name_index_trusted,
             name_index_fallback_scans,
@@ -583,8 +627,15 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "generation": wal_generation,
                 "generation_status": wal_generation_status(wal_max_seq, wal_generation.as_deref()),
                 "hydration_status": wal_hydration_status(wal_applied_seq, wal_max_seq),
+                "embedding_model": wal_embedding_model,
+                "embedding_dim": wal_embedding_dim,
+                "embedding_model_status": embedding_model_status(
+                    wal_applied_seq,
+                    wal_embedding_model.as_deref().zip(wal_embedding_dim),
+                    (&embedding_model, embedding_dim as i64),
+                ),
             },
-            "wal_groups": wal_group_positions_json(&wal_group_positions),
+            "wal_groups": wal_group_positions_json(&wal_group_positions, (&embedding_model, embedding_dim as i64)),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
             // missing, any index built against it is meaningless, regardless of whether a
             // `knowledge_build_indices` call has run since the table broke to store `false`
@@ -666,26 +717,64 @@ fn wal_hydration_status(applied_seq: Option<u64>, max_seq: Option<u64>) -> &'sta
     }
 }
 
-/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation)`
-/// tuples (issue #378 FR-007; generation added by issue #387) into the additive `wal_groups`
-/// JSON map. `generation_status` (issue #414 FR-001) is a sibling field alongside `generation`,
-/// not a replacement for it — `generation` keeps its existing value/meaning so a caller that only
-/// reads it is unaffected.
-fn wal_group_positions_json(positions: &[WalGroupPosition]) -> Value {
+/// Classifies FR-007/FR-008's embedding-identity comparison (issue #440) into four states,
+/// mirroring `wal_generation_status`'s three-state shape but distinguishing a genuine value
+/// mismatch from "unknown": `"not_applicable"` (nothing has ever been applied for this group —
+/// `applied_seq` itself is `None`), `"unknown"` (a position is recorded, but no embedding
+/// identity was recorded alongside it — a pre-#440 write, or one with recompute disabled),
+/// `"match"` (recorded identity equals the running embedder's), or `"mismatch"` (recorded
+/// identity differs by model name or dimension — FR-008's "surface it clearly and visibly"
+/// signal, evaluated independent of whether a replay happened in this session).
+fn embedding_model_status(
+    applied_seq: Option<u64>,
+    recorded: Option<(&str, i64)>,
+    running: (&str, i64),
+) -> &'static str {
+    match (applied_seq, recorded) {
+        (None, _) => "not_applicable",
+        (Some(_), None) => "unknown",
+        (Some(_), Some((model, dim))) => {
+            if model == running.0 && dim == running.1 {
+                "match"
+            } else {
+                "mismatch"
+            }
+        }
+    }
+}
+
+/// Renders `handle_knowledge_status`'s per-group `(group_id, applied_seq, max_seq, generation,
+/// embedding_model, embedding_dim)` tuples (issue #378 FR-007; generation added by issue #387;
+/// embedding_model/embedding_dim added by issue #440 FR-007) into the additive `wal_groups` JSON
+/// map. `generation_status`/`hydration_status`/`embedding_model_status` are sibling fields, not
+/// replacements — the underlying `generation`/`embedding_model`/`embedding_dim` values keep their
+/// existing meaning so a caller that only reads those is unaffected. `running` is the process's
+/// own embedder identity, compared against every group's recorded identity (there is one embedder
+/// per process, not one per group).
+fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64)) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
-        .map(|(gid, applied, max, generation)| {
-            (
-                gid.clone(),
-                json!({
-                    "applied_seq": applied,
-                    "max_seq": max,
-                    "generation": generation,
-                    "generation_status": wal_generation_status(*max, generation.as_deref()),
-                    "hydration_status": wal_hydration_status(*applied, *max),
-                }),
-            )
-        })
+        .map(
+            |(gid, applied, max, generation, embedding_model, embedding_dim)| {
+                (
+                    gid.clone(),
+                    json!({
+                        "applied_seq": applied,
+                        "max_seq": max,
+                        "generation": generation,
+                        "generation_status": wal_generation_status(*max, generation.as_deref()),
+                        "hydration_status": wal_hydration_status(*applied, *max),
+                        "embedding_model": embedding_model,
+                        "embedding_dim": embedding_dim,
+                        "embedding_model_status": embedding_model_status(
+                            *applied,
+                            embedding_model.as_deref().zip(*embedding_dim),
+                            running,
+                        ),
+                    }),
+                )
+            },
+        )
         .collect();
     Value::Object(map)
 }
@@ -998,7 +1087,7 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
             .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &group_id, seq);
+        wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         Ok(())
     })
     .await??;
@@ -1088,7 +1177,7 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // Its applied_seq advances uniformly with every other wal_flush_ungrouped caller (issue
         // #383 FR-006) — no per-caller exception for raw cypher's trust level.
         let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
+        wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq, &state_c);
         // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
         // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
         // an Entity row with the index never learning about it. Reuse the WAL's own
@@ -1407,7 +1496,7 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, target_group, seq);
+        wal_exec::advance_wal_position(&conn, target_group, seq, &state_c);
         Ok(uuids)
     })
     .await??;
@@ -1457,7 +1546,7 @@ async fn handle_delete_chunk_episode(
             _ => DEFAULT_GROUP_ID,
         };
         let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, target_group, seq);
+        wal_exec::advance_wal_position(&conn, target_group, seq, &state_c);
         Ok(uuids)
     })
     .await??;
@@ -1516,7 +1605,7 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // makes this per-group by construction, with no default-group fallback to reason about.
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         }
         Ok(counts)
     })
@@ -1650,7 +1739,7 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
             } else {
                 None
             };
-            conn.set_wal_position(DEFAULT_GROUP_ID, 0, generation.as_deref())?;
+            conn.set_wal_position(DEFAULT_GROUP_ID, 0, generation.as_deref(), None)?;
             // Fresh empty table — a no-op today, kept for uniformity with every other
             // Entity-population path (issue #219).
             conn.rebuild_name_index()?;
@@ -2368,6 +2457,26 @@ async fn handle_rebuild_from_wal(
                     });
                     f
                 });
+                // issue #440 FR-001/FR-006/FR-007: recompute embeddings from co-located source
+                // text rather than binding the WAL's stored vectors, warn if this WAL's recorded
+                // embedding identity mismatches the running embedder, and persist that identity
+                // alongside applied_seq below. Skipped for a dry run — replay_opts never invokes
+                // recompute_embed_fn when dry_run is set, so building the bridge (and its
+                // mismatch check) would be pure overhead.
+                let (recompute_embed_fn, embedding_identity) = if dry_run {
+                    (None, None)
+                } else {
+                    let embedder_ctx = crate::embedding_cache::EmbedderContext {
+                        embedder: Arc::clone(&state_c.embedder),
+                        model: state_c.embedding_model.clone(),
+                        cache: Arc::clone(&state_c.embedding_cache),
+                    };
+                    if let Some(msg) = embedder_ctx.check_replay_mismatch(&wal_dir_c) {
+                        eprintln!("[WAL WARN] {msg}");
+                    }
+                    let identity = embedder_ctx.identity();
+                    (Some(embedder_ctx.recompute_fn_via_handle()), Some(identity))
+                };
                 let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
@@ -2380,6 +2489,7 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
+                        recompute_embed_fn,
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
@@ -2431,8 +2541,14 @@ async fn handle_rebuild_from_wal(
                     // rebuild that just succeeded.
                     if let Some(seq) = stats.last_committed_seq {
                         warn_on_rebuild_seq_gap(&conn, &gid_c, from_seq, "reload");
-                        match conn.set_wal_position(&gid_c, seq, generation_for_replay.as_deref())
-                        {
+                        match conn.set_wal_position(
+                            &gid_c,
+                            seq,
+                            generation_for_replay.as_deref(),
+                            embedding_identity
+                                .as_ref()
+                                .map(|(model, dim)| (model.as_str(), *dim)),
+                        ) {
                             Ok(()) => {
                                 // FR-010: a reset-triggered self-heal also re-binds cross-group
                                 // pointers into this group, immediately after the full replay
@@ -2457,7 +2573,7 @@ async fn handle_rebuild_from_wal(
                                                     &state_c, &group_id, mutations,
                                                 );
                                                 wal_exec::advance_wal_position(
-                                                    &conn, &group_id, seq,
+                                                    &conn, &group_id, seq, &state_c,
                                                 );
                                             }
                                             rebind_counts = Some(counts);
@@ -2623,6 +2739,7 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
+                        recompute_embed_fn: None,
                     },
                 )
             })
@@ -2772,6 +2889,22 @@ async fn handle_rebuild_from_wal(
                     }
                     true
                 });
+                // issue #440 FR-001/FR-006/FR-007: same recompute bridge + mismatch check +
+                // identity-to-persist derivation as the streaming path above.
+                let (recompute_embed_fn, embedding_identity) = if dry_run {
+                    (None, None)
+                } else {
+                    let embedder_ctx = crate::embedding_cache::EmbedderContext {
+                        embedder: Arc::clone(&bg_state.embedder),
+                        model: bg_state.embedding_model.clone(),
+                        cache: Arc::clone(&bg_state.embedding_cache),
+                    };
+                    if let Some(msg) = embedder_ctx.check_replay_mismatch(&wal_dir_c) {
+                        eprintln!("[WAL WARN] {msg}");
+                    }
+                    let identity = embedder_ctx.identity();
+                    (Some(embedder_ctx.recompute_fn_via_handle()), Some(identity))
+                };
                 let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
@@ -2784,6 +2917,7 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
+                        recompute_embed_fn,
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
@@ -2835,6 +2969,9 @@ async fn handle_rebuild_from_wal(
                             &bg_gid,
                             seq,
                             bg_current_generation_for_replay.as_deref(),
+                            embedding_identity
+                                .as_ref()
+                                .map(|(model, dim)| (model.as_str(), *dim)),
                         ) {
                             Ok(()) => {
                                 // FR-010: same post-replay re-bind as the streaming path — part
@@ -2851,7 +2988,7 @@ async fn handle_rebuild_from_wal(
                                                     &bg_state, &group_id, mutations,
                                                 );
                                                 wal_exec::advance_wal_position(
-                                                    &conn, &group_id, seq,
+                                                    &conn, &group_id, seq, &bg_state,
                                                 );
                                             }
                                             rebind_counts = Some(counts);
@@ -3034,7 +3171,7 @@ async fn clear_groups_for_rebuild(
         // empty" reset below is never racing an advance of its own position.
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         }
         // Reset only request_gid's own WAL position (issue #353 FR-005, scoped per group by
         // issue #378; generation-scoped by issue #387) — a WalPosition is tied to a *physical*
@@ -3044,7 +3181,7 @@ async fn clear_groups_for_rebuild(
         // no position of its own to reset (issue #432). The from_seq: 0 rebuild this function
         // exists to enable will overwrite request_gid's position with the replay's precise
         // last_committed_seq (and its own freshly-read generation) once it completes.
-        conn.set_wal_position(&request_gid, 0, generation.as_deref())?;
+        conn.set_wal_position(&request_gid, 0, generation.as_deref(), None)?;
         Ok(())
     })
     .await??;
@@ -3130,7 +3267,7 @@ async fn handle_apply_corrections(req: &IpcRequest, state: Arc<AppState>) -> Res
             // writer, the same documented limitation as handle_delete_by_group.
             let seq =
                 wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq);
+            wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq, &state_c);
         }
         Ok::<_, Error>(apply_result)
     })
@@ -3194,7 +3331,7 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             // owning the merge — this call's mutations all belong to gid_c, so (unlike the
             // FR-004-exempt sites) per-operation attribution names it directly.
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
         }
         Ok::<_, Error>(merge_result)
     })
@@ -3308,7 +3445,7 @@ async fn handle_add_cross_group_edge(
         // The new RelatesToNode_ edge is owned by gid_c alone — its two endpoints may point into
         // other groups, but the mutation itself belongs to exactly one group (FR-004).
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid_c, seq);
+        wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
         Ok::<_, Error>(edge)
     })
     .await??;
@@ -3349,7 +3486,7 @@ async fn handle_rebind_pointers(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // group's applied_seq (issue #383).
         for (group_id, mutations) in grouped {
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq);
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         }
         Ok::<_, Error>(counts)
     })
@@ -3484,7 +3621,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         };
 
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid_wal, seq);
+        wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3620,7 +3757,7 @@ async fn handle_assert_relationship(
         };
 
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid_wal, seq);
+        wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
         Ok::<_, Error>((uuid, created))
     })
     .await??;
@@ -3870,7 +4007,7 @@ async fn handle_reprocess_entity_types(
             let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let count = corrections::apply_entity_type_labels(&conn, &batch, &ancestor_map_c)?;
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
             Ok(count)
         })
         .await??;
@@ -3953,7 +4090,7 @@ async fn handle_reprocess_entity_types(
                 }
             }
             let seq = wal_exec::wal_flush_ungrouped(&state_d, &group_id_d, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &group_id_d, seq);
+            wal_exec::advance_wal_position(&conn, &group_id_d, seq, &state_d);
             Ok(restamped_count)
         })
         .await??
@@ -4139,11 +4276,17 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             // this arm only — drop_lbug_wal/restore_from_backup never touch indices, so a failed
             // call there must leave indices_built at its prior value, not force it to false.
             state.indices_built.store(false, Ordering::Release);
+            let embedder_ctx = crate::embedding_cache::EmbedderContext {
+                embedder: Arc::clone(&state.embedder),
+                model: state.embedding_model.clone(),
+                cache: Arc::clone(&state.embedding_cache),
+            };
             recover_rebuild_from_workspace_wal(
                 &db_path,
                 &wal_root,
                 embedding_dim,
                 Arc::clone(&state.sink),
+                embedder_ctx,
             )
             .await
         }
@@ -4247,6 +4390,11 @@ async fn handle_knowledge_recover_full(
         .ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
     let embedding_dim = state.embedder.dim();
     let sink = Arc::clone(&state.sink);
+    let embedder_ctx = crate::embedding_cache::EmbedderContext {
+        embedder: Arc::clone(&state.embedder),
+        model: state.embedding_model.clone(),
+        cache: Arc::clone(&state.embedding_cache),
+    };
 
     // Preset to false before attempting the sequence: run_full_recovery_sequence rebuilds
     // indices via a fatal `build_indices_and_constraints()?`, so there is no later success-path
@@ -4260,6 +4408,7 @@ async fn handle_knowledge_recover_full(
             &wal_root,
             embedding_dim,
             sink,
+            Some(embedder_ctx),
         )
     })
     .await?;
@@ -4363,6 +4512,7 @@ async fn recover_rebuild_from_workspace_wal(
     wal_root: &std::path::Path,
     embedding_dim: usize,
     sink: std::sync::Arc<dyn crate::telemetry::TelemetrySink>,
+    embedder_ctx: crate::embedding_cache::EmbedderContext,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     let wal_root = wal_root.to_path_buf();
@@ -4394,11 +4544,30 @@ async fn recover_rebuild_from_workspace_wal(
             let (mut lines_replayed, mut unrecognised_lines) = (0u64, 0u64);
             let (mut failed_lines, mut unparseable_lines, mut legacy_skipped_lines) =
                 (0u64, 0u64, 0u64);
+            let embedding_identity = embedder_ctx.identity();
             for (gid, dir) in wal_group::list_group_wal_dirs(&wal_root)? {
-                let stats = crate::replay::WalReplayer::new(&dir).replay(&conn)?;
+                // issue #440 FR-001/FR-006/FR-007: this strategy wipes and replays the *entire*
+                // embedded DB from WAL — exactly the "graph rebuilt from WAL" scenario the issue
+                // exists to fix — so it must recompute embeddings and warn on mismatch the same
+                // way the other replay call sites do, not bind the WAL's stored vectors verbatim.
+                if let Some(msg) = embedder_ctx.check_replay_mismatch(&dir) {
+                    eprintln!("[WAL WARN] {msg}");
+                }
+                let stats = crate::replay::WalReplayer::new(&dir).replay_opts(
+                    &conn,
+                    crate::replay::ReplayOptions {
+                        recompute_embed_fn: Some(embedder_ctx.recompute_fn_via_handle()),
+                        ..Default::default()
+                    },
+                )?;
                 if let Some(seq) = stats.last_committed_seq {
                     let generation = crate::wal_generation::read_generation(&dir);
-                    if let Err(e) = conn.set_wal_position(&gid, seq, generation.as_deref()) {
+                    if let Err(e) = conn.set_wal_position(
+                        &gid,
+                        seq,
+                        generation.as_deref(),
+                        Some((embedding_identity.0.as_str(), embedding_identity.1)),
+                    ) {
                         eprintln!(
                             "liminis-context-graph: rebuild_from_workspace_wal: failed to persist applied_seq={seq} for group {gid:?} (non-fatal): {e}"
                         );
@@ -4830,5 +4999,73 @@ mod tests {
         // wal_hydration_status's doc comment) rather than leaving it as an unverified gap.
         assert_eq!(wal_hydration_status(Some(0), Some(0)), "not_applicable");
         assert_eq!(wal_hydration_status(None, Some(0)), "not_applicable");
+    }
+
+    // issue #440 FR-007/FR-008: the four states a caller must be able to distinguish.
+    #[test]
+    fn embedding_model_status_not_applicable_when_nothing_ever_applied() {
+        assert_eq!(
+            embedding_model_status(None, None, ("bge-base-en-v1.5", 768)),
+            "not_applicable"
+        );
+        // Even a recorded identity can't apply if applied_seq itself is None — that combination
+        // shouldn't arise in practice (set_wal_position always writes both together), but the
+        // classification must still be governed by applied_seq, not by whether identity is Some.
+        assert_eq!(
+            embedding_model_status(
+                None,
+                Some(("bge-base-en-v1.5", 768)),
+                ("bge-base-en-v1.5", 768)
+            ),
+            "not_applicable"
+        );
+    }
+
+    #[test]
+    fn embedding_model_status_unknown_when_position_recorded_without_identity() {
+        // A pre-#440 write, or one with recompute disabled: a position exists but no embedding
+        // identity was ever recorded alongside it.
+        assert_eq!(
+            embedding_model_status(Some(42), None, ("bge-base-en-v1.5", 768)),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn embedding_model_status_match_when_identity_equals_running() {
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("bge-base-en-v1.5", 768)),
+                ("bge-base-en-v1.5", 768)
+            ),
+            "match"
+        );
+    }
+
+    #[test]
+    fn embedding_model_status_mismatch_on_model_name_difference() {
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("bge-base-en-v1.5", 768)),
+                ("other-model", 768)
+            ),
+            "mismatch"
+        );
+    }
+
+    #[test]
+    fn embedding_model_status_mismatch_on_dimension_difference_alone() {
+        // Edge Cases: a dimension override under the same model name still counts as a
+        // model-identity mismatch, not just a model-name mismatch.
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("bge-base-en-v1.5", 768)),
+                ("bge-base-en-v1.5", 1024)
+            ),
+            "mismatch"
+        );
     }
 }

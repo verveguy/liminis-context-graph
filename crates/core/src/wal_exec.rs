@@ -32,13 +32,30 @@ use crate::{
 /// be copy-paste-wrong here is which `group_id` expression gets passed to `set_wal_position` — a
 /// single call site makes that a type-level pairing with the flush call's own `group_id`
 /// argument instead of a repeated, error-prone literal.
+///
+/// `state`'s own `(embedding_model, embedder.dim())` is persisted alongside `seq`/`generation`
+/// (issue #440, FR-007) on every call, not only after a replay — any content this write actually
+/// created was embedded by `state`'s running embedder (the only embedder a process ever runs), so
+/// recording that identity here is what lets `embedding_model_status` catch a model change at the
+/// very next startup even for a group that has never been explicitly rebuilt. Like `generation`,
+/// this is a best-effort marker re-derived and re-stamped on every write, not an audit of every
+/// vector currently in the group — a write that touches only some of a group's content (a delete,
+/// a correction, a label restamp) still stamps the running identity, the same approximation
+/// `generation` already makes for every mutation regardless of its content.
 pub(crate) fn advance_wal_position(
     conn: &Conn<'_>,
     group_id: &str,
     result: Option<(u64, Option<String>)>,
+    state: &AppState,
 ) {
     if let Some((seq, generation)) = result {
-        if let Err(e) = conn.set_wal_position(group_id, seq, generation.as_deref()) {
+        let embedding_identity = (state.embedding_model.as_str(), state.embedder.dim() as i64);
+        if let Err(e) = conn.set_wal_position(
+            group_id,
+            seq,
+            generation.as_deref(),
+            Some(embedding_identity),
+        ) {
             eprintln!(
                 "liminis-context-graph: advance_wal_position: failed to persist applied_seq={seq} for group {group_id} (non-fatal): {e}"
             );
@@ -282,6 +299,7 @@ mod tests {
             ontology: None,
             ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(crate::embedding_cache::EmbeddingCache::new()),
         }
     }
 
@@ -376,7 +394,7 @@ mod tests {
         .unwrap();
         let (seq1, gen1) = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
             .expect("chunk 1 must assign a seq");
-        conn.set_wal_position("liminis", seq1, gen1.as_deref())
+        conn.set_wal_position("liminis", seq1, gen1.as_deref(), None)
             .unwrap();
 
         // Chunk 2: commit and flush — both really happen — but the position write that would
@@ -390,7 +408,7 @@ mod tests {
         let (seq2, _gen2) = wal_flush_chunk(&state, "liminis", conn.drain_mutations())
             .expect("chunk 2 must assign a seq");
         assert!(seq2 > seq1, "chunk 2's seq must be strictly higher");
-        // No conn.set_wal_position(seq2) call here — the simulated crash.
+        // No conn.set_wal_position(seq2, None) call here — the simulated crash.
 
         // Both episodes are actually committed in the graph...
         assert_eq!(

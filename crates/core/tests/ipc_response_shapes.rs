@@ -61,6 +61,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 

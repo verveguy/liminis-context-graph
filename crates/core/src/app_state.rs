@@ -11,6 +11,7 @@ use crate::{
     db::Db,
     dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter},
     embedder::Embedder,
+    embedding_cache::EmbeddingCache,
     env::lcg_env_var,
     error::Error,
     extractor::Extractor,
@@ -93,6 +94,12 @@ pub struct AppState {
     /// re-apply the fallback themselves. Like `ontology`, requires a restart to pick up
     /// changes — hot-reload is out of scope (see the issue's Assumptions).
     pub group_ontologies: Arc<Mutex<HashMap<String, Option<Arc<Ontology>>>>>,
+    /// Content-addressed embedding cache (issue #440, FR-003) shared across every WAL-replaying
+    /// call site that recomputes embeddings during this process's lifetime — constructed once in
+    /// `main.rs` right after the embedder is probed, so it stays warm across the startup-recovery
+    /// → serving transition, and threaded through here so `handle_rebuild_from_wal` reuses the
+    /// same instance rather than starting cold on every rebuild.
+    pub embedding_cache: Arc<EmbeddingCache>,
 }
 
 impl AppState {
@@ -103,6 +110,7 @@ impl AppState {
     ///   selection (Anthropic vs. local OpenAI-compatible) happens once in `main.rs`, not here.
     /// - `LCG_WAL_DIR`: WAL directory path (default `.lcg/wal`).
     /// - `LCG_EMBEDDING_MODEL`: embedding model name (default `bge-base-en-v1.5`).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_env(
         sink: Arc<dyn TelemetrySink>,
         db: Option<Arc<Db>>,
@@ -111,6 +119,7 @@ impl AppState {
         embedder: Arc<dyn Embedder>,
         embedding_model: String,
         extractor: Arc<dyn Extractor>,
+        embedding_cache: Arc<EmbeddingCache>,
     ) -> Self {
         // deprecated: remove in Phase B (see #59)
         let dedup: Arc<dyn DedupAdapter> =
@@ -237,6 +246,7 @@ impl AppState {
             ontology,
             ontology_drift,
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache,
         }
     }
 
@@ -332,6 +342,24 @@ impl AppState {
                 self.wal_max_bytes_per_file,
             ) {
                 Ok(w) => {
+                    // Mint this group's embedding-model identity stamp (issue #440, FR-005) the
+                    // same way `wal_generation`'s own reset token is minted — gated on
+                    // `global_seq() == 0` so a pre-existing populated stream (no stamp yet) is
+                    // never retroactively backfilled, only a genuinely fresh one. Non-fatal on
+                    // error, matching the generation-mint error handling this mirrors: a missed
+                    // stamp only means FR-006's replay-time check stays "unknown" for this
+                    // stream, never a false mismatch.
+                    if w.global_seq() == 0 {
+                        if let Err(e) = crate::wal_embedding_identity::ensure_model_identity(
+                            &dir,
+                            &self.embedding_model,
+                            self.embedder.dim() as i64,
+                        ) {
+                            eprintln!(
+                                "[WAL WARN] wal_writers: failed to mint embedding-model identity for group {group_id:?} at {dir:?} (non-fatal): {e}"
+                            );
+                        }
+                    }
                     guard.insert(group_id.to_string(), w);
                 }
                 Err(e) => {
