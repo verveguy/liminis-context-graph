@@ -801,6 +801,21 @@ async fn test_knowledge_status_empty_db() {
     assert_eq!(r["relationship_count"], 0, "expected 0 relationships: {v}");
     assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
     assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
+    // issue #440 FR-007/FR-008: nothing has ever been applied for the default group on a fresh
+    // DB, so the embedding-identity comparison is "not_applicable" rather than "unknown" — same
+    // rule `wal.generation_status` already follows.
+    assert!(
+        r["wal"]["embedding_model"].is_null(),
+        "expected wal.embedding_model:null on an empty db: {v}"
+    );
+    assert!(
+        r["wal"]["embedding_dim"].is_null(),
+        "expected wal.embedding_dim:null on an empty db: {v}"
+    );
+    assert_eq!(
+        r["wal"]["embedding_model_status"], "not_applicable",
+        "expected wal.embedding_model_status:not_applicable on an empty db: {v}"
+    );
     assert!(
         r["database_path"]
             .as_str()
@@ -5249,11 +5264,31 @@ async fn knowledge_status_reports_per_group_wal_positions() {
             entry["max_seq"].is_u64(),
             "{group_id} must report a known max_seq: {status_v}"
         );
+        // issue #440 FR-007/FR-008: each group's own embedding identity is mirrored alongside
+        // its applied_seq/max_seq, and — since this state's embedder never changes between the
+        // write above and this status call — compares as a "match" against itself.
+        assert_eq!(
+            entry["embedding_model"], "bge-base-en-v1.5",
+            "{group_id} must report the running embedder's model: {status_v}"
+        );
+        assert_eq!(
+            entry["embedding_dim"], 4,
+            "{group_id} must report the running embedder's dim: {status_v}"
+        );
+        assert_eq!(
+            entry["embedding_model_status"], "match",
+            "{group_id} must report embedding_model_status:match: {status_v}"
+        );
     }
 
     // The flat fields stay pinned to the default group ("liminis"), which never received a
     // write in this test — reporting null/absent, not either non-default group's position.
     assert_eq!(status_v["result"]["wal"]["applied_seq"], Value::Null);
+    assert_eq!(
+        status_v["result"]["wal"]["embedding_model_status"], "not_applicable",
+        "the default group never wrote, so its embedding_model_status must stay \
+         not_applicable rather than leaking either non-default group's identity: {status_v}"
+    );
 }
 
 /// issue #378 Review finding: `handle_knowledge_status`'s per-group backfill must not run under

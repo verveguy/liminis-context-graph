@@ -1596,8 +1596,12 @@ mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
-(`{applied_seq, max_seq, generation, generation_status, hydration_status}`). This is the multi-group view; the flat
-`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status` fields described next remain present and
+(`{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model,
+embedding_dim, embedding_model_status}` — the last three added by issue #440, mirroring each
+group's own embedding identity the same way `generation` is already mirrored per group). This is
+the multi-group view; the flat
+`wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status`/`wal.embedding_model`/`wal.embedding_dim`/`wal.embedding_model_status`
+fields described next remain present and
 **pinned specifically to the default `"liminis"` group**, unchanged in meaning from a pre-378
 single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
 written before this issue) needs no change. If the default group has no WAL directory at all
@@ -1728,8 +1732,15 @@ next write or an explicit rebuild — never a false `"match"`.
 
 A `"mismatch"` is never a hard failure — it is deliberately self-healing, the same way a
 `generation` mismatch triggers a full replay rather than refusing outright: the fix is to rebuild
-(`knowledge_rebuild_from_wal`), which recomputes every vector under the now-running embedder and
-updates the recorded identity to match. Until then, `"mismatch"` is a live signal that vector
+(`knowledge_rebuild_from_wal`), which recomputes every vector it can under the now-running embedder
+and updates the recorded identity to match — but only if no recompute *attempt* actually failed
+during that rebuild (e.g. the embedder was unreachable partway through); if one did, the identity
+is left unstamped (`"unknown"`) rather than persisted as a `"match"` it can't back up, so a rebuild
+that didn't fully succeed never reports a false confirmation. A row with no co-located source text
+to recompute from (`embeddings_recompute_fallback`, FR-002) does *not* by itself block the
+`"match"` write — that fallback is normal, ongoing WAL shape (e.g. a targeted `SET` that updates
+only a vector field), not evidence the rebuild failed. Until a mismatch is resolved, it is a live
+signal that vector
 search results may be degraded — the previously-active vectors were computed under a different
 model than the one now serving queries. The service also logs a `[WAL WARN] embedding-model
 mismatch: ...` line at replay time (before a rebuild starts) when the WAL directory's own recorded
