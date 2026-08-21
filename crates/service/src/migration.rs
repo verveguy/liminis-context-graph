@@ -459,12 +459,19 @@ fn merge_wal_dir_into_root(
             // paths. That is a completed move, not a collision, so finish it here instead of
             // leaving a `.graphiti/wal` entry that blocks Step 9 on every subsequent restart.
             if same_tree_contents(&entry.path(), &dest)? {
+                // Report a removal failure under the entry's own path, not `legacy_wal_dir` (the
+                // `read_err` closure's fixed path) — a permission problem on this one self-healed
+                // entry should point whoever's debugging at the entry, not the parent directory.
+                let entry_err = |e: io::Error| MigrationError::MoveFile {
+                    path: entry.path(),
+                    source: e,
+                };
                 let remove_result = if entry.path().is_dir() {
                     std::fs::remove_dir_all(entry.path())
                 } else {
                     std::fs::remove_file(entry.path())
                 };
-                remove_result.map_err(read_err)?;
+                remove_result.map_err(entry_err)?;
                 continue;
             }
             // A genuine name collision: leave in place; see doc comment above on why it isn't
