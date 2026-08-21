@@ -251,13 +251,18 @@ whose `phase` field steps through `corruption_detected` → `checkpoint_drop_com
 **Readiness: a successful connect is not readiness.** Because the socket is bound before the
 database opens, a bare `connect()` to `.lcg/service.sock` can succeed while the service is still
 relocating the WAL root or replaying WAL — before it has started actually serving graph requests.
-The correct readiness signal is a `health_check` request/response round-trip reporting
-`"healthy"`: `handle_health_check` can only return `healthy` once `Db::open()` has succeeded,
-which is after both legacy-workspace migration (which completes before the bind) and WAL-root
-migration (which runs after it) have finished. A client that treats connect-success as readiness
-and immediately issues requests can observe a transient `degraded` state, or race the WAL-root
-migration described above — poll `health_check` (or `knowledge_status`) until it reports healthy
-before sending real work.
+(The process's own accept loop, in `run_socket_service`, only starts after `bootstrap_app_state()`
+resolves, so a request sent on such a connection queues in the kernel and is not read until
+startup work has already finished — it does not race migration and get served with stale state.
+The actual risk is a client that treats the `connect()` succeeding as sufficient evidence of
+readiness by itself — e.g. proceeding to inspect on-disk WAL state, or reporting "ready" in its
+own UI — without waiting for a `health_check` round-trip.) The correct readiness signal is a
+`health_check` request/response round-trip reporting `"healthy"`: `handle_health_check` can only
+return `healthy` once `Db::open()` has succeeded, which is after both legacy-workspace migration
+(which completes before the bind) and WAL-root migration (which runs after it) have finished.
+Poll `health_check` until it reports `healthy` (or `knowledge_status` until `connected` and
+`queryable` are both `true` and `initializing` is `false` — `knowledge_status` has no `healthy`
+field of its own) before treating the service as ready.
 
 ## `knowledge_status` health fields
 
