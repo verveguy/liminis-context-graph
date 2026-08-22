@@ -254,3 +254,98 @@ async fn test_backfill_summary_embeddings_dry_run_does_not_mutate() {
         "dry_run must not write any WAL mutation"
     );
 }
+
+/// Wraps an `Embedder` with a fixed per-call delay, so a real backfill run's Phase C spans
+/// enough wall-clock time for a genuinely concurrent `knowledge_find_entities` call to land while
+/// `entity_summary_embedding_idx` is dropped — without this, `MockEmbedder`/`NameMapEmbedder`
+/// resolve near-instantly and the race window is too narrow to hit deterministically.
+struct SlowEmbedder {
+    inner: Arc<dyn Embedder>,
+    delay: std::time::Duration,
+}
+
+impl Embedder for SlowEmbedder {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<f32>, lcg_core::error::Error>> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            self.inner.embed(text).await
+        })
+    }
+
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+}
+
+/// Issue #470 concurrency fix: a `knowledge_find_entities` call that lands while
+/// `knowledge_backfill_summary_embeddings` has `entity_summary_embedding_idx` dropped (Phase C)
+/// must auto-heal rather than hard-fail. Real concurrent timing, not a simulated state, so this
+/// fails if the `indices_built` bookkeeping backfill relies on ever regresses.
+#[tokio::test]
+async fn test_backfill_summary_embeddings_concurrent_find_entities_does_not_hard_fail() {
+    let dir = TempDir::new().unwrap();
+    let wal_dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    {
+        let conn = db.connect().unwrap();
+        conn.create_vector_indexes().unwrap();
+    }
+
+    let mut map = HashMap::new();
+    map.insert("a pump manufacturer".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    let inner: Arc<dyn Embedder> = Arc::new(NameMapEmbedder::new(DIM, map));
+    let embedder: Arc<dyn Embedder> = Arc::new(SlowEmbedder {
+        inner,
+        delay: std::time::Duration::from_millis(20),
+    });
+    let state = make_state_with_wal(db.clone(), wal_dir.path(), embedder);
+    state
+        .indices_built
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    {
+        let conn = db.connect().unwrap();
+        // 40 candidates x 20ms/embed = ~800ms of Phase C runtime — comfortably enough for the
+        // concurrent find_entities call below to land mid-window.
+        for i in 0..40 {
+            conn.insert_entity(&make_entity(&format!("widget-{i}"), "a pump manufacturer"))
+                .unwrap();
+        }
+        conn.drain_mutations();
+    }
+
+    let backfill_state = Arc::clone(&state);
+    let backfill_handle = tokio::spawn(async move {
+        dispatch(
+            "knowledge_backfill_summary_embeddings",
+            json!({ "group_id": GRP, "dry_run": false }),
+            backfill_state,
+        )
+        .await
+    });
+
+    // Give the backfill task a head start into Phase C before racing the search in.
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+    let find_state = Arc::clone(&state);
+    let find_result = dispatch_raw(
+        "knowledge_find_entities",
+        json!({ "query": "widget-0", "group_ids": [GRP], "num_results": 5 }),
+        find_state,
+    )
+    .await;
+    assert!(
+        find_result.get("error").is_none(),
+        "a concurrent search racing into the dropped summary index must auto-heal, not \
+         hard-fail: {find_result}"
+    );
+
+    let backfill_result = backfill_handle.await.unwrap();
+    assert_eq!(
+        backfill_result["backfilled"], 40,
+        "backfill itself must still complete successfully: {backfill_result}"
+    );
+}

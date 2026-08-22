@@ -18,15 +18,34 @@
 //! on an indexed column outright. This pass is the one place `summary_embedding` *can* be
 //! refreshed for existing rows, because it owns the index's lifecycle directly for the duration
 //! of Phase C: drop the index, batch-write real embeddings via plain `SET` (legal once the index
-//! is gone), then rebuild the index. The write lock is held for the *entire* Phase C sequence —
-//! not released between batches, unlike `backfill_relation_types` — so no concurrent read can
-//! observe the index in its dropped state and race the auto-heal path
-//! (`is_missing_index_error` → `build_indices_once`) against this pass's own rebuild. If the
-//! process crashes mid-backfill (index dropped, not yet rebuilt), the next read's auto-heal path
-//! self-heals it via the same idempotent `CREATE_VECTOR_INDEX` call — no extra recovery needed.
+//! is gone), then rebuild the index.
+//!
+//! For a real (non-dry-run) run, the write lock is acquired *before* Phase A's candidate read and
+//! held continuously through Phase C's rebuild — not released in between, and not released
+//! between Phase C's batches either (unlike `backfill_relation_types`). Holding it across Phase A
+//! too (rather than the cheaper read lock a dry run uses) closes a TOCTOU window: without it, a
+//! concurrent `knowledge_assert_entity` re-assert could change `summary` after Phase A captured
+//! it but before Phase C writes the embedding, silently persisting an embedding of stale text.
+//!
+//! `state.indices_built` is set to `false` before the index is dropped and back to `true` once
+//! the rebuild succeeds — mirroring `handle_rebuild_from_wal`'s exact bookkeeping
+//! (`handlers.rs`'s `bg_indices_built.store(false, ...)` before its own drop/replay/rebuild
+//! cycle). This is *not* redundant with holding `write_lock`: the hot-path search handlers
+//! (`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`) never
+//! take `write_lock` for their read queries, so a concurrent search genuinely can race in while
+//! the index is dropped. What makes that race safe is `indices_built`: a search that hits
+//! `is_missing_index_error` while `indices_built` is `false` calls `build_indices_once`, which
+//! itself blocks on `write_lock.write()` until this pass releases it, then finds `indices_built`
+//! already `true` and returns immediately, letting the search retry succeed. Without setting the
+//! flag, `indices_built` would stay `true` throughout, and a search hitting the race would take
+//! the *other* branch (`return Err(missing index)`) instead of auto-healing — a hard, user-visible
+//! failure despite this pass ostensibly self-healing (see `ADR-0025`, `ADR-0036`). If the process
+//! crashes mid-backfill (index dropped, `indices_built` never reset to `true`), the next read's
+//! auto-heal path self-heals it via the same idempotent `CREATE_VECTOR_INDEX` call.
 //!
 //! Callers must add `knowledge_backfill_summary_embeddings` to `service_protocol.py` in the
 //! liminis-app repo.
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -78,12 +97,25 @@ pub async fn backfill_summary_embeddings(
     params: BackfillParams,
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> Result<Value, Error> {
-    // ── Phase A: paginated read of all Entity rows with a non-empty summary (read lock) ──────
+    // ── Phase A: paginated read of all Entity rows with a non-empty summary ──────────────────
+    // A dry run only needs a consistent snapshot briefly, so it takes the cheaper read lock. A
+    // real run holds the write lock from here through Phase C's rebuild, so a concurrent
+    // `knowledge_assert_entity` re-assert can't change `summary` in the gap between this read and
+    // Phase C's write of the embedding computed from it (see module doc).
     let db = state
         .db
         .load_full()
         .ok_or_else(|| Error::DbUnavailable("DB unavailable".to_string()))?;
-    let _read_guard = state.write_lock.read().await;
+    let write_guard = if !params.dry_run {
+        Some(state.write_lock.write().await)
+    } else {
+        None
+    };
+    let _read_guard = if write_guard.is_none() {
+        Some(state.write_lock.read().await)
+    } else {
+        None
+    };
     let db_a = Arc::clone(&db);
     let group_id_a = params.group_id.clone();
 
@@ -146,7 +178,7 @@ pub async fn backfill_summary_embeddings(
         .to_json());
     }
 
-    // ── Phase C: drop index → batched embed+SET → rebuild index, one held write lock ─────────
+    // ── Phase C: drop index → batched embed+SET → rebuild index (write lock held since Phase A) ─
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(json!({
             "type": "progress",
@@ -155,7 +187,15 @@ pub async fn backfill_summary_embeddings(
         }));
     }
 
-    let _write_guard = state.write_lock.write().await;
+    // Mirrors `handle_rebuild_from_wal`'s bookkeeping: cleared before the index is actually
+    // dropped, so a concurrent search that races in and hits a missing-index error takes the
+    // auto-heal branch (`build_indices_once`, which blocks on `write_lock` until this pass
+    // releases it) instead of a hard failure — see module doc.
+    // Mirrors `handle_rebuild_from_wal`'s bookkeeping: cleared before the index is actually
+    // dropped, so a concurrent search that races in and hits a missing-index error takes the
+    // auto-heal branch (`build_indices_once`, which blocks on `write_lock` until this pass
+    // releases it) instead of a hard failure — see module doc.
+    state.indices_built.store(false, Ordering::Release);
 
     let db_drop = Arc::clone(&db);
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
@@ -216,8 +256,9 @@ pub async fn backfill_summary_embeddings(
         conn.create_entity_summary_embedding_index()
     })
     .await??;
+    state.indices_built.store(true, Ordering::Release);
 
-    drop(_write_guard);
+    drop(write_guard);
 
     Ok(BackfillReport {
         group_id: params.group_id.clone(),
