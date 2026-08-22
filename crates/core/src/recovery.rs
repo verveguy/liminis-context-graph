@@ -390,6 +390,13 @@ pub fn run_full_recovery_sequence(
     // ── Step 4: rebuild FTS + HNSW indexes, and the in-process name index ────
     {
         let conn = db.connect()?;
+        // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding, so
+        // replaying it verbatim in Step 3 leaves that column NULL — must zero-fill before
+        // build_indices_and_constraints below ever builds entity_summary_embedding_idx over the
+        // column (issue #470).
+        if let Err(e) = schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim) {
+            eprintln!("liminis-context-graph: run_full_recovery_sequence: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+        }
         conn.build_indices_and_constraints()?;
         // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
         // a full rebuild is the only way the name index observes the replayed data.

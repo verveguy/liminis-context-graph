@@ -3860,6 +3860,113 @@ async fn parity_backfill_idempotent() {
     );
 }
 
+// ── #470: knowledge_backfill_summary_embeddings IPC parity (FR-005) ──────────
+
+/// Empty DB + dry_run:true → response shape is correct: group_id, total_entities, backfilled,
+/// dry_run fields present with the right values.
+#[tokio::test]
+async fn parity_backfill_summary_embeddings_shape() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        90,
+        "knowledge_backfill_summary_embeddings",
+        json!({ "group_id": "any-group", "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 90);
+    let r = &v["result"];
+    assert_eq!(r["group_id"], "any-group", "group_id must be echoed: {v}");
+    assert_eq!(
+        r["total_entities"], 0,
+        "empty DB must have total_entities=0: {v}"
+    );
+    assert_eq!(r["backfilled"], 0, "empty DB must have backfilled=0: {v}");
+    assert_eq!(r["dry_run"], true, "dry_run flag must be reflected: {v}");
+}
+
+/// group_id is required — an omitted/empty value must be rejected, not silently run
+/// database-wide or against a default group.
+#[tokio::test]
+async fn parity_backfill_summary_embeddings_requires_group_id() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db.clone());
+    let v_missing = dispatch_val(
+        91,
+        "knowledge_backfill_summary_embeddings",
+        json!({ "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v_missing, 91, -32000);
+
+    let state2 = make_state(db);
+    let v_empty = dispatch_val(
+        92,
+        "knowledge_backfill_summary_embeddings",
+        json!({ "group_id": "", "dry_run": true }),
+        state2,
+    )
+    .await;
+    assert_err_resp(&v_empty, 92, -32000);
+}
+
+/// A live (non-dry-run) run on entities with a non-empty summary embeds and persists a real
+/// vector, counted in `backfilled`; entities with an empty summary are excluded from the count
+/// (FR-005, SC-004).
+#[tokio::test]
+async fn parity_backfill_summary_embeddings_live_fills_entities() {
+    let (db, _dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfse-001".to_string(),
+            name: "widget-1".to_string(),
+            group_id: "bfse-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-09-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "a pump manufacturer".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "bfse-002".to_string(),
+            name: "widget-2".to_string(),
+            group_id: "bfse-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2024-09-01T00:00:01Z".to_string(),
+            name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            summary: "".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let state = make_state_with_mock_embed(db.clone());
+    let v = dispatch_val(
+        93,
+        "knowledge_backfill_summary_embeddings",
+        json!({ "group_id": "bfse-group", "dry_run": false }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 93);
+    let r = &v["result"];
+    assert_eq!(
+        r["total_entities"], 2,
+        "must count both entities scanned: {v}"
+    );
+    assert_eq!(
+        r["backfilled"], 1,
+        "only the non-empty-summary entity is a backfill candidate: {v}"
+    );
+    assert_eq!(r["dry_run"], false, "dry_run flag must be reflected: {v}");
+}
+
 // ── #177: reprocess_entity_types scope / dry_run ──────────────────────────────
 
 /// Backward-compat: calling with no `scope` param must behave identically to pre-#177.

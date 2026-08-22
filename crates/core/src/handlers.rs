@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    assert, backfill, canonicalize, corrections,
+    assert, backfill, backfill_summary_embeddings, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::{self, Db},
     episode,
@@ -154,6 +154,9 @@ async fn handle(
         }
         "knowledge_backfill_relation_types" => {
             handle_backfill_relation_types(req, state, progress_tx).await
+        }
+        "knowledge_backfill_summary_embeddings" => {
+            handle_backfill_summary_embeddings(req, state, progress_tx).await
         }
         "knowledge_reprocess_relation_types" => {
             handle_reprocess_relation_types(req, state, progress_tx).await
@@ -2353,6 +2356,16 @@ async fn handle_rebuild_from_wal(
                 let mut build_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
+                    // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
+                    // so replaying it verbatim leaves that column NULL — must zero-fill before
+                    // build_indices_and_constraints below ever builds entity_summary_embedding_idx
+                    // over the column (issue #470).
+                    if let Err(e) = crate::schema::zero_fill_null_entity_summary_embeddings(
+                        &conn,
+                        state_c.embedder.dim(),
+                    ) {
+                        eprintln!("liminis-context-graph: reload: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -2755,6 +2768,16 @@ async fn handle_rebuild_from_wal(
                 let mut build_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
+                    // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
+                    // so replaying it verbatim leaves that column NULL — must zero-fill before
+                    // build_indices_and_constraints below ever builds entity_summary_embedding_idx
+                    // over the column (issue #470).
+                    if let Err(e) = crate::schema::zero_fill_null_entity_summary_embeddings(
+                        &conn,
+                        bg_state.embedder.dim(),
+                    ) {
+                        eprintln!("liminis-context-graph: reload(bg): zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -3363,7 +3386,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
 
-    let (name_embedding, embed_err) = match state.embedder.embed(&name).await {
+    let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
         Ok(v) => (v, None),
         // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
         // variable-length LIST) — a literal zero-length vector fails to bind with a
@@ -3373,6 +3396,22 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         // stored embedding untouched instead (see `update_entity_core`), so the warning text
         // is finalized below once we know which branch ran.
         Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+    };
+
+    // `summary_embedding` (issue #470), mirroring `name_embedding`'s embed-with-fallback shape
+    // exactly (including the same before-existence-check timing — #444 tracks fixing that for
+    // both fields together, out of scope here). Per ADR-0314, an empty `summary` is a legitimate,
+    // common state, not an error: it's never sent to the embedder, and gets the same zero-vector
+    // sentinel a genuine embedder failure would produce. Like `name_embedding`, this is only ever
+    // persisted on the create branch below — `update_entity_core` never touches either embedding
+    // column once an HNSW index exists over it (see that function's own doc comment).
+    let (summary_embedding, summary_embed_err) = if summary.trim().is_empty() {
+        (vec![0.0f32; state.embedder.dim()], None)
+    } else {
+        match state.embedder.embed(&summary).await {
+            Ok(v) => (v, None),
+            Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+        }
     };
 
     let db = load_db(&state)?;
@@ -3432,6 +3471,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     attributes,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
+                    summary_embedding,
                 };
                 conn.insert_entity(&row)?;
                 (row.uuid, true)
@@ -3445,13 +3485,22 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     .await??;
     drop(_guard);
 
-    let embedding_warning = embed_err.map(|e| {
-        if created {
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(e) = name_embed_err {
+        warnings.push(if created {
             format!("embedder unavailable; stored a zero-vector name_embedding: {e}")
         } else {
             format!("embedder unavailable; existing name_embedding left unchanged: {e}")
-        }
-    });
+        });
+    }
+    if let Some(e) = summary_embed_err {
+        warnings.push(if created {
+            format!("embedder unavailable; stored a zero-vector summary_embedding: {e}")
+        } else {
+            format!("embedder unavailable; existing summary_embedding left unchanged: {e}")
+        });
+    }
+    let embedding_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
 
     Ok(json!({
         "entity_uuid": entity_uuid_out,
@@ -3992,6 +4041,28 @@ async fn handle_backfill_relation_types(
     backfill::backfill_relation_types(state, params, progress_tx).await
 }
 
+/// `knowledge_backfill_summary_embeddings` (issue #470, FR-005): computes `summary_embedding`
+/// for existing `Entity` rows in `group_id`, so entities created before this feature existed
+/// become semantically retrievable by summary paraphrase. See
+/// `backfill_summary_embeddings::backfill_summary_embeddings`'s module doc for why this exists
+/// as its own operation (drop/rebuild of `entity_summary_embedding_idx` around a held write
+/// lock) rather than a per-row `SET` on the live index.
+///
+/// Parameters (from req.params):
+/// - `group_id: String` (required) — restricts candidate selection and WAL attribution to this
+///   group only, matching `knowledge_backfill_relation_types`'s convention.
+/// - `dry_run: bool` (default false) — report candidate count without embedding or mutating.
+async fn handle_backfill_summary_embeddings(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    let params = backfill_summary_embeddings::BackfillParams { group_id, dry_run };
+    backfill_summary_embeddings::backfill_summary_embeddings(state, params, progress_tx).await
+}
+
 // ── Relation reprocessing handler (issue #210) ───────────────────────────────
 
 /// Fact-based LLM relation classification: the relation-side twin of
@@ -4374,6 +4445,14 @@ async fn recover_rebuild_from_workspace_wal(
                 legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
+            // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding, so
+            // replay leaves it NULL — must zero-fill before build_indices_and_constraints below
+            // ever builds entity_summary_embedding_idx over the column (issue #470).
+            if let Err(e) =
+                crate::schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim)
+            {
+                eprintln!("liminis-context-graph: rebuild_from_workspace_wal: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+            }
             conn.build_indices_and_constraints()?;
             // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
             // rebuild the name index from the fully-loaded data.

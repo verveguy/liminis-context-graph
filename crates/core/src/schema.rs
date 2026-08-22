@@ -14,6 +14,11 @@ pub fn init(conn: &Conn<'_>, embedding_dim: usize) -> Result<(), Error> {
 }
 
 fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
+    // `summary_embedding` is a deliberate divergence from graphiti's kuzu_driver.py schema-parity
+    // rule (like `WalPosition.generation`, see ADR-0353/ADR-0387): upstream's Entity table has no
+    // summary vector, only `name_embedding`. Without it, meaning-based retrieval against an
+    // entity's `summary` was lexical-only (FTS) — a paraphrase sharing no vocabulary with the
+    // summary couldn't be found by vector similarity. See ADR-0470 (issue #470).
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -23,7 +28,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          created_at TIMESTAMP, \
          name_embedding FLOAT[{dim}], \
          summary STRING, \
-         attributes STRING\
+         attributes STRING, \
+         summary_embedding FLOAT[{dim}]\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -177,7 +183,7 @@ pub fn create_edge_tables(conn: &Conn<'_>, _dim: usize) -> Result<(), Error> {
 /// zero-row property access at the Binder stage. lbug raises a Binder exception when the
 /// property is unknown; a successful probe means the column is already present.
 /// This avoids a lbug bug where `ALTER TABLE ADD` on an existing column corrupts the hash index.
-pub fn migrate(conn: &Conn<'_>) {
+pub fn migrate(conn: &Conn<'_>, dim: usize) {
     // Each column is probed independently — no early return — so that a DB which already has
     // relation_type (from the first migration) still gets episodes probed and added if absent.
     // lbug fails at bind time if the column is not in the schema; success means it's present.
@@ -243,6 +249,53 @@ pub fn migrate(conn: &Conn<'_>) {
             eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD generation STRING: {e} (non-fatal)");
         }
     }
+    // Entity gained `summary_embedding` (issue #470) so an entity's summary is semantically
+    // (not just lexically) searchable. Probe first: a fresh DB already has the column from
+    // `create_node_tables`, so the ALTER only runs against pre-existing workspaces. Immediately
+    // after adding it, zero-fill every existing row *before* any vector index is built over the
+    // column (that happens later, in `build_indices_and_constraints`) — a plain `SET` is only
+    // legal on an indexed column before the index exists (see `update_entity_core`'s doc comment
+    // in db.rs for the HNSW-rejects-SET-on-indexed-column constraint), so this is the one window
+    // where every row can be given a real (all-zero) vector rather than leaving it NULL. This
+    // sidesteps needing to know whether `CREATE_VECTOR_INDEX` tolerates NULL entries: after this
+    // migration, `summary_embedding` is always a same-length `FLOAT[dim]` vector, never absent.
+    // The zero-vector is the same sentinel `handle_assert_entity`/`episode.rs` use for an
+    // empty-string summary, so a not-yet-backfilled pre-existing entity is indistinguishable from
+    // one created with an empty summary — both simply don't contribute to summary-vector search
+    // until a real embedding replaces the zero vector (via `knowledge_backfill_summary_embeddings`).
+    if conn
+        .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.summary_embedding LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query(&format!(
+            "ALTER TABLE Entity ADD summary_embedding FLOAT[{dim}]"
+        )) {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE Entity ADD summary_embedding FLOAT[{dim}]: {e} (non-fatal)");
+        } else if let Err(e) = zero_fill_null_entity_summary_embeddings(conn, dim) {
+            eprintln!("liminis-context-graph: schema migrate: zero-fill Entity.summary_embedding: {e} (non-fatal)");
+        }
+    }
+}
+
+/// Zero-fills any `Entity` row whose `summary_embedding` is `NULL` (issue #470). Idempotent — a
+/// no-op when no row is `NULL`. `migrate`'s `ALTER` branch only reaches rows already present in
+/// the DB at migration time; it does NOT cover a row created afterward by replaying a pre-#470
+/// WAL recording verbatim: `WalReplayer` executes raw recorded Cypher, and a `MERGE ... ON CREATE
+/// SET` that never mentions `summary_embedding` (because it was logged before that column
+/// existed) leaves the column `NULL` on the newly-created row — empirically verified in
+/// `handlers_wal_admin.rs`'s `test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embedding`,
+/// since a fixed-size `FLOAT[dim]` ARRAY column does not uniformly default an omitted property to
+/// zero across every write path. Callers that rebuild a DB from WAL (`Db::open_or_rebuild`,
+/// `handle_rebuild_from_wal`, the `knowledge_recover*` family) must call this after replay and
+/// before the first `create_vector_indexes`/`build_indices_and_constraints` call, so
+/// `CREATE_VECTOR_INDEX` never has to face a `NULL` entry (untested, unsupported) and the "always
+/// a same-length `FLOAT[dim]` vector, never absent" invariant holds regardless of how a row was
+/// created.
+pub fn zero_fill_null_entity_summary_embeddings(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
+    conn.exec_params(
+        "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
+        serde_json::json!({ "zero": vec![0.0f32; dim] }),
+    )
 }
 
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other
