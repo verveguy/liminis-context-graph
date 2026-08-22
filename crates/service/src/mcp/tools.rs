@@ -664,7 +664,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            assertion forwards through merged_into to the canonical entity and \
                            updates the canonical instead. `summary` and `attributes` are always \
                            fully replaced on update, like `labels` — a re-assert that omits \
-                           `summary` clears any previously-set value, not a partial merge. If the \
+                           `summary` clears any previously-set value, not a partial merge. Its \
+                           semantic-search vector is write-once: an update that changes `summary` \
+                           does not recompute the entity's summary embedding, so meaning-based \
+                           retrieval keeps matching the entity's original summary text until \
+                           `knowledge_backfill_summary_embeddings` is run for its group_id. If the \
                            configured embedder is unavailable, the call still succeeds with a \
                            zero-vector name_embedding and a non-null `embedding_warning` in the \
                            response.",

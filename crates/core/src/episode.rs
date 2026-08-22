@@ -370,37 +370,35 @@ pub async fn add_episode(
     // before — so the salvage step below can cosine-match an off-list edge endpoint against
     // the batch's own entity name embeddings without re-embedding anything (order-only change;
     // extraction.entities is already final by this point).
+    //
+    // The summary_embedding pass (issue #470) computes alongside it, per entity, via
+    // `tokio::try_join!` rather than a second sequential loop — the two embed calls for the same
+    // entity are independent, so running them concurrently keeps this batch's added latency to
+    // one round-trip per entity instead of two. Per ADR-0314, an extracted `summary` legitimately
+    // defaults to `""` — that's never sent to the embedder (would waste a round-trip encoding
+    // nothing); those entities get a same-dimension zero vector instead, the same sentinel
+    // `insert_entity` falls back to for any unset `summary_embedding`.
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
     let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
-    for n in &entity_names {
-        name_embeddings.push(tokio::select! {
-            r = state.embedder.embed(n) => r?,
+    let mut summary_embeddings: Vec<Vec<f32>> = Vec::with_capacity(extraction.entities.len());
+    for (n, e) in entity_names.iter().zip(extraction.entities.iter()) {
+        let name_fut = state.embedder.embed(n);
+        let summary_fut = async {
+            if e.summary.trim().is_empty() {
+                Ok(vec![0.0f32; state.embedder.dim()])
+            } else {
+                state.embedder.embed(&e.summary).await
+            }
+        };
+        let (name_emb, summary_emb) = tokio::select! {
+            r = futures::future::try_join(name_fut, summary_fut) => r?,
             _ = state.cancel_token.cancelled() => {
                 state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
                 return Err(Error::Cancelled);
             }
-        });
-    }
-
-    // Parallel `summary_embedding` pass (issue #470) so extraction-created entities are
-    // semantically searchable by summary, on equal footing with directly-asserted ones. Per
-    // ADR-0314, an extracted `summary` legitimately defaults to `""` — that's never sent to the
-    // embedder (would waste a round-trip encoding nothing); those entities get a same-dimension
-    // zero vector instead, the same sentinel `insert_entity` falls back to for any unset
-    // `summary_embedding`.
-    let mut summary_embeddings: Vec<Vec<f32>> = Vec::with_capacity(extraction.entities.len());
-    for e in &extraction.entities {
-        if e.summary.trim().is_empty() {
-            summary_embeddings.push(vec![0.0f32; state.embedder.dim()]);
-        } else {
-            summary_embeddings.push(tokio::select! {
-                r = state.embedder.embed(&e.summary) => r?,
-                _ = state.cancel_token.cancelled() => {
-                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                    return Err(Error::Cancelled);
-                }
-            });
-        }
+        };
+        name_embeddings.push(name_emb);
+        summary_embeddings.push(summary_emb);
     }
 
     // Post-extraction edge validation (pre-lock, advisory only): drop self-referential edges —
