@@ -1604,7 +1604,7 @@ impl<'db> Conn<'db> {
             self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?;
         let bm25_candidates =
             self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?;
-        let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
+        let fused_uuids = crate::search::rrf_fuse(&[&bm25_candidates, &vector_candidates]);
 
         let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
 
