@@ -12,14 +12,17 @@ use crate::{
 ///
 /// `rrf_score(rank) = 1.0 / (rank + 60.0)`
 /// Returns UUIDs sorted by descending fused score; UUID tie-breaking for determinism.
-pub fn rrf_fuse(bm25: &[(String, f64)], vector: &[(String, f64)]) -> Vec<String> {
+///
+/// N-ary (issue #470) rather than a fixed 2-list signature, so `hybrid_entity_search` can fuse
+/// a third input (the summary-vector list) alongside BM25 and the name-vector list, while
+/// `hybrid_edge_search` keeps fusing exactly 2 — both call the same implementation.
+pub fn rrf_fuse(lists: &[&[(String, f64)]]) -> Vec<String> {
     let mut scores: HashMap<String, f64> = HashMap::new();
 
-    for (rank, (uuid, _)) in bm25.iter().enumerate() {
-        *scores.entry(uuid.clone()).or_default() += 1.0 / (rank as f64 + 60.0);
-    }
-    for (rank, (uuid, _)) in vector.iter().enumerate() {
-        *scores.entry(uuid.clone()).or_default() += 1.0 / (rank as f64 + 60.0);
+    for list in lists {
+        for (rank, (uuid, _)) in list.iter().enumerate() {
+            *scores.entry(uuid.clone()).or_default() += 1.0 / (rank as f64 + 60.0);
+        }
     }
 
     let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
@@ -93,8 +96,16 @@ pub async fn hybrid_entity_search(
         let bm25 = conn.fts_search_entities(&query_owned, gid_refs.as_deref(), candidate_limit)?;
         let vector =
             conn.vector_search_entities(&embedding, gid_refs.as_deref(), candidate_limit)?;
+        // Third RRF input (issue #470): summary-vector matches, so a query that paraphrases an
+        // entity's `summary` — sharing no vocabulary with it (no FTS match) and no similarity to
+        // `name` (no name-vector match) — is still retrieved via meaning-based similarity.
+        let vector_summary = conn.vector_search_entities_by_summary(
+            &embedding,
+            gid_refs.as_deref(),
+            candidate_limit,
+        )?;
 
-        let fused_uuids = rrf_fuse(&bm25, &vector);
+        let fused_uuids = rrf_fuse(&[&bm25, &vector, &vector_summary]);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
         conn.get_entities_by_uuids(&top_uuids)
     })
@@ -126,7 +137,7 @@ pub async fn hybrid_edge_search(
         let bm25 = conn.fts_search_edges(&query_owned, gid_refs.as_deref(), candidate_limit)?;
         let vector = conn.vector_search_edges(&embedding, gid_refs.as_deref(), candidate_limit)?;
 
-        let fused_uuids = rrf_fuse(&bm25, &vector);
+        let fused_uuids = rrf_fuse(&[&bm25, &vector]);
         let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
         conn.get_relates_to_by_uuids(&top_uuids)
     })
@@ -141,7 +152,8 @@ mod tests {
 
     #[test]
     fn test_rrf_fuse_empty() {
-        let result = rrf_fuse(&[], &[]);
+        let empty: &[(String, f64)] = &[];
+        let result = rrf_fuse(&[empty, empty]);
         assert!(result.is_empty());
     }
 
@@ -152,7 +164,8 @@ mod tests {
             ("b".to_string(), 0.8),
             ("c".to_string(), 0.5),
         ];
-        let result = rrf_fuse(&bm25, &[]);
+        let empty: &[(String, f64)] = &[];
+        let result = rrf_fuse(&[&bm25, empty]);
         assert_eq!(result, vec!["a", "b", "c"]);
     }
 
@@ -161,7 +174,7 @@ mod tests {
         // 'b' appears in both lists at rank 0 → should score highest
         let bm25 = vec![("a".to_string(), 1.0), ("b".to_string(), 0.9)];
         let vector = vec![("b".to_string(), 0.1), ("c".to_string(), 0.05)];
-        let result = rrf_fuse(&bm25, &vector);
+        let result = rrf_fuse(&[&bm25, &vector]);
         assert_eq!(result[0], "b", "overlapping entry should rank first");
     }
 
@@ -170,9 +183,27 @@ mod tests {
         // Two entries with identical scores → sorted by UUID alphabetically
         let bm25 = vec![("z".to_string(), 1.0), ("a".to_string(), 1.0)];
         let vector = vec![("a".to_string(), 1.0), ("z".to_string(), 1.0)];
-        let result = rrf_fuse(&bm25, &vector);
+        let result = rrf_fuse(&[&bm25, &vector]);
         // Both have same rrf score; UUID tie-break gives "a" < "z"
         assert_eq!(result[0], "a");
         assert_eq!(result[1], "z");
+    }
+
+    #[test]
+    fn test_rrf_fuse_three_lists() {
+        // 'b' appears in all three lists at rank 0 → should score highest; a third list alone
+        // contributing an entry ('d') must still surface it (issue #470: summary-vector list).
+        let bm25 = vec![("a".to_string(), 1.0), ("b".to_string(), 0.9)];
+        let vector = vec![("b".to_string(), 0.1), ("c".to_string(), 0.05)];
+        let vector_summary = vec![("b".to_string(), 0.2), ("d".to_string(), 0.05)];
+        let result = rrf_fuse(&[&bm25, &vector, &vector_summary]);
+        assert_eq!(
+            result[0], "b",
+            "entry present in all three lists should rank first"
+        );
+        assert!(
+            result.contains(&"d".to_string()),
+            "an entry found only via the third (summary-vector) list must still surface: {result:?}"
+        );
     }
 }
