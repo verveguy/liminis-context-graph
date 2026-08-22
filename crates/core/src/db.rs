@@ -1223,6 +1223,36 @@ impl<'db> Conn<'db> {
         self.collect_uuid_score_pairs(&cypher, params)
     }
 
+    /// HNSW vector search on Entity.summary_embedding (issue #470); returns (uuid, distance)
+    /// pairs (lower = closer). Mirrors `vector_search_entities` exactly, querying
+    /// `entity_summary_embedding_idx` instead of `entity_name_embedding_idx` — this is the query
+    /// side of meaning-based retrieval against an entity's `summary`, fused into
+    /// `hybrid_entity_search`'s RRF alongside the existing name-vector and FTS lists.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
+    pub fn vector_search_entities_by_summary(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let gid_filter = match group_ids {
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
+        };
+        let cypher = format!(
+            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', $emb, $limit) \
+             WITH node, distance {gid_filter} \
+             RETURN node.uuid, distance \
+             ORDER BY distance ASC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        if let Some(gids) = group_ids {
+            params["gids"] = serde_json::json!(gids);
+        }
+        self.collect_uuid_score_pairs(&cypher, params)
+    }
+
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
     /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
     /// no groups.
