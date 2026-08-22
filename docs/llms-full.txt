@@ -375,11 +375,11 @@ no graph logic is duplicated between them:
 - **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (43)
+## IPC methods (44)
 
-The socket dispatch handles **43 methods**: 42 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **44 methods**: 43 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (43) and the MCP tool registry (42, below) differ by exactly one — `health_check` is
+surface (44) and the MCP tool registry (43, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -393,6 +393,7 @@ not exposed as an MCP tool.
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
+| Semantic search maintenance | `knowledge_backfill_summary_embeddings` |
 | Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
 | WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
@@ -496,7 +497,7 @@ union of all active scopes.
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group` |
+| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -729,6 +730,40 @@ genuine fact-based classification instead of lexical matching or pseudo-typing:
   they describe a proposed mutation rather than one that already happened; `breakdown` is always
   present on a successful apply response, as `{}` when there were zero in-scope candidates.
 
+### Semantic search maintenance (`backfill_summary_embeddings`)
+
+**`knowledge_backfill_summary_embeddings`** (issue #470) computes `summary_embedding` for every
+entity in `group_id` that has a non-empty `summary`, so entities created before this capability
+existed become semantically retrievable by summary paraphrase — not just by name-vector or
+full-text match. `knowledge_find_entities` already fuses a summary-vector match into its hybrid
+retrieval for entities embedded going forward (both `knowledge_assert_entity` and the extraction
+path embed `summary` on creation); this tool is what makes that retrieval available for entities
+that predate the capability.
+
+- **Every candidate is unconditionally re-embedded on each call.** There is no cheap way to tell
+  "already has a real embedding" apart from "still carries the schema migration's zero-vector
+  placeholder" from a stored `FLOAT[]` value alone, so re-running this backfills the same rows
+  again. This is safe (idempotent in effect) but not free (an embedder round-trip per candidate,
+  same as `knowledge_backfill_relation_types` and subject to the same no-batching caveat, #445) —
+  use `dry_run: true` first to see the candidate count.
+- **Holds an exclusive lock for the whole run, blocking all other reads and writes.** Unlike most
+  admin operations, the summary-vector HNSW index is dropped for the run's duration and rebuilt
+  at the end — this is the only way an indexed embedding column can be refreshed for existing
+  rows at all (a plain `SET` on an HNSW-indexed column is rejected once the index exists). Prefer
+  running this at a low-traffic time, especially for a large group.
+- **`group_id` is required** (matching `knowledge_backfill_relation_types`'s convention):
+  candidate selection and WAL attribution are both restricted to that one group; an omitted,
+  `null`, or empty `group_id` is rejected rather than running database-wide or against the
+  default group.
+- **A partially-completed backfill is not an error.** Entities not yet processed simply retrieve
+  via existing name/lexical behavior, exactly as before this issue — running the tool again
+  covers more of the group each time.
+- **`summary_embedding` stays write-once after backfill, same as on creation.** A later
+  `knowledge_assert_entity` re-assert that changes an entity's `summary` does not refresh its
+  `summary_embedding` — the vector reflects whichever summary was embedded last (at creation, or
+  at the most recent backfill run), not necessarily the current `summary` text. Re-run this tool
+  to bring a changed summary's vector back in sync.
+
 ### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
 
 `knowledge_add_cross_group_edge` creates an edge whose endpoint(s) may live in a `group_id`
@@ -823,9 +858,10 @@ result fields exist for that, both introduced in 0.13.2.
 
 ### Progress notifications
 
-The five long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
-`knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, and
-`knowledge_reprocess_entity_types` — bridge to MCP progress notifications when the client
+The six long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+`knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`,
+`knowledge_reprocess_relation_types`, and `knowledge_reprocess_entity_types` — bridge to MCP
+progress notifications when the client
 attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both
 standalone and attached mode. Without a progress token, these calls simply block until they
 complete, same as over the socket protocol. In attached mode, each progress notification also
@@ -3142,6 +3178,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
+| [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
 
 ## Historical numbering
