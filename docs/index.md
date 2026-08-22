@@ -20,6 +20,13 @@ Source: [github.com/{{ site.repository }}](https://github.com/{{ site.repository
 [`README`](https://github.com/{{ site.repository }}/blob/main/README.md) has a short overview
 and a standalone quickstart; this site is the full reference.
 
+**Multi-graph, not multi-tenant.** One process can hold many graphs, each with its own `group_id`
+and its own WAL stream — see [IPC & MCP Reference: group_ids semantics](ipc-mcp-reference.md#group_ids-semantics-omitted-vs-empty)
+and [Operations](operations.md) for the mechanics. That's a data-organisation capability for one
+user's own workspaces and subscriptions, not tenancy: there is no authentication, no
+authorisation, and no per-tenant resource isolation. Anything that can reach the socket can reach
+every group in the database — treat the process boundary as the trust boundary.
+
 ## Reference pages
 
 - **[Getting Started](getting-started.md)** — install, run, build from source, bundle in downstream apps.

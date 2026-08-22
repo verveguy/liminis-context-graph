@@ -191,6 +191,107 @@ is read or the database is touched. A bounded rebuild is **not durable**: WAL en
 bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
 forward-only replay noted above.
 
+### group_ids semantics: omitted vs. empty
+
+Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
+"all groups"** (issue #413) — this holds across all 9 read tools: `knowledge_find_entities`,
+`knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_list_entities`,
+`knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`,
+`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`.
+
+**An explicit `group_ids: []` does not mean the same thing on every tool**, and this split is
+deliberate, not an inconsistency to be fixed here:
+
+- On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
+  and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
+  groups" — i.e. **zero rows**, a filter matching nothing.
+- On the other five read tools (`knowledge_search_passages`, `knowledge_list_entities`,
+  `knowledge_list_relationships`, `knowledge_get_entity_neighbors`,
+  `knowledge_get_entities_by_source`), an explicit `group_ids: []` collapses to the same
+  behavior as omitting it — **all groups**.
+
+If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
+the tool's own `ToolSpec` description in
+[`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
+before relying on `[]` to mean "nothing" — on the other five it doesn't.
+
+This section is the single, central statement of that contract; individual tool entries on this
+page don't restate it.
+
+### Deletion (`delete_chunk_episode`, `delete_by_source`)
+
+**Breaking change in 0.13.2 (issue #406): `group_ids` is required and non-empty on both
+`knowledge_delete_chunk_episode` and `knowledge_delete_by_source`.** A call that previously
+omitted `group_ids` deleted matching episodes across every group in the workspace; that was
+cross-group-unsafe, so as of 0.13.2 an omitted, `null`, or empty `group_ids` is rejected outright
+with an error, before any delete runs. **There is no default to fall back to** — a caller
+upgrading from a pre-0.13.2 client that relied on omission must start passing its own group(s)
+explicitly:
+
+```json
+{"chunk_id": "notes-0001", "group_ids": ["liminis"]}
+```
+
+```json
+{"source_file": "notes.md", "group_ids": ["liminis"]}
+```
+
+This is a different contract from the read-tool one above — omitting `group_ids` here never means
+"all groups"; it means "reject the call." A `group_ids` naming a group with no matching rows still
+succeeds, returning `deleted_count: 0`.
+
+### Direct assertion (`assert_entity`, `assert_relationship`)
+
+`knowledge_assert_entity` and `knowledge_assert_relationship` (issue #379) are a direct write
+path: the caller already knows a fact and records it as a single entity or edge, without a prose
+round-trip through `knowledge_process_chunk`'s LLM-driven extraction. Use `process_chunk` when
+you have unstructured text and want the graph populated by extraction; use the assert tools when
+you already know exactly which entity or edge you want to write.
+
+**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `labels`,
+`summary`, `attributes`, and `group_id` (default `liminis`).
+
+- **Upsert identity is `(name, group_id)`**, unless `entity_uuid` is supplied. `entity_uuid`, when
+  given, is a **strict, group-scoped lookup** — the call fails if no entity with that UUID exists
+  in `group_id`; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
+  cannot mint an entity at a UUID of its own choosing.
+- **On an update, omitting `summary` or `attributes` clears the previously stored value** rather
+  than leaving it untouched — both fields are always overwritten with whatever the call supplies
+  (empty string if omitted), matching how `labels`/`name` are handled.
+- **Only `name` is embedded for semantic search** (`name_embedding`). `summary` is stored and is
+  full-text searchable (it's part of `Entity`'s `[name, summary]` FTS index), but is **not**
+  semantically searchable — a `knowledge_find_entities` vector query will not match on `summary`
+  content until issue #470 lands. `attributes` is not indexed at all — full-text or semantic — and
+  is retrievable only via direct UUID lookup or `knowledge_query_cypher`.
+- **An update never re-embeds `name_embedding` — only a create does** (ADR-0379 Decision 6, forced
+  by a lbug constraint: the embedded column sits under an HNSW index once indexes are built, and
+  lbug rejects a plain `SET` on an indexed column). Re-asserting an existing entity with a changed
+  `name` updates the stored `name`, but `name_embedding` keeps reflecting the *old* name until the
+  entity is deleted and recreated. There is currently no supported way to refresh it in place.
+
+**`knowledge_assert_relationship`** accepts `source_name`, `target_name`, `predicate` (all
+required), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
+omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `liminis`).
+
+- **Upsert identity is `(source_node_uuid, predicate, target_node_uuid, group_id)`**, resolved via
+  `find_active_relates_to_uuid` (an invalidated edge is skipped, so re-asserting after an
+  invalidation creates a fresh edge rather than resurrecting the old one).
+- **Endpoint resolution is strictly scoped to the call's own `group_id` — it never falls back to a
+  cross-group search.** If `source_name` or `target_name` doesn't resolve to an entity already in
+  that group, the call fails with an error naming
+  [`knowledge_add_cross_group_edge`](#cross-group-pointers-add_cross_group_edge-rebind_pointers)
+  as the tool to use for connecting entities across groups.
+- **`fact` is the field embedded for semantic search** (`fact_embedding`) — not `name`/`predicate`,
+  the opposite of `knowledge_assert_entity`. `fact` is also part of `RelatesToNode_`'s `[name,
+  fact]` FTS index, so it's both full-text and semantically searchable; `attributes` is indexed
+  neither way, same as on the entity side.
+- **Same never-re-embed-on-update caveat as `knowledge_assert_entity`** (ADR-0379 Decision 6): a
+  re-assert that changes `fact` updates the stored `fact` text but leaves `fact_embedding`
+  reflecting the prior text until the edge is deleted and recreated.
+
+See [ADR-0379](adr/0379-direct-assertion-conventions.md) for the full rationale behind these
+upsert and embedding decisions.
+
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
 Three tools populate an edge's `relation_type`, with different tradeoffs:
