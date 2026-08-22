@@ -104,7 +104,6 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
-| [0432](0432-force-clear-guard-scans-wal-content-group-ids.md) | `force_clear` Rebuild Guard Scans WAL Content for Referenced `group_id`s | 2026-08-21 |
 
 ## Historical numbering
 
