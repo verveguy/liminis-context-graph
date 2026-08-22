@@ -35,7 +35,7 @@ fn open_db(path: &std::path::Path) -> Arc<Db> {
     {
         let conn = db.connect().unwrap();
         conn.init_schema(DIM).unwrap();
-        schema::migrate(&conn);
+        schema::migrate(&conn, DIM);
     }
     db
 }
