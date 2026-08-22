@@ -535,6 +535,37 @@ pub fn registry() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "knowledge_backfill_summary_embeddings",
+            description: "Computes summary_embedding for every entity in group_id that has a \
+                           non-empty summary, so entities created before this capability existed \
+                           (issue #470) become semantically retrievable by summary paraphrase, \
+                           not just by name-vector or full-text match. Every candidate is \
+                           unconditionally re-embedded on each call — there is no cheap way to \
+                           detect which rows already carry a real embedding versus the \
+                           migration's zero-vector placeholder, so re-running this is safe but \
+                           not free. This operation drops and rebuilds the summary-vector index \
+                           around its write phase and holds an exclusive lock for the whole \
+                           run, blocking all other reads and writes for its duration — prefer \
+                           running it at a low-traffic time, especially for a large group. \
+                           group_id is required; omitted, null, or empty is rejected rather than \
+                           falling back to a database-wide rewrite or the default group. Supports \
+                           MCP progress notifications when called with a progress token.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "Restricts candidate selection and WAL attribution to this group only (required; no default)."
+                        },
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview the candidate count without embedding or writing."}
+                    },
+                    "required": ["group_id"]
+                })
+            },
+        },
+        ToolSpec {
             name: "knowledge_reprocess_relation_types",
             description: "Reclassify relation types via the configured extraction LLM, using \
                            each edge's fact against the ontology's declared relation types. \
@@ -1090,13 +1121,14 @@ pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Names of the five streaming methods that emit MCP progress notifications (FR-007).
+/// Names of the six streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
         "knowledge_rebuild_from_wal"
             | "knowledge_canonicalize_relations"
             | "knowledge_backfill_relation_types"
+            | "knowledge_backfill_summary_embeddings"
             | "knowledge_reprocess_relation_types"
             | "knowledge_reprocess_entity_types"
     )
@@ -1108,11 +1140,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_42_unique_tools() {
+    fn registry_has_43_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 42);
+        assert_eq!(r.len(), 43);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 42, "tool names must be unique");
+        assert_eq!(names.len(), 43, "tool names must be unique");
     }
 
     #[test]
@@ -1122,7 +1154,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 14);
         assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 12);
+        assert_eq!(count(Scope::Admin), 13);
     }
 
     #[test]
@@ -1184,9 +1216,30 @@ mod tests {
         assert!(is_streaming_method("knowledge_rebuild_from_wal"));
         assert!(is_streaming_method("knowledge_canonicalize_relations"));
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
+        assert!(is_streaming_method("knowledge_backfill_summary_embeddings"));
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    #[test]
+    fn backfill_summary_embeddings_is_registered_admin_scope_with_required_group_id() {
+        let r = registry();
+        let tool = r
+            .iter()
+            .find(|t| t.name == "knowledge_backfill_summary_embeddings")
+            .expect("knowledge_backfill_summary_embeddings must be registered");
+        assert_eq!(
+            tool.scope,
+            Scope::Admin,
+            "performs index drop/rebuild — must be Admin scope, not Write"
+        );
+        let schema = (tool.input_schema)();
+        assert_eq!(
+            schema.get("required").and_then(|r| r.as_array()),
+            Some(&vec![json!("group_id")]),
+            "group_id must be the sole required field"
+        );
     }
 
     #[test]
