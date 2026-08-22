@@ -1,5 +1,22 @@
 # Golden Real-Corpus WAL Fixture
 
+> **Invariant: this fixture's `group_id` must match the WAL directory its content lives in.**
+>
+> A WAL stream carries exactly one `group_id`. Cross-group links are resolvable pointers
+> ([ADR-0369](../../../../../docs/adr/0369-resolvable-cross-group-pointers.md)), never rows bearing
+> a foreign group. This fixture is committed in the **flat, pre-#378 layout**, so
+> `migrate_wal_root_if_needed` relocates it into `<wal_root>/liminis/` — which is why its content is
+> `liminis` and not something else.
+>
+> It was originally captured (#217) under `apollo_program`, which made the directory it migrated into
+> disagree with the group its rows carried. No deployment has that shape: the liminis app has only
+> ever written to `liminis`, and consumers using non-default groups postdate per-group directories
+> entirely. That mismatch was nonetheless read as a product defect and cost a full cycle of work —
+> see #432, #462 and #467 — before anyone checked whether it occurs outside this directory.
+>
+> If you recapture or add a fixture here, name its group after the directory its content will end up
+> in. A fixture that violates the invariant manufactures defects rather than catching them.
+
 This directory contains the real-data fixture consumed by
 `crates/core/tests/real_corpus_e2e.rs` (#217, direct in-process `handlers::dispatch`) and, as
 of #234/#235/#236, also by the MCP-over-stdio suites in `crates/service/tests/` —
