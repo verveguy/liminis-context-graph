@@ -3363,7 +3363,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
 
-    let (name_embedding, embed_err) = match state.embedder.embed(&name).await {
+    let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
         Ok(v) => (v, None),
         // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
         // variable-length LIST) — a literal zero-length vector fails to bind with a
@@ -3373,6 +3373,22 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         // stored embedding untouched instead (see `update_entity_core`), so the warning text
         // is finalized below once we know which branch ran.
         Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+    };
+
+    // `summary_embedding` (issue #470), mirroring `name_embedding`'s embed-with-fallback shape
+    // exactly (including the same before-existence-check timing — #444 tracks fixing that for
+    // both fields together, out of scope here). Per ADR-0314, an empty `summary` is a legitimate,
+    // common state, not an error: it's never sent to the embedder, and gets the same zero-vector
+    // sentinel a genuine embedder failure would produce. Like `name_embedding`, this is only ever
+    // persisted on the create branch below — `update_entity_core` never touches either embedding
+    // column once an HNSW index exists over it (see that function's own doc comment).
+    let (summary_embedding, summary_embed_err) = if summary.trim().is_empty() {
+        (vec![0.0f32; state.embedder.dim()], None)
+    } else {
+        match state.embedder.embed(&summary).await {
+            Ok(v) => (v, None),
+            Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+        }
     };
 
     let db = load_db(&state)?;
@@ -3432,6 +3448,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     attributes,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
+                    summary_embedding,
                 };
                 conn.insert_entity(&row)?;
                 (row.uuid, true)
@@ -3445,13 +3462,22 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     .await??;
     drop(_guard);
 
-    let embedding_warning = embed_err.map(|e| {
-        if created {
+    let mut warnings: Vec<String> = Vec::new();
+    if let Some(e) = name_embed_err {
+        warnings.push(if created {
             format!("embedder unavailable; stored a zero-vector name_embedding: {e}")
         } else {
             format!("embedder unavailable; existing name_embedding left unchanged: {e}")
-        }
-    });
+        });
+    }
+    if let Some(e) = summary_embed_err {
+        warnings.push(if created {
+            format!("embedder unavailable; stored a zero-vector summary_embedding: {e}")
+        } else {
+            format!("embedder unavailable; existing summary_embedding left unchanged: {e}")
+        });
+    }
+    let embedding_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
 
     Ok(json!({
         "entity_uuid": entity_uuid_out,

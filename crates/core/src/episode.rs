@@ -380,6 +380,27 @@ pub async fn add_episode(
         });
     }
 
+    // Parallel `summary_embedding` pass (issue #470) so extraction-created entities are
+    // semantically searchable by summary, on equal footing with directly-asserted ones. Per
+    // ADR-0314, an extracted `summary` legitimately defaults to `""` — that's never sent to the
+    // embedder (would waste a round-trip encoding nothing); those entities get a same-dimension
+    // zero vector instead, the same sentinel `insert_entity` falls back to for any unset
+    // `summary_embedding`.
+    let mut summary_embeddings: Vec<Vec<f32>> = Vec::with_capacity(extraction.entities.len());
+    for e in &extraction.entities {
+        if e.summary.trim().is_empty() {
+            summary_embeddings.push(vec![0.0f32; state.embedder.dim()]);
+        } else {
+            summary_embeddings.push(tokio::select! {
+                r = state.embedder.embed(&e.summary) => r?,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
+            });
+        }
+    }
+
     // Post-extraction edge validation (pre-lock, advisory only): drop self-referential edges —
     // a pure, DB-independent check that's always correct — then *salvage*, rather than
     // permanently drop, edges whose endpoint name is absent from this batch's own entity list.
@@ -565,34 +586,38 @@ pub async fn add_episode(
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
         }
-        let make_insert_row = |name_embedding: Vec<f32>| DedupDecision::Insert {
-            row: EntityRow {
-                uuid: uuid::Uuid::new_v4().to_string(),
-                name: extracted.name.clone(),
-                group_id: gid_owned.clone(),
-                labels: {
-                    let mut labels = vec!["Entity".to_string()];
-                    if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                        if let Some(ancestors) =
-                            ontology_ref.and_then(|o| o.ancestor_map.get(&extracted.entity_type))
-                        {
-                            labels.extend(ancestors.iter().cloned());
+        let make_insert_row =
+            |name_embedding: Vec<f32>, summary_embedding: Vec<f32>| DedupDecision::Insert {
+                row: EntityRow {
+                    uuid: uuid::Uuid::new_v4().to_string(),
+                    name: extracted.name.clone(),
+                    group_id: gid_owned.clone(),
+                    labels: {
+                        let mut labels = vec!["Entity".to_string()];
+                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
+                            if let Some(ancestors) = ontology_ref
+                                .and_then(|o| o.ancestor_map.get(&extracted.entity_type))
+                            {
+                                labels.extend(ancestors.iter().cloned());
+                            }
+                            labels.push(extracted.entity_type.clone());
                         }
-                        labels.push(extracted.entity_type.clone());
-                    }
-                    labels
+                        labels
+                    },
+                    created_at: ref_time_owned.clone(),
+                    name_embedding,
+                    summary: extracted.summary.clone(),
+                    attributes: match &extracted.original_entity_type {
+                        Some(orig) => {
+                            serde_json::json!({ "original_entity_type": orig }).to_string()
+                        }
+                        None => "{}".to_string(),
+                    },
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
+                    summary_embedding,
                 },
-                created_at: ref_time_owned.clone(),
-                name_embedding,
-                summary: extracted.summary.clone(),
-                attributes: match &extracted.original_entity_type {
-                    Some(orig) => serde_json::json!({ "original_entity_type": orig }).to_string(),
-                    None => "{}".to_string(),
-                },
-                episode_uuids: vec![],
-                source_descriptions: vec![],
-            },
-        };
+            };
         let decision = match &phase_b_results[i] {
             PhaseBResult::NameMatch { existing } => {
                 // Exact name match — resolve immediately, no dedup-adapter check needed.
@@ -627,11 +652,11 @@ pub async fn add_episode(
                         merged_summary: format!("{} {}", existing.summary, extracted.summary),
                     }
                 } else {
-                    make_insert_row(name_embeddings[i].clone())
+                    make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
                 }
             }
             PhaseBResult::EmbeddingCandidate { candidate: None } => {
-                make_insert_row(name_embeddings[i].clone())
+                make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
             }
         };
         decisions.push(decision);
