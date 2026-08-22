@@ -485,6 +485,41 @@ impl Embedder for NameMapEmbedder {
     }
 }
 
+// ── CountingEmbedder ────────────────────────────────────────────────────────
+
+/// Test embedder that wraps another embedder and counts `embed()` calls. Used to assert a
+/// negative — e.g. that an empty-summary entity never triggers an embedder round-trip at all
+/// (issue #470's FR-002 empty-summary edge case), which a returned zero-vector alone can't
+/// distinguish from "embedded an empty string and got a zero vector back."
+pub struct CountingEmbedder {
+    inner: std::sync::Arc<dyn Embedder>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingEmbedder {
+    pub fn new(inner: std::sync::Arc<dyn Embedder>) -> Self {
+        Self {
+            inner,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub fn call_count(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Embedder for CountingEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed(text)
+    }
+
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
