@@ -95,7 +95,9 @@ enum DedupDecision {
         merged_summary: String,
     },
     Insert {
-        row: EntityRow,
+        // Boxed: `EntityRow` grew past clippy::large_enum_variant's threshold once
+        // `summary_embedding` (issue #470) was added, and `Merge`'s variant is much smaller.
+        row: Box<EntityRow>,
     },
 }
 
@@ -588,7 +590,7 @@ pub async fn add_episode(
         }
         let make_insert_row =
             |name_embedding: Vec<f32>, summary_embedding: Vec<f32>| DedupDecision::Insert {
-                row: EntityRow {
+                row: Box::new(EntityRow {
                     uuid: uuid::Uuid::new_v4().to_string(),
                     name: extracted.name.clone(),
                     group_id: gid_owned.clone(),
@@ -616,7 +618,7 @@ pub async fn add_episode(
                     episode_uuids: vec![],
                     source_descriptions: vec![],
                     summary_embedding,
-                },
+                }),
             };
         let decision = match &phase_b_results[i] {
             PhaseBResult::NameMatch { existing } => {
