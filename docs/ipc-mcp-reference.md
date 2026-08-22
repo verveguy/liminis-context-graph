@@ -46,7 +46,7 @@ distinguishes a genuinely empty group from one whose WAL holds unapplied content
 field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 rather than here.
 
-Every long-running method above (the five WAL/recovery/reclassification operations most likely
+Every long-running method above (the six WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
 

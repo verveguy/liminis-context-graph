@@ -101,7 +101,8 @@ pub async fn backfill_summary_embeddings(
                 for row in &rows {
                     total += 1;
                     // dump_entities_page columns: [uuid, name, group_id, labels, created_at,
-                    // name_embedding, summary, attributes] — summary is index 6.
+                    // name_embedding, summary, attributes, summary_embedding] — summary is
+                    // index 6; the appended summary_embedding (index 8) is unused here.
                     let summary = value_as_string(&row[6]);
                     if !summary.trim().is_empty() {
                         all_candidates.push(EntityCandidate {

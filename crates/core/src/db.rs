@@ -128,6 +128,16 @@ impl Db {
             if let Some(ref warning) = stats.fidelity_warning {
                 eprintln!("[WAL REBUILD WARNING] {warning}");
             }
+            // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding at all,
+            // so replaying it verbatim leaves that column NULL — migrate()'s own zero-fill only
+            // covers rows already present at migration time, not ones replay creates afterward.
+            // Must run before the caller's own build_indices_and_constraints() ever builds
+            // entity_summary_embedding_idx over the column (issue #470).
+            if let Err(e) =
+                crate::schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim)
+            {
+                eprintln!("liminis-context-graph: open_or_rebuild: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+            }
             // WAL replay executes raw recorded Cypher templates, bypassing the typed
             // insert_entity/update_entity_created_at hooks — a full rebuild is the only
             // way the name index observes replayed data (FR-004).
@@ -2499,7 +2509,10 @@ impl<'db> Conn<'db> {
     // Column ordering is fixed; dump.rs uses named const indices to avoid magic numbers.
 
     /// Page of Entity rows for dump.
-    /// Columns: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes]
+    /// Columns: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes,
+    /// summary_embedding] — `summary_embedding` (issue #470) is appended last so the two existing
+    /// callers (`dump.rs`, `backfill_summary_embeddings.rs`) that index by position into the first
+    /// 8 columns are unaffected.
     pub(crate) fn dump_entities_page(
         &self,
         group_id: Option<&str>,
@@ -2510,7 +2523,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2518,7 +2531,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
