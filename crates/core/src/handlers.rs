@@ -2356,6 +2356,16 @@ async fn handle_rebuild_from_wal(
                 let mut build_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
+                    // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
+                    // so replaying it verbatim leaves that column NULL — must zero-fill before
+                    // build_indices_and_constraints below ever builds entity_summary_embedding_idx
+                    // over the column (issue #470).
+                    if let Err(e) = crate::schema::zero_fill_null_entity_summary_embeddings(
+                        &conn,
+                        state_c.embedder.dim(),
+                    ) {
+                        eprintln!("liminis-context-graph: reload: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -2758,6 +2768,16 @@ async fn handle_rebuild_from_wal(
                 let mut build_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
+                    // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
+                    // so replaying it verbatim leaves that column NULL — must zero-fill before
+                    // build_indices_and_constraints below ever builds entity_summary_embedding_idx
+                    // over the column (issue #470).
+                    if let Err(e) = crate::schema::zero_fill_null_entity_summary_embeddings(
+                        &conn,
+                        bg_state.embedder.dim(),
+                    ) {
+                        eprintln!("liminis-context-graph: reload(bg): zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -4425,6 +4445,14 @@ async fn recover_rebuild_from_workspace_wal(
                 legacy_skipped_lines,
                 duration_ms: replay_started_at.elapsed().as_millis() as u64,
             });
+            // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding, so
+            // replay leaves it NULL — must zero-fill before build_indices_and_constraints below
+            // ever builds entity_summary_embedding_idx over the column (issue #470).
+            if let Err(e) =
+                crate::schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim)
+            {
+                eprintln!("liminis-context-graph: rebuild_from_workspace_wal: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+            }
             conn.build_indices_and_constraints()?;
             // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
             // rebuild the name index from the fully-loaded data.

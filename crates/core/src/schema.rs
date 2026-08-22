@@ -271,13 +271,31 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
             "ALTER TABLE Entity ADD summary_embedding FLOAT[{dim}]"
         )) {
             eprintln!("liminis-context-graph: schema migrate: ALTER TABLE Entity ADD summary_embedding FLOAT[{dim}]: {e} (non-fatal)");
-        } else if let Err(e) = conn.exec_params(
-            "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
-            serde_json::json!({ "zero": vec![0.0f32; dim] }),
-        ) {
+        } else if let Err(e) = zero_fill_null_entity_summary_embeddings(conn, dim) {
             eprintln!("liminis-context-graph: schema migrate: zero-fill Entity.summary_embedding: {e} (non-fatal)");
         }
     }
+}
+
+/// Zero-fills any `Entity` row whose `summary_embedding` is `NULL` (issue #470). Idempotent — a
+/// no-op when no row is `NULL`. `migrate`'s `ALTER` branch only reaches rows already present in
+/// the DB at migration time; it does NOT cover a row created afterward by replaying a pre-#470
+/// WAL recording verbatim: `WalReplayer` executes raw recorded Cypher, and a `MERGE ... ON CREATE
+/// SET` that never mentions `summary_embedding` (because it was logged before that column
+/// existed) leaves the column `NULL` on the newly-created row — empirically verified in
+/// `handlers_wal_admin.rs`'s `test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embedding`,
+/// since a fixed-size `FLOAT[dim]` ARRAY column does not uniformly default an omitted property to
+/// zero across every write path. Callers that rebuild a DB from WAL (`Db::open_or_rebuild`,
+/// `handle_rebuild_from_wal`, the `knowledge_recover*` family) must call this after replay and
+/// before the first `create_vector_indexes`/`build_indices_and_constraints` call, so
+/// `CREATE_VECTOR_INDEX` never has to face a `NULL` entry (untested, unsupported) and the "always
+/// a same-length `FLOAT[dim]` vector, never absent" invariant holds regardless of how a row was
+/// created.
+pub fn zero_fill_null_entity_summary_embeddings(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
+    conn.exec_params(
+        "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
+        serde_json::json!({ "zero": vec![0.0f32; dim] }),
+    )
 }
 
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other
