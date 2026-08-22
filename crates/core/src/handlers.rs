@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    assert, backfill, canonicalize, corrections,
+    assert, backfill, backfill_summary_embeddings, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::{self, Db},
     episode,
@@ -154,6 +154,9 @@ async fn handle(
         }
         "knowledge_backfill_relation_types" => {
             handle_backfill_relation_types(req, state, progress_tx).await
+        }
+        "knowledge_backfill_summary_embeddings" => {
+            handle_backfill_summary_embeddings(req, state, progress_tx).await
         }
         "knowledge_reprocess_relation_types" => {
             handle_reprocess_relation_types(req, state, progress_tx).await
@@ -4016,6 +4019,28 @@ async fn handle_backfill_relation_types(
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
     let params = backfill::BackfillParams { group_id, dry_run };
     backfill::backfill_relation_types(state, params, progress_tx).await
+}
+
+/// `knowledge_backfill_summary_embeddings` (issue #470, FR-005): computes `summary_embedding`
+/// for existing `Entity` rows in `group_id`, so entities created before this feature existed
+/// become semantically retrievable by summary paraphrase. See
+/// `backfill_summary_embeddings::backfill_summary_embeddings`'s module doc for why this exists
+/// as its own operation (drop/rebuild of `entity_summary_embedding_idx` around a held write
+/// lock) rather than a per-row `SET` on the live index.
+///
+/// Parameters (from req.params):
+/// - `group_id: String` (required) — restricts candidate selection and WAL attribution to this
+///   group only, matching `knowledge_backfill_relation_types`'s convention.
+/// - `dry_run: bool` (default false) — report candidate count without embedding or mutating.
+async fn handle_backfill_summary_embeddings(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    let params = backfill_summary_embeddings::BackfillParams { group_id, dry_run };
+    backfill_summary_embeddings::backfill_summary_embeddings(state, params, progress_tx).await
 }
 
 // ── Relation reprocessing handler (issue #210) ───────────────────────────────
