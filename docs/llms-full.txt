@@ -616,8 +616,9 @@ you already know exactly which entity or edge you want to write.
   in `group_id`; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
   cannot mint an entity at a UUID of its own choosing.
 - **On an update, omitting `summary` or `attributes` clears the previously stored value** rather
-  than leaving it untouched — both fields are always overwritten with whatever the call supplies
-  (empty string if omitted), matching how `labels`/`name` are handled.
+  than leaving it untouched — both fields are always overwritten with whatever the call supplies:
+  `summary` defaults to `""` if omitted, `attributes` defaults to `"{}"` (an empty JSON object,
+  not an empty string) if omitted or non-object, matching how `labels`/`name` are handled.
 - **Only `name` is embedded for semantic search** (`name_embedding`). `summary` is stored and is
   full-text searchable (it's part of `Entity`'s `[name, summary]` FTS index), but is **not**
   semantically searchable — a `knowledge_find_entities` vector query will not match on `summary`
