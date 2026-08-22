@@ -380,7 +380,7 @@ impl<'db> Conn<'db> {
     /// Creates the Entity and Episodic node tables. Call once after connecting.
     pub fn init_schema(&self, embedding_dim: usize) -> Result<(), Error> {
         crate::schema::init(self, embedding_dim)?;
-        crate::schema::migrate(self);
+        crate::schema::migrate(self, embedding_dim);
         Ok(())
     }
 
@@ -775,10 +775,10 @@ impl<'db> Conn<'db> {
                 }
             }
         }
-        Ok(())
+        self.create_entity_summary_embedding_index()
     }
 
-    /// Drops the 3 HNSW vector indexes. Idempotent — errors (including "no such index") are
+    /// Drops the 4 HNSW vector indexes. Idempotent — errors (including "no such index") are
     /// suppressed so this is safe to call even when the indexes are already absent. Used by
     /// `handle_rebuild_from_wal` to ensure a from-scratch rebuild doesn't leave a stale
     /// pre-rebuild HNSW index in place after `CREATE_VECTOR_INDEX` stops treating every error
@@ -789,6 +789,30 @@ impl<'db> Conn<'db> {
             self.raw_query("CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')");
         let _ =
             self.raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
+        self.drop_entity_summary_embedding_index();
+    }
+
+    /// Creates just the `Entity.summary_embedding` HNSW index. Idempotent, following the same
+    /// "already exists" suppression as `create_vector_indexes`. Broken out as its own function
+    /// (rather than folded only into the aggregate) so `knowledge_backfill_summary_embeddings`
+    /// can drop/rebuild this single index around its write phase without touching the other 3
+    /// (issue #470).
+    pub fn create_entity_summary_embedding_index(&self) -> Result<(), Error> {
+        if let Err(e) = self.raw_query(
+            "CALL CREATE_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', \
+             'summary_embedding', metric := 'cosine')",
+        ) {
+            if !crate::error::is_already_exists_error(&e) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops just the `Entity.summary_embedding` HNSW index. Idempotent — errors are suppressed.
+    /// See `create_entity_summary_embedding_index` for why this is independently callable.
+    pub fn drop_entity_summary_embedding_index(&self) {
+        let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx')");
     }
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
