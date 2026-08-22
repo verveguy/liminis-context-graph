@@ -163,4 +163,82 @@ mod is_missing_table_error_tests {
         );
         assert!(!is_missing_table_error(&err));
     }
+
+    /// Pins the *verbatim* error text lbug 0.19.1 produces for each condition these
+    /// classifiers match on. Every one of them keys off a Display-string substring, which
+    /// ADR-0009 calls out as fragile by design: upstream is free to reword an exception in a
+    /// patch release, and when it does, the failure is silent — auto-heal stops firing, an
+    /// idempotent index rebuild starts propagating, or `knowledge_status` stops degrading.
+    ///
+    /// The strings below were captured by running each failing query against a live 0.19.1
+    /// engine over the IPC socket during the 0.17.0 → 0.19.1 bump (#398), not copied from a
+    /// changelog.
+    ///
+    /// **What this can and cannot catch.** The strings are literals, so these tests hold the
+    /// *classifiers* to text the engine was observed to emit — loosen or tighten a matcher and
+    /// they go red. They cannot detect the engine rewording an exception, because nothing here
+    /// talks to lbug. Detecting that stays the job of the behavioral tests that exercise the
+    /// real engine (`degraded_startup`, `auto_recovery`, the index auto-heal paths); the value
+    /// of this module is that when one of those fails after a bump, the observed 0.19.1 text is
+    /// recorded here to diff against instead of having to be re-derived. Re-probe the engine
+    /// and update the classifier and these literals together on every lbug bump.
+    mod lbug_0_19_1_error_text {
+        use super::*;
+
+        #[test]
+        fn missing_index_text_is_still_classified() {
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: Table Entity doesn't have an index \
+                 with name no_such_index_xyz."
+                    .to_string(),
+            );
+            assert!(is_missing_index_error(&err));
+        }
+
+        #[test]
+        fn index_already_exists_text_is_still_classified() {
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: Index entity_name_embedding_idx \
+                 already exists in table Entity."
+                    .to_string(),
+            );
+            assert!(is_already_exists_error(&err));
+        }
+
+        #[test]
+        fn missing_table_text_is_still_classified() {
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: Table NoSuchTable_XYZ does not exist."
+                    .to_string(),
+            );
+            assert!(is_missing_table_error(&err));
+        }
+
+        #[test]
+        fn unknown_function_is_not_a_missing_table() {
+            // 0.19.1 raises this as a *Catalog* exception rather than a Binder exception, so
+            // the "Binder exception:" guard alone already excludes it — but the carve-out is
+            // asserted here rather than assumed, since the classifier must keep propagating
+            // this failure instead of degrading on it.
+            let err = Error::QueryFailed(
+                "Query execution failed: Catalog exception: function no_such_table_function_xyz \
+                 does not exist."
+                    .to_string(),
+            );
+            assert!(!is_missing_table_error(&err));
+        }
+
+        #[test]
+        fn node_table_already_exists_is_not_an_index_already_exists() {
+            // Creating a node table that already exists reports "already exists in catalog",
+            // NOT "already exists in table". The distinction matters: index-build callers
+            // swallow `is_already_exists_error`, and a duplicate *table* creation is a
+            // different failure that must propagate rather than be silently ignored.
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: Entity already exists in catalog."
+                    .to_string(),
+            );
+            assert!(!is_already_exists_error(&err));
+        }
+    }
 }
