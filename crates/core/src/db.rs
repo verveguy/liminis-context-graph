@@ -421,10 +421,22 @@ impl<'db> Conn<'db> {
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
         // Enforce Entity-first label-order invariant (AD-8)
         let labels = enforce_entity_first(&row.labels);
+        // `summary_embedding` is a fixed-size `FLOAT[N]` column, same as `name_embedding` above
+        // — a zero-length list fails to bind ("Unsupported casting LIST with incorrect list
+        // entry to ARRAY"). Callers that don't compute a real summary embedding (an empty
+        // `EntityRow::default()`-derived value, which every pre-#470 call site produces) get a
+        // same-dimension zero vector here, sized off `name_embedding` since that field is always
+        // populated with a real, correctly-sized vector by every caller.
+        let summary_embedding = if row.summary_embedding.is_empty() {
+            vec![0.0f32; row.name_embedding.len()]
+        } else {
+            row.summary_embedding.clone()
+        };
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
-             summary: $summary, attributes: $attributes})",
+             summary: $summary, attributes: $attributes, \
+             summary_embedding: $summary_embedding})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -434,6 +446,7 @@ impl<'db> Conn<'db> {
                 "name_embedding": row.name_embedding,
                 "summary": row.summary,
                 "attributes": row.attributes,
+                "summary_embedding": summary_embedding,
             }),
         )?;
         self.name_index
@@ -1499,6 +1512,7 @@ impl<'db> Conn<'db> {
                             attributes: value_as_string(&row[7]),
                             episode_uuids: vec![],
                             source_descriptions: vec![],
+                            ..Default::default()
                         },
                     ));
                 }
@@ -1706,6 +1720,7 @@ impl<'db> Conn<'db> {
             attributes: value_as_string(&row[7]),
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         }))
     }
 
@@ -1790,6 +1805,7 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[7]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             }))
         } else {
             Ok(None)

@@ -2751,6 +2751,7 @@ fn batch_fallback_rolls_back_whole_batch_on_bad_row() {
         attributes: "{}".to_string(),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     })
     .unwrap();
 
@@ -3360,6 +3361,7 @@ fn sc001_prior_committed_transactions_survive_a_later_rollback() {
         attributes: "{}".to_string(),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     })
     .unwrap();
 
