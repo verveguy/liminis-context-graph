@@ -12,9 +12,9 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This site documents **v{{ site.version }}** (see [`Cargo.toml`](https://github.com/{{ site.repository }}/blob/main/Cargo.toml)).
-It describes the `main` branch as of that release; unreleased changes on `main` since the
-last tag may not yet be reflected here.
+This page documents **v{{ site.version }}**, built directly from that release tag's `docs/`
+tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
+here; use the version switcher in the footer to browse other published releases.
 
 Source: [github.com/{{ site.repository }}](https://github.com/{{ site.repository }}). The
 [`README`](https://github.com/{{ site.repository }}/blob/main/README.md) has a short overview
