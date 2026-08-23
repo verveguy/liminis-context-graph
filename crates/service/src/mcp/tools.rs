@@ -49,8 +49,12 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Get knowledge graph status: entity/episode/relationship counts, \
                            embedding config, WAL state (including each group's applied_seq, \
                            max_seq, current on-disk generation, and generation_status — issue \
-                           #387/#414, cheap: no extra WAL directory scan), ontology summary, and \
-                           whether search indices are built. generation_status is \
+                           #387/#414, cheap: no extra WAL directory scan), ontology summary, \
+                           per-group ontology drift (group_ontology_drift — issue #451, an array \
+                           of {group_id, drifted, drift_summary} for every group this process has \
+                           resolved an ontology for; a group not yet used in this process is \
+                           simply absent, not falsely reported as not drifted), and whether \
+                           search indices are built. generation_status is \
                            \"not_applicable\" (no WAL stream yet), \"unknown\" (stream exists but \
                            .wal-generation.json is missing or corrupt — knowledge_rebuild_from_wal \
                            will refuse once a position is recorded), or \"known\". Returns a \

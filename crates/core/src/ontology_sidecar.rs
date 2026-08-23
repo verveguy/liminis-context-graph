@@ -34,6 +34,83 @@ pub fn read_sidecar(workspace_root: &Path) -> Option<OntologySidecar> {
     }
 }
 
+/// Resolves the path a per-group drift sidecar would live at for `group_id` (issue #451,
+/// FR-005): `{workspace_root}/.lcg/ontology-hash/<encoded_group_id>.json`. Mirrors
+/// [`crate::ontology::group_ontology_path`]'s encoding and directory-per-group precedent exactly,
+/// kept as a genuinely separate file (not a field folded into the existing single-valued
+/// `.lcg/ontology-hash.json`) so that file's content/shape stays byte-identical for existing
+/// single-ontology workspaces (FR-004).
+pub fn group_sidecar_path(
+    workspace_root: &Path,
+    group_id: &str,
+) -> Result<PathBuf, crate::error::Error> {
+    let encoded = crate::wal_group::encode_group_dir_name(group_id)?;
+    Ok(workspace_root
+        .join(".lcg")
+        .join("ontology-hash")
+        .join(format!("{encoded}.json")))
+}
+
+/// Reads a group's drift sidecar. Returns `None` if `group_id` is invalid, the file is missing,
+/// or it's unparseable — mirrors [`read_sidecar`]'s absent-on-any-failure behavior.
+pub fn read_group_sidecar(workspace_root: &Path, group_id: &str) -> Option<OntologySidecar> {
+    let path = group_sidecar_path(workspace_root, group_id).ok()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    match serde_json::from_str::<OntologySidecar>(&text) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: ontology-sidecar: failed to parse group sidecar {:?} for group {:?}: {} — treating as absent",
+                path, group_id, e
+            );
+            None
+        }
+    }
+}
+
+/// Atomically writes a group's drift sidecar, recording the resolved ontology's hash and type
+/// lists for that group (issue #451). Mirrors [`write_sidecar`]'s shape and atomic-write pattern,
+/// scoped to one group's file under `.lcg/ontology-hash/`.
+pub fn write_group_sidecar(
+    workspace_root: &Path,
+    group_id: &str,
+    ontology: Option<&Ontology>,
+) -> std::io::Result<()> {
+    let path = group_sidecar_path(workspace_root, group_id).map_err(std::io::Error::other)?;
+    let dir = path
+        .parent()
+        .expect("group_sidecar_path always has a parent");
+    std::fs::create_dir_all(dir)?;
+
+    let hash = content_hash(ontology);
+    let (mode, entity_types, relation_types) = match ontology {
+        Some(o) => (
+            Some(o.mode.to_string()),
+            o.entity_types.iter().map(|e| e.name.clone()).collect(),
+            o.relation_types.iter().map(|r| r.name.clone()).collect(),
+        ),
+        None => (None, vec![], vec![]),
+    };
+
+    let sidecar = OntologySidecar {
+        hash,
+        mode,
+        entity_types,
+        relation_types,
+    };
+
+    let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
+
+    let tmp_path = path.with_extension("json.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(json.as_bytes())?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
 /// Atomically writes the sidecar file, recording the current ontology's hash and type lists.
 pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std::io::Result<()> {
     let lcg_dir = workspace_root.join(".lcg");
@@ -156,12 +233,46 @@ pub fn compute_drift(
         Some(r) => r,
         None => return (false, None),
     };
+    compute_drift_from_sidecar(read_sidecar(root), ontology, has_prior_data)
+}
 
-    let sidecar = match read_sidecar(root) {
+/// Per-group generalization of [`compute_drift`] (issue #451, FR-001/FR-005/FR-010): compares
+/// the resolved ontology already handed to this group (whether via its own per-group file, the
+/// workspace fallback, or neither) against `group_id`'s own persisted drift sidecar. Returns
+/// `(false, None)` when `workspace_root` is `None` (no root to compare against — mirrors
+/// `compute_drift`'s same fast path for direct-construction callers with no configured root).
+pub fn compute_group_drift(
+    workspace_root: Option<&Path>,
+    group_id: &str,
+    ontology: Option<&Ontology>,
+    has_prior_data: bool,
+) -> (bool, Option<String>) {
+    let root = match workspace_root {
+        Some(r) => r,
+        None => return (false, None),
+    };
+    compute_drift_from_sidecar(read_group_sidecar(root, group_id), ontology, has_prior_data)
+}
+
+/// Shared drift comparison logic behind both [`compute_drift`] (workspace-scoped) and
+/// [`compute_group_drift`] (per-group, issue #451): given whichever sidecar record was already
+/// read for the relevant scope, decide whether `ontology`'s current hash has drifted from it.
+///
+/// `has_prior_data`: true when no sidecar exists but the DB already contains ingested nodes for
+/// the relevant scope (a pre-#98 workspace, or — per FR-010 — a group whose data predates
+/// per-group drift tracking). In that case, loading an ontology is treated as drift (FR-002).
+///
+/// Returns `(drifted, drift_summary)`.
+fn compute_drift_from_sidecar(
+    sidecar: Option<OntologySidecar>,
+    ontology: Option<&Ontology>,
+    has_prior_data: bool,
+) -> (bool, Option<String>) {
+    let sidecar = match sidecar {
         Some(s) => s,
         None => {
-            // Pre-#98 workspace: ingested before sidecar writes were added. If the DB has data
-            // and an ontology is now loaded, that's drift (FR-002, User Story 3 Scenario 2).
+            // No prior record for this scope. If it already has data and an ontology is now
+            // loaded, that's drift (FR-002, User Story 3 Scenario 2; FR-010 for the per-group case).
             if has_prior_data {
                 if let Some(o) = ontology {
                     return (

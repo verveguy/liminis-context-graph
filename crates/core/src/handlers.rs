@@ -8,7 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 
 use crate::{
-    app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
+    app_state::{build_indices_once, load_db, AppState, GroupDriftStatus, OntologyDriftState},
     assert, backfill, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::{self, Db},
@@ -269,10 +269,7 @@ enum StatusOutcome {
 }
 
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
-    // Deliberately reports the workspace-wide ontology/drift, not any group's resolved ontology
-    // (issue #446): this summary has no group_id in its request shape, drift detection stays
-    // workspace-scoped for this issue (see ADR-0446), and a per-group breakdown here would be a
-    // knowledge_status IPC protocol change this issue's Plan explicitly chose not to make.
+    // Workspace-wide ontology/drift (unchanged since #446/ADR-0446 Decision 3, FR-008/FR-004).
     let ontology_summary = {
         let drift = state
             .ontology_drift
@@ -302,6 +299,13 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         }
     };
 
+    // Per-group drift breakdown (issue #451, FR-002a): purely from the in-memory
+    // `group_ontologies` cache, populated lazily by `resolve_ontology` (FR-007) — never a disk
+    // scan, unlike `wal_group_positions` below, so a group this process hasn't resolved yet is
+    // simply absent from the array rather than falsely reported as "not drifted" (User Story 4,
+    // Scenario 2).
+    let group_ontology_drift = group_ontology_drift_json(&state.all_group_drift_statuses());
+
     let db_opt = state.db.load_full();
     if db_opt.is_none() {
         let reason = state
@@ -326,6 +330,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "initializing": false,
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
+            "group_ontology_drift": group_ontology_drift,
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
@@ -602,7 +607,27 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         }),
     };
     result["ontology"] = ontology_summary;
+    result["group_ontology_drift"] = group_ontology_drift;
     Ok(result)
+}
+
+/// Renders `handle_knowledge_status`'s per-group drift breakdown (issue #451, FR-002a) into a
+/// JSON array of `{group_id, drifted, drift_summary}` — one entry per group this process has
+/// resolved an ontology for (see `AppState::all_group_drift_statuses`). A group never resolved
+/// this process is simply absent, not present with `drifted: false`.
+fn group_ontology_drift_json(statuses: &[(String, GroupDriftStatus)]) -> Value {
+    Value::Array(
+        statuses
+            .iter()
+            .map(|(group_id, status)| {
+                json!({
+                    "group_id": group_id,
+                    "drifted": status.drifted,
+                    "drift_summary": status.drift_summary,
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Classifies a group's generation reporting into the three states FR-001 requires be
@@ -2461,13 +2486,9 @@ async fn handle_rebuild_from_wal(
             duration_ms: replay_started_at.elapsed().as_millis() as u64,
         });
 
-        // After a successful non-dry-run WAL replay the graph is fully under the current ontology.
-        // Deliberately reads state.ontology (the workspace-wide ontology), not any group's
-        // resolved ontology (issue #446): this records "the graph is now consistent with the
-        // *workspace* ontology," a workspace-scoped concept this issue's drift detection doesn't
-        // extend per-group (see ADR-0446). A group replayed here that only has a per-group
-        // ontology gets no drift tracking from this write — a documented v1 limitation, not a
-        // miss.
+        // After a successful non-dry-run WAL replay the graph is fully under the current
+        // workspace ontology — clear the workspace-level drift flag as before (FR-008,
+        // unchanged since #446).
         if !dry_run {
             if let Some(ref root) = state.workspace_root {
                 let ontology_ref = state.ontology.as_deref();
@@ -2478,6 +2499,23 @@ async fn handle_rebuild_from_wal(
                     );
                 } else if let Ok(mut guard) = state.ontology_drift.lock() {
                     *guard = OntologyDriftState::default();
+                }
+
+                // Per-group clear (issue #451, FR-009): scoped to the one group this rebuild
+                // actually remediated, not every cached group (ADR-0451) — a sibling group's
+                // legitimately-drifted state must survive this call untouched (FR-003).
+                let group_ontology = state.resolve_ontology(&group_id);
+                if let Err(e) = ontology_sidecar::write_group_sidecar(
+                    root,
+                    &group_id,
+                    group_ontology.as_deref(),
+                ) {
+                    eprintln!(
+                        "liminis-context-graph: ontology-sidecar: WAL replay group sidecar write failed for {:?}: {}",
+                        group_id, e
+                    );
+                } else {
+                    state.clear_group_drift(&group_id);
                 }
             }
         }
@@ -2696,6 +2734,9 @@ async fn handle_rebuild_from_wal(
         // bg_gid is moved into the spawn_blocking closure below; keep a clone for the
         // post-completion job_result JSON.
         let bg_gid_for_result = bg_gid.clone();
+        // bg_state is moved into the spawn_blocking closure below (via bg_gid's borrow inside
+        // it); keep a clone for the post-completion per-group drift clear (issue #451, FR-009).
+        let bg_state_for_result = Arc::clone(&bg_state);
         // bg_current_generation is moved into the spawn_blocking closure below (it's what gets
         // persisted alongside applied_seq); keep a clone for the post-completion job_result JSON.
         let bg_current_generation_for_replay = bg_current_generation.clone();
@@ -2898,11 +2939,8 @@ async fn handle_rebuild_from_wal(
                         job_result["generation"] = json!(bg_current_generation);
                         job_result["cross_group_rebind"] = json!(cross_group_rebind);
                         job.result = Some(job_result);
-                        // Update the sidecar so drift clears after a successful WAL rebuild.
-                        // Deliberately uses bg_ontology (the workspace-wide state.ontology snapshot
-                        // captured above), not any group's resolved ontology (issue #446) — same
-                        // rationale as the streaming replay path above: drift detection stays
-                        // workspace-scoped for this issue (see ADR-0446).
+                        // Update the sidecar so drift clears after a successful WAL rebuild
+                        // (workspace-level, unchanged since #446 — FR-008).
                         if !dry_run {
                             if let Some(ref root) = bg_workspace_root {
                                 let ontology_ref = bg_ontology.as_deref();
@@ -2914,6 +2952,24 @@ async fn handle_rebuild_from_wal(
                                     );
                                 } else if let Ok(mut guard) = bg_ontology_drift.lock() {
                                     *guard = OntologyDriftState::default();
+                                }
+
+                                // Per-group clear (issue #451, FR-009): scoped to the group this
+                                // background rebuild actually remediated (ADR-0451), mirroring the
+                                // streaming path above.
+                                let group_ontology =
+                                    bg_state_for_result.resolve_ontology(&bg_gid_for_result);
+                                if let Err(e) = ontology_sidecar::write_group_sidecar(
+                                    root,
+                                    &bg_gid_for_result,
+                                    group_ontology.as_deref(),
+                                ) {
+                                    eprintln!(
+                                        "liminis-context-graph: ontology-sidecar: bg WAL replay group sidecar write failed for {:?}: {}",
+                                        bg_gid_for_result, e
+                                    );
+                                } else {
+                                    bg_state_for_result.clear_group_drift(&bg_gid_for_result);
                                 }
                             }
                         }
