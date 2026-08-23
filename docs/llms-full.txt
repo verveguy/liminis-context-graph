@@ -10,9 +10,9 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This site documents **v0.13.3** (see [`Cargo.toml`](https://github.com/verveguy/liminis-context-graph/blob/main/Cargo.toml)).
-It describes the `main` branch as of that release; unreleased changes on `main` since the
-last tag may not yet be reflected here.
+This page documents **v0.13.3**, built directly from that release tag's `docs/`
+tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
+here; use the version switcher in the footer to browse other published releases.
 
 Source: [github.com/verveguy/liminis-context-graph](https://github.com/verveguy/liminis-context-graph). The
 [`README`](https://github.com/verveguy/liminis-context-graph/blob/main/README.md) has a short overview
@@ -2926,13 +2926,114 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Docs publishing
+
+The docs site is **no longer published from `main`**. Every merge to `main` that
+touches `docs/` still runs the PR-time checks below, but does not change the live
+site. Publishing happens only when a GitHub Release is published, via
+`.github/workflows/docs-publish.yml`. See
+[ADR-0477](adr/0477-tag-based-versioned-docs-publishing.md) for the full design.
+
+### What happens automatically when you cut a release
+
+`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish.
+That `release: published` event triggers `docs-publish.yml`, which:
+
+1. Skips entirely if the release's tag doesn't match the `vX.Y.Z` version-tag
+   scheme (e.g. a non-version release like `eval-artifacts-2026-07`) — no docs
+   action is taken.
+2. Builds that tag's `docs/` tree with Jekyll, `--baseurl`-overridden to
+   `/liminis-context-graph/v<version>/`, and publishes it to the `gh-pages`
+   branch at that path. Every previously published version's path is left
+   untouched.
+3. Recomputes "latest stable release" fresh from the GitHub Releases API
+   (`scripts/docs-publish-latest-stable-version.sh`) — never trusting the
+   triggering event alone. If the just-published tag **is** the latest stable
+   (non-prerelease) release, its build is also promoted to the site root. A
+   prerelease tag only ever gets its own versioned path; it never becomes root.
+4. Regenerates `gh-pages/versions.json` from what's actually on disk, which
+   drives the version switcher in the page footer.
+
+### What to check after a release publishes
+
+1. Confirm the `Docs publish` workflow run for the release succeeded:
+   `gh run list --workflow docs-publish.yml --limit 1`.
+2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
+   footer reads the new version.
+3. Visit the new version's own URL
+   (`https://v3rv.com/liminis-context-graph/v<version>/`) and confirm it's live.
+4. Spot-check that the previous version's URL is still reachable and unchanged.
+
+If the workflow run failed (e.g. a transient build error), re-run it with
+`workflow_dispatch` rather than cutting a new release — see the republish
+procedure below, which uses the exact same mechanism.
+
+### Republishing a correction without a new release (FR-006)
+
+Use this when the docs for an **already-released** version are wrong about
+behaviour that has already shipped — the exact situation
+[#473](https://github.com/verveguy/liminis-context-graph/issues/473) dealt with by
+hand before this workflow existed. This procedure needs no new git tag and no new
+GitHub Release.
+
+1. Fix the docs on `main` (or a branch) as you normally would, and merge.
+2. Run the publish workflow manually for the affected version:
+
+   ```bash
+   gh workflow run docs-publish.yml -f version=0.13.3
+   ```
+
+   By default this builds `refs/tags/v0.13.3` — i.e. it rebuilds the tag's own
+   `docs/` tree, so it only picks up your fix if you've already fast-forwarded or
+   cherry-picked it onto that tag. To publish a fix that lives on `main` instead
+   (the common case), pass the ref explicitly:
+
+   ```bash
+   gh workflow run docs-publish.yml -f version=0.13.3 -f ref=main
+   ```
+
+   `docs-publish-build.sh` force-patches `docs/_config.yml`'s `version:` field to
+   `0.13.3` regardless of which ref you build from, so the published page footer
+   still reads the correct version even though the content came from `main`.
+
+3. "Latest stable" is recomputed fresh from the Releases API on this run too, so
+   the root URL is updated automatically if (and only if) `0.13.3` is still the
+   current latest stable release. Republishing an older version never touches
+   root.
+4. Verify using the same steps as "What to check after a release publishes" above.
+
+### One-time manual steps (required once, after this mechanism first ships)
+
+Two follow-ups are manual repo-settings / one-off actions outside any PR diff
+(the same category as GitHub Pages' original enablement — see ADR-0295). Until
+both are done, this workflow builds and pushes to `gh-pages` correctly, but the
+live site keeps serving from `main` as before:
+
+1. **Pages source switch.** In the repository's Settings → Pages, switch
+   `source.branch` from `main` to `gh-pages` (`source.path` to `/`,
+   `build_type` left as `legacy`).
+2. **Backfill.** Publish `v0.12.0` through `v0.13.3` — the tags with a working
+   `docs/_config.yml` — once each via
+   `gh workflow run docs-publish.yml -f version=<x.y.z>`, in ascending order, so
+   `v0.13.3` ends up promoted to root. `v0.9.0`–`v0.11.0` predate the Jekyll docs
+   setup entirely (no `docs/_config.yml` at those refs) and should **not** be
+   backfilled — building them would mean inventing config that version never
+   shipped with.
+
+If Pages ever needs to be re-pointed (e.g. after a repository transfer), redo
+step 1; the `gh-pages` branch itself is unaffected by that setting.
+
 ## Related
 
 - [ADR-0430](adr/0430-ci-tee-pipefail.md) — the `tee`/`pipefail` defect this process
   works around, and the workflow-level fix
+- [ADR-0477](adr/0477-tag-based-versioned-docs-publishing.md) — the tag-based,
+  versioned docs publishing design described above
 - `.github/workflows/ci.yml` — the required gate and five e2e jobs
+- `.github/workflows/docs-publish.yml` — the docs publishing workflow
 - #428 — the regression that shipped behind these jobs while conclusion-only
   verification was in use
+- #473 — the docs-drift audit that motivated the FR-006 republish procedure above
 
 ---
 
@@ -3041,6 +3142,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
+| [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
 
 ## Historical numbering
 
