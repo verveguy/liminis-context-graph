@@ -127,7 +127,7 @@ jobs:
             git worktree add ../gh-pages gh-pages
           else
             echo "No gh-pages branch yet -- initializing it."
-            git worktree add --orphan gh-pages ../gh-pages
+            git worktree add --orphan ../gh-pages
             # Spare .git: it's the file linking this worktree back to the main
             # checkout's .git/worktrees/, not tracked content -- deleting it
             # breaks every subsequent git command run in ../gh-pages.
