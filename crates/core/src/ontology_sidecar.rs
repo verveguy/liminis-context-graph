@@ -471,4 +471,166 @@ mod tests {
         write_wal_ontology_sidecar(&wal_dir, None).unwrap();
         assert!(wal_ontology_path(&wal_dir).exists());
     }
+
+    // ── group_sidecar_path / read_group_sidecar / write_group_sidecar (issue #451) ──────────
+
+    #[test]
+    fn group_sidecar_path_lives_under_ontology_hash_dir() {
+        let dir = TempDir::new().unwrap();
+        let path = group_sidecar_path(dir.path(), "group-a").unwrap();
+        assert_eq!(
+            path,
+            dir.path()
+                .join(".lcg")
+                .join("ontology-hash")
+                .join("group-a.json")
+        );
+    }
+
+    #[test]
+    fn group_sidecar_path_percent_encodes_unsafe_group_id() {
+        let dir = TempDir::new().unwrap();
+        let path = group_sidecar_path(dir.path(), "acme/prod").unwrap();
+        assert!(path.to_string_lossy().contains("acme%2Fprod.json"));
+    }
+
+    #[test]
+    fn group_sidecar_path_rejects_empty_group_id() {
+        let dir = TempDir::new().unwrap();
+        assert!(group_sidecar_path(dir.path(), "").is_err());
+    }
+
+    #[test]
+    fn write_then_read_group_sidecar_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let ontology = sample_ontology();
+        write_group_sidecar(dir.path(), "group-a", Some(&ontology)).unwrap();
+
+        let sidecar =
+            read_group_sidecar(dir.path(), "group-a").expect("group sidecar should be present");
+        assert_eq!(sidecar.mode.as_deref(), Some("strict"));
+        assert_eq!(sidecar.entity_types, vec!["KnowledgeChannel".to_string()]);
+        assert_eq!(sidecar.hash, content_hash(Some(&ontology)));
+    }
+
+    #[test]
+    fn read_group_sidecar_missing_file_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(read_group_sidecar(dir.path(), "group-a").is_none());
+    }
+
+    #[test]
+    fn write_group_sidecar_does_not_touch_workspace_sidecar() {
+        let dir = TempDir::new().unwrap();
+        write_group_sidecar(dir.path(), "group-a", Some(&sample_ontology())).unwrap();
+        assert!(
+            read_sidecar(dir.path()).is_none(),
+            "writing a group sidecar must never create/modify the workspace-level sidecar file (FR-004)"
+        );
+    }
+
+    #[test]
+    fn group_sidecars_for_different_groups_do_not_collide() {
+        let dir = TempDir::new().unwrap();
+        let a = sample_ontology();
+        let mut b = sample_ontology();
+        b.entity_types.push(EntityTypeDef {
+            name: "Extra".to_string(),
+            description: None,
+            parent: None,
+        });
+        write_group_sidecar(dir.path(), "group-a", Some(&a)).unwrap();
+        write_group_sidecar(dir.path(), "group-b", Some(&b)).unwrap();
+
+        let sidecar_a = read_group_sidecar(dir.path(), "group-a").unwrap();
+        let sidecar_b = read_group_sidecar(dir.path(), "group-b").unwrap();
+        assert_eq!(sidecar_a.entity_types, vec!["KnowledgeChannel".to_string()]);
+        assert_eq!(
+            sidecar_b.entity_types,
+            vec!["KnowledgeChannel".to_string(), "Extra".to_string()]
+        );
+    }
+
+    // ── compute_group_drift (issue #451) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn compute_group_drift_no_workspace_root_means_no_drift() {
+        let ontology = sample_ontology();
+        let (drifted, summary) = compute_group_drift(None, "group-a", Some(&ontology), true);
+        assert!(!drifted);
+        assert!(summary.is_none());
+    }
+
+    #[test]
+    fn compute_group_drift_no_sidecar_no_prior_data_means_no_drift() {
+        let dir = TempDir::new().unwrap();
+        let ontology = sample_ontology();
+        let (drifted, _) = compute_group_drift(Some(dir.path()), "group-a", Some(&ontology), false);
+        assert!(!drifted, "first-ever use of a group must not report drift");
+    }
+
+    #[test]
+    fn compute_group_drift_no_sidecar_with_prior_data_reports_drift() {
+        let dir = TempDir::new().unwrap();
+        let ontology = sample_ontology();
+        let (drifted, summary) =
+            compute_group_drift(Some(dir.path()), "group-a", Some(&ontology), true);
+        assert!(
+            drifted,
+            "FR-010: a group with existing data but no recorded hash must be treated as drifted"
+        );
+        assert!(summary.unwrap().contains("ontology added"));
+    }
+
+    #[test]
+    fn compute_group_drift_matches_own_sidecar_no_drift() {
+        let dir = TempDir::new().unwrap();
+        let ontology = sample_ontology();
+        write_group_sidecar(dir.path(), "group-a", Some(&ontology)).unwrap();
+        let (drifted, _) = compute_group_drift(Some(dir.path()), "group-a", Some(&ontology), false);
+        assert!(!drifted);
+    }
+
+    #[test]
+    fn compute_group_drift_is_isolated_from_other_groups_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let a = sample_ontology();
+        let mut b = sample_ontology();
+        b.entity_types.push(EntityTypeDef {
+            name: "Extra".to_string(),
+            description: None,
+            parent: None,
+        });
+        // group-a's sidecar matches `a`; group-b has no sidecar at all.
+        write_group_sidecar(dir.path(), "group-a", Some(&a)).unwrap();
+
+        let (drifted_a, _) = compute_group_drift(Some(dir.path()), "group-a", Some(&a), false);
+        assert!(
+            !drifted_a,
+            "group-a's own matching sidecar must mean no drift for group-a"
+        );
+
+        let (drifted_b, _) = compute_group_drift(Some(dir.path()), "group-b", Some(&b), false);
+        assert!(
+            !drifted_b,
+            "group-b has never been recorded and has no prior data — first use, not drift"
+        );
+    }
+
+    #[test]
+    fn compute_group_drift_detects_change_to_own_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let mut old = sample_ontology();
+        write_group_sidecar(dir.path(), "group-a", Some(&old)).unwrap();
+
+        old.entity_types.push(EntityTypeDef {
+            name: "NewType".to_string(),
+            description: None,
+            parent: None,
+        });
+        let (drifted, summary) =
+            compute_group_drift(Some(dir.path()), "group-a", Some(&old), false);
+        assert!(drifted);
+        assert!(summary.unwrap().contains("NewType"));
+    }
 }
