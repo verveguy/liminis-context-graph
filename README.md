@@ -114,7 +114,9 @@ Or run it as a native MCP server instead — add to your client's MCP config:
 
 ### Build from source
 
-Requires [Rust/Cargo](https://rustup.rs/). The first build downloads a prebuilt, self-contained lbug bundle (LadybugDB bindings) — no C++ toolchain or `cmake` build step:
+Requires [Rust/Cargo](https://rustup.rs/), a C++20 compiler, and OpenSSL 3. The first build downloads a prebuilt lbug bundle (LadybugDB bindings), so the graph engine itself is never compiled — no `cmake` build step and no C++ dependency tree. lbug's `build.rs` does still compile its own small cxx FFI bridge locally at `-std=c++2a`, which is why a C++20 compiler is needed (GCC 13+ / a recent Clang; Ubuntu 22.04's GCC 11 is too old, as it lacks `<format>`). The bundle statically ships its other third-party dependencies, but since lbug 0.18.0 it links OpenSSL externally, so you also need `openssl@3` (macOS: `brew install openssl@3`; Debian/Ubuntu: `apt install libssl-dev`).
+
+This applies to building from source only. Released binaries link OpenSSL statically and require nothing installed — see [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md):
 
 ```bash
 cargo build --release                         # build both crates
@@ -170,7 +172,7 @@ specs/                   # feature specifications
 
 | Crate | Version | Role |
 |-------|---------|------|
-| `lbug` | `=0.17.0` | LadybugDB Rust bindings (pinned) |
+| `lbug` | `=0.19.1` | LadybugDB Rust bindings (pinned) |
 | `thiserror` | `2` | Error type generation |
 
 No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.

@@ -128,7 +128,8 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      # LBUG_BUILD_FROM_SOURCE removed: lbug 0.17.0+ prebuilt is a self-contained fat bundle.
+      # LBUG_BUILD_FROM_SOURCE removed: the lbug prebuilt is a fat bundle (no longer
+      # fully self-contained — OpenSSL links externally since 0.18.0).
       # Source builds cause 7399 duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
       - name: "Get rustc version for lbug cache key"
         id: "rustc-ver"
@@ -157,11 +158,83 @@ jobs:
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
+      # Force the OpenSSL link static so release artifacts stay self-contained. lbug's
+      # build.rs emits -lssl/-lcrypto unconditionally and takes its search path from
+      # `pkg-config --variable=libdir openssl` alone; the script redirects that at a
+      # directory holding only libssl.a/libcrypto.a and exports the result via
+      # $GITHUB_ENV, so the build step below inherits it. Without it the macOS artifact
+      # inherits Homebrew's absolute install name and fails to load on any machine
+      # lacking that exact path (LadybugDB/ladybug#682). See ADR-0398.
+      #
+      # ORDERING IS LOAD-BEARING: this must run AFTER "Install dependencies" above and
+      # BEFORE "Build artifacts" below. `packages_install` is what applies
+      # `[workspace.metadata.dist.dependencies.apt]`, which is where libssl-dev — the
+      # package supplying the libssl.a/libcrypto.a archives the script requires — comes
+      # from on the Linux runners. Run earlier (e.g. in the inlined build-setup.yml
+      # fragment, which cargo-dist places above `Install dependencies`) the script dies
+      # with "libssl.a not found" on any runner that does not happen to preinstall it.
+      # This is why the step lives here rather than in .github/build-setup.yml.
+      - name: "Stage static OpenSSL for a self-contained link"
+        run: "bash scripts/stage-openssl-static.sh"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
           dist build ${{ needs.plan.outputs.tag-flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           echo "dist ran successfully"
+      # Guard the artifact that actually ships, before it is uploaded. ci.yml runs the
+      # same assertion, but only against a Linux `cargo build --release` binary — this
+      # is the only check that covers what `dist build` produced, and the only one that
+      # ever sees aarch64-apple-darwin, the target with no PR-path CI at all. Without it
+      # a dropped staging step reaches users rather than a red job. See ADR-0398.
+      - name: "Assert built artifacts have no dynamic OpenSSL dependency"
+        shell: bash
+        run: |
+          set -eu
+          # `dist build` writes each target's binary under target/<triple>/dist/.
+          # No mapfile/arrays here: the macOS runner's /bin/bash is 3.2.
+          # -print0/-0 throughout, for the same reason scripts/stage-openssl-static.sh
+          # escapes its export line: a checkout path containing a space must not be
+          # split into fragments. Whitespace-splitting here would hand the assertion
+          # nonexistent paths, and it reports a missing file as a failure, so this
+          # would surface as a confusing red rather than a silent pass — but the
+          # threat model is the same one, so handle it the same way.
+          # Match by layout, not by name: SC-006 requires every binary the release
+          # workflow produces. `dist plan` publishes TWO packages — lcg-service (whose
+          # binary is liminis-context-graph) and lcg-eval — each with tarballs on all
+          # three targets and its own installer, and lcg-eval reaches lbug via lcg-core
+          # so it links OpenSSL on identical terms. A `-name liminis-context-graph`
+          # filter inspected one of the two and let the other ship on the assumption
+          # that one job's PKG_CONFIG_PATH covers both; FR-009 exists precisely so
+          # self-containment does not rest on that incidental coupling. Globbing by
+          # position also covers a future third binary without editing this step.
+          #
+          # `! -path '*/dist/*/*'` is load-bearing: target/<triple>/dist/ is a full
+          # cargo profile directory, so without it deps/ and build/ drag in ~88 test
+          # and build-script executables.
+          find_bins() {
+            find target -type f -perm -u+x -path '*/dist/*' \
+              ! -path '*/dist/*/*' -print0
+          }
+          # Then assert the known-shipping binaries are actually among them, so a
+          # layout change cannot quietly reduce the set to a subset (or to nothing)
+          # and still pass. NUL-safe read, and no arrays: the macOS runner's
+          # /bin/bash is 3.2.
+          found=""
+          while IFS= read -r -d '' bin; do
+            found="$found $(basename "$bin")"
+          done < <(find_bins)
+          for expected in liminis-context-graph lcg-eval; do
+            case " $found " in
+              *" $expected "*) ;;
+              *)
+                echo "No '$expected' binary found under target/**/dist/ — refusing to" >&2
+                echo "pass without inspecting every shipped binary. Did dist build's" >&2
+                echo "output layout, or the set of published packages, change?" >&2
+                exit 1
+                ;;
+            esac
+          done
+          find_bins | xargs -0 bash scripts/assert-static-openssl.sh
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up

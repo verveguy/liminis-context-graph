@@ -664,7 +664,7 @@ impl<'db> Conn<'db> {
     /// Updates an existing `RelatesToNode_` shadow node's `fact`, `valid_at`, `relation_type`,
     /// and `attributes` in a single `SET` statement, then best-effort syncs the same
     /// `fact`/`valid_at`/`attributes` onto the direct `Entity→Entity` compat rel — reusing
-    /// `invalidate_edge`'s non-fatal `SET`-on-rel pattern, since lbug 0.17.0 may not support
+    /// `invalidate_edge`'s non-fatal `SET`-on-rel pattern, since lbug may not support
     /// `SET` on rel properties and a failure here must not fail the whole update. Used by
     /// `knowledge_assert_relationship`'s update-in-place path (issue #379 FR-017): no existing
     /// setter covers `fact`/`valid_at`/`relation_type` in one shot.
@@ -1522,7 +1522,8 @@ impl<'db> Conn<'db> {
     /// Hybrid HNSW + BM25 dedup: retrieves CANDIDATE_K candidates per path, fuses with RRF,
     /// cosine-rechecks the full fused set against `threshold`, and returns the best match.
     ///
-    /// Note: the `ef` search parameter is not configurable in lbug 0.17.0; the lbug default is used.
+    /// Note: the `ef` search parameter is not configurable through lbug's Rust binding as of
+    /// 0.19.1; the lbug default is used.
     pub fn hybrid_dedup_similar_entity(
         &self,
         name_embedding: &[f32],
@@ -2336,7 +2337,7 @@ impl<'db> Conn<'db> {
 
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
     /// on the RelatesToNode_ shadow node. Also attempts to set `invalid_at` on the
-    /// RELATES_TO relationship property (lbug 0.17.0 may not support SET on rels;
+    /// RELATES_TO relationship property (lbug may not support SET on rels;
     /// if it fails the error is logged but not propagated).
     pub fn invalidate_edge(&self, edge_uuid: &str, invalid_at: &str) -> Result<(), Error> {
         // The `invalid_at` param name is timestamp-gated (see TIMESTAMP_PARAM_NAMES), so an
@@ -3757,11 +3758,13 @@ mod applied_seq_tests {
     }
 }
 
-/// Pins lbug 0.17.0 engine behavior (verified against the vendored C++ source, not documented in
-/// the Rust crate's own API surface or exercised by its own test suite — see issue #240's Research
-/// findings) that the replay transaction-boundary design in `replay.rs::flush_batch` depends on.
-/// If a future lbug version changes either behavior pinned here, these tests must fail loudly
-/// rather than let `flush_batch`'s assumptions silently go stale.
+/// Pins lbug engine behavior (originally verified against 0.17.0's vendored C++ source, not
+/// documented in the Rust crate's own API surface or exercised by its own test suite — see issue
+/// #240's Research findings) that the replay transaction-boundary design in
+/// `replay.rs::flush_batch` depends on. If a future lbug version changes either behavior pinned
+/// here, these tests must fail loudly rather than let `flush_batch`'s assumptions silently go
+/// stale. They did exactly their job as a no-op on the 0.17.0 → 0.19.1 bump (#398): both
+/// behaviors still hold, which is why the assertions below are unchanged.
 #[cfg(test)]
 mod lbug_transaction_semantics_pinning_tests {
     use super::*;

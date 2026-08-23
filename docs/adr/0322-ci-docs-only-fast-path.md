@@ -80,14 +80,16 @@ classified.
 | `Cargo\.toml$`, `Cargo\.lock$` (any depth) | code | manifests/lockfile — covers `crates/*/Cargo.toml` and `spikes/**/Cargo.toml` |
 | `^\.cargo/` | code | build config (e.g. the `LBUG_VERSION` pin) |
 | `^\.github/workflows/` | code | CI/build files — also satisfies "editing `ci.yml` itself must run the full suite" |
+| `^scripts/` | code | since #398, `build-release` executes `stage-openssl-static.sh` and `assert-static-openssl.sh` directly — see the amendment below |
 | `^crates/eval/scripts/` | code | `crates/eval/scripts/test-scripts.sh` is invoked directly by the `test` job's "eval script guards" step, so a change here can break CI even though it isn't `.rs` |
 | everything else | docs/non-code | default |
 
-Two entries are deliberately asymmetric despite living under similarly-named
-directories: `crates/eval/scripts/**` is code (the `test` job executes it directly),
-while a top-level `scripts/**` (docs-generation tooling from #295/PR #320) is docs — the
-Rust suite never runs it. The distinction is what each path is actually exercised by,
-not its directory name.
+The principle behind these entries is that classification follows what each path is
+actually exercised by, not its directory name. `crates/eval/scripts/**` and `scripts/**`
+are both code because CI jobs execute them directly. (This ADR originally classified
+top-level `scripts/**` as docs, on the then-correct grounds that it held only
+docs-generation tooling from #295/PR #320 that the Rust suite never ran; #398 changed
+that fact — see the amendment below.)
 
 Unmatched/unrecognized paths default to docs. This is a known, accepted gap, not a safe
 default: a genuinely new code-relevant path that isn't yet in the pattern above will be
@@ -179,3 +181,26 @@ case this issue promises not to touch (FR-003/User Story 2).
 - `.github/workflows/ci.yml` — the `push: branches: [main]` scoping and its
   in-file comment documenting the lbug cache race this ADR's Decision 5 and Consequences
   sections preserve
+
+## Amendment (2026-08-16, issue #398)
+
+`^scripts/` is now classified as **code**, reversing this ADR's original decision to treat
+the top-level `scripts/` directory as docs.
+
+The original reasoning was sound for the facts at the time: `scripts/` held only
+docs-generation tooling (#295/PR #320) that no CI job executed. #398 changed those facts by
+adding `scripts/stage-openssl-static.sh` — which forces the static OpenSSL link that keeps
+release artifacts self-contained — and `scripts/assert-static-openssl.sh`, the guard that
+catches its absence (see [ADR-0398](0398-openssl-linkage-for-release-artifacts.md)). Both
+are executed directly by `ci.yml`'s `build-release` job.
+
+Left unchanged, a PR editing *only* those two scripts — fixing a bug in the staging logic,
+say — would have been classified `code_changed=false` and skipped `build-release`: the one
+job that exercises them, and the permanent pre-tag regression guard ADR-0398 relies on. The
+guard would have been silently unenforced in exactly the change set most likely to break it.
+
+**Cost.** `scripts/generate-docs-llms-full.sh` is swept up by the same pattern, so a PR that
+edits that script now runs the full Rust suite unnecessarily. That is over-classification —
+the safe direction for a deny-list, per this ADR's own "unmatched paths default to docs is
+the risky direction" reasoning — and it does not affect ordinary docs PRs, which regenerate
+`docs/llms-full.txt` without touching the generator itself.
