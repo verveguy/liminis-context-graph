@@ -5,6 +5,14 @@ title: Getting Started
 
 # Getting Started
 
+**Multi-graph, not multi-tenant.** One workspace's `liminis-context-graph` process can hold many
+independent graphs, each isolated by its own `group_id` and its own WAL stream — this is a
+data-organisation feature for one user's own workspaces and subscriptions, not a security
+boundary. There is no authentication, no authorisation, and no per-tenant resource isolation:
+treat the process boundary as the trust boundary. See
+[IPC & MCP Reference: group_ids semantics](ipc-mcp-reference.md#group_ids-semantics-omitted-vs-empty)
+and [Operations](operations.md) for how groups work in practice.
+
 ## Install prebuilt binary
 
 No Rust toolchain required:
