@@ -57,8 +57,9 @@ alone, without reading any source code.
 
 **Independent Test**: Run `--mcp-stdio` locally, send a `tools/list` request, and read the
 `description` field of every tool whose output includes an edge object with `episode_uuids`.
-Confirm each description states either-endpoint mention co-occurrence, not per-edge support or
-provenance.
+Confirm each description accurately reflects that tool's actual read path — either-endpoint
+mention co-occurrence for tools that populate the field, or that it is always empty for tools
+that never populate it (see FR-001) — and never per-edge support or provenance.
 
 **Acceptance Scenarios**:
 
@@ -67,11 +68,13 @@ provenance.
    provenance attached"), **Then** the description no longer uses "provenance" for edges and
    instead states that `episode_uuids` lists episodes mentioning either endpoint entity.
 2. **Given** the same registry, **When** a client reads the `description` of any other tool that
-   returns edges with `episode_uuids` (`knowledge_find_relationships`,
-   `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`,
-   `knowledge_get_entity_neighbors`), **Then** the description explicitly states the
-   either-endpoint co-occurrence semantics for that field, even where today it says nothing about
-   the field at all.
+   returns edges with `episode_uuids`, **Then** the description explicitly states that field's
+   actual behavior on that tool's read path, even where today it says nothing about the field at
+   all: `knowledge_get_entity_neighbors` (which shares `knowledge_list_relationships`'s
+   enrichment path) states either-endpoint co-occurrence semantics, while
+   `knowledge_find_relationships`, `knowledge_get_edges_by_group`, and
+   `knowledge_get_edges_by_uuids` (which never populate the field — see FR-001) state that
+   `episode_uuids` is always empty on that read path.
 3. **Given** a tool that returns edges, **When** its description is corrected, **Then** the
    `input_schema` and every other field of its `ToolSpec` are unchanged.
 
@@ -153,10 +156,19 @@ description matches the either-endpoint semantics.
 - **FR-001**: Every `ToolSpec` in `crates/service/src/mcp/tools.rs` whose tool returns edges
   carrying `episode_uuids` (`knowledge_find_relationships`, `knowledge_list_relationships`,
   `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`,
-  `knowledge_get_entity_neighbors`) MUST describe the field as episodes mentioning either endpoint
-  entity (source or target), not as support or provenance for the relationship itself. This
-  includes tools whose description currently says nothing about the field at all — silence is not
-  acceptable where the field is present in the response and its meaning is non-obvious.
+  `knowledge_get_entity_neighbors`) MUST accurately describe how that specific tool's read path
+  populates the field, never as support or provenance for the relationship itself. The actual
+  behavior is not uniform across these five tools (confirmed in Research by tracing each handler):
+  - `knowledge_list_relationships` and `knowledge_get_entity_neighbors` call
+    `enrich_edge_from_entity_ep_info` and so genuinely populate `episode_uuids` via either-endpoint
+    mention co-occurrence — their descriptions MUST state that.
+  - `knowledge_find_relationships`, `knowledge_get_edges_by_group`, and
+    `knowledge_get_edges_by_uuids` build `RelatesToEdge` via `..Default::default()` and never call
+    that enrichment function — `episode_uuids` is unconditionally empty on these read paths — so
+    their descriptions MUST state that the field is always empty there, not either-endpoint
+    wording, which would itself misdescribe these three paths.
+  This includes tools whose description currently says nothing about the field at all — silence is
+  not acceptable where the field is present in the response and its meaning is non-obvious.
 - **FR-002**: Wherever `README.md` or `docs/ipc-mcp-reference.md` documents edge response shapes
   at field level, the same either-endpoint correction MUST apply. Per the research captured in
   User Story 3 and the Assumptions below, neither file currently does so; this requirement is
@@ -192,8 +204,9 @@ description matches the either-endpoint semantics.
 ### Measurable Outcomes
 
 - **SC-001**: A consumer reading only `tools/list` output (no source access) learns, for every
-  tool that returns edges with `episode_uuids`, that the field is either-endpoint mention
-  co-occurrence, not per-edge support or provenance.
+  tool that returns edges with `episode_uuids`, that tool's actual behavior for the field —
+  either-endpoint mention co-occurrence for the tools that populate it, or that it is always empty
+  for the tools that never populate it (see FR-001) — and never per-edge support or provenance.
 - **SC-002**: `README.md` and `docs/ipc-mcp-reference.md` contain no text describing edge
   `episode_uuids` as relationship support, evidence, or provenance, whether that text is
   pre-existing or newly added.
@@ -205,6 +218,15 @@ description matches the either-endpoint semantics.
 
 ## Assumptions
 
+- Research found the population of `episode_uuids` is not uniform across the five tools named in
+  FR-001: only `knowledge_list_relationships` and `knowledge_get_entity_neighbors` call
+  `enrich_edge_from_entity_ep_info`; `knowledge_find_relationships`,
+  `knowledge_get_edges_by_group`, and `knowledge_get_edges_by_uuids` build `RelatesToEdge` via
+  `..Default::default()` and never populate it. FR-001, SC-001, and User Story 1's Acceptance
+  Scenario 2 are worded to require description text matching each tool's actual per-path
+  behavior — either-endpoint co-occurrence or always-empty — rather than uniform either-endpoint
+  wording across all five, since uniform wording would itself misdescribe the three non-enriching
+  tools.
 - `docs/ipc-mcp-reference.md` explicitly documents itself as a method-level index that defers
   request/response field detail to the `handlers.rs` dispatch source
   ("this page is the method index, not a copy of each handler's parameter parsing" — verified in
