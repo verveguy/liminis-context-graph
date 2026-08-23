@@ -25,6 +25,11 @@ To capture events from the default transport:
 
 ## Event Types
 
+Telemetry is scoped to the process, not to individual graphs within it: no event type carries a
+`group_id` (or similar per-graph) field today, including `ipc_call` for calls that operate on a
+specific group — this is a gap for anyone trying to attribute telemetry to one graph in a
+multi-graph workspace, not a documentation omission.
+
 All events share two common fields:
 
 | Field | Type | Description |
