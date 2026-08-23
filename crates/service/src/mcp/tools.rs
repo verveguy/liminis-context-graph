@@ -84,7 +84,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_find_relationships",
             description: "Hybrid (full-text + vector) search for relationships (facts) \
-                           matching a query.",
+                           matching a query. Returned edges' `episode_uuids` is always \
+                           empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -137,7 +138,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_edges_by_group",
             description: "List all relationship edges belonging to the given group IDs, or \
-                           every group's edges when group_ids is omitted.",
+                           every group's edges when group_ids is omitted. Returned edges' \
+                           `episode_uuids` is always empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -148,7 +150,8 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_edges_by_uuids",
-            description: "Fetch relationship edges by their UUIDs.",
+            description: "Fetch relationship edges by their UUIDs. Returned edges' \
+                           `episode_uuids` is always empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -208,7 +211,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_list_relationships",
             description: "List relationship edges (facts), optionally scoped to specific \
-                           group IDs, with episode provenance attached.",
+                           group IDs. Each edge's `episode_uuids` lists episodes that mention \
+                           its source or target entity (either-endpoint co-occurrence), not \
+                           evidence for that specific relationship.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -226,7 +231,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_entity_neighbors",
             description: "Get the immediate graph neighborhood (connected edges and nodes) \
-                           of an entity.",
+                           of an entity. Each returned edge's `episode_uuids` lists episodes \
+                           that mention its source or target entity (either-endpoint \
+                           co-occurrence), not evidence for that specific relationship.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
