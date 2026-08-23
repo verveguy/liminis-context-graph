@@ -12,12 +12,15 @@
 //! On-disk layout: `<wal_dir>/.wal-embedding-model.json` holding
 //! `{"model": "<identifier>", "dim": <vector dimension>}`.
 //!
-//! Like `.wal-generation.json`, this file is load-bearing but never a hard-failure surface: a
-//! missing or corrupt record is treated as "unknown," never as a mismatch (see
+//! Unlike `.wal-generation.json`, this file is diagnostic-only, never a hard-failure surface —
+//! only `.wal-generation.json` is load-bearing (see `docs/operations.md`'s WAL publishing
+//! contract). A missing or corrupt record is treated as "unknown," never as a mismatch (see
 //! `read_model_identity`) — a WAL predating this feature (Edge Cases, FR-009) must keep replaying
 //! exactly as it did before, using recompute wherever source text is present, with no migration
 //! step and no possibility of a damaged-but-harmless artifact masquerading as a detected
-//! mismatch.
+//! mismatch. Losing this file costs only FR-006's replay-time mismatch warning, permanently, for
+//! that WAL directory — recompute (FR-001) never reads it, so replay and rebuild are otherwise
+//! unaffected.
 
 use std::fs;
 use std::io::Write;
