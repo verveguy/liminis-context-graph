@@ -289,12 +289,7 @@ impl AppState {
             }
         }
 
-        let resolved = self
-            .workspace_root
-            .as_deref()
-            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
-            .map(Arc::new)
-            .or_else(|| self.ontology.clone());
+        let resolved = self.load_resolved_ontology(group_id);
 
         // Per-group drift (issue #451, FR-001/FR-007): computed on this same first-resolution
         // trigger, against whatever this group actually resolved through (own file, workspace
@@ -352,6 +347,41 @@ impl AppState {
             }
         }
         resolved
+    }
+
+    /// Loads the ontology `group_id` resolves to (its own per-group file if present and valid,
+    /// otherwise the workspace-wide fallback), without caching it or computing drift. The shared
+    /// resolution step behind [`Self::resolve_ontology`] (which layers caching + drift on top)
+    /// and [`Self::peek_or_load_ontology`] (which needs only the value, not those side effects).
+    fn load_resolved_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
+        self.workspace_root
+            .as_deref()
+            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
+            .map(Arc::new)
+            .or_else(|| self.ontology.clone())
+    }
+
+    /// Returns `group_id`'s already-resolved ontology if this process has cached one, otherwise
+    /// loads (without caching, and without computing or warning about drift) the value it would
+    /// resolve to.
+    ///
+    /// Used by drift-clear sites (issue #451, FR-009 — the two `handle_rebuild_from_wal` paths)
+    /// that need the currently-resolved ontology only to record it into that group's sidecar as
+    /// part of clearing drift. Calling [`Self::resolve_ontology`] there instead would, for a
+    /// group this process hasn't touched yet (the realistic case for an admin-triggered WAL
+    /// rebuild used as degraded-mode recovery — see this repo's "WAL-corruption recovery" runbook
+    /// in CLAUDE.md), compute drift against the *pre-remediation* sidecar and emit a "drift
+    /// detected ... recommend Recreate + re-ingest" warning in the middle of the very operation
+    /// that performs that remediation, immediately followed by this call's own clear — a
+    /// misleading false alarm, not a real signal, since nothing about the group's state was ever
+    /// observed by a caller in between.
+    pub fn peek_or_load_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
+        if let Ok(guard) = self.group_ontologies.lock() {
+            if let Some(cached) = guard.get(group_id) {
+                return cached.ontology.clone();
+            }
+        }
+        self.load_resolved_ontology(group_id)
     }
 
     /// Returns `group_id`'s cached drift status, or `None` if that group's ontology has not yet

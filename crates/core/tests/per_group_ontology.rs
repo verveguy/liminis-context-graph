@@ -853,3 +853,91 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
          across groups (ADR-0451)"
     );
 }
+
+// Regression: a WAL rebuild for a group this process has never resolved before (the realistic
+// degraded-mode-recovery case — an admin issues a rebuild before any other use of the group)
+// must not populate that group's drift cache at all, and must leave the on-disk sidecar in a
+// state that reports "not drifted" whenever the group is genuinely resolved afterward. Before
+// the `peek_or_load_ontology` fix, the clear-site called `resolve_ontology` to fetch the value
+// to write into the sidecar, which — for a never-before-resolved group with data already
+// present (post-replay) and no prior sidecar — computed drift=true and printed a false-alarm
+// "drift detected ... recommend Recreate + re-ingest" warning in the middle of the very
+// operation performing that remediation, then immediately cached the group as resolved (even
+// though FR-007 says a group's status becomes available only on genuine first use).
+#[tokio::test]
+async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
+    let dir = TempDir::new().unwrap();
+    let db = make_db(&dir);
+    let wal_root = dir.path().join("wal");
+
+    write_workspace_ontology(dir.path(), "mode: open\nentity_types:\n  - name: Person\n");
+    let workspace_ontology = load_ontology(Some(dir.path()));
+
+    let state = make_state_with_wal(db, Some(dir.path()), Some(&wal_root), workspace_ontology);
+    // Deliberately no `state.resolve_ontology("fresh-group")` call here — this group has never
+    // been resolved in this process, mirroring a freshly-started/degraded service whose first
+    // action on this group is an admin-triggered rebuild.
+    assert!(
+        state.group_drift_status("fresh-group").is_none(),
+        "precondition: group must start as not-yet-computed"
+    );
+
+    let group_wal = group_wal_dir(&wal_root, "fresh-group").unwrap();
+    std::fs::create_dir_all(&group_wal).unwrap();
+    std::fs::write(
+        group_wal.join("20260522_000000_aaa111_0000.jsonl"),
+        entity_wal_line(0, "fresh-entity", "fresh-group") + "\n",
+    )
+    .unwrap();
+
+    let v = dispatch(
+        1,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": "fresh-group"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["success"], json!(true), "{v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            2,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        match status_v["result"]["status"].as_str().unwrap_or("?") {
+            "completed" => break,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 5s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    }
+
+    assert!(
+        state.group_drift_status("fresh-group").is_none(),
+        "a rebuild of a group this process never resolved must not populate its drift cache \
+         (FR-007: status becomes available only on genuine first use, not as a side effect of \
+         the clear-site fetching a value to write into the sidecar)"
+    );
+
+    // Now genuinely resolve the group for the first time — the sidecar the rebuild just wrote
+    // must already match, so this reports "not drifted", not a stale false positive.
+    state.resolve_ontology("fresh-group");
+    assert!(
+        !state.group_drift_status("fresh-group").unwrap().drifted,
+        "the sidecar written by the rebuild must already be consistent with the resolved \
+         ontology, so the group's genuine first resolution afterward reports no drift"
+    );
+}

@@ -2504,7 +2504,13 @@ async fn handle_rebuild_from_wal(
                 // Per-group clear (issue #451, FR-009): scoped to the one group this rebuild
                 // actually remediated, not every cached group (ADR-0451) — a sibling group's
                 // legitimately-drifted state must survive this call untouched (FR-003).
-                let group_ontology = state.resolve_ontology(&group_id);
+                // Uses `peek_or_load_ontology`, not `resolve_ontology` — this group may never
+                // have been resolved by this process before reaching here (e.g. a WAL rebuild
+                // used as degraded-mode recovery, before any other use of the group), and
+                // `resolve_ontology` would compute+warn drift against the pre-remediation
+                // sidecar as a side effect of merely fetching this value, immediately followed
+                // by this same call's own clear — a misleading false alarm.
+                let group_ontology = state.peek_or_load_ontology(&group_id);
                 if let Err(e) = ontology_sidecar::write_group_sidecar(
                     root,
                     &group_id,
@@ -2956,9 +2962,11 @@ async fn handle_rebuild_from_wal(
 
                                 // Per-group clear (issue #451, FR-009): scoped to the group this
                                 // background rebuild actually remediated (ADR-0451), mirroring the
-                                // streaming path above.
+                                // streaming path above. Uses `peek_or_load_ontology`, not
+                                // `resolve_ontology`, for the same false-alarm-avoidance reason
+                                // documented at the streaming path's call site.
                                 let group_ontology =
-                                    bg_state_for_result.resolve_ontology(&bg_gid_for_result);
+                                    bg_state_for_result.peek_or_load_ontology(&bg_gid_for_result);
                                 if let Err(e) = ontology_sidecar::write_group_sidecar(
                                     root,
                                     &bg_gid_for_result,
