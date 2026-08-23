@@ -74,6 +74,42 @@ reprocessing for that group — the consumer's own local configuration (per-grou
 file, or neither) is always what governs. A stream published without this file still replays and
 behaves identically; only the documentation available to the consumer is degraded.
 
+## Drift detection
+
+If the ontology governing a group's data changes between service restarts — the file is edited,
+or a group starts/stops resolving through a per-group file versus the workspace fallback — the
+graph's entity/relation types may no longer match the vocabulary that produced them. Drift
+detection catches this and recommends **Recreate + re-ingest** (or a WAL rebuild/replay) as the
+remediation.
+
+**Workspace-level drift** is unchanged from before per-group ontologies existed: computed eagerly
+at startup by comparing the workspace ontology's content hash against `.lcg/ontology-hash.json`,
+and reported via the top-level `ontology.drifted`/`ontology.drift_summary` fields in
+`knowledge_status` (see below).
+
+**Per-group drift** covers the surface per-group ontologies (above) added: both a group governed
+by its own dedicated `.lcg/ontology/<group_id>.yaml` file, and a group that falls back to the
+workspace ontology. A change to either source — or a change in *which* source a group resolves
+through (e.g. its per-group file is added or removed) — is detected as drift for that group.
+Persisted per-group state lives at `.lcg/ontology-hash/<group_id>.json` (same `<group_id>`
+percent-encoding as per-group ontology files), one file per group, separate from the
+workspace-level `.lcg/ontology-hash.json` file.
+
+**Per-group drift is computed lazily, not scanned eagerly at startup.** A group's drift status
+becomes available the first time that group's ontology is resolved in the running process — the
+same trigger point as ontology resolution itself (a group's first `knowledge_add_episode`, or any
+other extraction-guided operation for that group). A group never used in the current process has
+**no drift status at all** ("not yet computed"), distinct from "not drifted" — see the
+`knowledge_status` example below. This mirrors per-group ontology resolution's own
+restart-required, use-triggered caching: a change made while the service keeps running is not
+picked up until the next restart, and a group's drift status — once computed — does not change
+again mid-process even if its file is edited again.
+
+Drift clears after a successful remediation for the specific group remediated: either a fresh
+ingest for that group (`knowledge_add_episode`, e.g. following "Recreate + re-ingest") or a
+`knowledge_rebuild_from_wal` replay for that group. Clearing one group's drift never clears (or
+affects) any other group's drift status.
+
 ## Format
 
 ```yaml
@@ -139,20 +175,36 @@ See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-
 
 ## `knowledge_status` summary
 
-The `knowledge_status` IPC response always includes an `ontology` field:
+The `knowledge_status` IPC response always includes an `ontology` field (workspace-level) and a
+`group_ontology_drift` field (per-group, issue #451):
 
 ```json
 {
   "ontology": {
     "present": true,
+    "loaded": true,
     "mode": "strict",
     "entity_type_count": 4,
-    "relation_type_count": 4
-  }
+    "relation_type_count": 4,
+    "drifted": false,
+    "drift_summary": null
+  },
+  "group_ontology_drift": [
+    { "group_id": "catalog", "drifted": true, "drift_summary": "entity types added: [Equipment]" },
+    { "group_id": "content", "drifted": false, "drift_summary": null }
+  ]
 }
 ```
 
-When no ontology is loaded, `present` is `false` and counts are `0`.
+When no ontology is loaded, `ontology.present` is `false` and counts are `0`; `ontology.drifted`
+still reflects the workspace-level drift state (see [Drift detection](#drift-detection) above).
+
+`group_ontology_drift` is an array with **one entry per group whose ontology has been resolved at
+least once in the current process** — a group not yet used has no entry at all (not a false
+`drifted: false`); see [Drift detection](#drift-detection) above for the lazy, use-triggered
+timing. A single-ontology workspace (no `.lcg/ontology/` directory) behaves identically: the array
+is empty until a group is used, then contains that group only, and the `ontology` field's shape
+and values are unaffected either way.
 
 The response also includes an `indices_built` boolean, a `name_index_trusted` boolean, and a
 `name_index_fallback_scans` integer — these describe search-index and name-lookup health rather
