@@ -71,6 +71,14 @@ pub fn read_group_sidecar(workspace_root: &Path, group_id: &str) -> Option<Ontol
 /// Atomically writes a group's drift sidecar, recording the resolved ontology's hash and type
 /// lists for that group (issue #451). Mirrors [`write_sidecar`]'s shape and atomic-write pattern,
 /// scoped to one group's file under `.lcg/ontology-hash/`.
+///
+/// Unlike [`write_sidecar`] (called only from serialized, effectively-single-writer call sites —
+/// startup and a group-scoped WAL rebuild), this is also called from `add_episode`'s post-ingest
+/// clear site with no write lock held, so two concurrent ingests for the same group can call this
+/// concurrently. Uses a per-call unique temp filename for the same reason
+/// [`write_wal_ontology_sidecar`] does: a shared temp name would let one writer's `File::create`
+/// truncate a file the other hasn't finished writing, and one `rename` could publish the
+/// truncated result.
 pub fn write_group_sidecar(
     workspace_root: &Path,
     group_id: &str,
@@ -101,7 +109,8 @@ pub fn write_group_sidecar(
 
     let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
 
-    let tmp_path = path.with_extension("json.tmp");
+    // Unique per call, not a fixed `.json.tmp` name — see the doc comment above.
+    let tmp_path = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
     {
         let mut f = std::fs::File::create(&tmp_path)?;
         f.write_all(json.as_bytes())?;
@@ -527,6 +536,42 @@ mod tests {
             read_sidecar(dir.path()).is_none(),
             "writing a group sidecar must never create/modify the workspace-level sidecar file (FR-004)"
         );
+    }
+
+    #[test]
+    fn concurrent_writes_to_the_same_group_sidecar_do_not_collide() {
+        // Regression: write_group_sidecar is called from add_episode's post-ingest clear site
+        // with no write lock held, so two concurrent ingests for the same group can call it at
+        // once. A shared fixed temp filename would let one writer's `File::create` truncate a
+        // file the other hasn't finished writing, and one `rename` could publish the truncated
+        // result — every writer must succeed and the final file must be one writer's complete,
+        // valid output, never a torn mix of two.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut ontology = sample_ontology();
+                    ontology.entity_types[0].name = format!("Type{i}");
+                    write_group_sidecar(&path, "group-a", Some(&ontology))
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap().expect("concurrent write must not fail");
+        }
+
+        let sidecar = read_group_sidecar(&path, "group-a")
+            .expect("sidecar must be present and parseable after concurrent writes");
+        assert_eq!(
+            sidecar.entity_types.len(),
+            1,
+            "must be one writer's complete output, not a torn mix"
+        );
+        assert!(sidecar.entity_types[0].starts_with("Type"));
     }
 
     #[test]

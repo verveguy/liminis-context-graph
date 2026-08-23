@@ -336,6 +336,17 @@ impl AppState {
                 drift_summary,
             },
         };
+        // Known race (issue #451 review): this computation reads `group_id`'s sidecar without
+        // holding `group_ontologies`'s lock across the read-compute-insert sequence. If a
+        // concurrent remediation for the same never-before-resolved group (a WAL rebuild, or a
+        // successful `add_episode`) writes a new sidecar and clears drift *between* this call's
+        // sidecar read and this insert, this insert can overwrite that clear with a stale
+        // `drifted: true` computed against the pre-remediation sidecar — `knowledge_status` would
+        // then report the group as drifted until it's next genuinely used. Not fixed here:
+        // closing it correctly needs either holding this lock across a DB round trip (new
+        // contention affecting unrelated groups) or a versioned sidecar read, and it self-heals
+        // on that group's next successful `add_episode` (FR-009 always clears unconditionally on
+        // ingest) — narrow, self-bounded, and lower severity than a false negative would be.
         match self.group_ontologies.lock() {
             Ok(mut guard) => {
                 guard.insert(group_id.to_string(), entry);
