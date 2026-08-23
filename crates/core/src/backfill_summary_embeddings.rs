@@ -230,7 +230,7 @@ pub async fn backfill_summary_embeddings(
                 )?;
             }
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &gid_c, seq);
+            wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
             Ok(())
         })
         .await??;
