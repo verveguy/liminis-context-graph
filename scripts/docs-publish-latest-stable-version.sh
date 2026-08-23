@@ -29,7 +29,7 @@ TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
 
 gh api "repos/${REPO}/releases" --paginate \
   --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' \
-  | grep -E "${TAG_PATTERN}" \
+  | { grep -E "${TAG_PATTERN}" || true; } \
   | sed 's/^v//' \
   | sort -t. -k1,1n -k2,2n -k3,3n \
   | tail -n1
