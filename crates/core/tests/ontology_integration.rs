@@ -2025,3 +2025,68 @@ async fn knowledge_status_group_ontology_drift_empty_until_a_group_is_used() {
         "g1 was just freshly ingested under the current ontology — no drift"
     );
 }
+
+// User Story 4, Scenario 1: knowledge_status's group_ontology_drift array must distinguish a
+// drifted group from a non-drifted sibling in the actual JSON response, including drift_summary
+// — not just via the internal AppState::group_drift_status accessor other tests exercise.
+#[tokio::test]
+async fn knowledge_status_group_ontology_drift_distinguishes_drifted_and_clean_groups() {
+    let dir = TempDir::new().unwrap();
+    write_ontology_file(&dir, "mode: open\nentity_types:\n  - name: Person\n");
+    let ontology = load_ontology(Some(dir.path()));
+    let (db, _db_dir) = make_db();
+
+    // group-a's recorded sidecar reflects a stale ontology, so its first resolution drifts.
+    let stale = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef {
+            name: "StaleType".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    ontology_sidecar::write_group_sidecar(dir.path(), "group-a", Some(&stale)).unwrap();
+
+    let state = make_state_with_root(db, dir.path(), ontology);
+    state.resolve_ontology("group-a");
+    state.resolve_ontology("group-b");
+
+    let resp = handlers::dispatch(
+        req(1, "knowledge_status", json!({})),
+        Arc::clone(&state),
+        None,
+    )
+    .await;
+    let resp_val = serde_json::to_value(resp).unwrap();
+    let breakdown = resp_val["result"]["group_ontology_drift"]
+        .as_array()
+        .expect("group_ontology_drift must be an array");
+    assert_eq!(breakdown.len(), 2, "{breakdown:?}");
+
+    let a = breakdown
+        .iter()
+        .find(|e| e["group_id"] == json!("group-a"))
+        .expect("group-a entry present");
+    assert_eq!(
+        a["drifted"],
+        json!(true),
+        "group-a's sidecar was stale: {a:?}"
+    );
+    assert!(
+        a["drift_summary"].as_str().is_some_and(|s| !s.is_empty()),
+        "a drifted group's summary must be a non-empty string: {a:?}"
+    );
+
+    let b = breakdown
+        .iter()
+        .find(|e| e["group_id"] == json!("group-b"))
+        .expect("group-b entry present");
+    assert_eq!(
+        b["drifted"],
+        json!(false),
+        "group-b has no prior sidecar or data — first use, not drift: {b:?}"
+    );
+    assert_eq!(b["drift_summary"], json!(null));
+}

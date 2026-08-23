@@ -100,10 +100,13 @@ becomes available the first time that group's ontology is resolved in the runnin
 same trigger point as ontology resolution itself (a group's first `knowledge_add_episode`, or any
 other extraction-guided operation for that group). A group never used in the current process has
 **no drift status at all** ("not yet computed"), distinct from "not drifted" — see the
-`knowledge_status` example below. This mirrors per-group ontology resolution's own
-restart-required, use-triggered caching: a change made while the service keeps running is not
-picked up until the next restart, and a group's drift status — once computed — does not change
-again mid-process even if its file is edited again.
+`knowledge_status` example below. This mirrors per-group ontology resolution's own use-triggered
+caching: a group that has **not yet been resolved** in this process picks up whatever its file
+(or the workspace fallback) contains *at the time of that first use*, so an edit made while the
+service keeps running is visible the first time the group is actually used. It's only a group
+whose resolution is **already cached** — because it was used earlier in this process — that needs
+a restart to see a later edit; once a group's drift status has been computed, it does not change
+again mid-process even if its file is edited again afterward.
 
 Drift clears after a successful remediation for the specific group remediated: either a fresh
 ingest for that group (`knowledge_add_episode`, e.g. following "Recreate + re-ingest") or a
