@@ -93,6 +93,6 @@ versions_json="$(
   for d in "${GH_PAGES_DIR}"/v*/; do
     [[ -d "$d" ]] || continue
     basename "$d" | sed 's/^v//'
-  done | sort -t. -k1,1nr -k2,2nr -k3,3nr | jq -R . | jq -s '{versions: .}'
+  done | sort -rV | jq -R . | jq -s '{versions: .}'
 )"
 printf '%s\n' "${versions_json}" > "${GH_PAGES_DIR}/versions.json"
