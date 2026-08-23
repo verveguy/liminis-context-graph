@@ -20,7 +20,7 @@ behaviour (CHANGELOG 0.13.0–0.13.3) was never reflected on the site — the in
 mode (describing unreleased behaviour) was equally possible and, by construction,
 unavoidable under always-publish-from-`main`.
 
-Full requirements are in `specs/477-publish-the-docs/spec.md`; this ADR records the
+Full requirements are in `specs/477-publish-the-docs-site/spec.md`; this ADR records the
 mechanism, not the requirements themselves.
 
 ## Decision
