@@ -16,8 +16,36 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+/// Deterministic, offline per-text pseudo-random vector — same construction as
+/// `lcg_core::embedder::HashEmbedder`, duplicated here since this stub is a hand-rolled HTTP
+/// server, not a `lcg_core::Embedder` impl. See `HashEmbedder`'s doc comment for why this must be
+/// text-dependent rather than a constant vector: issue #440 makes WAL replay recompute every
+/// corpus embedding through this same stub, and a constant vector collapses the entire corpus to
+/// one point, turning vector/ANN search into an artifact of index tie-breaking that systematically
+/// favors whichever entities win that tie-break (e.g. the numerically-dominant cluster in a real
+/// corpus fixture) regardless of query, rather than harmless query-independent noise.
+fn hash_embedding(text: &str, dim: usize) -> Vec<f32> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let mut seed = hasher.finish().max(1); // xorshift64 requires a nonzero seed
+    let mut v = Vec::with_capacity(dim);
+    for _ in 0..dim {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        v.push(((seed as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32);
+    }
+    v
+}
+
 /// Spawns a minimal stub HTTP embedder on a random OS-assigned port, so tests don't depend on
 /// a real embedder sidecar being available. Mirrors `clean_shutdown.rs`'s helper.
+///
+/// Returns a deterministic, per-text vector (via [`hash_embedding`]) rather than a constant one
+/// — see that function's doc comment for why a constant response is actively wrong once replay
+/// recomputes every embedding through this stub (issue #440), not merely "semantically empty but
+/// harmless".
 pub fn spawn_stub_embedder() -> u16 {
     use std::io::Read;
     use std::net::TcpListener;
@@ -26,19 +54,27 @@ pub fn spawn_stub_embedder() -> u16 {
     let port = listener.local_addr().unwrap().port();
 
     std::thread::spawn(move || {
-        let embedding = format!("[{}]", vec!["0.0"; 768].join(","));
-        let body = format!(
-            r#"{{"object":"list","data":[{{"object":"embedding","embedding":{embedding},"index":0}}],"model":"stub-model","usage":{{"prompt_tokens":1,"total_tokens":1}}}}"#
-        );
-        let http_response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(),
-            body
-        );
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
-            let mut buf = [0u8; 4096];
-            let _ = Read::read(&mut s, &mut buf);
+            let mut buf = [0u8; 65536];
+            let n = Read::read(&mut s, &mut buf).unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let request_body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+            let text: String = serde_json::from_str::<Value>(request_body)
+                .ok()
+                .and_then(|v| v["input"].as_str().map(str::to_string))
+                .unwrap_or_default();
+
+            let embedding = hash_embedding(&text, 768);
+            let embedding_json = serde_json::to_string(&embedding).unwrap();
+            let body = format!(
+                r#"{{"object":"list","data":[{{"object":"embedding","embedding":{embedding_json},"index":0}}],"model":"stub-model","usage":{{"prompt_tokens":1,"total_tokens":1}}}}"#
+            );
+            let http_response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
             let _ = Write::write_all(&mut s, http_response.as_bytes());
         }
     });

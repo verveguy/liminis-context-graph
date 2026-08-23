@@ -6,10 +6,17 @@
 // AnthropicExtractor + real OaiEmbedder ingest run). See FR-001..FR-015 in
 // specs/217-golden-real-corpus-wal/spec.md.
 //
-// Query-time embedding uses MockEmbedder (a zero vector, dim matched to the fixture) rather
-// than a live embedder, per FR-011's zero-network requirement — this makes the vector half of
-// RRF-fused search deterministic-but-uninformative, while the BM25/FTS half still carries a
-// real signal from the actual captured content. Golden-query assertions are therefore written
+// Query-time (and, since issue #440, WAL-replay recompute-time) embedding uses HashEmbedder — a
+// deterministic, offline, per-text pseudo-random vector, dim matched to the fixture — rather
+// than a live embedder, per FR-011's zero-network requirement. This makes the vector half of
+// RRF-fused search carry no real semantic signal, while the BM25/FTS half still carries a real
+// signal from the actual captured content. HashEmbedder (not a constant-zero embedder like
+// MockEmbedder) is deliberate: issue #440 makes replay recompute every entity's stored vector
+// through this same embedder, and a constant vector would collapse the entire corpus to one
+// point, turning "vector search" into an artifact of ANN index tie-breaking that systematically
+// favors whichever entities win that tie-break (in this fixture, the numerically-dominant
+// Apollo/Saturn cluster) regardless of query — rather than the query-independent noise a
+// zero-signal embedder is meant to approximate. Golden-query assertions are therefore written
 // as top-N set-membership, not exact top-1/ordering (see module docstring in
 // crates/core/scripts/capture_real_corpus.py and the fixture's expected_results.json).
 //
@@ -37,7 +44,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::{Embedder, MockEmbedder},
+    embedder::{Embedder, HashEmbedder},
     error::Error as LcgError,
     extractor::{ExtractOptions, Extractor, MockExtractor},
     handlers,
@@ -93,7 +100,7 @@ impl Extractor for CountingExtractor {
 }
 
 struct CountingEmbedder {
-    inner: MockEmbedder,
+    inner: HashEmbedder,
     calls: Arc<AtomicUsize>,
 }
 
@@ -199,7 +206,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, TempDir, CallCounts) {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(CountingEmbedder {
-            inner: MockEmbedder::new(dim),
+            inner: HashEmbedder::new(dim),
             calls: Arc::clone(&embedder_calls),
         }),
         extractor: Arc::new(CountingExtractor {
@@ -427,10 +434,10 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             .map(|n| n.as_str().unwrap_or_default().to_string())
             .collect();
 
-        // Query-time embedding is a mocked zero vector here (FR-011), so the fused top-N
-        // will not exactly reproduce capture time's real-embedder ranking — assert
-        // set-membership (at least one recorded hub entity still surfaces), not exact
-        // top-1/ordering (see module docstring, Edge Cases in the spec).
+        // Query-time (and corpus-side, via #440 recompute) embedding is semantically blind here
+        // (FR-011), so the fused top-N will not exactly reproduce capture time's real-embedder
+        // ranking — assert set-membership (at least one recorded hub entity still surfaces), not
+        // exact top-1/ordering (see module docstring, Edge Cases in the spec).
         let overlap = expected_names
             .iter()
             .filter(|n| actual_names.contains(*n))
@@ -476,9 +483,9 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             .collect();
 
         // Same tolerance rationale as the entity-query assertions above: relation_type is a
-        // coarser signal than exact fact/uuid identity, so it survives the MockEmbedder-induced
-        // re-ranking more reliably while still confirming real relation-typed data (FR-009's
-        // spirit) shows up for a real natural-language query.
+        // coarser signal than exact fact/uuid identity, so it survives the semantically-blind
+        // vector re-ranking more reliably while still confirming real relation-typed data
+        // (FR-009's spirit) shows up for a real natural-language query.
         let overlap = expected_relation_types
             .intersection(&actual_relation_types)
             .count();
