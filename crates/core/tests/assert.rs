@@ -544,6 +544,51 @@ async fn assert_entity_embedder_unavailable_still_succeeds_with_warning() {
     );
 }
 
+/// Same fallback for `knowledge_assert_entity`'s `summary_embedding` (issue #470): a non-empty
+/// `summary` that the embedder fails on still succeeds, stores a zero-vector `summary_embedding`,
+/// and surfaces its own distinct `embedding_warning` text (appended alongside `name_embedding`'s,
+/// per `handlers.rs`'s `warnings.join("; ")`).
+#[tokio::test]
+async fn assert_entity_summary_embedder_unavailable_still_succeeds_with_warning() {
+    let (db, _dir) = make_db(DIM);
+    let state = make_state_failing_embedder(db);
+    let v = dispatch_val(
+        41,
+        "knowledge_assert_entity",
+        json!({
+            "name": "Offline Summary Corp",
+            "summary": "a non-empty summary the embedder will fail on",
+            "group_id": "liminis",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 41);
+    let warning = v["result"]["embedding_warning"]
+        .as_str()
+        .expect("expected a populated embedding_warning");
+    assert!(
+        warning.contains("summary_embedding"),
+        "expected the summary_embedding failure to be named in embedding_warning: {warning}"
+    );
+    let uuid = v["result"]["entity_uuid"].as_str().unwrap();
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    let rows = conn
+        .cypher_query(&format!(
+            "MATCH (n:Entity {{uuid: '{uuid}'}}) RETURN n.summary_embedding"
+        ))
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "[0,0,0,0]",
+        "expected a zero-vector stored summary_embedding on embedder failure, matching \
+         name_embedding's same fallback convention: {:?}",
+        rows[0][0]
+    );
+}
+
 /// Same fallback for `knowledge_assert_relationship`'s `fact_embedding` (FR-021).
 #[tokio::test]
 async fn assert_relationship_embedder_unavailable_still_succeeds_with_warning() {

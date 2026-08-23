@@ -128,6 +128,16 @@ impl Db {
             if let Some(ref warning) = stats.fidelity_warning {
                 eprintln!("[WAL REBUILD WARNING] {warning}");
             }
+            // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding at all,
+            // so replaying it verbatim leaves that column NULL — migrate()'s own zero-fill only
+            // covers rows already present at migration time, not ones replay creates afterward.
+            // Must run before the caller's own build_indices_and_constraints() ever builds
+            // entity_summary_embedding_idx over the column (issue #470).
+            if let Err(e) =
+                crate::schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim)
+            {
+                eprintln!("liminis-context-graph: open_or_rebuild: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+            }
             // WAL replay executes raw recorded Cypher templates, bypassing the typed
             // insert_entity/update_entity_created_at hooks — a full rebuild is the only
             // way the name index observes replayed data (FR-004).
@@ -380,7 +390,7 @@ impl<'db> Conn<'db> {
     /// Creates the Entity and Episodic node tables. Call once after connecting.
     pub fn init_schema(&self, embedding_dim: usize) -> Result<(), Error> {
         crate::schema::init(self, embedding_dim)?;
-        crate::schema::migrate(self);
+        crate::schema::migrate(self, embedding_dim);
         Ok(())
     }
 
@@ -421,10 +431,22 @@ impl<'db> Conn<'db> {
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
         // Enforce Entity-first label-order invariant (AD-8)
         let labels = enforce_entity_first(&row.labels);
+        // `summary_embedding` is a fixed-size `FLOAT[N]` column, same as `name_embedding` above
+        // — a zero-length list fails to bind ("Unsupported casting LIST with incorrect list
+        // entry to ARRAY"). Callers that don't compute a real summary embedding (an empty
+        // `EntityRow::default()`-derived value, which every pre-#470 call site produces) get a
+        // same-dimension zero vector here, sized off `name_embedding` since that field is always
+        // populated with a real, correctly-sized vector by every caller.
+        let summary_embedding = if row.summary_embedding.is_empty() {
+            vec![0.0f32; row.name_embedding.len()]
+        } else {
+            row.summary_embedding.clone()
+        };
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
-             summary: $summary, attributes: $attributes})",
+             summary: $summary, attributes: $attributes, \
+             summary_embedding: $summary_embedding})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -434,6 +456,7 @@ impl<'db> Conn<'db> {
                 "name_embedding": row.name_embedding,
                 "summary": row.summary,
                 "attributes": row.attributes,
+                "summary_embedding": summary_embedding,
             }),
         )?;
         self.name_index
@@ -775,10 +798,10 @@ impl<'db> Conn<'db> {
                 }
             }
         }
-        Ok(())
+        self.create_entity_summary_embedding_index()
     }
 
-    /// Drops the 3 HNSW vector indexes. Idempotent — errors (including "no such index") are
+    /// Drops the 4 HNSW vector indexes. Idempotent — errors (including "no such index") are
     /// suppressed so this is safe to call even when the indexes are already absent. Used by
     /// `handle_rebuild_from_wal` to ensure a from-scratch rebuild doesn't leave a stale
     /// pre-rebuild HNSW index in place after `CREATE_VECTOR_INDEX` stops treating every error
@@ -789,6 +812,30 @@ impl<'db> Conn<'db> {
             self.raw_query("CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')");
         let _ =
             self.raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
+        self.drop_entity_summary_embedding_index();
+    }
+
+    /// Creates just the `Entity.summary_embedding` HNSW index. Idempotent, following the same
+    /// "already exists" suppression as `create_vector_indexes`. Broken out as its own function
+    /// (rather than folded only into the aggregate) so `knowledge_backfill_summary_embeddings`
+    /// can drop/rebuild this single index around its write phase without touching the other 3
+    /// (issue #470).
+    pub fn create_entity_summary_embedding_index(&self) -> Result<(), Error> {
+        if let Err(e) = self.raw_query(
+            "CALL CREATE_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', \
+             'summary_embedding', metric := 'cosine')",
+        ) {
+            if !crate::error::is_already_exists_error(&e) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Drops just the `Entity.summary_embedding` HNSW index. Idempotent — errors are suppressed.
+    /// See `create_entity_summary_embedding_index` for why this is independently callable.
+    pub fn drop_entity_summary_embedding_index(&self) {
+        let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx')");
     }
 
     // ── Retrieval ─────────────────────────────────────────────────────────────
@@ -1186,6 +1233,36 @@ impl<'db> Conn<'db> {
         self.collect_uuid_score_pairs(&cypher, params)
     }
 
+    /// HNSW vector search on Entity.summary_embedding (issue #470); returns (uuid, distance)
+    /// pairs (lower = closer). Mirrors `vector_search_entities` exactly, querying
+    /// `entity_summary_embedding_idx` instead of `entity_name_embedding_idx` — this is the query
+    /// side of meaning-based retrieval against an entity's `summary`, fused into
+    /// `hybrid_entity_search`'s RRF alongside the existing name-vector and FTS lists.
+    /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
+    /// no groups.
+    pub fn vector_search_entities_by_summary(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let gid_filter = match group_ids {
+            Some(_) => "WHERE node.group_id IN $gids",
+            None => "",
+        };
+        let cypher = format!(
+            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', $emb, $limit) \
+             WITH node, distance {gid_filter} \
+             RETURN node.uuid, distance \
+             ORDER BY distance ASC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        if let Some(gids) = group_ids {
+            params["gids"] = serde_json::json!(gids);
+        }
+        self.collect_uuid_score_pairs(&cypher, params)
+    }
+
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
     /// `group_ids: None` searches across every group; `Some(&[])` is a real filter and matches
     /// no groups.
@@ -1475,6 +1552,7 @@ impl<'db> Conn<'db> {
                             attributes: value_as_string(&row[7]),
                             episode_uuids: vec![],
                             source_descriptions: vec![],
+                            ..Default::default()
                         },
                     ));
                 }
@@ -1537,7 +1615,7 @@ impl<'db> Conn<'db> {
             self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?;
         let bm25_candidates =
             self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?;
-        let fused_uuids = crate::search::rrf_fuse(&bm25_candidates, &vector_candidates);
+        let fused_uuids = crate::search::rrf_fuse(&[&bm25_candidates, &vector_candidates]);
 
         let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
 
@@ -1683,6 +1761,7 @@ impl<'db> Conn<'db> {
             attributes: value_as_string(&row[7]),
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         }))
     }
 
@@ -1767,6 +1846,7 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[7]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             }))
         } else {
             Ok(None)
@@ -2430,7 +2510,10 @@ impl<'db> Conn<'db> {
     // Column ordering is fixed; dump.rs uses named const indices to avoid magic numbers.
 
     /// Page of Entity rows for dump.
-    /// Columns: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes]
+    /// Columns: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes,
+    /// summary_embedding] — `summary_embedding` (issue #470) is appended last so the two existing
+    /// callers (`dump.rs`, `backfill_summary_embeddings.rs`) that index by position into the first
+    /// 8 columns are unaffected.
     pub(crate) fn dump_entities_page(
         &self,
         group_id: Option<&str>,
@@ -2441,7 +2524,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2449,7 +2532,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )

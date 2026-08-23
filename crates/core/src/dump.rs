@@ -26,7 +26,8 @@ const ENTITY_CYPHER: &str = "\
     MERGE (n:Entity {uuid: $uuid}) \
     SET n.name = $name, n.group_id = $group_id, n.labels = $labels, \
     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
-    n.summary = $summary, n.attributes = $attributes";
+    n.summary = $summary, n.attributes = $attributes, \
+    n.summary_embedding = $summary_embedding";
 
 const EPISODIC_CYPHER: &str = "\
     MERGE (n:Episodic {uuid: $uuid}) \
@@ -149,7 +150,8 @@ fn dump_entity_nodes(
         if count > 0 {
             writer.with_chunk(|w| {
                 for row in &rows {
-                    // cols: [uuid, name, group_id, labels, created_at, name_embedding, summary, attributes]
+                    // cols: [uuid, name, group_id, labels, created_at, name_embedding, summary,
+                    // attributes, summary_embedding]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -158,6 +160,21 @@ fn dump_entity_nodes(
                     let embedding = value_as_float_array(&row[5]);
                     let summary = value_as_string(&row[6]);
                     let attributes = value_as_string(&row[7]);
+                    // summary_embedding (issue #470): dumped alongside name_embedding so a
+                    // dump→replay round trip (`knowledge_dump_wal` + `knowledge_rebuild_from_wal`)
+                    // doesn't silently drop it back to NULL, which would break the
+                    // never-absent-FLOAT[dim] invariant the schema migration establishes. A NULL
+                    // source value (a row that slipped past migration's zero-fill, e.g. one
+                    // created via a still-unmigrated replay path) decodes to an empty Vec — falls
+                    // back to a same-length zero vector, matching `insert_entity`'s own fallback,
+                    // since binding a genuine zero-length list against a fixed-size `FLOAT[dim]`
+                    // column fails at bind time ("Unsupported casting LIST ... to ARRAY").
+                    let summary_embedding = value_as_float_array(&row[8]);
+                    let summary_embedding = if summary_embedding.is_empty() {
+                        vec![0.0f32; embedding.len()]
+                    } else {
+                        summary_embedding
+                    };
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -167,6 +184,7 @@ fn dump_entity_nodes(
                         "name_embedding": float_slice_to_json(&embedding),
                         "summary": summary,
                         "attributes": attributes,
+                        "summary_embedding": float_slice_to_json(&summary_embedding),
                     });
                     w.log_mutation(ENTITY_CYPHER, params, "")?;
                 }

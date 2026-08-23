@@ -47,7 +47,7 @@ fn migrate_adds_mentions_uuid_and_created_at_on_existing_db() {
         "precondition: MENTIONS.uuid must be absent before migrate"
     );
 
-    schema::migrate(&conn);
+    schema::migrate(&conn, 4);
 
     // The columns now bind (probe succeeds for both).
     conn.run_cypher("MATCH ()-[r:MENTIONS]->() RETURN r.uuid, r.created_at LIMIT 0")
@@ -81,7 +81,58 @@ fn migrate_adds_mentions_uuid_and_created_at_on_existing_db() {
     );
 
     // Idempotent: a second migrate is a clean no-op (columns already present → no re-ALTER).
-    schema::migrate(&conn);
+    schema::migrate(&conn, 4);
     conn.run_cypher("MATCH ()-[r:MENTIONS]->() RETURN r.uuid, r.created_at LIMIT 0")
         .expect("columns still present after a second migrate");
+}
+
+/// Simulates a pre-#470 DB (Entity has no `summary_embedding` column, with an existing row),
+/// runs the real `schema::migrate`, and asserts: the column is added, the pre-existing row is
+/// zero-filled (not left NULL) so a later `CREATE_VECTOR_INDEX` never has to tolerate NULLs, and
+/// a second migrate is a no-op that leaves the value untouched.
+#[test]
+fn migrate_adds_and_zero_fills_entity_summary_embedding_on_existing_db() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+
+    // Pre-#470 Entity schema: no summary_embedding column.
+    conn.run_cypher("CREATE NODE TABLE Entity (uuid STRING PRIMARY KEY, name STRING)")
+        .unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid:'en1', name:'x'})")
+        .unwrap();
+
+    // Precondition: Entity.summary_embedding is absent (binder error on the probe).
+    assert!(
+        conn.run_cypher("MATCH (n:Entity) RETURN n.summary_embedding LIMIT 0")
+            .is_err(),
+        "precondition: Entity.summary_embedding must be absent before migrate"
+    );
+
+    schema::migrate(&conn, 4);
+
+    // The column now binds.
+    conn.run_cypher("MATCH (n:Entity) RETURN n.summary_embedding LIMIT 0")
+        .expect("Entity.summary_embedding must bind after migrate");
+
+    // The pre-existing row is zero-filled, not left NULL.
+    let rows = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.summary_embedding")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !rows[0][0].is_empty(),
+        "pre-existing row's summary_embedding must be zero-filled, not NULL; got: {:?}",
+        rows[0][0]
+    );
+
+    // Idempotent: a second migrate is a clean no-op and does not disturb the value.
+    schema::migrate(&conn, 4);
+    let rows_again = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.summary_embedding")
+        .unwrap();
+    assert_eq!(
+        rows[0][0], rows_again[0][0],
+        "a second migrate must not change an already-migrated row's summary_embedding"
+    );
 }

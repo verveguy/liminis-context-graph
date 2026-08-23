@@ -39,6 +39,8 @@ pub struct EntityRow {
     pub episode_uuids: Vec<String>,
     #[serde(default)]
     pub source_descriptions: Vec<String>,
+    #[serde(skip)]
+    pub summary_embedding: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -3,6 +3,11 @@
 // Proves the auto-heal pattern from issue #58: calling a search handler on a freshly
 // opened DB (init_schema only, no build_indices_and_constraints) succeeds by triggering
 // build_indices_once() internally on the first missing-index binder error from lbug.
+//
+// Also covers issue #470's backfill/auto-heal interaction: `knowledge_backfill_summary_embeddings`
+// drops `entity_summary_embedding_idx` mid-run and must clear `indices_built` around that window
+// (mirroring `handle_rebuild_from_wal`'s bookkeeping) so a concurrent search racing into the
+// missing-index error takes the auto-heal branch instead of a hard failure.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -175,5 +180,68 @@ async fn find_entities_second_search_skips_auto_heal() {
     assert!(
         msg.contains("knowledge_build_indices"),
         "Error must name the recovery step (FR-007), got: {msg}"
+    );
+}
+
+/// Issue #470: pins the fix for `knowledge_backfill_summary_embeddings`'s interaction with the
+/// auto-heal path. The backfill drops `entity_summary_embedding_idx` for the duration of its
+/// write phase; a `knowledge_find_entities` call that races in during that window must not hard-
+/// fail — it must observe `indices_built == false` (set by the backfill immediately before the
+/// drop, mirroring `handle_rebuild_from_wal`'s own bookkeeping) and take the auto-heal branch,
+/// which itself blocks on `write_lock` until the backfill releases it and then finds the index
+/// already rebuilt. This test simulates that exact mid-backfill state directly (full indices
+/// built, then only the summary index dropped and the flag cleared) rather than relying on real
+/// concurrent timing, so it fails deterministically if the bookkeeping regresses.
+#[tokio::test]
+async fn find_entities_auto_heals_when_only_summary_index_is_missing() {
+    let dim = 4;
+    let (state, _dir) = make_state_without_indices(dim);
+
+    {
+        let db = state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        // Full build first — every index present, matching a normal running service.
+        conn.build_indices_and_constraints().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "test-entity-summary-heal-1".to_string(),
+            name: "SummaryHealEntity".to_string(),
+            group_id: "test-group".to_string(),
+            labels: vec![],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0f32; dim],
+            summary: "a summary indexed before the simulated backfill window".to_string(),
+            attributes: "{}".to_string(),
+            summary_embedding: vec![0.1f32; dim],
+            ..Default::default()
+        })
+        .unwrap();
+        // Simulates `backfill_summary_embeddings`'s Phase C: clear the flag immediately before
+        // dropping just the one index it owns — the other 3 indices stay intact throughout,
+        // unlike `make_state_without_indices`'s "nothing built yet" scenario above.
+        state.indices_built.store(true, Ordering::Release);
+        conn.drop_entity_summary_embedding_index();
+        state.indices_built.store(false, Ordering::Release);
+    }
+
+    let request = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(3),
+        method: "knowledge_find_entities".to_string(),
+        params: json!({"query": "SummaryHealEntity", "group_ids": ["test-group"], "num_results": 5}),
+    };
+    let response = handlers::dispatch(request, Arc::clone(&state), None).await;
+    let v: Value = serde_json::to_value(&response).unwrap();
+
+    assert!(
+        v.get("error").is_none(),
+        "a search racing into the dropped summary index must auto-heal, not hard-fail: {v}"
+    );
+    assert!(
+        v.get("result").is_some(),
+        "expected a successful result after auto-heal: {v}"
+    );
+    assert!(
+        state.indices_built.load(Ordering::Acquire),
+        "indices_built must be true again after the auto-heal rebuild"
     );
 }

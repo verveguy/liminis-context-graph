@@ -125,6 +125,62 @@ fn test_fts_index_creation_and_query() {
     eprintln!("FTS result[0]: uuid={:?}, score={:?}", first[0], first[1]);
 }
 
+/// Regression/negative-control for issue #470's own correction to community report #465:
+/// `node_name_and_summary` already covers `summary` lexically today (not just `name`), so a
+/// keyword that appears *only* in `summary` — never in `name` — must still be found via FTS.
+/// This is the "lexical already works" baseline that the semantic (vector) SC-001 test in
+/// `assert.rs` is contrasted against: FTS finds keyword overlap, vector search finds paraphrases
+/// with no keyword overlap at all.
+#[test]
+fn fts_query_matches_summary_only_keyword_not_present_in_name() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("spike.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(DIM).unwrap();
+
+    conn.insert_entity(&EntityRow {
+        uuid: "e1".to_string(),
+        name: "widget-42".to_string(),
+        group_id: "test".to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: "2026-01-01 00:00:00".to_string(),
+        name_embedding: zero_vec(DIM),
+        summary: "a hydraulic pump manufactured in Ohio".to_string(),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    conn.insert_entity(&EntityRow {
+        uuid: "e2".to_string(),
+        name: "widget-43".to_string(),
+        group_id: "test".to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: "2026-01-01 00:00:00".to_string(),
+        name_embedding: zero_vec(DIM),
+        summary: "a cardboard box factory".to_string(),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+
+    // "hydraulic" appears only in e1's summary, never in either entity's name.
+    let rows = conn
+        .cypher_query(
+            "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', 'hydraulic') \
+             WITH node, score RETURN node.uuid, score",
+        )
+        .unwrap();
+
+    assert!(
+        rows.iter().any(|r| r[0] == "e1"),
+        "FTS query for a summary-only keyword must match the entity whose summary contains it: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|r| r[0] != "e2"),
+        "FTS query for 'hydraulic' must not match an unrelated entity: {rows:?}"
+    );
+}
+
 /// T004 [P] [LDB] — HNSW vector index creation and QUERY_VECTOR_INDEX round-trip.
 #[test]
 fn test_hnsw_vector_query() {

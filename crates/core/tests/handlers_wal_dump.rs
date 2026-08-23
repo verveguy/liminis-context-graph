@@ -19,7 +19,7 @@ use lcg_core::{
     replay::WalReplayer,
     schema,
     telemetry::{NoopSink, TelemetrySink},
-    WalWriter,
+    EntityRow, WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -35,7 +35,7 @@ fn open_db(path: &std::path::Path) -> Arc<Db> {
     {
         let conn = db.connect().unwrap();
         conn.init_schema(DIM).unwrap();
-        schema::migrate(&conn);
+        schema::migrate(&conn, DIM);
     }
     db
 }
@@ -564,5 +564,90 @@ async fn test_dump_wal_timestamp_fidelity() {
     assert!(
         raw_ts.contains(".123456") || raw_ts.contains("123456"),
         "raw TIMESTAMP must preserve microsecond component .123456 after dump→replay (SC-003): {raw_ts}"
+    );
+}
+
+// ── #470: Entity.summary_embedding survives dump→replay ──────────────────────
+
+/// A real (non-zero) `summary_embedding` must survive a `knowledge_dump_wal` → replay round
+/// trip, not silently reset to NULL. Regression test for a gap where `dump_entities_page` and
+/// `ENTITY_CYPHER` were updated for every other Entity column except this one, added alongside
+/// #470's own column — the dumped WAL line would omit `summary_embedding` entirely, and
+/// replaying it would leave the column NULL on the target DB, breaking the "always a same-length
+/// FLOAT[dim] vector, never absent" invariant the schema migration establishes.
+#[tokio::test]
+async fn test_dump_wal_preserves_entity_summary_embedding() {
+    let dir = TempDir::new().unwrap();
+
+    let db1_path = dir.path().join("db1-se.db");
+    let db1 = open_db(&db1_path);
+    const UUID: &str = "se-entity-1";
+    {
+        let conn = db1.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: UUID.to_string(),
+            name: "widget-1".to_string(),
+            group_id: "se-group".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "a pump manufacturer".to_string(),
+            attributes: "{}".to_string(),
+            summary_embedding: vec![0.1, 0.2, 0.3, 0.4],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let before_rows = db1
+        .connect()
+        .unwrap()
+        .cypher_query(&format!(
+            "MATCH (n:Entity {{uuid: '{UUID}'}}) RETURN n.summary_embedding"
+        ))
+        .unwrap();
+    assert_eq!(before_rows.len(), 1);
+    let before = before_rows[0][0].clone();
+    assert!(
+        !before.is_empty(),
+        "precondition: seeded entity must have a non-empty summary_embedding: {before:?}"
+    );
+
+    let dump_dir = dir.path().join("dump-se");
+    let state1 = make_state(Arc::clone(&db1), db1_path.to_str().unwrap());
+    let dump_v = dispatch(
+        10,
+        "knowledge_dump_wal",
+        json!({ "target_dir": dump_dir.to_str().unwrap() }),
+        state1,
+    )
+    .await;
+    assert_eq!(
+        dump_v["result"]["success"], true,
+        "dump must succeed: {dump_v}"
+    );
+
+    let db2_path = dir.path().join("db2-se.db");
+    let db2 = open_db(&db2_path);
+    {
+        let conn = db2.connect().unwrap();
+        let stats = WalReplayer::new(&dump_dir)
+            .replay(&conn)
+            .expect("dump replay must succeed");
+        assert_eq!(stats.failed_lines, 0, "zero replay failures");
+    }
+
+    let after_rows = db2
+        .connect()
+        .unwrap()
+        .cypher_query(&format!(
+            "MATCH (n:Entity {{uuid: '{UUID}'}}) RETURN n.summary_embedding"
+        ))
+        .unwrap();
+    assert_eq!(after_rows.len(), 1);
+    let after = after_rows[0][0].clone();
+    assert_eq!(
+        before, after,
+        "summary_embedding must survive a dump -> replay round trip unchanged"
     );
 }

@@ -1493,6 +1493,92 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
     );
 }
 
+/// Pins a load-bearing lbug/Kuzu behavior for issue #470: `entity_wal_line` is a pre-#470-style
+/// raw WAL recording whose Entity `MERGE`/`SET` never mentions `summary_embedding` at all (it was
+/// recorded, in spirit, before that column existed). Replaying it via `force_clear: true` must
+/// not leave `summary_embedding` NULL on the rebuilt entity — verified here to come back
+/// zero-filled automatically (a fixed-size `FLOAT[dim]` ARRAY column defaults an omitted property
+/// to a zero vector at `CREATE`/`MERGE` time, unlike `ALTER TABLE ADD` against pre-existing rows,
+/// which genuinely leaves them NULL until `schema::migrate`'s explicit zero-fill runs). If a
+/// future lbug/Kuzu upgrade changes this default, this test — not a live corpus — is where it
+/// should surface: `entity_summary_embedding_idx` is built immediately afterward and NULL
+/// tolerance in `CREATE_VECTOR_INDEX` is unverified.
+#[tokio::test]
+async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embedding() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_ggg778_0000.jsonl"),
+        entity_wal_line(0, "legacy-entity-no-summary-embedding") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        33,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(
+        v["result"]["success"], true,
+        "force_clear:true must allow the rebuild to proceed: {v}"
+    );
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            34,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => break,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:Entity {uuid: 'legacy-entity-no-summary-embedding'}) \
+             RETURN n.summary_embedding",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the legacy entity must exist after rebuild");
+    assert!(
+        !rows[0][0].is_empty(),
+        "summary_embedding must be zero-filled, not NULL, after replaying a pre-#470 WAL \
+         recording via force_clear: {:?}",
+        rows[0][0]
+    );
+}
+
 /// A dry run against a non-empty database must fail fast the same way, regardless of
 /// `force_clear` — dry runs never mutate the DB, so "clearing" has no meaning there, and the
 /// whole point is to surface the problem before the operator commits to a real run.

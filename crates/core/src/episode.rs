@@ -95,7 +95,9 @@ enum DedupDecision {
         merged_summary: String,
     },
     Insert {
-        row: EntityRow,
+        // Boxed: `EntityRow` grew past clippy::large_enum_variant's threshold once
+        // `summary_embedding` (issue #470) was added, and `Merge`'s variant is much smaller.
+        row: Box<EntityRow>,
     },
 }
 
@@ -368,16 +370,35 @@ pub async fn add_episode(
     // before — so the salvage step below can cosine-match an off-list edge endpoint against
     // the batch's own entity name embeddings without re-embedding anything (order-only change;
     // extraction.entities is already final by this point).
+    //
+    // The summary_embedding pass (issue #470) computes alongside it, per entity, via
+    // `tokio::try_join!` rather than a second sequential loop — the two embed calls for the same
+    // entity are independent, so running them concurrently keeps this batch's added latency to
+    // one round-trip per entity instead of two. Per ADR-0314, an extracted `summary` legitimately
+    // defaults to `""` — that's never sent to the embedder (would waste a round-trip encoding
+    // nothing); those entities get a same-dimension zero vector instead, the same sentinel
+    // `insert_entity` falls back to for any unset `summary_embedding`.
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
     let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
-    for n in &entity_names {
-        name_embeddings.push(tokio::select! {
-            r = state.embedder.embed(n) => r?,
+    let mut summary_embeddings: Vec<Vec<f32>> = Vec::with_capacity(extraction.entities.len());
+    for (n, e) in entity_names.iter().zip(extraction.entities.iter()) {
+        let name_fut = state.embedder.embed(n);
+        let summary_fut = async {
+            if e.summary.trim().is_empty() {
+                Ok(vec![0.0f32; state.embedder.dim()])
+            } else {
+                state.embedder.embed(&e.summary).await
+            }
+        };
+        let (name_emb, summary_emb) = tokio::select! {
+            r = futures::future::try_join(name_fut, summary_fut) => r?,
             _ = state.cancel_token.cancelled() => {
                 state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
                 return Err(Error::Cancelled);
             }
-        });
+        };
+        name_embeddings.push(name_emb);
+        summary_embeddings.push(summary_emb);
     }
 
     // Post-extraction edge validation (pre-lock, advisory only): drop self-referential edges —
@@ -565,34 +586,38 @@ pub async fn add_episode(
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
         }
-        let make_insert_row = |name_embedding: Vec<f32>| DedupDecision::Insert {
-            row: EntityRow {
-                uuid: uuid::Uuid::new_v4().to_string(),
-                name: extracted.name.clone(),
-                group_id: gid_owned.clone(),
-                labels: {
-                    let mut labels = vec!["Entity".to_string()];
-                    if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                        if let Some(ancestors) =
-                            ontology_ref.and_then(|o| o.ancestor_map.get(&extracted.entity_type))
-                        {
-                            labels.extend(ancestors.iter().cloned());
+        let make_insert_row =
+            |name_embedding: Vec<f32>, summary_embedding: Vec<f32>| DedupDecision::Insert {
+                row: Box::new(EntityRow {
+                    uuid: uuid::Uuid::new_v4().to_string(),
+                    name: extracted.name.clone(),
+                    group_id: gid_owned.clone(),
+                    labels: {
+                        let mut labels = vec!["Entity".to_string()];
+                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
+                            if let Some(ancestors) = ontology_ref
+                                .and_then(|o| o.ancestor_map.get(&extracted.entity_type))
+                            {
+                                labels.extend(ancestors.iter().cloned());
+                            }
+                            labels.push(extracted.entity_type.clone());
                         }
-                        labels.push(extracted.entity_type.clone());
-                    }
-                    labels
-                },
-                created_at: ref_time_owned.clone(),
-                name_embedding,
-                summary: extracted.summary.clone(),
-                attributes: match &extracted.original_entity_type {
-                    Some(orig) => serde_json::json!({ "original_entity_type": orig }).to_string(),
-                    None => "{}".to_string(),
-                },
-                episode_uuids: vec![],
-                source_descriptions: vec![],
-            },
-        };
+                        labels
+                    },
+                    created_at: ref_time_owned.clone(),
+                    name_embedding,
+                    summary: extracted.summary.clone(),
+                    attributes: match &extracted.original_entity_type {
+                        Some(orig) => {
+                            serde_json::json!({ "original_entity_type": orig }).to_string()
+                        }
+                        None => "{}".to_string(),
+                    },
+                    episode_uuids: vec![],
+                    source_descriptions: vec![],
+                    summary_embedding,
+                }),
+            };
         let decision = match &phase_b_results[i] {
             PhaseBResult::NameMatch { existing } => {
                 // Exact name match — resolve immediately, no dedup-adapter check needed.
@@ -627,11 +652,11 @@ pub async fn add_episode(
                         merged_summary: format!("{} {}", existing.summary, extracted.summary),
                     }
                 } else {
-                    make_insert_row(name_embeddings[i].clone())
+                    make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
                 }
             }
             PhaseBResult::EmbeddingCandidate { candidate: None } => {
-                make_insert_row(name_embeddings[i].clone())
+                make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
             }
         };
         decisions.push(decision);
