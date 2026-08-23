@@ -128,9 +128,11 @@ GitHub Release.
    gh workflow run docs-publish.yml -f version=0.13.3 -f ref=main
    ```
 
-   `docs-publish-build.sh` force-patches `docs/_config.yml`'s `version:` field to
-   `0.13.3` regardless of which ref you build from, so the published page footer
-   still reads the correct version even though the content came from `main`.
+   `docs-publish-build.sh` passes `DOCS_VERSION=0.13.3` to the site build
+   regardless of which ref you build from, so the published page footer still
+   reads the correct version even though the content came from `main`. (It used
+   to patch `docs/_config.yml` for this; the Astro site takes the value from the
+   environment instead, leaving the working tree alone.)
 
 3. "Latest stable" is recomputed fresh from the Releases API on this run too, so
    the root URL is updated automatically if (and only if) `0.13.3` is still the
@@ -148,13 +150,15 @@ live site keeps serving from `main` as before:
 1. **Pages source switch.** In the repository's Settings → Pages, switch
    `source.branch` from `main` to `gh-pages` (`source.path` to `/`,
    `build_type` left as `legacy`).
-2. **Backfill.** Publish `v0.12.0` through `v0.13.3` — the tags with a working
-   `docs/_config.yml` — once each via
-   `gh workflow run docs-publish.yml -f version=<x.y.z>`, in ascending order, so
-   `v0.13.3` ends up promoted to root. `v0.9.0`–`v0.11.0` predate the Jekyll docs
-   setup entirely (no `docs/_config.yml` at those refs) and should **not** be
-   backfilled — building them would mean inventing config that version never
-   shipped with.
+2. **Backfill.** Only tags carrying `site/` can be built by this workflow, since
+   that is what it runs. Every tag up to and including `v0.13.3` shipped the
+   Jekyll site instead and cannot be rebuilt under this scheme — the build script
+   says so and exits rather than producing something misleading. Publish from the
+   first release that includes the Astro site onward; there is nothing to
+   backfill before it.
+
+   Backfilling the Jekyll-era versions would mean building them with a site they
+   never shipped with, which is the opposite of what per-version copies are for.
 
 If Pages ever needs to be re-pointed (e.g. after a repository transfer), redo
 step 1; the `gh-pages` branch itself is unaffected by that setting.

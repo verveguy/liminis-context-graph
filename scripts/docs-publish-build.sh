@@ -18,8 +18,8 @@
 # true by construction rather than something this script has to be careful
 # about.
 #
-# Requires bundler + the gems in <docs-source-dir>/docs/Gemfile already
-# installed (e.g. via ruby/setup-ruby's bundler-cache: true).
+# Requires the site's Node dependencies already installed
+# (<docs-source-dir>/site, e.g. via `pnpm install --frozen-lockfile`).
 
 set -euo pipefail
 
@@ -42,22 +42,25 @@ if [[ "${IS_LATEST_STABLE}" != "true" && "${IS_LATEST_STABLE}" != "false" ]]; th
   exit 1
 fi
 
-CONFIG="${DOCS_SRC}/docs/_config.yml"
-if [[ ! -f "${CONFIG}" ]]; then
-  echo "error: ${CONFIG} not found -- this ref predates the Jekyll docs setup and cannot be built under this scheme" >&2
+SITE_DIR="${DOCS_SRC}/site"
+if [[ ! -f "${SITE_DIR}/package.json" ]]; then
+  echo "error: ${SITE_DIR}/package.json not found -- this ref predates the Astro docs site." >&2
+  echo "Tags from before that migration were built with Jekyll and cannot be rebuilt under" >&2
+  echo "this scheme; their published copies under gh-pages/v*/ are left untouched." >&2
   exit 1
 fi
 
-# Force-patch version: to the target, unconditionally -- a no-op when building
-# straight from the matching tag (values already agree), and the mechanism
-# that makes the FR-006 republish procedure work when building from a
-# corrected main/branch commit instead of a tag.
-sed -i.bak -E "s/^version: .*/version: \"${VERSION}\"/" "${CONFIG}"
-rm -f "${CONFIG}.bak"
-
+# DOCS_VERSION labels the build with the version it documents, rather than
+# whatever Cargo.toml at this ref happens to say. A no-op when building straight
+# from the matching tag (the values already agree), and the mechanism that makes
+# the FR-006 republish procedure work when building from a corrected main/branch
+# commit instead. The Jekyll build did this by sed-patching a checked-in
+# _config.yml; an environment variable does the same job without editing a file
+# in the working tree.
 build_site() {
   local baseurl="$1" dest="$2"
-  ( cd "${DOCS_SRC}/docs" && bundle exec jekyll build --baseurl "${baseurl}" --destination "${dest}" )
+  ( cd "${SITE_DIR}" \
+      && DOCS_BASE="${baseurl}" DOCS_VERSION="${VERSION}" pnpm build --outDir "${dest}" )
 }
 
 VERSIONED_DEST="$(mktemp -d)"
@@ -83,6 +86,8 @@ if [[ "${IS_LATEST_STABLE}" == "true" ]]; then
 fi
 
 # Pages would otherwise re-run Jekyll over this already-built static output.
+# Still required: the accumulator is served with build_type: legacy, so Pages
+# treats the branch as a Jekyll source unless told not to.
 touch "${GH_PAGES_DIR}/.nojekyll"
 
 # Regenerate the version manifest from what's actually on disk -- scanned, not

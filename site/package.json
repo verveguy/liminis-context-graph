@@ -1,0 +1,29 @@
+{
+  "name": "@liminis/context-graph-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "//": "The documentation site. Its own package, and the only Node in this repository — a Rust workspace has no reason to carry an Astro toolchain anywhere near its build.",
+  "scripts": {
+    "dev": "node scripts/sync-docs.mjs && astro dev",
+    "build": "node scripts/sync-docs.mjs && astro build",
+    "preview": "astro preview",
+    "docs:sync": "node scripts/sync-docs.mjs",
+    "diagrams": "node scripts/render-diagrams.mjs",
+    "diagrams:check": "node scripts/render-diagrams.mjs --check",
+    "links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/react": "^4.2.1",
+    "@astrojs/starlight": "^0.32.2",
+    "@liminis/diagrams": "^0.1.2",
+    "astro": "^5.5.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "unist-util-visit": "^5.1.0"
+  }
+}

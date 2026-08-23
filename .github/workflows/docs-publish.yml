@@ -92,14 +92,21 @@ jobs:
           ref: ${{ needs.determine.outputs.ref }}
           path: docs-src
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
         with:
-          # Mirrors docs-drift.yml's pin -- see that file for why (github-pages
-          # gem's pinned Jekyll 3.9.0 / liquid 4.0.3 breaks on Ruby 3.2+).
-          ruby-version: "3.1"
-          bundler-cache: true
-          working-directory: docs-src/docs
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: docs-src/site/pnpm-lock.yaml
+
+      # site/ is the only Node in this repository, and is deliberately not part
+      # of the Rust build. Installed here because docs-publish-build.sh runs the
+      # Astro build twice (versioned, and root when this is the latest stable)
+      # and should not pay an install for each.
+      - name: Install documentation site dependencies
+        working-directory: docs-src/site
+        run: pnpm install --frozen-lockfile
 
       - name: Determine latest stable version
         id: latest

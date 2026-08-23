@@ -20,6 +20,38 @@ Source: [github.com/{{ site.repository }}](https://github.com/{{ site.repository
 [`README`](https://github.com/{{ site.repository }}/blob/main/README.md) has a short overview
 and a standalone quickstart; this site is the full reference.
 
+## How it fits together
+
+One process, one socket, one database directory. A client speaks JSON-RPC (or MCP)
+over a Unix socket; extraction calls out to an LLM; everything else — graph storage,
+vector index, full-text search, the write-ahead log — is embedded.
+
+```c4 static height=26rem
+Person(user, "You", "Or an agent acting for you")
+System_Ext(client, "MCP or JSON-RPC client", "Claude Desktop, an editor, your own code")
+
+System_Boundary(proc, "liminis-context-graph (one process)") {
+  Container(ipc, "IPC surface", "JSON-RPC + MCP over a Unix socket", "The whole API, and the trust boundary")
+  Container(core, "Graph engine", "Rust", "Episodes, entities, relations, dedup, canonicalisation")
+  Container(extract, "Extraction", "Rust", "Turns text into entities and relations")
+  ContainerDb(store, "Embedded stores", "LadybugDB", "Property graph, HNSW vectors, full-text index, WAL")
+}
+
+System_Ext(llm, "LLM provider", "Local or hosted — the only network call")
+
+Rel(user, client, "Asks questions, adds documents")
+Rel(client, ipc, "JSON-RPC / MCP over a socket")
+Rel(ipc, core, "Dispatches")
+Rel(core, extract, "Sends episode text to")
+Rel(extract, llm, "Prompts")
+Rel(core, store, "Reads and writes")
+```
+<picture><source media="(prefers-color-scheme: dark)" srcset="./diagrams/index-1-dark.svg" /><img src="./diagrams/index-1.svg" alt="Diagram 1 from index.md" /></picture>
+
+Everything inside that boundary is one binary and files in a directory you own. The
+only arrow leaving it is the LLM call, and a local model keeps even that on your
+machine.
+
 **Multi-graph, not multi-tenant.** One process can hold many graphs, each with its own `group_id`
 and its own WAL stream — see [IPC & MCP Reference: group_ids semantics](ipc-mcp-reference.md#group_ids-semantics-omitted-vs-empty)
 and [Operations](operations.md) for the mechanics. That's a data-organisation capability for one
