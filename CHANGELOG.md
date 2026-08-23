@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Changed
+
+- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.19.1`, moving both the crate pin in
+  `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together. Picks
+  up upstream's buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint
+  lock-file cleanup fixes (0.19.0), batched detached-node relationship deletes, WAL group commits,
+  stats-aware query planning, and HNSW scalar quantization. No IPC or MCP tool schema, response
+  shape, or dispatch method changes.
+
+  **Upgrading is one-way for the database — but not for your data.** A database created under
+  `0.17.0` (storage version 41) opens directly under `0.19.1`: no migration step, no
+  export/reimport. The first checkpoint under the new binary then rewrites it to storage version
+  43, after which **an older `liminis-context-graph` binary will not open it again**.
+
+  This affects only `.lcg/db/`, which is a derived index. The WAL under `.lcg/wal/` is the source
+  of truth and is plain JSONL owned by this project — its format is independent of lbug's storage
+  version, so the bump does not touch it. **To roll back to an older binary: stop the service,
+  delete (or move aside) `.lcg/db/`, and start the older binary — it rebuilds the graph from the
+  WAL on startup.** No database backup is required for this path.
+
+  If you would rather keep a restorable snapshot than rebuild, back up `.lcg/db/` **and**
+  `.lcg/wal/` together before upgrading, copying the WAL directories whole — dot-namespace
+  included (`cp -R`/`rsync -a`, never a `*.jsonl` glob), since `.wal-generation.json` is
+  load-bearing. See `docs/operations.md`.
+
+### Fixed
+
+- Release binaries no longer carry a dynamic OpenSSL dependency. `lbug 0.18.0` moved OpenSSL out
+  of the prebuilt bundle, which by default made the shipped binary require `libssl`/`libcrypto` on
+  the user's machine — and on macOS bake in Homebrew's absolute install path, so it would fail to
+  load for anyone without `openssl@3` at exactly `/opt/homebrew/opt/openssl@3`. OpenSSL is now
+  linked statically into release artifacts, preserving the self-contained single-binary install.
+  See [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md).
+
+  Building *from source* now requires OpenSSL 3 development files (`brew install openssl@3` on
+  macOS, `apt install libssl-dev` on Debian/Ubuntu). Installing a released binary requires nothing.
+
 ## [0.13.3] - 2026-08-22
 
 A patch release closing the upgrade-path regression 0.13.2 introduced, scoping the last two

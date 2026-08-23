@@ -216,3 +216,16 @@ contributor who *does* add entity deletion knows what else needs updating.
 - **#220**: lbug 0.18.x upgrade, which adds non-PK secondary ART indexes.
 - **#221**: follow-on issue tracking the drop-in replacement of this fix's `NameIndex` with a
   materialized column + ART index, once #220 lands.
+
+## Amendment (2026-08-16, issue #398)
+
+The lbug pin moved from `0.17.0` to `0.19.1`, so the constraint this ADR is built on no longer
+holds at the engine level. Read "the current lbug 0.17.0 pin" (Context) and "lbug 0.17.0 cannot
+support at all (no non-PK secondary index type exists)" as statements about 0.17.0, which was
+current when this ADR was written. 0.18.0 added secondary ART indexes upstream
+(`LadybugDB/ladybug#582`).
+
+**This does not change the decision, and `NameIndex` is still the live implementation.** #398
+bumped the dependency and adopted none of the new capabilities — the "Related" note above
+anticipated exactly this sequencing. #220 was superseded by #398 rather than implemented; the
+drop-in replacement stays tracked by **#221**, whose blocker is now cleared.
