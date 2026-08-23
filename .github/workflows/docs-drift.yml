@@ -61,3 +61,18 @@ jobs:
       - name: Check internal links
         working-directory: docs
         run: bundle exec htmlproofer ./_site --disable-external --allow-hash-href
+
+      # Continuous regression coverage for the --baseurl override that
+      # docs-publish-build.sh relies on to build every non-root version (see
+      # docs/adr/0477-tag-based-versioned-docs-publishing.md). Internal links are
+      # relative_url-filtered and cross-file ADR links go through
+      # jekyll-relative-links, not hardcoded, so this is a real assertion that a
+      # non-root baseurl still rewrites them correctly (FR-005) -- not just a
+      # one-off manual check.
+      - name: Build site (versioned baseurl)
+        working-directory: docs
+        run: bundle exec jekyll build --baseurl /liminis-context-graph/v0.0.0-baseurl-check --destination _site-versioned
+
+      - name: Check internal links (versioned baseurl)
+        working-directory: docs
+        run: bundle exec htmlproofer ./_site-versioned --disable-external --allow-hash-href

@@ -1,0 +1,155 @@
+name: Docs publish
+
+# Publishes the docs site from a release tag's docs/ tree, not from `main` (see
+# docs/adr/0477-tag-based-versioned-docs-publishing.md). This is a separate
+# workflow from release.yml on purpose: release.yml is cargo-dist-generated
+# (see ADR-0021), so a second, unrelated concern riding on its `allow-dirty`
+# hand edits would be fragile.
+#
+# Triggers:
+#   - release: published  -- the normal path. Filtered below (FR-009) so a
+#     non-version release (e.g. `eval-artifacts-2026-07`) never publishes docs.
+#   - workflow_dispatch    -- the FR-006 republish path: rebuild an already-
+#     released version's docs (optionally from a corrected ref) without
+#     cutting a new release tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to (re)publish, without a leading v (e.g. 0.13.3)"
+        required: true
+      ref:
+        description: "Git ref to build docs/ from (default: refs/tags/v<version>)"
+        required: false
+
+# Queuing, not cancel-in-progress: every run must complete so its version is
+# added to the accumulator. Two releases publishing close together must not
+# race a fetch-modify-push cycle on the gh-pages branch.
+concurrency:
+  group: docs-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Decide whether this event should publish anything at all, before doing any
+  # checkout. Kept separate from `publish` so FR-009's tag-shape filter (and a
+  # bad workflow_dispatch input) short-circuit as a quiet no-op rather than a
+  # red job.
+  determine:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.params.outputs.skip }}
+      version: ${{ steps.params.outputs.version }}
+      ref: ${{ steps.params.outputs.ref }}
+    steps:
+      - name: Determine version and ref
+        id: params
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
+        run: |
+          set -euo pipefail
+          TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
+
+          if [[ "${EVENT_NAME}" == "release" ]]; then
+            if ! [[ "${RELEASE_TAG}" =~ ${TAG_PATTERN} ]]; then
+              echo "Release tag '${RELEASE_TAG}' does not match the version-tag scheme; skipping (FR-009)."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            VERSION="${RELEASE_TAG#v}"
+            REF="refs/tags/${RELEASE_TAG}"
+          else
+            VERSION="${INPUT_VERSION}"
+            REF="${INPUT_REF:-refs/tags/v${VERSION}}"
+          fi
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+            echo "error: version '${VERSION}' does not look like X.Y.Z" >&2
+            exit 1
+          fi
+
+          {
+            echo "skip=false"
+            echo "version=${VERSION}"
+            echo "ref=${REF}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: determine
+    if: needs.determine.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout docs source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.determine.outputs.ref }}
+          path: docs-src
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          # Mirrors docs-drift.yml's pin -- see that file for why (github-pages
+          # gem's pinned Jekyll 3.9.0 / liquid 4.0.3 breaks on Ruby 3.2+).
+          ruby-version: "3.1"
+          bundler-cache: true
+          working-directory: docs-src/docs
+
+      - name: Determine latest stable version
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          LATEST="$(bash docs-src/scripts/docs-publish-latest-stable-version.sh)"
+          echo "Latest stable version: ${LATEST:-<none>}"
+          echo "latest=${LATEST}" >> "$GITHUB_OUTPUT"
+          if [[ "${LATEST}" == "${{ needs.determine.outputs.version }}" ]]; then
+            echo "is_latest_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_latest_stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout or initialize gh-pages accumulator
+        working-directory: docs-src
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages:gh-pages
+            git worktree add ../gh-pages gh-pages
+          else
+            echo "No gh-pages branch yet -- initializing it."
+            git worktree add --orphan ../gh-pages
+            # Spare .git: it's the file linking this worktree back to the main
+            # checkout's .git/worktrees/, not tracked content -- deleting it
+            # breaks every subsequent git command run in ../gh-pages.
+            find ../gh-pages -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          fi
+
+      - name: Build and accumulate this version
+        working-directory: docs-src
+        run: |
+          bash scripts/docs-publish-build.sh . \
+            "${{ needs.determine.outputs.version }}" \
+            "${{ steps.latest.outputs.is_latest_stable }}" \
+            ../gh-pages
+
+      - name: Commit and push gh-pages
+        working-directory: gh-pages
+        run: |
+          set -euo pipefail
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+          git commit -m "docs: publish v${{ needs.determine.outputs.version }} (latest-stable=${{ steps.latest.outputs.is_latest_stable }})"
+          git push origin gh-pages
