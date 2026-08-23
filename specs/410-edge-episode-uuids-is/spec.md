@@ -133,7 +133,7 @@ description matches the either-endpoint semantics.
 
 ---
 
-### Edge Cases
+## Edge Cases
 
 - A future tool is added that returns edges with `episode_uuids` after this issue closes: not
   covered by this issue's acceptance criteria, but the corrected `ToolSpec` descriptions in this

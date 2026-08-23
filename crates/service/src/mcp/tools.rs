@@ -1197,6 +1197,58 @@ mod tests {
     }
 
     #[test]
+    fn edge_tool_descriptions_state_episode_uuids_semantics_accurately() {
+        let r = registry();
+        let desc_of = |name: &str| {
+            r.iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool {name} must remain registered"))
+                .description
+        };
+
+        // These three read paths build `RelatesToEdge` via `..Default::default()` and
+        // never call `enrich_edge_from_entity_ep_info`, so `episode_uuids` is
+        // unconditionally empty on returned edges (issue #410).
+        for name in [
+            "knowledge_find_relationships",
+            "knowledge_get_edges_by_group",
+            "knowledge_get_edges_by_uuids",
+        ] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("episode_uuids") && desc.contains("always") && desc.contains("empty"),
+                "{name} description must state episode_uuids is always empty on this path, got: {desc}"
+            );
+            assert!(
+                !desc.to_lowercase().contains("provenance"),
+                "{name} description must not claim provenance for episode_uuids, got: {desc}"
+            );
+        }
+
+        // These two call `enrich_edge_from_entity_ep_info`, populating `episode_uuids`
+        // with either-endpoint entity mention co-occurrence (ADR-0012) — not evidence
+        // for the specific relationship.
+        for name in [
+            "knowledge_list_relationships",
+            "knowledge_get_entity_neighbors",
+        ] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("episode_uuids") && desc.contains("either-endpoint"),
+                "{name} description must state either-endpoint co-occurrence semantics, got: {desc}"
+            );
+            assert!(
+                !desc.to_lowercase().contains("provenance"),
+                "{name} description must not claim provenance for edge episode_uuids, got: {desc}"
+            );
+        }
+
+        // knowledge_list_entities is entity-scoped and out of scope for issue #410:
+        // "episode provenance" is accurate there and must remain untouched.
+        assert!(desc_of("knowledge_list_entities").contains("episode provenance attached"));
+    }
+
+    #[test]
     fn backfill_relation_types_description_warns_and_points_to_replacement() {
         let r = registry();
         let tool = r
