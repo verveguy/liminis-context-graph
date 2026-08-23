@@ -17,6 +17,9 @@
 #   - its tag matches the project's version-tag scheme (^v[0-9]+\.[0-9]+\.[0-9]+(-...)?$),
 #     which excludes non-version releases like `eval-artifacts-2026-07` (FR-009)
 #   - it is not marked a prerelease (FR-002)
+#   - it is not a draft (drafts aren't published/visible to readers, so one
+#     outranking the real latest stable by version number must not suppress
+#     that promotion)
 
 set -euo pipefail
 
@@ -25,7 +28,7 @@ REPO="${DOCS_PUBLISH_REPO:-verveguy/liminis-context-graph}"
 TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
 
 gh api "repos/${REPO}/releases" --paginate \
-  --jq '.[] | select(.prerelease == false) | .tag_name' \
+  --jq '.[] | select(.prerelease == false and .draft == false) | .tag_name' \
   | grep -E "${TAG_PATTERN}" \
   | sed 's/^v//' \
   | sort -t. -k1,1n -k2,2n -k3,3n \

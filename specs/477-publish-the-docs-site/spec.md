@@ -68,7 +68,7 @@ A maintainer finds that the docs for the *currently shipped* version are wrong a
 - A GitHub Release whose tag is not part of the project's version-tag scheme (e.g. the existing `eval-artifacts-2026-07` release, which predates and is unrelated to this issue) must not trigger a docs publish or attempt to build a `docs/` tree from that ref.
 - A prerelease tag (cargo-dist marks rc-style tags as prereleases automatically) publishes a GitHub Release but must not become the root URL's content and must not disturb the current latest-stable content.
 - Publishing a new version must not remove, corrupt, or otherwise affect any previously published version's URL.
-- Two tags whose release-publish events tags are close together in time must still leave the site in a fully consistent end state — the eventual root URL and every versioned URL must reflect their correct respective content, with no partial or interleaved output from an in-progress build.
+- Two tags whose release-publish events are close together in time must still leave the site in a fully consistent end state — the eventual root URL and every versioned URL must reflect their correct respective content, with no partial or interleaved output from an in-progress build.
 - Republishing a correction for a version that is *not* the current latest stable must change only that version's URL, not the root.
 - Some existing release tags predate the docs site's Jekyll setup entirely — `v0.10.0` and `v0.11.0` have no `docs/_config.yml` at their ref — and so cannot be built under this scheme without modification. This constrains, but does not by itself resolve, the backfill design decision below.
 

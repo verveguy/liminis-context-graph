@@ -73,8 +73,11 @@ if [[ "${IS_LATEST_STABLE}" == "true" ]]; then
   build_site "/liminis-context-graph" "${ROOT_DEST}"
 
   # Replace everything at gh-pages root except the accumulated v*/ version
-  # directories -- this preserves FR-003 even for the root copy.
-  find "${GH_PAGES_DIR}" -mindepth 1 -maxdepth 1 ! -name 'v*' -exec rm -rf {} +
+  # directories -- this preserves FR-003 even for the root copy. Also spare
+  # .git: this directory is a git worktree, and .git here is the file linking
+  # it back to the main checkout's .git/worktrees/ -- deleting it breaks every
+  # subsequent git command in this worktree, including the commit/push step.
+  find "${GH_PAGES_DIR}" -mindepth 1 -maxdepth 1 ! -name 'v*' ! -name '.git' -exec rm -rf {} +
   cp -R "${ROOT_DEST}/." "${GH_PAGES_DIR}/"
   rm -rf "${ROOT_DEST}"
 fi

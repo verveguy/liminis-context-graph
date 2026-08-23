@@ -128,7 +128,10 @@ jobs:
           else
             echo "No gh-pages branch yet -- initializing it."
             git worktree add --orphan gh-pages ../gh-pages
-            find ../gh-pages -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+            # Spare .git: it's the file linking this worktree back to the main
+            # checkout's .git/worktrees/, not tracked content -- deleting it
+            # breaks every subsequent git command run in ../gh-pages.
+            find ../gh-pages -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
           fi
 
       - name: Build and accumulate this version

@@ -67,9 +67,19 @@
           var select = document.createElement("select");
           select.setAttribute("aria-label", "Switch documented version");
 
+          // versions.json includes prereleases (they get their own versioned
+          // URL but never become root -- see docs/adr/0477-*.md), so
+          // data.versions[0] may be a prerelease. Root always serves the
+          // latest *stable* release, so the label must match: the first
+          // version with no "-" suffix.
+          var stableVersions = data.versions.filter(function (v) {
+            return v.indexOf("-") === -1;
+          });
+          var latestStable = stableVersions.length > 0 ? stableVersions[0] : data.versions[0];
+
           var latestOption = document.createElement("option");
           latestOption.value = "/liminis-context-graph/";
-          latestOption.textContent = "latest (v" + data.versions[0] + ")";
+          latestOption.textContent = "latest (v" + latestStable + ")";
           select.appendChild(latestOption);
 
           data.versions.forEach(function (v) {
