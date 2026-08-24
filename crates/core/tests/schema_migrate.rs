@@ -136,3 +136,86 @@ fn migrate_adds_and_zero_fills_entity_summary_embedding_on_existing_db() {
         "a second migrate must not change an already-migrated row's summary_embedding"
     );
 }
+
+/// Simulates a pre-#221 DB (`Entity` has no `lookup_key` column, with existing rows), runs the
+/// real `schema::migrate`, and asserts: the column is added, every pre-existing row is
+/// backfilled with the correct composite key (not left NULL), `get_entity_by_name_ci` resolves
+/// via the backfilled column, and a second migrate is a no-op that leaves values untouched
+/// (User Story 2, FR-005, SC-004).
+#[test]
+fn migrate_adds_and_backfills_entity_lookup_key_on_existing_db() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+
+    // Pre-#221 Entity schema: every column `get_entity_by_name_ci` and the backfill query need
+    // except `lookup_key` itself, so this test isolates the lookup_key migration specifically.
+    conn.run_cypher(
+        "CREATE NODE TABLE Entity (uuid STRING PRIMARY KEY, name STRING, group_id STRING, \
+         labels STRING[], created_at TIMESTAMP, name_embedding FLOAT[4], summary STRING, \
+         attributes STRING)",
+    )
+    .unwrap();
+    conn.run_cypher(
+        "CREATE (:Entity {uuid:'en1', name:'Alice', group_id:'g1', labels:['Entity'], \
+         created_at: timestamp('2026-01-01 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], \
+         summary:'s', attributes:'{}'})",
+    )
+    .unwrap();
+
+    // Precondition: Entity.lookup_key is absent (binder error on the probe).
+    assert!(
+        conn.run_cypher("MATCH (n:Entity) RETURN n.lookup_key LIMIT 0")
+            .is_err(),
+        "precondition: Entity.lookup_key must be absent before migrate"
+    );
+
+    schema::migrate(&conn, 4);
+
+    // The column now binds.
+    conn.run_cypher("MATCH (n:Entity) RETURN n.lookup_key LIMIT 0")
+        .expect("Entity.lookup_key must bind after migrate");
+
+    // The pre-existing row is backfilled with the correct composite key, not left NULL.
+    let rows = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.lookup_key")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "g1\u{1f}alice",
+        "pre-existing row's lookup_key must be backfilled from its group_id/name, not left NULL"
+    );
+
+    // Subsequent lookups use the backfilled column.
+    assert_eq!(
+        conn.get_entity_by_name_ci("Alice", "g1")
+            .unwrap()
+            .unwrap()
+            .uuid,
+        "en1",
+        "get_entity_by_name_ci must resolve via the freshly backfilled lookup_key"
+    );
+
+    // Idempotent: a second migrate is a clean no-op and does not disturb the value.
+    schema::migrate(&conn, 4);
+    let rows_again = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.lookup_key")
+        .unwrap();
+    assert_eq!(
+        rows[0][0], rows_again[0][0],
+        "a second migrate must not change an already-migrated row's lookup_key"
+    );
+
+    // FR-002/SC-001, verified specifically for the migrated (not fresh-schema) path: the
+    // build_indices_and_constraints step a real upgrade runs after migrate() must produce an
+    // ART-indexed access path here too, not just on a DB created post-#221.
+    conn.create_entity_lookup_key_index().unwrap();
+    let plan = conn
+        .cypher_query("EXPLAIN MATCH (e:Entity) WHERE e.lookup_key = 'g1\u{1f}alice' RETURN e.uuid")
+        .unwrap();
+    let plan_text = plan.into_iter().flatten().collect::<Vec<_>>().join("\n");
+    assert!(
+        plan_text.contains("ART"),
+        "the migrated schema's lookup_key column must be served by the ART index, got: {plan_text}"
+    );
+}

@@ -19,6 +19,12 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // summary vector, only `name_embedding`. Without it, meaning-based retrieval against an
     // entity's `summary` was lexical-only (FTS) — a paraphrase sharing no vocabulary with the
     // summary couldn't be found by vector similarity. See ADR-0470 (issue #470).
+    // `lookup_key` (issue #221, ADR-0221) is a deliberate divergence from graphiti's
+    // kuzu_driver.py schema-parity rule, like `summary_embedding` above: it materializes
+    // `group_id + '\x1f' + lower(name)` (computed host-side, see `db::compute_lookup_key`)
+    // so `get_entity_by_name_ci` can be answered by an ART-indexed equality lookup instead of
+    // an in-process accelerator (ADR-0038's `NameIndex`, which this column and its index
+    // replace) or an unindexed `lower(e.name) = $x` scan.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -29,7 +35,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          name_embedding FLOAT[{dim}], \
          summary STRING, \
          attributes STRING, \
-         summary_embedding FLOAT[{dim}]\
+         summary_embedding FLOAT[{dim}], \
+         lookup_key STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -301,6 +308,25 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
             eprintln!("liminis-context-graph: schema migrate: zero-fill Entity.summary_embedding: {e} (non-fatal)");
         }
     }
+    // Entity gained `lookup_key` (issue #221) to serve `get_entity_by_name_ci` from a
+    // database-native ART index instead of ADR-0038's in-process `NameIndex`. Probe first: a
+    // fresh DB already has the column from `create_node_tables`, so the ALTER only runs
+    // against pre-existing workspaces. Backfill immediately after, in the same one-shot
+    // migration step (FR-005) — `Db::build_indices_and_constraints`'s later
+    // `create_entity_lookup_key_index` call builds the ART index over whatever the column
+    // holds at that point, so every existing row must have a correct key before that runs.
+    if conn
+        .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.lookup_key LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE Entity ADD lookup_key STRING") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE Entity ADD lookup_key STRING: {e} (non-fatal)");
+            conn.mark_lookup_key_migration_failed();
+        } else if let Err(e) = backfill_entity_lookup_keys(conn) {
+            eprintln!("liminis-context-graph: schema migrate: backfill Entity.lookup_key: {e} (non-fatal)");
+            conn.mark_lookup_key_migration_failed();
+        }
+    }
 }
 
 /// Zero-fills any `Entity` row whose `summary_embedding` is `NULL` (issue #470). Idempotent — a
@@ -322,6 +348,40 @@ pub fn zero_fill_null_entity_summary_embeddings(conn: &Conn<'_>, dim: usize) -> 
         "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
         serde_json::json!({ "zero": vec![0.0f32; dim] }),
     )
+}
+
+/// Backfills `lookup_key` for every `Entity` row where it's `NULL` (issue #221 FR-005/FR-006).
+/// Idempotent — a no-op when no row is `NULL`. Computes each row's key in Rust via
+/// `db::compute_lookup_key` (never Cypher `lower()`, for the Unicode-consistency reason
+/// documented there) and writes it back one row at a time, rather than a single bulk
+/// Cypher `SET` — a deliberate, acknowledged-slower trade for guaranteed key consistency
+/// with every other writer.
+///
+/// Called from two places, mirroring `zero_fill_null_entity_summary_embeddings`'s dual-call-site
+/// shape: `migrate`'s one-shot ALTER-triggered backfill (existing rows at migration time), and
+/// every WAL-rebuild/recovery site (`Db::open_or_rebuild`, `handle_rebuild_from_wal`, the
+/// `knowledge_recover*` family) — because `WalReplayer::replay` executes raw recorded Cypher
+/// verbatim, a replayed `Entity` CREATE never sets `lookup_key` (`dump.rs`'s `ENTITY_CYPHER`
+/// template is deliberately left unchanged, per ADR-0221 — this backfill is the only
+/// self-sufficiency mechanism a dump→replay round trip needs). Must run before the caller's own
+/// `build_indices_and_constraints`/`create_entity_lookup_key_index` ever builds the ART index
+/// over the column, so the index is never built while rows are still `NULL`.
+pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
+    let rows = conn.query_params(
+        "MATCH (n:Entity) WHERE n.lookup_key IS NULL RETURN n.uuid, n.name, n.group_id",
+        serde_json::json!({}),
+    )?;
+    for row in rows {
+        let uuid = crate::db::value_as_string(&row[0]);
+        let name = crate::db::value_as_string(&row[1]);
+        let group_id = crate::db::value_as_string(&row[2]);
+        let key = crate::db::compute_lookup_key(&group_id, &name);
+        conn.exec_params(
+            "MATCH (n:Entity {uuid: $uuid}) SET n.lookup_key = $key",
+            serde_json::json!({ "uuid": uuid, "key": key }),
+        )?;
+    }
+    Ok(())
 }
 
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other

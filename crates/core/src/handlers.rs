@@ -444,8 +444,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     )
                 })
                 .collect();
-            let name_index_trusted = conn.name_index_trusted();
-            let name_index_fallback_scans = conn.name_index_fallback_scan_count();
+            let name_index_trusted = conn.lookup_key_migrated();
+            let name_index_fallback_scans = conn.lookup_key_fallback_scan_count();
 
             // Only the table-touching queries below can hit "table does not exist" (FR-001); the
             // WAL scan and name-index counters above are in-memory/filesystem and always succeed.
@@ -1181,23 +1181,14 @@ async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         // #383 FR-006) — no per-caller exception for raw cypher's trust level.
         let seq = wal_exec::wal_flush_ungrouped(&state_c, DEFAULT_GROUP_ID, conn.drain_mutations());
         wal_exec::advance_wal_position(&conn, DEFAULT_GROUP_ID, seq, &state_c);
-        // The raw-Cypher escape hatch bypasses every NameIndex insert/update hook (issue
-        // #283, FR-004): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove
-        // an Entity row with the index never learning about it. Reuse the WAL's own
-        // mutation-keyword heuristic so read-only Cypher through this admin path pays no
-        // extra scan cost, and only rebuild (a full Entity scan) when the query looks like a
-        // write. Index DDL (CREATE/DROP INDEX) is excluded first, matching `log_mutation`'s
-        // own filter — it never touches Entity rows, so it doesn't warrant a rebuild even
-        // though it contains CREATE/DROP keywords. A rebuild failure is non-fatal to this
-        // request — it marks the index untrusted so downstream endpoint-authority lookups
-        // fall back to a scan until the next successful rebuild, matching the two
-        // `knowledge_rebuild_from_wal` arms below.
-        if !crate::wal::is_index_ddl(&query) && crate::wal::looks_like_mutation(&query) {
-            if let Err(e) = conn.rebuild_name_index() {
-                eprintln!("[NAME INDEX] rebuild after query_cypher mutation failed: {e}");
-                conn.mark_name_index_untrusted();
-            }
-        }
+        // The raw-Cypher escape hatch bypasses the host-side `lookup_key` write path (issue
+        // #221): a CREATE/SET/DELETE/etc. issued here can create, rename, or remove an Entity
+        // row without `lookup_key` ever being set or updated. Unlike ADR-0038's in-process
+        // `NameIndex`, there is no proactive rebuild to run here — `Entity.lookup_key`'s ART
+        // index is a database-native structure lbug maintains automatically for whatever rows
+        // do carry the column, and a row with a NULL/stale key degrades only the three
+        // documented-acceptable call sites (FR-011) or self-heals on its next hit at the
+        // authority call site (FR-010, `get_entity_by_name_ci_with_scan_fallback`).
         Ok(rows)
     })
     .await??;
@@ -1743,9 +1734,6 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
                 None
             };
             conn.set_wal_position(DEFAULT_GROUP_ID, 0, generation.as_deref(), None)?;
-            // Fresh empty table — a no-op today, kept for uniformity with every other
-            // Entity-population path (issue #219).
-            conn.rebuild_name_index()?;
         }
         Ok(db)
     })
@@ -2476,21 +2464,18 @@ async fn handle_rebuild_from_wal(
                     ) {
                         eprintln!("liminis-context-graph: reload: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
                     }
+                    // Replay bypassed insert_entity/update_entity_created_at — every replayed
+                    // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
+                    // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
+                    if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                        eprintln!("liminis-context-graph: reload: backfill Entity.lookup_key failed (non-fatal): {e}");
+                        conn.mark_lookup_key_migration_failed();
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
                             eprintln!("liminis-context-graph: reload: end-of-reload index build failed: {e} (non-fatal)");
                         }
-                    }
-                    // Replay bypassed insert_entity/update_entity_created_at (issue #219) —
-                    // rebuild the name index from the fully-loaded data, same non-fatal
-                    // posture as the index build above.
-                    if let Err(e) = conn.rebuild_name_index() {
-                        eprintln!("liminis-context-graph: reload: end-of-reload name index rebuild failed: {e} (non-fatal)");
-                        // FR-003: the index may now be blind to replayed entities — mark it
-                        // untrusted so endpoint-authority lookups fall back to a scan until a
-                        // later rebuild succeeds, instead of silently trusting a stale index.
-                        conn.mark_name_index_untrusted();
                     }
                     // Issue #352: a WAL directory populated after this writer was constructed
                     // (external seed, restore, distributed-WAL pull) may contain seqs the
@@ -2919,21 +2904,18 @@ async fn handle_rebuild_from_wal(
                     ) {
                         eprintln!("liminis-context-graph: reload(bg): zero-fill Entity.summary_embedding failed (non-fatal): {e}");
                     }
+                    // Replay bypassed insert_entity/update_entity_created_at — every replayed
+                    // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
+                    // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
+                    if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                        eprintln!("liminis-context-graph: reload(bg): backfill Entity.lookup_key failed (non-fatal): {e}");
+                        conn.mark_lookup_key_migration_failed();
+                    }
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
                             eprintln!("liminis-context-graph: reload(bg): end-of-reload index build failed: {e} (non-fatal)");
                         }
-                    }
-                    // Replay bypassed insert_entity/update_entity_created_at (issue #219) —
-                    // rebuild the name index from the fully-loaded data, same non-fatal
-                    // posture as the index build above.
-                    if let Err(e) = conn.rebuild_name_index() {
-                        eprintln!("liminis-context-graph: reload(bg): end-of-reload name index rebuild failed: {e} (non-fatal)");
-                        // FR-003: the index may now be blind to replayed entities — mark it
-                        // untrusted so endpoint-authority lookups fall back to a scan until a
-                        // later rebuild succeeds, instead of silently trusting a stale index.
-                        conn.mark_name_index_untrusted();
                     }
                     // Issue #352: a WAL directory populated after this writer was constructed
                     // (external seed, restore, distributed-WAL pull) may contain seqs the
@@ -4526,8 +4508,28 @@ async fn recover_drop_lbug_wal(
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
             // The reopened DB (checkpoint-only, WAL dropped) may already contain entities —
-            // rebuild the name index from it (issue #219).
-            conn.rebuild_name_index()?;
+            // init_schema's migrate() already backfilled lookup_key for any pre-existing row
+            // missing it, but a row written since then via raw Cypher could still be NULL, so
+            // backfill again as a safety net (issue #221; cheap no-op when nothing is NULL).
+            // Non-fatal, matching every other backfill call site added by this issue: the
+            // checkpoint/backup DB file itself is perfectly valid, so a transient backfill
+            // query error here shouldn't fail an otherwise-successful recovery.
+            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                eprintln!(
+                    "liminis-context-graph: recover_drop_lbug_wal: lookup_key backfill failed (non-fatal): {e}"
+                );
+                conn.mark_lookup_key_migration_failed();
+            }
+            // This strategy's whole premise is reopening an already-indexed checkpoint (see
+            // the file-existence guard above), which holds for HNSW/FTS on any checkpoint that
+            // has ever completed a normal startup — but a checkpoint predating issue #221 has
+            // never had entity_lookup_key_idx built at all. Idempotent, so safe to call
+            // unconditionally rather than trying to detect "is this a pre-#221 checkpoint".
+            if let Err(e) = conn.create_entity_lookup_key_index() {
+                eprintln!(
+                    "liminis-context-graph: recover_drop_lbug_wal: entity_lookup_key_idx build failed (non-fatal): {e}"
+                );
+            }
         }
         Ok(RecoverOutcome {
             db: Some(db),
@@ -4639,10 +4641,15 @@ async fn recover_rebuild_from_workspace_wal(
             {
                 eprintln!("liminis-context-graph: rebuild_from_workspace_wal: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
             }
+            // WAL replay above bypassed insert_entity/update_entity_created_at — every
+            // replayed row's lookup_key is NULL — so backfill it before
+            // build_indices_and_constraints below ever builds entity_lookup_key_idx over the
+            // column (issue #221 FR-006).
+            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                eprintln!("liminis-context-graph: rebuild_from_workspace_wal: backfill Entity.lookup_key failed (non-fatal): {e}");
+                conn.mark_lookup_key_migration_failed();
+            }
             conn.build_indices_and_constraints()?;
-            // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
-            // rebuild the name index from the fully-loaded data.
-            conn.rebuild_name_index()?;
         }
         Ok(RecoverOutcome {
             db: Some(db),
@@ -4697,9 +4704,26 @@ async fn recover_restore_from_backup(
         {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
-            // The restored backup file may already contain entities — rebuild the name
-            // index from it (issue #219).
-            conn.rebuild_name_index()?;
+            // The restored backup file may already contain entities — init_schema's migrate()
+            // already backfilled lookup_key for any pre-existing row missing it, but back
+            // fill again as a safety net for any row written since (issue #221; cheap no-op
+            // when nothing is NULL). Non-fatal, matching every other backfill call site added
+            // by this issue: the restored backup file itself is perfectly valid, so a
+            // transient backfill query error here shouldn't fail an otherwise-successful
+            // recovery.
+            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                eprintln!(
+                    "liminis-context-graph: recover_restore_from_backup: lookup_key backfill failed (non-fatal): {e}"
+                );
+                conn.mark_lookup_key_migration_failed();
+            }
+            // See recover_drop_lbug_wal's identical comment: a backup predating issue #221
+            // never had entity_lookup_key_idx built, and this call is idempotent.
+            if let Err(e) = conn.create_entity_lookup_key_index() {
+                eprintln!(
+                    "liminis-context-graph: recover_restore_from_backup: entity_lookup_key_idx build failed (non-fatal): {e}"
+                );
+            }
         }
         Ok(RecoverOutcome {
             db: Some(db),

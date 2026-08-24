@@ -56,9 +56,11 @@ pub struct PurgeCounts {
 ///
 /// When `dry_run` is `false`, the delete + forced-rebind sequence runs inside one
 /// `BEGIN TRANSACTION`/`COMMIT` (FR-002: multiple `group_ids` are purged atomically — a failure
-/// partway through rolls back the whole call, never leaving a partial purge). After commit, the
-/// `NameIndex` is rebuilt (FR-004); a rebuild failure is non-fatal and instead marks the index
-/// untrusted, matching the existing `[NAME INDEX]` fallback pattern used elsewhere.
+/// partway through rolls back the whole call, never leaving a partial purge). No index
+/// invalidation step is needed after commit (issue #221): `Entity.lookup_key`'s secondary ART
+/// index is a database-native structure lbug maintains automatically across this call's
+/// `DETACH DELETE`s, unlike the in-process `NameIndex` this purge previously had to rebuild by
+/// hand.
 ///
 /// Returns, alongside [`PurgeCounts`], a [`GroupedMutations`] bucketing every mutation this call
 /// issued by the `group_id` it actually modified (issue #385 FR-002): each purged group's own
@@ -142,14 +144,6 @@ pub fn purge_groups(
             let _ = conn.exec_transaction_control("ROLLBACK");
             return Err(e);
         }
-    }
-
-    if let Err(e) = conn.rebuild_name_index() {
-        eprintln!(
-            "[NAME INDEX] rebuild_name_index failed after group purge (non-fatal, marking \
-             untrusted): {e}"
-        );
-        conn.mark_name_index_untrusted();
     }
 
     Ok((

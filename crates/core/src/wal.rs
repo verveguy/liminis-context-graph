@@ -875,15 +875,21 @@ pub(crate) fn strip_quoted_literals(s: &str) -> String {
     result
 }
 
-/// Whether `cypher` is index DDL (`CREATE_VECTOR_INDEX`, `CREATE INDEX`, `DROP INDEX`), which
-/// `looks_like_mutation` would otherwise misclassify as an `Entity`-mutating write on its
-/// `CREATE`/`DROP` keywords. Checked ahead of `looks_like_mutation` wherever the result decides
-/// whether to pay for `Entity`-related work (WAL logging, `NameIndex` rebuild) — index DDL never
-/// touches `Entity` rows, so neither is needed for it (higher priority per AD-W7).
+/// Whether `cypher` is index DDL (`CREATE_VECTOR_INDEX`, `CREATE INDEX`, `CREATE ART INDEX`,
+/// `DROP INDEX`), which `looks_like_mutation` would otherwise misclassify as an
+/// `Entity`-mutating write on its `CREATE`/`DROP` keywords. Checked ahead of
+/// `looks_like_mutation` wherever the result decides whether to pay for `Entity`-related work
+/// (WAL logging) — index DDL never touches `Entity` rows, so it isn't needed for it (higher
+/// priority per AD-W7).
+///
+/// `"CREATE ART INDEX"` (issue #221, `Entity.lookup_key`'s secondary index) is checked
+/// separately from `"CREATE INDEX"`: the `ART` token sitting between `CREATE` and `INDEX` means
+/// the plain substring check doesn't match it.
 pub(crate) fn is_index_ddl(cypher: &str) -> bool {
     let upper = cypher.to_uppercase();
     upper.contains("CREATE_VECTOR_INDEX")
         || upper.contains("CREATE INDEX")
+        || upper.contains("CREATE ART INDEX")
         || upper.contains("DROP INDEX")
 }
 
@@ -898,12 +904,12 @@ pub(crate) fn is_index_ddl(cypher: &str) -> bool {
 /// This can only ever turn a prior false negative into a (correct) match, never the reverse,
 /// since it splits existing tokens further rather than merging any together.
 ///
-/// Originally `log_mutation`'s inline check (WAL-logging decision); also used by
-/// `handle_query_cypher` (issue #283, FR-004) to decide whether a raw-Cypher call through the
-/// `cypher` MCP scope needs a follow-up `NameIndex` rebuild — reusing this heuristic keeps the
-/// two "does this look like a write" decisions from silently diverging. Callers that care about
-/// index DDL specifically (see `is_index_ddl`) should check that first, since this function
-/// alone would classify `CREATE INDEX ...` as a mutation.
+/// `log_mutation`'s inline WAL-logging check. Prior to issue #221, `handle_query_cypher` also
+/// reused this heuristic to decide whether a raw-Cypher call through the `cypher` MCP scope
+/// needed a follow-up `NameIndex` rebuild; that call site is gone now that `Entity.lookup_key`'s
+/// secondary ART index is maintained by lbug itself and there is nothing left to rebuild.
+/// Callers that care about index DDL specifically (see `is_index_ddl`) should check that first,
+/// since this function alone would classify `CREATE INDEX ...` as a mutation.
 pub(crate) fn looks_like_mutation(cypher: &str) -> bool {
     let upper = cypher.to_uppercase();
     let stripped = strip_quoted_literals(&upper);

@@ -1,6 +1,6 @@
 # ADR-0283: Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution
 
-**Status**: Accepted
+**Status**: Superseded by [ADR-0221](0221-secondary-art-index-for-entity-name-lookup.md)
 **Date**: 2026-07-30
 **Issue**: #283 (this fix); narrows ADR-0038's "no scan fallback" stance for two of its four
 call sites; corrects a weakening ADR-0038 introduced in #219's `NameIndex` accelerator to
@@ -291,3 +291,11 @@ out of scope for this escape hatch.
 - `crates/core/tests/edge_endpoint_resolution.rs`,
   `crates/core/tests/name_index_coherence.rs`,
   `crates/core/tests/handlers_wal_admin.rs`: coverage for SC-001, SC-002, FR-004, FR-005, SC-004.
+
+## Superseded (2026-08-24, issue #221)
+
+The trust-flag/bounded-scan-fallback mechanism this ADR describes now backs a persisted
+`Entity.lookup_key` column and secondary ART index rather than `NameIndex`. The policy this ADR
+established — mitigate where a miss is wrong (the Site 1 authority lookup), not where a miss is
+merely slower — carries forward unchanged; only the underlying data structure changed. See
+[ADR-0221](0221-secondary-art-index-for-entity-name-lookup.md).

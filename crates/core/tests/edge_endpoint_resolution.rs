@@ -38,6 +38,9 @@ fn make_db() -> (Arc<Db>, TempDir) {
     {
         let conn = db.connect().unwrap();
         conn.init_schema(EMB_DIM).unwrap();
+        // Build the ART index so the scan-fallback/self-heal assertions in this file
+        // (issue #221) exercise the real indexed-miss -> scan path against an existing index.
+        conn.create_entity_lookup_key_index().unwrap();
     }
     (db, dir)
 }
@@ -224,7 +227,7 @@ async fn test_global_fallback_resolution_is_scoped_to_group_id() {
 }
 
 // ── Issue #283 / SC-001: an entity persisted via a path that bypasses insert_entity ────
-// (and therefore never touched the in-process NameIndex) must still be resolvable by a
+// (and therefore has no lookup_key set, issue #221) must still be resolvable by a
 // later edge naming it, via the endpoint-authority scan fallback.
 
 #[tokio::test]
@@ -232,8 +235,9 @@ async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
     let (db, _dir) = make_db();
     {
         let conn = db.connect().unwrap();
-        // Bypasses insert_entity entirely, so the NameIndex has never observed 'Apple' — the
-        // exact scenario issue #283 describes (raw Cypher writes, WAL replay, etc.).
+        // Bypasses insert_entity entirely, so 'Apple' has no lookup_key — the exact scenario
+        // issue #283 describes (raw Cypher writes, WAL replay, etc.), now against the
+        // ART-index-backed lookup (issue #221).
         conn.run_cypher(&format!(
             "CREATE (:Entity {{uuid: 'raw-apple', name: 'Apple', group_id: '{GROUP_A}', \
              labels: ['Entity'], created_at: timestamp('2026-01-01 00:00:00'), \
@@ -278,7 +282,7 @@ async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
 // ── Issue #283 follow-up: a scan-fallback miss must be memoized per batch too ──────────
 // (not just a hit) — otherwise a batch with several edges naming the same genuinely
 // nonexistent entity would pay a full scan per edge, reintroducing the O(edges × |Entity|)
-// cost ADR-0038 removed. `NameIndex` self-healing only covers the hit case (there's nothing
+// cost ADR-0038 removed. `lookup_key` self-healing only covers the hit case (there's nothing
 // to insert for a name that doesn't exist), so Phase C's own per-batch memo must cover misses.
 
 #[tokio::test]
@@ -323,7 +327,7 @@ async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
 
     let conn = db.connect().unwrap();
     assert_eq!(
-        conn.name_index_fallback_scan_count(),
+        conn.lookup_key_fallback_scan_count(),
         1,
         "two edges naming the same nonexistent entity in one batch must share a single \
          fallback scan, not one per edge (FR-002)"

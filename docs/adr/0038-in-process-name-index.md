@@ -1,6 +1,6 @@
 # ADR-0038: In-Process NameIndex Accelerator for Entity Name Lookup
 
-**Status**: Accepted
+**Status**: Superseded by [ADR-0221](0221-secondary-art-index-for-entity-name-lookup.md)
 **Date**: 2026-07-25
 **Issue**: #219 (this fix); corrects ADR-0029's residual-risk framing; field reports #202/#203,
 discussion #207; amplified by #209; follow-on chain #220 (lbug 0.18.x upgrade), #221
@@ -229,3 +229,14 @@ current when this ADR was written. 0.18.0 added secondary ART indexes upstream
 bumped the dependency and adopted none of the new capabilities — the "Related" note above
 anticipated exactly this sequencing. #220 was superseded by #398 rather than implemented; the
 drop-in replacement stays tracked by **#221**, whose blocker is now cleared.
+
+## Superseded (2026-08-23, issue #221)
+
+`NameIndex` and its invalidation contract described above are removed. `get_entity_by_name_ci`
+is now served by a materialized `Entity.lookup_key` column and a secondary `CREATE ART INDEX`,
+as this ADR's own "Related" section and #398's amendment both anticipated. See
+[ADR-0221](0221-secondary-art-index-for-entity-name-lookup.md) for the replacement design,
+including why the persisted-staleness trade-off (out-of-band writes no longer self-heal on
+restart, unlike this ADR's in-process map) needed explicit new mitigation at the one
+authority call site (ADR-0283's Site 1) rather than inheriting this ADR's "no scan fallback"
+stance unexamined.

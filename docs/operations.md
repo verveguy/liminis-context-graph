@@ -294,20 +294,26 @@ on `knowledge_rebuild_status`'s `result` for the background-job path) for the sp
 that produced it; it is omitted from dry-run rebuild results, since a dry run never touches
 indices.
 
-**`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — report the
-health of the in-process `NameIndex` accelerator behind case-insensitive entity name lookups
-([ADR-0038](adr/0038-in-process-name-index.md)). `name_index_trusted` is `true` unless a write path
-is known to have bypassed the index — e.g. a raw-Cypher mutation via `knowledge_query_cypher`
-whose follow-up rebuild failed, or a post-replay `rebuild_name_index()` failure inside
-`knowledge_rebuild_from_wal` — and goes back to `true` once the next rebuild succeeds.
-`name_index_fallback_scans` counts how many times an endpoint-existence lookup (the
-"does this entity exist anywhere in the group" check used during edge-endpoint resolution)
-missed the index and fell back to a bounded database scan; it only increments on a miss; a
-healthy, coherent index keeps this at (or near) `0`. Both fields are `null` while the service is
-degraded (no connected database). A rising `name_index_fallback_scans` count, or a
-`name_index_trusted: false` that doesn't clear on its own, signals index desync worth
-investigating — see [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md) for the
-mechanism.
+**`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — field names
+kept for wire compatibility, but re-backed by the `Entity.lookup_key` secondary ART index
+([ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md), which supersedes the
+in-process `NameIndex` accelerator these fields originally described
+([ADR-0038](adr/0038-in-process-name-index.md))). Case-insensitive entity name lookups are now
+served directly by the database, so there is no in-process copy to rebuild — a raw-Cypher
+mutation via `knowledge_query_cypher` no longer affects either field, unlike the pre-#221
+design. `name_index_trusted` instead reports whether the one-shot `lookup_key` backfill migration
+completed without error (`schema::migrate`, and the equivalent post-WAL-rebuild/recovery backfill
+passes); it is `true` by default (nothing to migrate on a fresh database) and only goes back to
+`true` once a subsequent migration/backfill attempt succeeds. `name_index_fallback_scans` keeps
+its prior meaning exactly: it counts how many times an endpoint-existence lookup (the "does this
+entity exist anywhere in the group" check used during edge-endpoint resolution) missed the index
+— now specifically signaling a `lookup_key` value that is NULL or stale, most likely from an
+out-of-band write via the `cypher` MCP scope or a second process — and fell back to a bounded
+database scan, which also self-heals the row's `lookup_key` on a hit. Both fields are `null`
+while the service is degraded (no connected database). A rising `name_index_fallback_scans`
+count, or a `name_index_trusted: false` that doesn't clear on its own, signals `lookup_key`
+staleness worth investigating — see
+[ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md) for the mechanism.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below

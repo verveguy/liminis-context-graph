@@ -1,13 +1,13 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lbug::{LogicalType, Value};
 
 use crate::{
     error::Error,
-    name_index::NameIndex,
     pointer::EndpointSide,
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
@@ -23,11 +23,34 @@ pub type GroupedMutations = BTreeMap<String, Vec<(String, serde_json::Value)>>;
 
 pub struct Db {
     inner: lbug::Database,
-    /// In-process accelerator for `Conn::get_entity_by_name_ci` (issue #219). Lives on `Db`
-    /// (not `Conn`) because it must survive across requests; `AppState.db` is swapped
-    /// wholesale on `clear_all`/recovery, so a fresh `Db` naturally starts with an empty
-    /// index. See `name_index.rs` and the NameIndex ADR for the invalidation contract.
-    name_index: NameIndex,
+    /// Observability for the `Entity.lookup_key` ART-index-backed lookup (issue #221,
+    /// ADR-0221; supersedes ADR-0038's in-process `NameIndex`). Lives on `Db` (not `Conn`)
+    /// because it must survive across requests; `AppState.db` is swapped wholesale on
+    /// `clear_all`/recovery, so a fresh `Db` naturally starts with default (trusted, no
+    /// fallback scans yet) status.
+    lookup_key_status: LookupKeyStatus,
+}
+
+/// Observability for the `lookup_key` ART-index design, surfaced through `knowledge_status`'s
+/// `name_index_trusted`/`name_index_fallback_scans` JSON fields (kept on the wire for IPC/
+/// Python-side compatibility; FR-012). Narrower than `NameIndex`'s old trust flag: `migrated`
+/// reports whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed
+/// without error, not whether every row's key is currently fresh — the database is the source
+/// of truth for that now, so there is no per-write staleness to track. `fallback_scans` keeps
+/// counting exactly what it counted before: every time `get_entity_by_name_ci_with_scan_fallback`
+/// (the Site 1 authority lookup, FR-010) had to fall back past the index.
+pub struct LookupKeyStatus {
+    migrated: AtomicBool,
+    fallback_scans: AtomicU64,
+}
+
+impl Default for LookupKeyStatus {
+    fn default() -> Self {
+        Self {
+            migrated: AtomicBool::new(true),
+            fallback_scans: AtomicU64::new(0),
+        }
+    }
 }
 
 /// The persisted consumer-side WAL position for one group (issue #353, made per-group by
@@ -67,7 +90,7 @@ pub struct Conn<'db> {
     /// WAL-flush helper. Order-preserving so bound-param and raw paths interleave
     /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-0015).
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
-    name_index: &'db NameIndex,
+    lookup_key_status: &'db LookupKeyStatus,
 }
 
 /// Serializes `Db::open` across threads. `INSTALL`/`LOAD EXTENSION` mutate a
@@ -97,7 +120,7 @@ impl Db {
         drop(setup_conn);
         Ok(Self {
             inner,
-            name_index: NameIndex::default(),
+            lookup_key_status: LookupKeyStatus::default(),
         })
     }
 
@@ -168,10 +191,18 @@ impl Db {
             {
                 eprintln!("liminis-context-graph: open_or_rebuild: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
             }
-            // WAL replay executes raw recorded Cypher templates, bypassing the typed
-            // insert_entity/update_entity_created_at hooks — a full rebuild is the only
-            // way the name index observes replayed data (FR-004).
-            conn.rebuild_name_index()?;
+            // WAL replay executes raw recorded Cypher templates, bypassing insert_entity's
+            // lookup_key write — backfill any row replay left with a NULL lookup_key before
+            // the caller's own build_indices_and_constraints() builds the ART index over the
+            // column (issue #221 FR-006).
+            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
+                eprintln!(
+                    "liminis-context-graph: open_or_rebuild: lookup_key backfill failed (non-fatal): {e}"
+                );
+                // FR-012: a failed backfill can leave rows with a NULL lookup_key, so
+                // knowledge_status must not report a clean migration.
+                conn.mark_lookup_key_migration_failed();
+            }
             // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
             // the replay just computed — a fresh rebuild is exactly as authoritative as
             // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
@@ -252,7 +283,7 @@ impl Db {
         Ok(Conn {
             inner: conn,
             executed_mutations: RefCell::new(Vec::new()),
-            name_index: &self.name_index,
+            lookup_key_status: &self.lookup_key_status,
         })
     }
 }
@@ -462,36 +493,12 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
-    /// Creates HNSW vector indexes and FTS indexes; idempotent.
+    /// Creates HNSW vector indexes, FTS indexes, and the `Entity.lookup_key` secondary ART
+    /// index (issue #221); idempotent.
     pub fn build_indices_and_constraints(&self) -> Result<(), Error> {
         self.create_vector_indexes()?;
-        crate::schema::create_fts_indexes(self)
-    }
-
-    /// Repopulates the in-process name-lookup index (issue #219) from a full `Entity` table
-    /// scan. This is the FR-004 single-scan mechanism, and the only way the index observes
-    /// `Entity` rows written by a path that bypasses the typed `insert_entity`/
-    /// `update_entity_created_at` methods — most importantly WAL replay, which executes raw
-    /// recorded Cypher templates. Call at startup, after any recovery strategy, and after
-    /// any non-dry-run WAL rebuild. Idempotent — always a full replace, never additive.
-    pub fn rebuild_name_index(&self) -> Result<(), Error> {
-        let rows = self.query_params(
-            "MATCH (e:Entity) RETURN e.uuid, e.name, e.group_id, e.created_at",
-            serde_json::json!({}),
-        )?;
-        let entries = rows
-            .into_iter()
-            .map(|row| {
-                (
-                    value_as_string(&row[0]),
-                    value_as_string(&row[1]),
-                    value_as_string(&row[2]),
-                    value_as_timestamp_str(&row[3]),
-                )
-            })
-            .collect();
-        self.name_index.rebuild(entries);
-        Ok(())
+        crate::schema::create_fts_indexes(self)?;
+        self.create_entity_lookup_key_index()
     }
 
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
@@ -510,11 +517,12 @@ impl<'db> Conn<'db> {
         } else {
             row.summary_embedding.clone()
         };
+        let lookup_key = compute_lookup_key(&row.group_id, &row.name);
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
              summary: $summary, attributes: $attributes, \
-             summary_embedding: $summary_embedding})",
+             summary_embedding: $summary_embedding, lookup_key: $lookup_key})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -525,10 +533,9 @@ impl<'db> Conn<'db> {
                 "summary": row.summary,
                 "attributes": row.attributes,
                 "summary_embedding": summary_embedding,
+                "lookup_key": lookup_key,
             }),
         )?;
-        self.name_index
-            .insert(&row.uuid, &row.name, &row.group_id, &row.created_at);
         Ok(())
     }
 
@@ -906,6 +913,32 @@ impl<'db> Conn<'db> {
         let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx')");
     }
 
+    /// Creates the secondary ART index on `Entity.lookup_key` (issue #221 FR-002), the
+    /// database-native replacement for ADR-0038's in-process `NameIndex`. An explicit `ART`
+    /// index type is required — `CREATE INDEX` with no type is only valid for a table's
+    /// primary key. Idempotent, following the same "already exists" suppression as
+    /// `create_vector_indexes`; a genuine failure (e.g. missing column) propagates.
+    pub fn create_entity_lookup_key_index(&self) -> Result<(), Error> {
+        if let Err(e) = self
+            .raw_query("CREATE ART INDEX entity_lookup_key_idx FOR (e:Entity) ON (e.lookup_key)")
+        {
+            // A repeat CREATE ART INDEX reports "entity_lookup_key_idx already exists in
+            // catalog" — a different wording than CREATE_VECTOR_INDEX/CREATE_FTS_INDEX's
+            // "already exists in table", so is_already_exists_error alone doesn't catch it.
+            // See is_named_catalog_entry_already_exists_error's doc comment for why that check
+            // isn't simply folded into is_already_exists_error.
+            if !crate::error::is_already_exists_error(&e)
+                && !crate::error::is_named_catalog_entry_already_exists_error(
+                    &e,
+                    "entity_lookup_key_idx",
+                )
+            {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     // ── Retrieval ─────────────────────────────────────────────────────────────
 
     /// Returns the last `last_n` episodic nodes for a given group, newest first.
@@ -941,11 +974,11 @@ impl<'db> Conn<'db> {
 
     /// Deletes an Episodic node and all its connected edges.
     ///
-    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
-    /// invalidates the `NameIndex` (issue #219, ADR-0038). If a future change makes this
-    /// (or any path) delete `Entity` nodes, it must also invalidate the corresponding
-    /// `NameIndex` entries. `crate::group_purge` (issue #361) is the deliberate, sole
-    /// exception to this rule — see `delete_entities_by_group_ids` below.
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. Unlike ADR-0038's
+    /// in-process `NameIndex`, `Entity.lookup_key`'s secondary ART index is a database-native
+    /// structure that lbug itself maintains across insert/update/delete (issue #221) — so
+    /// even `crate::group_purge`'s `DETACH DELETE` of `Entity` rows (see
+    /// `delete_entities_by_group_ids` below) requires no manual invalidation step here.
     pub fn remove_episode(&self, episode_uuid: &str) -> Result<(), Error> {
         self.exec_params(
             "MATCH (ep:Episodic {uuid: $uuid}) DETACH DELETE ep",
@@ -978,8 +1011,7 @@ impl<'db> Conn<'db> {
     /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
     /// caller bypassing the handler-layer validation.
     ///
-    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
-    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
@@ -1021,8 +1053,7 @@ impl<'db> Conn<'db> {
     /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
     /// caller bypassing the handler-layer validation.
     ///
-    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes — so this never
-    /// invalidates the `NameIndex` (issue #219, ADR-0038). See `remove_episode`.
+    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
@@ -1091,8 +1122,10 @@ impl<'db> Conn<'db> {
 
     /// `DETACH DELETE`s every `Entity` node in the given group_ids. This is the deliberate,
     /// sole-with-`delete_relates_to_by_group_ids` exception to the "only ever `Episodic`" rule
-    /// documented on `remove_episode` — callers MUST also invalidate/rebuild the `NameIndex`
-    /// (see `mark_name_index_untrusted`/`rebuild_name_index`) after calling this.
+    /// documented on `remove_episode`. No caller-side index invalidation is needed: the
+    /// `Entity.lookup_key` ART index is maintained by lbug itself across this delete
+    /// (issue #221) — unlike ADR-0038's in-process `NameIndex`, which this exception was
+    /// originally written to warn callers about.
     pub fn delete_entities_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
         self.exec_params(
             "MATCH (e:Entity) WHERE e.group_id IN $gids DETACH DELETE e",
@@ -1737,86 +1770,39 @@ impl<'db> Conn<'db> {
 
     /// Returns an EntityRow by case-insensitive, whitespace-normalised name match.
     ///
-    /// Resolved via the in-process `NameIndex` accelerator rather than a database query
-    /// (issue #219 — `lower(e.name) = $x` is a scalar-function predicate lbug cannot route
-    /// through any index, so this used to be a full `Entity` table scan on every call). Each
-    /// same-named candidate is re-verified against the database via `get_entity_by_uuid`
-    /// before being returned (FR-006); if the winning candidate is stale — deleted, or no
-    /// longer matching this `name`/`group_id` — the remaining candidates for this key are
-    /// tried in turn (FR-005) rather than giving up on the first failure. Returns `Ok(None)`
-    /// only once every candidate the index knows of has failed verification (or it knows of
-    /// none).
+    /// Answered by an equality lookup against the materialized `Entity.lookup_key` column
+    /// (`group_id + '\x1f' + lower(name)`, computed host-side via `compute_lookup_key` —
+    /// never via Cypher `lower()`, so the predicate stays index-pushdownable) and its
+    /// secondary ART index `entity_lookup_key_idx` (issue #221, ADR-0221; supersedes
+    /// ADR-0038's in-process `NameIndex`). Because the database is now the sole source of
+    /// truth for this lookup, there is no separate in-process copy that can go stale for any
+    /// row written through `insert_entity`/`update_entity_core` — a hit here is correct for
+    /// any row whose `lookup_key` reflects its current `name`/`group_id`.
     ///
-    /// There is deliberately no scan fallback on a total miss here — see
-    /// `get_entity_by_name_ci_with_scan_fallback` for the endpoint-authority call sites that
-    /// need one, and the NameIndex ADR / issue #283 for why the two are kept separate.
+    /// A miss can still occur for a row whose `lookup_key` was never written — e.g. one
+    /// created by raw Cypher via the `cypher` MCP scope, or by a second process writing the
+    /// DB file directly (FR-011's documented, accepted limitation for this call site). The same
+    /// class of out-of-band write can also leave a row with a *non-NULL but stale* `lookup_key`
+    /// (e.g. a raw-Cypher rename that updates `name` without updating `lookup_key`) — a hit in
+    /// that case returns the row under its *old* identity, not merely a miss. This, too, is
+    /// FR-011's accepted limitation for this call site; `get_entity_by_name_ci_with_scan_fallback`
+    /// re-verifies every hit against the requested `name`/`group_id` specifically because the
+    /// authority site (FR-010) cannot tolerate either failure shape. There is deliberately no
+    /// scan fallback or hit-verification here — see `get_entity_by_name_ci_with_scan_fallback`
+    /// for the endpoint-authority call site that needs both, and ADR-0283 for why the two are
+    /// kept separate.
     pub fn get_entity_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        let lower_name = name.trim().to_lowercase();
-        for uuid in self.name_index.lookup_candidates(name, group_id) {
-            if let Some(row) = self.get_entity_by_uuid(&uuid)? {
-                if row.group_id == group_id && row.name.trim().to_lowercase() == lower_name {
-                    return Ok(Some(row));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// Case-insensitive, whitespace-normalised name lookup for the endpoint-authority call
-    /// sites (issue #283 / #218): unlike `get_entity_by_name_ci`, a miss here does not mean
-    /// "the entity doesn't exist" — it may mean the `NameIndex` simply hasn't observed it
-    /// (raw Cypher writes, WAL replay whose index rebuild failed, a second writer process).
-    /// Those call sites treat "does this entity exist anywhere in the group" as an authority
-    /// question, so a miss falls back to a bounded, single-row database scan rather than
-    /// trusting the index alone.
-    ///
-    /// On a scan hit, the result is inserted back into the `NameIndex` (self-healing it for
-    /// subsequent lookups in this and later requests). Every fallback scan is counted via
-    /// `NameIndex::record_fallback_scan` regardless of outcome (SC-004), so index desync is
-    /// observable through `knowledge_status` without reproducing the bug.
-    ///
-    /// Callers MUST use this sparingly (FR-002): it is intended for a batch's deduplicated
-    /// set of unresolved names (e.g. `episode.rs`'s `missing_names`), not per-edge/per-entity
-    /// use, or it reintroduces the full-scan cost ADR-0038 removed.
-    pub fn get_entity_by_name_ci_with_scan_fallback(
-        &self,
-        name: &str,
-        group_id: &str,
-    ) -> Result<Option<EntityRow>, Error> {
-        if let Some(row) = self.get_entity_by_name_ci(name, group_id)? {
-            return Ok(Some(row));
-        }
-        self.name_index.record_fallback_scan();
-        let scanned = self.scan_entity_by_name_ci(name, group_id)?;
-        if let Some(ref row) = scanned {
-            self.name_index
-                .insert(&row.uuid, &row.name, &row.group_id, &row.created_at);
-        }
-        Ok(scanned)
-    }
-
-    /// Bounded, single-row full scan backing `get_entity_by_name_ci_with_scan_fallback`'s
-    /// miss path. Reproduces the index's own winner-selection rule (`ORDER BY created_at
-    /// ASC, uuid ASC LIMIT 1`) and, per the resolved spec assumption, does not filter out
-    /// `Merged`-labelled tombstones — the index itself resolves through them (see
-    /// `corrections::merge_entities`), so a fallback that filtered them would disagree with
-    /// the index on what "resolves" means for a merged-away alias.
-    fn scan_entity_by_name_ci(
-        &self,
-        name: &str,
-        group_id: &str,
-    ) -> Result<Option<EntityRow>, Error> {
-        let lower_name = name.trim().to_lowercase();
+        let key = compute_lookup_key(group_id, name);
         let rows = self.query_params(
-            "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
+            "MATCH (e:Entity) WHERE e.lookup_key = $key \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.name_embedding, e.summary, e.attributes \
              ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
-            serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
+            serde_json::json!({ "key": key }),
         )?;
         Ok(rows.into_iter().next().map(|row| EntityRow {
             uuid: value_as_string(&row[0]),
@@ -1833,23 +1819,157 @@ impl<'db> Conn<'db> {
         }))
     }
 
-    /// Whether the in-process `NameIndex` is currently believed coherent with the database
-    /// (FR-003). Surfaced through `knowledge_status` (SC-004).
-    pub fn name_index_trusted(&self) -> bool {
-        self.name_index.is_trusted()
+    /// Case-insensitive, whitespace-normalised name lookup for the endpoint-authority call
+    /// site (issue #283 / #218 / #221 FR-010): unlike `get_entity_by_name_ci`, a miss here
+    /// does not mean "the entity doesn't exist" — it may mean this row's `lookup_key` was
+    /// never written (raw Cypher writes, a second writer process; see FR-011). That call site
+    /// treats "does this entity exist anywhere in the group" as an authority question, so a
+    /// miss falls back to a bounded, single-row database scan rather than trusting the index
+    /// alone.
+    ///
+    /// On a scan hit, the row's `lookup_key` is self-healed with a `SET` so subsequent lookups
+    /// hit the index directly — this is the mechanism that keeps FR-010's guarantee equivalent
+    /// to ADR-0283's, now that `lookup_key` is a persisted column rather than a process-local
+    /// structure that self-heals on restart. Every fallback scan is counted regardless of
+    /// outcome (SC-004/FR-012), so staleness stays observable through `knowledge_status`.
+    ///
+    /// An indexed hit is also re-verified against the requested `name`/`group_id` before being
+    /// trusted (unlike the plain `get_entity_by_name_ci`, which does not — FR-011's accepted
+    /// limitation for the three non-authority sites). This guards a specific staleness shape a
+    /// NULL/missing `lookup_key` alone doesn't cover: an out-of-band write (raw Cypher, a
+    /// second process) can rename an `Entity` row without updating its `lookup_key`, leaving a
+    /// *non-NULL but stale* key that still matches the row's *old* name. Without this check,
+    /// a lookup for that old name would return the row under its new identity — the wrong
+    /// entity for the query, not merely a miss — which would corrupt edge-endpoint resolution
+    /// at this authority site. On a mismatch, this falls through to the scan (which reflects
+    /// live data) exactly as a plain miss would.
+    ///
+    /// Callers MUST use this sparingly (FR-002): it is intended for a batch's deduplicated
+    /// set of unresolved names (e.g. `episode.rs`'s `missing_names`), not per-edge/per-entity
+    /// use, or it reintroduces the full-scan cost ADR-0038 removed.
+    pub fn get_entity_by_name_ci_with_scan_fallback(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        if let Some(row) = self.get_entity_by_name_ci(name, group_id)? {
+            if row.group_id == group_id
+                && row.name.trim().to_lowercase() == name.trim().to_lowercase()
+            {
+                return Ok(Some(row));
+            }
+            // The indexed hit's lookup_key matched, but the row's live name/group_id no
+            // longer does — a stale (non-NULL) key from an out-of-band rename. Treat this
+            // exactly like a miss: fall through to the scan below, which reflects live data.
+        }
+        self.record_lookup_key_fallback_scan();
+        let scanned = self.scan_entity_by_name_ci(name, group_id)?;
+        if let Some(ref row) = scanned {
+            let key = compute_lookup_key(&row.group_id, &row.name);
+            // The scan read and this SET are two independent statements, not one transaction —
+            // a concurrent update_entity_core rename between them would already have persisted
+            // its own correct lookup_key for the new name. Scoping the SET to the exact
+            // name/group_id this scan observed makes it a no-op in that case (0 rows matched)
+            // instead of clobbering the fresher value with one derived from stale data.
+            if let Err(e) = self.exec_params(
+                "MATCH (e:Entity {uuid: $uuid, name: $expected_name, group_id: $expected_group_id}) \
+                 SET e.lookup_key = $key",
+                serde_json::json!({
+                    "uuid": row.uuid,
+                    "expected_name": row.name,
+                    "expected_group_id": row.group_id,
+                    "key": key,
+                }),
+            ) {
+                eprintln!(
+                    "liminis-context-graph: lookup_key self-heal failed for uuid={} (non-fatal): {e}",
+                    row.uuid
+                );
+            }
+        }
+        Ok(scanned)
     }
 
-    /// Total scan-fallback lookups performed against the `NameIndex` since this `Db` was
-    /// opened (SC-004). Surfaced through `knowledge_status`.
-    pub fn name_index_fallback_scan_count(&self) -> u64 {
-        self.name_index.fallback_scan_count()
+    /// Bounded (to one group), full scan backing `get_entity_by_name_ci_with_scan_fallback`'s
+    /// miss path. Reproduces the index's own winner-selection rule (`ORDER BY created_at
+    /// ASC, uuid ASC`, first match) and, per the resolved spec assumption, does not filter out
+    /// `Merged`-labelled tombstones — the index itself resolves through them (see
+    /// `corrections::merge_entities`), so a fallback that filtered them would disagree with
+    /// the index on what "resolves" means for a merged-away alias.
+    ///
+    /// The name comparison is done in Rust via `.trim().to_lowercase()` — the exact same
+    /// normalisation `compute_lookup_key` uses — rather than Cypher's `lower(e.name)`, for two
+    /// reasons this fallback specifically cannot risk getting wrong: `lower(e.name)` alone
+    /// doesn't trim, so a row whose `name` carries incidental whitespace would silently miss a
+    /// query for its trimmed name; and there is no guarantee lbug's Cypher `lower()` folds
+    /// non-ASCII names identically to Rust's `str::to_lowercase()` (`compute_lookup_key`'s own
+    /// doc comment). Both gaps land precisely on the out-of-band/raw-Cypher-written rows this
+    /// fallback exists to catch (FR-010) — reusing the query's own row set to filter in Rust
+    /// closes both by construction, at the cost of transferring every row in `group_id` rather
+    /// than only name-matching ones on the rare miss that reaches this path.
+    fn scan_entity_by_name_ci(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        let lower_name = name.trim().to_lowercase();
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.name_embedding, e.summary, e.attributes \
+             ORDER BY e.created_at ASC, e.uuid ASC",
+            serde_json::json!({ "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .find(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
+            .map(|row| EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                name_embedding: value_as_float_array(&row[5]),
+                summary: value_as_string(&row[6]),
+                attributes: value_as_string(&row[7]),
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+                ..Default::default()
+            }))
     }
 
-    /// Marks the `NameIndex` as potentially stale (FR-003), e.g. after a failed
-    /// post-replay `rebuild_name_index()` or a raw-Cypher mutation whose follow-up rebuild
-    /// failed. Cleared by the next successful `rebuild_name_index()`.
-    pub fn mark_name_index_untrusted(&self) {
-        self.name_index.mark_untrusted();
+    /// Whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed
+    /// without error (issue #221 FR-012). `true` by default — a fresh DB has no migration to
+    /// run. Surfaced through `knowledge_status`'s `name_index_trusted` field (kept on the wire
+    /// for IPC/Python-side compatibility; see `LookupKeyStatus`).
+    pub fn lookup_key_migrated(&self) -> bool {
+        self.lookup_key_status.migrated.load(Ordering::Relaxed)
+    }
+
+    /// Total scan-fallback lookups performed by `get_entity_by_name_ci_with_scan_fallback`
+    /// since this `Db` was opened (SC-004). Surfaced through `knowledge_status`'s
+    /// `name_index_fallback_scans` field (kept on the wire; see `LookupKeyStatus`).
+    pub fn lookup_key_fallback_scan_count(&self) -> u64 {
+        self.lookup_key_status
+            .fallback_scans
+            .load(Ordering::Relaxed)
+    }
+
+    fn record_lookup_key_fallback_scan(&self) {
+        self.lookup_key_status
+            .fallback_scans
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Marks the one-shot `lookup_key` backfill migration as failed (issue #221 FR-012), e.g.
+    /// when `schema::migrate`'s `ALTER TABLE Entity ADD lookup_key` or its backfill pass
+    /// errors. Called from `schema::migrate`; exposed here (not `pub(crate)`) so tests can
+    /// simulate the failure posture directly, matching the old `NameIndex` design's
+    /// `mark_name_index_untrusted` test seam.
+    pub fn mark_lookup_key_migration_failed(&self) {
+        self.lookup_key_status
+            .migrated
+            .store(false, Ordering::Relaxed);
     }
 
     /// Counts Entity nodes whose lowercased name matches the given name (case-insensitive)
@@ -1992,9 +2112,7 @@ impl<'db> Conn<'db> {
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.created_at = timestamp($new_created_at)",
             serde_json::json!({ "uuid": uuid, "new_created_at": created_at }),
-        )?;
-        self.name_index.update_created_at(uuid, created_at);
-        Ok(())
+        )
     }
 
     /// Batch-fetches episode info for a set of entity UUIDs via the MENTIONS relationship.
@@ -2451,9 +2569,9 @@ impl<'db> Conn<'db> {
 
     /// Updates an existing Entity's mutable fields — `name`, `labels` (through
     /// `enforce_entity_first`, since this path doesn't go through `insert_entity`'s own
-    /// invariant enforcement), `summary`, and `attributes` — in a single `SET` statement, then
-    /// refreshes the `NameIndex` entry for `existing.uuid` under the (possibly changed)
-    /// `new_name`. Used by `knowledge_assert_entity`'s update-in-place path (issue #379
+    /// invariant enforcement), `summary`, and `attributes` — plus `lookup_key`, recomputed for
+    /// the (possibly changed) `new_name` (issue #221 FR-001) — in a single `SET` statement.
+    /// Used by `knowledge_assert_entity`'s update-in-place path (issue #379
     /// FR-011): no existing narrow setter (`update_entity_labels`/`update_entity_attributes`)
     /// covers `name`/`summary` in one shot.
     ///
@@ -2478,24 +2596,19 @@ impl<'db> Conn<'db> {
         attributes: &str,
     ) -> Result<(), Error> {
         let labels = enforce_entity_first(labels);
+        let lookup_key = compute_lookup_key(&existing.group_id, new_name);
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.name = $name, e.labels = $labels, \
-             e.summary = $summary, e.attributes = $attributes",
+             e.summary = $summary, e.attributes = $attributes, e.lookup_key = $lookup_key",
             serde_json::json!({
                 "uuid": existing.uuid,
                 "name": new_name,
                 "labels": labels,
                 "summary": summary,
                 "attributes": attributes,
+                "lookup_key": lookup_key,
             }),
-        )?;
-        self.name_index.insert(
-            &existing.uuid,
-            new_name,
-            &existing.group_id,
-            &existing.created_at,
-        );
-        Ok(())
+        )
     }
 
     /// Marks the edge identified by `edge_uuid` as invalid by setting `invalid_at`
@@ -3257,28 +3370,22 @@ pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
     s.to_string()
 }
 
-/// Normalizes a `created_at` string (RFC-3339 or space-format) to the canonical
-/// `"YYYY-MM-DD HH:MM:SS"` space form used by `value_as_timestamp_str`/`format_datetime`.
+/// Computes the composite key materialized in `Entity.lookup_key` and used by every
+/// `get_entity_by_name_ci*` query and write path (issue #221 FR-001/FR-003): `group_id`,
+/// a `\x1f` (unit separator) delimiter, and `name` trimmed and lowercased.
 ///
-/// `NameIndex` (issue #219) sorts entries lexicographically on this string to reproduce the
-/// database's `ORDER BY created_at ASC` winner-selection rule, which only holds if every entry
-/// sharing a key is in the same format — freshly-inserted rows arrive via `insert_entity` as
-/// whatever the caller passed (typically RFC-3339, e.g. episode.rs's `reference_time`), while
-/// `rebuild_name_index()` always produces the space form read back from the database. Without
-/// normalization the `'T'`/`' '` separator byte dominates the comparison ahead of the actual
-/// time-of-day, silently picking the wrong deterministic winner. Falls through verbatim if
-/// neither format parses (defensive; should not happen for a valid `created_at`).
-pub(crate) fn canonical_created_at_for_index(s: &str) -> String {
-    if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-    {
-        return format_datetime(odt);
-    }
-    const SPACE_FMT: &[time::format_description::FormatItem<'static>] =
-        time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-    if let Ok(pdt) = time::PrimitiveDateTime::parse(s, SPACE_FMT) {
-        return format_datetime(pdt.assume_utc());
-    }
-    s.to_string()
+/// Always computed in Rust — including by `schema::backfill_entity_lookup_keys`'s one-shot
+/// migration backfill — never via Cypher `lower()`. `str::to_lowercase()` does full Unicode
+/// case-folding; there's no guarantee lbug's Cypher `lower()` folds identically for non-ASCII
+/// names, so computing the key in exactly one place for every writer (create, update, and
+/// backfill alike) is what guarantees two equal `(group_id, name)` pairs always produce the
+/// same key, regardless of which path wrote the row.
+///
+/// `\x1f` is a non-printable control character vanishingly unlikely to appear in an
+/// LLM-extracted entity name or an operator-supplied `group_id`, but this is a collision
+/// assumption, not a mechanical guarantee — see ADR-0221.
+pub(crate) fn compute_lookup_key(group_id: &str, name: &str) -> String {
+    format!("{group_id}\u{1f}{}", name.trim().to_lowercase())
 }
 
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {
@@ -3426,6 +3533,49 @@ mod fts_missing_index_tests {
         assert!(
             msg.contains("Binder exception:") && msg.contains("doesn't have an index with name"),
             "FTS missing-index error must match the same pattern as HNSW — got: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookup_key_index_ddl_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Regression guard for issue #221: `create_entity_lookup_key_index` must be idempotent —
+    /// a repeat `CREATE ART INDEX` on an already-indexed column must be caught by
+    /// `is_already_exists_error`, not propagate as a genuine failure. This is the empirical
+    /// verification the Plan stage flagged as unconfirmed (only `CREATE_VECTOR_INDEX`/
+    /// `CREATE_FTS_INDEX`'s conflict wording had been checked against `is_already_exists_error`
+    /// before this issue).
+    #[test]
+    fn double_create_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        assert!(conn.create_entity_lookup_key_index().is_ok());
+        assert!(
+            conn.create_entity_lookup_key_index().is_ok(),
+            "a second CREATE ART INDEX call must be swallowed as already-exists, not fail"
+        );
+    }
+
+    /// A genuine failure (missing column) must still propagate, not be silently swallowed as
+    /// already-exists — mirrors `create_fts_indexes_tests::missing_table_returns_genuine_error`.
+    #[test]
+    fn missing_column_returns_genuine_error() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        // No init_schema() — Entity doesn't exist at all, so lookup_key can't either.
+        let err = conn
+            .create_entity_lookup_key_index()
+            .expect_err("must fail when Entity/lookup_key doesn't exist");
+        assert!(
+            !crate::error::is_already_exists_error(&err),
+            "missing-column error must not be misclassified as already-exists: {err}"
         );
     }
 }

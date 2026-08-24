@@ -43,20 +43,25 @@ fn bench_name_lookup_scan_baseline_10k(c: &mut Criterion) {
     });
 }
 
-/// After (issue #219): `get_entity_by_name_ci` resolved via the in-process `NameIndex`
-/// accelerator plus a `get_entity_by_uuid` verify-on-hit — no `Entity` table scan.
-fn bench_name_lookup_indexed_10k(c: &mut Criterion) {
+/// After (issue #221): `get_entity_by_name_ci` resolved via an equality lookup on the
+/// materialized `Entity.lookup_key` column and its secondary ART index — no `Entity` table
+/// scan, and (unlike the in-process `NameIndex` accelerator this replaces, issue #219) no
+/// separate `get_entity_by_uuid` verify-on-hit round trip either, since the database is now
+/// the sole source of truth for the lookup. `setup_bench_db_n` populates `Entity` via
+/// `insert_entity`, which writes `lookup_key` on every row, and `build_indices_and_constraints`
+/// builds `entity_lookup_key_idx` before this benchmark runs.
+fn bench_name_lookup_art_indexed_10k(c: &mut Criterion) {
     let dim = 8;
     let (db, _dir) = setup_bench_db_n(10_000, dim);
 
-    c.bench_function("name_lookup_indexed_10k_hit", |b| {
+    c.bench_function("name_lookup_art_indexed_10k_hit", |b| {
         b.iter(|| {
             let conn = db.connect().unwrap();
             let _ = conn.get_entity_by_name_ci("Entity 9999", "bench").unwrap();
         });
     });
 
-    c.bench_function("name_lookup_indexed_10k_miss", |b| {
+    c.bench_function("name_lookup_art_indexed_10k_miss", |b| {
         b.iter(|| {
             let conn = db.connect().unwrap();
             let _ = conn
@@ -69,6 +74,6 @@ fn bench_name_lookup_indexed_10k(c: &mut Criterion) {
 criterion_group!(
     name_lookup,
     bench_name_lookup_scan_baseline_10k,
-    bench_name_lookup_indexed_10k
+    bench_name_lookup_art_indexed_10k
 );
 criterion_main!(name_lookup);
