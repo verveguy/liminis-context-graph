@@ -371,34 +371,45 @@ pub async fn add_episode(
     // the batch's own entity name embeddings without re-embedding anything (order-only change;
     // extraction.entities is already final by this point).
     //
-    // The summary_embedding pass (issue #470) computes alongside it, per entity, via
-    // `tokio::try_join!` rather than a second sequential loop — the two embed calls for the same
-    // entity are independent, so running them concurrently keeps this batch's added latency to
-    // one round-trip per entity instead of two. Per ADR-0314, an extracted `summary` legitimately
-    // defaults to `""` — that's never sent to the embedder (would waste a round-trip encoding
-    // nothing); those entities get a same-dimension zero vector instead, the same sentinel
-    // `insert_entity` falls back to for any unset `summary_embedding`.
+    // The summary_embedding pass (issue #470) batches alongside it via a second `embed_batch`
+    // call, joined concurrently with `futures::future::try_join` rather than run sequentially —
+    // the two batches are independent, so running them concurrently keeps this chunk's added
+    // latency to one batch round-trip instead of two (issue #445). Per ADR-0314, an extracted
+    // `summary` legitimately defaults to `""` — that's never sent to the embedder (would waste a
+    // batch slot encoding nothing); those entities are excluded from the summary batch and get a
+    // same-dimension zero vector instead, the same sentinel `insert_entity` falls back to for any
+    // unset `summary_embedding`. `summary_indices` records each included entity's original
+    // position so the batch's output (dense, in submission order) can be scattered back to the
+    // right index — the one non-mechanical step in this conversion (see #445 research/plan).
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
-    let mut name_embeddings: Vec<Vec<f32>> = Vec::with_capacity(entity_names.len());
-    let mut summary_embeddings: Vec<Vec<f32>> = Vec::with_capacity(extraction.entities.len());
-    for (n, e) in entity_names.iter().zip(extraction.entities.iter()) {
-        let name_fut = state.embedder.embed(n);
-        let summary_fut = async {
-            if e.summary.trim().is_empty() {
-                Ok(vec![0.0f32; state.embedder.dim()])
-            } else {
-                state.embedder.embed(&e.summary).await
-            }
-        };
-        let (name_emb, summary_emb) = tokio::select! {
-            r = futures::future::try_join(name_fut, summary_fut) => r?,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::Cancelled);
-            }
-        };
-        name_embeddings.push(name_emb);
-        summary_embeddings.push(summary_emb);
+    let name_refs: Vec<&str> = entity_names.iter().map(|s| s.as_str()).collect();
+    let summary_indices: Vec<usize> = extraction
+        .entities
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.summary.trim().is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    let summary_refs: Vec<&str> = summary_indices
+        .iter()
+        .map(|&i| extraction.entities[i].summary.as_str())
+        .collect();
+
+    let (name_embeddings, summary_batch_embeddings) = tokio::select! {
+        r = futures::future::try_join(
+            state.embedder.embed_batch(&name_refs),
+            state.embedder.embed_batch(&summary_refs),
+        ) => r?,
+        _ = state.cancel_token.cancelled() => {
+            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Cancelled);
+        }
+    };
+
+    let mut summary_embeddings: Vec<Vec<f32>> =
+        vec![vec![0.0f32; state.embedder.dim()]; extraction.entities.len()];
+    for (idx, emb) in summary_indices.into_iter().zip(summary_batch_embeddings) {
+        summary_embeddings[idx] = emb;
     }
 
     // Post-extraction edge validation (pre-lock, advisory only): drop self-referential edges —
@@ -449,16 +460,23 @@ pub async fn add_episode(
             }
         }
 
+        // Collected into a stable-ordered Vec (rather than iterated directly off the HashMap)
+        // so the batch call's output — dense, in submission order — can be zipped back to the
+        // correct key by position; HashMap iteration order is unspecified and would otherwise
+        // silently misassign an embedding to the wrong endpoint name (#445 research/plan).
+        let missing_names: Vec<(String, String)> = missing_names.into_iter().collect();
+        let missing_refs: Vec<&str> = missing_names.iter().map(|(_, o)| o.as_str()).collect();
+        let missing_embeddings = tokio::select! {
+            r = state.embedder.embed_batch(&missing_refs) => r?,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        };
+
         let mut salvage_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        for (lower, original) in missing_names {
-            let emb = tokio::select! {
-                r = state.embedder.embed(&original) => r?,
-                _ = state.cancel_token.cancelled() => {
-                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                    return Err(Error::Cancelled);
-                }
-            };
+        for ((lower, original), emb) in missing_names.into_iter().zip(missing_embeddings) {
             let mut best: Option<(f32, &str)> = None;
             for (i, candidate_emb) in name_embeddings.iter().enumerate() {
                 let score = crate::db::cosine_similarity(&emb, candidate_emb);
@@ -508,16 +526,14 @@ pub async fn add_episode(
     }
 
     let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
-    let mut fact_embeddings: Vec<Vec<f32>> = Vec::with_capacity(edge_facts.len());
-    for f in &edge_facts {
-        fact_embeddings.push(tokio::select! {
-            r = state.embedder.embed(f) => r?,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::Cancelled);
-            }
-        });
-    }
+    let edge_fact_refs: Vec<&str> = edge_facts.iter().map(|s| s.as_str()).collect();
+    let fact_embeddings = tokio::select! {
+        r = state.embedder.embed_batch(&edge_fact_refs) => r?,
+        _ = state.cancel_token.cancelled() => {
+            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            return Err(Error::Cancelled);
+        }
+    };
 
     // ── Phase B: async dedup (no lock) ────────────────────────────────────────
     if state.cancel_token.is_cancelled() {
