@@ -1,128 +1,18 @@
-/* Scoped to the playground island. `not-content` on the wrapper opts out of
-   Starlight's prose styles, which would otherwise style the textarea and SVG. */
-.c4-playground {
-  border: 1px solid var(--sl-color-gray-5);
-  border-radius: 0.5rem;
-  overflow: hidden;
-  margin: 1.5rem 0;
-  background: var(--sl-color-bg);
-}
-.c4-playground__bar {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid var(--sl-color-gray-5);
-  font-size: var(--sl-text-sm);
-  flex-wrap: wrap;
-}
-.c4-playground__bar label { display: inline-flex; align-items: center; gap: 0.35rem; }
-.c4-playground__bar button {
-  border: 1px solid var(--sl-color-gray-5);
-  background: transparent;
-  color: inherit;
-  border-radius: 0.3rem;
-  padding: 0.15rem 0.6rem;
-  cursor: pointer;
-  font: inherit;
-}
-.c4-playground__bar button:disabled { opacity: 0.45; cursor: default; }
-.c4-playground__hint { color: var(--sl-color-gray-3); }
-.c4-playground__panes { display: grid; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr); }
-@media (max-width: 50rem) { .c4-playground__panes { grid-template-columns: 1fr; } }
-.c4-playground__source {
-  border: 0;
-  border-right: 1px solid var(--sl-color-gray-5);
-  padding: 0.75rem;
-  font-family: var(--sl-font-mono);
-  font-size: var(--sl-text-xs);
-  line-height: 1.5;
-  resize: vertical;
-  background: transparent;
-  color: inherit;
-  min-height: 100%;
-}
-.c4-playground__source:focus { outline: 2px solid var(--sl-color-accent); outline-offset: -2px; }
-.c4-playground__canvas {
-  overflow: auto;
-  padding: 0.5rem;
-  display: flex;
-}
-
-/* Centred with auto margins, never `justify-content`/`align-items: center`.
-   Those centre the overflow too: a diagram wider than the pane spills equally
-   left and right, and the left half cannot be scrolled to — the scroll origin
-   is the container's start edge, which the centring has already moved content
-   past. It reads as a diagram with its left side cut off and no way to reach
-   it, because that is exactly what it is.
-
-   Auto margins collapse to zero once there is no free space, so the same rule
-   centres a small diagram and lets a large one start at its true origin and
-   scroll. The child here is the renderer's own positioning wrapper, not the
-   <svg>: that wrapper is the flex item, which is why a `max-width` on the svg
-   never constrained anything. */
-.c4-playground__canvas > * { margin: auto; }
-
-/* Lightbox. The first attempt was inset:0 with no backdrop — a takeover, not a
-   modal. The second used absolute + inset on the panel, which let the content
-   dictate the height and pushed it past the viewport.
+/* The playground's own styles ship with it; this maps its tokens onto
+   Starlight's, so it looks like part of the site rather than like a widget
+   dropped into it.
    
-   This version centres with flex and puts the margin on the *container* as
-   padding, so a gap on all four sides is guaranteed regardless of content. */
-.c4-playground__lightbox {
-  position: fixed;
-  inset: 0;
-  /* Above Starlight's header (z-index 10) and mobile nav. A body child, so
-     this number is not competing inside a nested stacking context. */
-  z-index: 9999;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 4vh 4vw;
-}
-.c4-playground__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgb(0 0 0 / 0.55);
-  backdrop-filter: blur(2px);
-}
-.c4-playground--expanded {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  max-width: 90rem;
-  display: flex;
-  flex-direction: column;
-  border-radius: 0.75rem;
-  box-shadow: 0 1.5rem 4rem rgb(0 0 0 / 0.45);
-  background: var(--sl-color-bg);
-  overflow: hidden;
-}
-.c4-playground--expanded .c4-playground__panes { flex: 1; min-height: 0; }
-.c4-playground--expanded .c4-playground__source,
-.c4-playground--expanded .c4-playground__canvas { min-height: 0; overflow: auto; }
+   Overriding the custom properties rather than the rules is what makes this
+   survive a package upgrade: new rules inside the package pick these up
+   automatically, where copied-and-edited rules would not. */
+@import '@liminis/diagrams/playground.css';
 
-/* Diagram-only: an illustration, not an invitation to edit. */
-.c4-playground--diagram-only .c4-playground__panes { grid-template-columns: 1fr; }
-
-.c4-playground__zoom {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.15rem;
-  margin-left: auto;
-}
-.c4-playground__zoom button {
-  min-width: 2rem;
-  padding: 0.2rem 0.4rem;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-/* The readout doubles as the reset control, disabled at 100% rather than
-   hidden — a control that vanishes when it does nothing is one the reader has
-   to rediscover. Disabled styling comes from the bar's own button rule. */
-
-.c4-playground__expand {
-  margin-left: 0.25rem;
-  line-height: 1;
-  padding: 0.2rem 0.5rem;
+.c4-playground {
+  --c4-border: var(--sl-color-gray-5);
+  --c4-bg: var(--sl-color-bg);
+  --c4-muted: var(--sl-color-gray-3);
+  --c4-accent: var(--sl-color-accent);
+  --c4-font-mono: var(--sl-font-mono);
+  --c4-text-sm: var(--sl-text-sm);
+  --c4-text-xs: var(--sl-text-xs);
 }
