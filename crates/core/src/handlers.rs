@@ -3557,6 +3557,17 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let gid_wal = group_id.clone();
+    // Held across both `spawn_blocking` sections below *and* the intervening
+    // `state.embedder.embed(...).await` calls on the create branch — not just around the DB
+    // work. This is required for correctness, not an oversight: `write_lock` is the only thing
+    // preventing two concurrent creates of the same not-yet-existing (name, group_id) from both
+    // resolving "not found" and both inserting, which would violate the upsert's uniqueness
+    // invariant (see `Db::connect`'s single-writer-instance doc comment). The tradeoff is that
+    // every create-path call now serializes unrelated writes for the duration of an embedder
+    // round-trip, where before this fix the embed ran unguarded; a narrower critical section
+    // (drop the guard during embed, then re-resolve under a freshly-acquired guard right before
+    // insert, falling back to update if another writer won the race) would recover that
+    // parallelism but was left as a follow-up rather than folded into this reordering.
     let _guard = state.write_lock.write().await;
 
     let db_resolve = Arc::clone(&db);
@@ -3776,6 +3787,12 @@ async fn handle_assert_relationship(
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let gid_wal = group_id.clone();
+    // See the matching comment in `handle_assert_entity`: held across both `spawn_blocking`
+    // sections and the create branch's `state.embedder.embed(...).await`, which is required to
+    // keep concurrent creates of the same not-yet-existing edge from both resolving "not found"
+    // and both inserting. Same known tradeoff (serializes unrelated writes for the duration of
+    // an embedder round-trip on create); a narrower critical section is a possible follow-up,
+    // not folded into this reordering.
     let _guard = state.write_lock.write().await;
 
     let db_resolve = Arc::clone(&db);
