@@ -749,7 +749,14 @@ async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
 /// Acceptance Scenario 2/3: a batch within the chunk limit issues exactly one request carrying
 /// all texts as an array, and the response is reassembled into request order via the `index`
 /// field even though the stub deliberately returns entries in reverse array order.
-#[tokio::test]
+// Holding the std `RwLockReadGuard` across `.await` is intentional, not an oversight — see
+// `EMBED_BATCH_SIZE_ENV_LOCK`'s doc comment and `ipc_parity.rs`'s identical pattern for
+// `CHUNK_ADVISORY_ENV_LOCK` (#429): `flavor = "current_thread"` pins this test to a
+// single-threaded runtime, so the guard is never held across a yield point that could contend
+// with another task on the same runtime — only with `cargo test`'s parallel OS threads, which
+// this guard still correctly serializes against.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
 async fn http_transport_embed_batch_single_request_and_correct_order() {
     let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
     let dim = 4;
@@ -774,7 +781,11 @@ async fn http_transport_embed_batch_single_request_and_correct_order() {
 
 /// FR-004: a batch larger than the chunk limit is transparently split into multiple
 /// sub-requests, and the full, correctly-ordered result is returned as if it were one call.
-#[tokio::test]
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockWriteGuard` (inside `EmbedBatchSizeEnvGuard`) across `.await` is safe under
+// `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
 async fn http_transport_embed_batch_chunks_oversized_batch() {
     let _env_guard = EmbedBatchSizeEnvGuard::set("2");
     let dim = 4;
@@ -827,8 +838,11 @@ async fn http_transport_embed_batch_mismatched_response_errors() {
     );
 }
 
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn uds_transport_embed_batch_roundtrip_and_order() {
     let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
     let dir = tempfile::TempDir::new().unwrap();
@@ -851,8 +865,12 @@ async fn uds_transport_embed_batch_roundtrip_and_order() {
     }
 }
 
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockWriteGuard` (inside `EmbedBatchSizeEnvGuard`) across `.await` is safe under
+// `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn uds_transport_embed_batch_chunks_oversized_batch() {
     let _env_guard = EmbedBatchSizeEnvGuard::set("2");
     let dir = tempfile::TempDir::new().unwrap();
