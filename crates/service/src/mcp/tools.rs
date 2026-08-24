@@ -84,7 +84,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_find_relationships",
             description: "Hybrid (full-text + vector) search for relationships (facts) \
-                           matching a query.",
+                           matching a query. Returned edges' `episode_uuids` is always \
+                           empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -137,7 +138,8 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_edges_by_group",
             description: "List all relationship edges belonging to the given group IDs, or \
-                           every group's edges when group_ids is omitted.",
+                           every group's edges when group_ids is omitted. Returned edges' \
+                           `episode_uuids` is always empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -148,7 +150,8 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_edges_by_uuids",
-            description: "Fetch relationship edges by their UUIDs.",
+            description: "Fetch relationship edges by their UUIDs. Returned edges' \
+                           `episode_uuids` is always empty on this read path (not populated).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -208,7 +211,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_list_relationships",
             description: "List relationship edges (facts), optionally scoped to specific \
-                           group IDs, with episode provenance attached.",
+                           group IDs. Each edge's `episode_uuids` lists episodes that mention \
+                           its source or target entity (either-endpoint co-occurrence), not \
+                           evidence for that specific relationship.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -226,7 +231,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_entity_neighbors",
             description: "Get the immediate graph neighborhood (connected edges and nodes) \
-                           of an entity.",
+                           of an entity. Each returned edge's `episode_uuids` lists episodes \
+                           that mention its source or target entity (either-endpoint \
+                           co-occurrence), not evidence for that specific relationship.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -1187,6 +1194,58 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    #[test]
+    fn edge_tool_descriptions_state_episode_uuids_semantics_accurately() {
+        let r = registry();
+        let desc_of = |name: &str| {
+            r.iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool {name} must remain registered"))
+                .description
+        };
+
+        // These three read paths build `RelatesToEdge` via `..Default::default()` and
+        // never call `enrich_edge_from_entity_ep_info`, so `episode_uuids` is
+        // unconditionally empty on returned edges (issue #410).
+        for name in [
+            "knowledge_find_relationships",
+            "knowledge_get_edges_by_group",
+            "knowledge_get_edges_by_uuids",
+        ] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("episode_uuids") && desc.contains("always") && desc.contains("empty"),
+                "{name} description must state episode_uuids is always empty on this path, got: {desc}"
+            );
+            assert!(
+                !desc.to_lowercase().contains("provenance"),
+                "{name} description must not claim provenance for episode_uuids, got: {desc}"
+            );
+        }
+
+        // These two call `enrich_edge_from_entity_ep_info`, populating `episode_uuids`
+        // with either-endpoint entity mention co-occurrence (ADR-0012) — not evidence
+        // for the specific relationship.
+        for name in [
+            "knowledge_list_relationships",
+            "knowledge_get_entity_neighbors",
+        ] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("episode_uuids") && desc.contains("either-endpoint"),
+                "{name} description must state either-endpoint co-occurrence semantics, got: {desc}"
+            );
+            assert!(
+                !desc.to_lowercase().contains("provenance"),
+                "{name} description must not claim provenance for edge episode_uuids, got: {desc}"
+            );
+        }
+
+        // knowledge_list_entities is entity-scoped and out of scope for issue #410:
+        // "episode provenance" is accurate there and must remain untouched.
+        assert!(desc_of("knowledge_list_entities").contains("episode provenance attached"));
     }
 
     #[test]
