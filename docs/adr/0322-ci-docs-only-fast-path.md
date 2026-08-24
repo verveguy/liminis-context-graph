@@ -204,3 +204,37 @@ edits that script now runs the full Rust suite unnecessarily. That is over-class
 the safe direction for a deny-list, per this ADR's own "unmatched paths default to docs is
 the risky direction" reasoning — and it does not affect ordinary docs PRs, which regenerate
 `docs/llms-full.txt` without touching the generator itself.
+
+
+## Amendment (2026-08-23): documentation-only exceptions to the broad patterns
+
+`^scripts/` and `^\.github/workflows/` were accurate proxies for "paths the Rust jobs
+depend on" when every script and workflow in the repository served the build. That
+stopped being true when ADR-0477 added `scripts/docs-publish-build.sh`,
+`scripts/docs-publish-latest-stable-version.sh` and the `docs-publish.yml` /
+`docs-drift.yml` workflows, and when the Jekyll site was replaced by an Astro site under
+`site/`. A pull request touching only the documentation site and its publishing script
+was classified code-touching and ran the full Rust suite — around forty minutes of
+compiling test binaries for a change no Rust file could observe.
+
+`DOCS_ONLY_PATTERN` now removes those paths from the candidate list before the deny-list
+is applied. Three properties are deliberate:
+
+- **The broad patterns stay broad.** A script or workflow added tomorrow still defaults
+  to code-touching. The exceptions are named individually, never by prefix, so nothing
+  new is exempted by accident.
+- **Each exception is a file the Rust jobs demonstrably never invoke.** `ci.yml` runs
+  `stage-openssl-static.sh`, `assert-static-openssl.sh` and
+  `crates/eval/scripts/test-scripts.sh`, and nothing else under `scripts/`;
+  `docs-drift.yml` and `docs-publish.yml` are separate workflows that `ci.yml` neither
+  calls nor shares a job with.
+- **The fail-safe direction of §3 is unchanged.** This only ever moves a named path from
+  "code" to "docs", never the reverse, and every early return still defaults to
+  `code_changed=true`.
+
+The patterns moved into `patterns.sh` so that `test-patterns.sh` exercises the strings
+CI actually uses rather than a copy that can drift. That test runs in the `changes` job
+itself — unconditional, and not gated on the output it validates, which a pattern wrong
+in the skip direction would otherwise suppress along with the rest of the suite. It
+asserts both directions, including that an unrecognised script or workflow still
+classifies as code.
