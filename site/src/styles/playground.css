@@ -27,7 +27,7 @@
   font: inherit;
 }
 .c4-playground__bar button:disabled { opacity: 0.45; cursor: default; }
-.c4-playground__hint { margin-left: auto; color: var(--sl-color-gray-3); }
+.c4-playground__hint { color: var(--sl-color-gray-3); }
 .c4-playground__panes { display: grid; grid-template-columns: minmax(0, 20rem) minmax(0, 1fr); }
 @media (max-width: 50rem) { .c4-playground__panes { grid-template-columns: 1fr; } }
 .c4-playground__source {
@@ -47,12 +47,21 @@
   overflow: auto;
   padding: 0.5rem;
   display: flex;
-  /* Centre on both axes. `margin: auto` on the SVG alone leaves it top-weighted
-     once the pane is taller than the diagram, which the lightbox always is. */
-  align-items: center;
-  justify-content: center;
 }
-.c4-playground__canvas svg { max-width: 100%; height: auto; }
+
+/* Centred with auto margins, never `justify-content`/`align-items: center`.
+   Those centre the overflow too: a diagram wider than the pane spills equally
+   left and right, and the left half cannot be scrolled to — the scroll origin
+   is the container's start edge, which the centring has already moved content
+   past. It reads as a diagram with its left side cut off and no way to reach
+   it, because that is exactly what it is.
+
+   Auto margins collapse to zero once there is no free space, so the same rule
+   centres a small diagram and lets a large one start at its true origin and
+   scroll. The child here is the renderer's own positioning wrapper, not the
+   <svg>: that wrapper is the flex item, which is why a `max-width` on the svg
+   never constrained anything. */
+.c4-playground__canvas > * { margin: auto; }
 
 /* Lightbox. The first attempt was inset:0 with no backdrop — a takeover, not a
    modal. The second used absolute + inset on the panel, which let the content
@@ -95,6 +104,22 @@
 
 /* Diagram-only: an illustration, not an invitation to edit. */
 .c4-playground--diagram-only .c4-playground__panes { grid-template-columns: 1fr; }
+
+.c4-playground__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  margin-left: auto;
+}
+.c4-playground__zoom button {
+  min-width: 2rem;
+  padding: 0.2rem 0.4rem;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+/* The readout doubles as the reset control, disabled at 100% rather than
+   hidden — a control that vanishes when it does nothing is one the reader has
+   to rediscover. Disabled styling comes from the bar's own button rule. */
 
 .c4-playground__expand {
   margin-left: 0.25rem;

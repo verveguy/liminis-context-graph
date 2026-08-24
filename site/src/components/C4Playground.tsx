@@ -32,6 +32,17 @@ export interface C4PlaygroundProps {
   height?: string
 }
 
+/**
+ * Zoom steps, rather than a continuous factor.
+ *
+ * A diagram is not a photograph: there is a size at which its labels are legible
+ * and sizes either side of it that are not, so the useful range is small and
+ * discrete. Steps also keep the control to two buttons and a readout, which is
+ * the entire UI anyone needs here.
+ */
+const ZOOM_STEPS = [0.5, 0.75, 1, 1.5, 2, 3]
+const DEFAULT_ZOOM_INDEX = ZOOM_STEPS.indexOf(1)
+
 export default function C4Playground({
   source,
   editable = true,
@@ -42,6 +53,7 @@ export default function C4Playground({
   const [positions, setPositions] = useState<ManualLayout['positions']>({})
   const [isEditMode, setIsEditMode] = useState(editable)
   const [isExpanded, setIsExpanded] = useState(false)
+  const [zoomIndex, setZoomIndex] = useState(DEFAULT_ZOOM_INDEX)
   const isDark = useIsDarkMode()
   const panelRef = useRef<HTMLDivElement>(null)
   const returnFocusTo = useRef<Element | null>(null)
@@ -116,6 +128,10 @@ export default function C4Playground({
     return result
   }, [text])
 
+  const zoom = ZOOM_STEPS[zoomIndex]
+  const stepZoom = (by: number) =>
+    setZoomIndex((i) => Math.min(ZOOM_STEPS.length - 1, Math.max(0, i + by)))
+
   const positionCount = Object.keys(positions).length
   const showSource = !readOnly
 
@@ -158,6 +174,37 @@ export default function C4Playground({
               ? `${positionCount} positions held in memory`
               : 'laid out by dagre'}
         </span>
+        <div className="c4-playground__zoom">
+          <button
+            type="button"
+            onClick={() => stepZoom(-1)}
+            disabled={zoomIndex === 0}
+            aria-label="Zoom out"
+            title="Zoom out"
+          >
+            −
+          </button>
+          {/* A percentage, not "1.5×": the reader is judging whether the labels
+              are readable, not doing arithmetic against an original. */}
+          <button
+            type="button"
+            onClick={() => setZoomIndex(DEFAULT_ZOOM_INDEX)}
+            disabled={zoomIndex === DEFAULT_ZOOM_INDEX}
+            aria-label="Reset zoom to actual size"
+            title="Reset zoom"
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <button
+            type="button"
+            onClick={() => stepZoom(1)}
+            disabled={zoomIndex === ZOOM_STEPS.length - 1}
+            aria-label="Zoom in"
+            title="Zoom in"
+          >
+            +
+          </button>
+        </div>
         <button
           type="button"
           className="c4-playground__expand"
@@ -190,6 +237,7 @@ export default function C4Playground({
               isEditMode={editable && isEditMode}
               manualPositions={positions}
               onPositionChange={setPositions}
+              zoom={zoom}
             />
           ) : (
             <C4ErrorDisplay errors={parsed.errors} isDarkMode={isDark} />
