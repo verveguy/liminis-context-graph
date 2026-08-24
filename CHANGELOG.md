@@ -46,6 +46,63 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   Building *from source* now requires OpenSSL 3 development files (`brew install openssl@3` on
   macOS, `apt install libssl-dev` on Debian/Ubuntu). Installing a released binary requires nothing.
 
+- Forward-ported from the 0.13 maintenance line: the edge `episode_uuids` documentation
+  correction (#410) and per-group ontology drift detection (#451), both released in 0.13.4. They
+  are listed under [0.13.4] below and are called out here because the maintenance branch was cut
+  from `v0.13.3` — a later version number does **not** by itself imply it contains an earlier
+  patch release's fixes. (#494)
+
+## [0.13.4] - 2026-08-24
+
+A patch release on the 0.13 maintenance line, extending drift detection to cover the per-group
+ontologies 0.13.3 introduced, and correcting a piece of public API documentation that claimed a
+guarantee the code never made.
+
+### Added
+
+- **Ontology drift is now detected per group, not just workspace-wide.** 0.13.3 added per-group
+  ontologies (`.lcg/ontology/<encoded_group_id>.yaml`, #446) but deliberately left drift detection
+  workspace-scoped — ADR-0446 recorded this as a known v1 limitation, meaning a group governed only
+  by its own ontology file got **no drift warning at all** when that file changed across a restart.
+  Drift exists to catch one hazard: the ontology changed while the database still holds data
+  ingested under the previous vocabulary. Per-group ontologies reintroduced that hazard without
+  the corresponding alarm. Each group's ontology is now hashed against its own sidecar record and
+  compared on first use, warning and recommending Recreate + re-ingest exactly as the
+  workspace-wide check does. (#451)
+- **`knowledge_status` reports a `group_ontology_drift` breakdown.** An array of
+  `{group_id, drifted, drift_summary}`, one entry per group this process has resolved an ontology
+  for. Drift is computed lazily on a group's first use, so a group this process has not touched is
+  **absent from the array** rather than reported with `drifted: false` — "not yet computed" is
+  deliberately distinguishable from "not drifted", so the field is never a false all-clear. The
+  existing workspace-wide ontology and drift fields are unchanged. (#451)
+
+### Fixed
+
+- **Edge `episode_uuids` no longer documented as provenance.** The field's name and its MCP tool
+  descriptions implied the episodes listed on a relationship edge were the evidence that produced
+  that fact. They are not: `get_episode_info_for_entities` returns every episode mentioning
+  **either** endpoint entity, deduplicated, regardless of whether it had anything to do with
+  asserting the relationship — ADR-0012's deliberate either-endpoint semantics, accurately
+  described in the function's own doc comment but never surfaced to callers. For a well-connected
+  entity that can be most of the corpus. Consumers treating the field as evidence were drawing
+  conclusions the data does not support.
+
+  The behaviour is unchanged and intentional; the documentation now matches it. Tool descriptions
+  for `knowledge_list_relationships` and `knowledge_get_entity_neighbors` state the either-endpoint
+  co-occurrence semantics explicitly. Three further read paths —
+  `knowledge_find_relationships`, `knowledge_get_edges_by_group` and `knowledge_get_edges_by_uuids`
+  — never populate the field at all and now say so, rather than leaving callers to infer meaning
+  from an empty array. A registry test asserts these descriptions stay accurate. (#410)
+
+### Internal
+
+- CI's `push` trigger now covers `maint/**`, so maintenance branches get the same post-merge signal
+  `main` has. Fabrik's merge train is main-only (it pins `DefaultBaseBranch()`), so release-line
+  fixes routed to a maintenance branch via `base:<branch>` are hand-landed and previously produced
+  no post-merge run. GitHub runs a workflow from the pushed branch's own tree, so this line has to
+  exist on each maintenance branch independently — adding it to `main` alone does not make it fire.
+  (#484)
+
 ## [0.13.3] - 2026-08-22
 
 A patch release closing the upgrade-path regression 0.13.2 introduced, scoping the last two
