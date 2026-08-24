@@ -132,7 +132,19 @@ runs:
           PATTERN="${PATTERN%)}|${EXTRA_DENY_PATTERN})"
         fi
 
-        CODE_CANDIDATES=$(echo "$CHANGED_FILES" | grep -Ev "$DOCS_ONLY_PATTERN") || true
+        # `|| true` would be wrong here, and wrong in the dangerous direction: it
+        # masks a grep *error* (exit > 1) as well as "no lines selected", leaving
+        # CODE_CANDIDATES empty so the deny-list below matches nothing and the PR
+        # is classified docs-only. A malformed pattern would silently skip the
+        # suite — the precise inversion of ADR-0322 §3. Exit 1 is the ordinary
+        # case (every changed file was documentation-only); anything above it is
+        # an error and defaults to the full suite.
+        DOCS_GREP_STATUS=0
+        CODE_CANDIDATES=$(echo "$CHANGED_FILES" | grep -Ev "$DOCS_ONLY_PATTERN") || DOCS_GREP_STATUS=$?
+        if [ "$DOCS_GREP_STATUS" -gt 1 ]; then
+          emit true "WARNING: grep failed (exit $DOCS_GREP_STATUS) while filtering documentation-only paths, defaulting to full suite (fail-safe)"
+          exit 0
+        fi
 
         # `shell: bash` runs with `-eo pipefail`. A bare command substitution whose grep
         # exits 1 (no match) therefore aborts the step *before* the next line executes —
