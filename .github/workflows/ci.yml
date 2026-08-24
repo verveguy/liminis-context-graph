@@ -91,6 +91,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # Runs here rather than in `test`, because `test` is gated on the very
+      # output this validates — a pattern wrong in the skip direction would take
+      # the test suite down with it and go unreported. This job is unconditional
+      # and the check costs a second.
+      - name: Check the classification patterns
+        run: .github/actions/classify-changes/test-patterns.sh
+
       - name: Classify diff (docs-only vs code-touching)
         id: classify
         uses: ./.github/actions/classify-changes

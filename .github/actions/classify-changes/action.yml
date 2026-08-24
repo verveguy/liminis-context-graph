@@ -120,11 +120,31 @@ runs:
         # catches its absence (ADR-0398). Both run inside `build-release`, so without
         # this pattern a PR editing only those scripts would be classified docs-only and
         # skip the very job that exercises them.
-        PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^\.github/actions/|^scripts/|^crates/eval/scripts/'
+        # Patterns live in patterns.sh so the test suite exercises the same strings
+        # CI does. A failure to source aborts this step, which fails the `changes`
+        # job — and ADR-0322 §3's `needs.changes.result != 'success'` guards then
+        # treat that as code-changed, so the fail-safe direction still holds.
+        # shellcheck source=patterns.sh
+        source "${GITHUB_ACTION_PATH}/patterns.sh"
+
+        PATTERN="${CODE_PATTERN}"
         if [ -n "$EXTRA_DENY_PATTERN" ]; then
-          PATTERN="${PATTERN}|${EXTRA_DENY_PATTERN}"
+          PATTERN="${PATTERN%)}|${EXTRA_DENY_PATTERN})"
         fi
-        PATTERN="${PATTERN})"
+
+        # `|| true` would be wrong here, and wrong in the dangerous direction: it
+        # masks a grep *error* (exit > 1) as well as "no lines selected", leaving
+        # CODE_CANDIDATES empty so the deny-list below matches nothing and the PR
+        # is classified docs-only. A malformed pattern would silently skip the
+        # suite — the precise inversion of ADR-0322 §3. Exit 1 is the ordinary
+        # case (every changed file was documentation-only); anything above it is
+        # an error and defaults to the full suite.
+        DOCS_GREP_STATUS=0
+        CODE_CANDIDATES=$(echo "$CHANGED_FILES" | grep -Ev "$DOCS_ONLY_PATTERN") || DOCS_GREP_STATUS=$?
+        if [ "$DOCS_GREP_STATUS" -gt 1 ]; then
+          emit true "WARNING: grep failed (exit $DOCS_GREP_STATUS) while filtering documentation-only paths, defaulting to full suite (fail-safe)"
+          exit 0
+        fi
 
         # `shell: bash` runs with `-eo pipefail`. A bare command substitution whose grep
         # exits 1 (no match) therefore aborts the step *before* the next line executes —
@@ -134,7 +154,7 @@ runs:
         # assignment from tripping `-e` while still capturing grep's real exit status, so
         # the three-way branch (matched / no match / grep error) behaves as written.
         GREP_STATUS=0
-        MATCHES=$(echo "$CHANGED_FILES" | grep -E "$PATTERN") || GREP_STATUS=$?
+        MATCHES=$(echo "$CODE_CANDIDATES" | grep -E "$PATTERN") || GREP_STATUS=$?
         if [ "$GREP_STATUS" -eq 0 ]; then
           echo "$MATCHES"
           emit true "code-relevant path(s) matched above: running full suite"

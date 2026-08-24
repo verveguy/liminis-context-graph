@@ -199,8 +199,56 @@ say — would have been classified `code_changed=false` and skipped `build-relea
 job that exercises them, and the permanent pre-tag regression guard ADR-0398 relies on. The
 guard would have been silently unenforced in exactly the change set most likely to break it.
 
-**Cost.** `scripts/generate-docs-llms-full.sh` is swept up by the same pattern, so a PR that
-edits that script now runs the full Rust suite unnecessarily. That is over-classification —
+**Cost** (superseded by the 2026-08-23 amendment below, which reclassifies this script as
+documentation). `scripts/generate-docs-llms-full.sh` is swept up by the same pattern, so a PR
+that edits that script now runs the full Rust suite unnecessarily. That is over-classification —
 the safe direction for a deny-list, per this ADR's own "unmatched paths default to docs is
 the risky direction" reasoning — and it does not affect ordinary docs PRs, which regenerate
 `docs/llms-full.txt` without touching the generator itself.
+
+
+## Amendment (2026-08-23): documentation-only exceptions to the broad patterns
+
+`^scripts/` and `^\.github/workflows/` were accurate proxies for "paths the Rust jobs
+depend on" when every script and workflow in the repository served the build. That
+stopped being true when ADR-0477 added `scripts/docs-publish-build.sh`,
+`scripts/docs-publish-latest-stable-version.sh` and the `docs-publish.yml` /
+`docs-drift.yml` workflows, and when the Jekyll site was replaced by an Astro site under
+`site/`. A pull request touching only the documentation site and its publishing script
+was classified code-touching and ran the full Rust suite — around forty minutes of
+compiling test binaries for a change no Rust file could observe.
+
+**This reverses the accepted cost recorded on 2026-08-16.** That amendment classified
+`^scripts/` as code to protect `stage-openssl-static.sh` and `assert-static-openssl.sh`,
+and accepted, in as many words, that `scripts/generate-docs-llms-full.sh` would be swept
+up with them and run the full Rust suite unnecessarily. That trade was correct when the
+directory held three scripts and one of them was the odd one out. It is no longer: five
+scripts now live there, three of them documentation-only, and the exception has become
+the rule. `generate-docs-llms-full.sh` is therefore reclassified as documentation, and
+the earlier amendment's "Cost" paragraph no longer describes current behaviour.
+
+The protection that amendment was written for is untouched: `stage-openssl-static.sh`
+and `assert-static-openssl.sh` are not exempted, and a pull request editing only those
+still runs `build-release`.
+
+`DOCS_ONLY_PATTERN` removes those paths from the candidate list before the deny-list is
+applied. Three properties are deliberate:
+
+- **The broad patterns stay broad.** A script or workflow added tomorrow still defaults
+  to code-touching. The exceptions are named individually, never by prefix, so nothing
+  new is exempted by accident.
+- **Each exception is a file the Rust jobs demonstrably never invoke.** `ci.yml` runs
+  `stage-openssl-static.sh`, `assert-static-openssl.sh` and
+  `crates/eval/scripts/test-scripts.sh`, and nothing else under `scripts/`;
+  `docs-drift.yml` and `docs-publish.yml` are separate workflows that `ci.yml` neither
+  calls nor shares a job with.
+- **The fail-safe direction of §3 is unchanged.** This only ever moves a named path from
+  "code" to "docs", never the reverse, and every early return still defaults to
+  `code_changed=true`.
+
+The patterns moved into `patterns.sh` so that `test-patterns.sh` exercises the strings
+CI actually uses rather than a copy that can drift. That test runs in the `changes` job
+itself — unconditional, and not gated on the output it validates, which a pattern wrong
+in the skip direction would otherwise suppress along with the rest of the suite. It
+asserts both directions, including that an unrecognised script or workflow still
+classifies as code.
