@@ -460,9 +460,10 @@ pub async fn add_episode(
             }
         }
 
-        // Collected into a stable-ordered Vec (rather than iterated directly off the HashMap)
-        // so the batch call's output — dense, in submission order — can be zipped back to the
-        // correct key by position; HashMap iteration order is unspecified and would otherwise
+        // Collected into a Vec with one fixed ordering (rather than iterated directly off the
+        // HashMap) so the batch call's output — dense, in submission order — can be zipped back
+        // to the correct key by position; HashMap iteration order is unspecified per-run, so
+        // iterating the map twice (once to build the request, once to zip the response) could
         // silently misassign an embedding to the wrong endpoint name (#445 research/plan).
         let missing_names: Vec<(String, String)> = missing_names.into_iter().collect();
         let missing_refs: Vec<&str> = missing_names.iter().map(|(_, o)| o.as_str()).collect();

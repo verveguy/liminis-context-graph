@@ -76,7 +76,15 @@ pub fn spawn_stub_embedder() -> u16 {
                     Value::String(s) => vec![s],
                     Value::Array(items) => items
                         .into_iter()
-                        .map(|v| v.as_str().unwrap_or_default().to_string())
+                        .map(|v| {
+                            v.as_str()
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "stub embedder: non-string element in 'input' array: {v}"
+                                    )
+                                })
+                                .to_string()
+                        })
                         .collect(),
                     _ => Vec::new(),
                 })

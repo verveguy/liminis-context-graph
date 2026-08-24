@@ -819,10 +819,12 @@ impl CountingEmbedder {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Number of `embed_batch` round-trips (one per call, regardless of how many texts it
-    /// carries) — distinct from `call_count()`, which counts single-text `embed()` calls. Used
-    /// by tests asserting a converted call site issues one batch call per chunk rather than one
-    /// call per item (#445).
+    /// Number of `embed_batch` *invocations* (one per call site call, regardless of how many
+    /// texts it carries, and including a no-op call on an empty slice per FR-006) — distinct
+    /// from `call_count()`, which counts single-text `embed()` calls. This is not a count of
+    /// underlying transport round-trips: an implementor like `OaiEmbedder` may internally split
+    /// one invocation into several chunked HTTP/UDS requests. Used by tests asserting a
+    /// converted call site issues one batch call per chunk rather than one call per item (#445).
     pub fn batch_call_count(&self) -> usize {
         self.batch_calls.load(std::sync::atomic::Ordering::SeqCst)
     }

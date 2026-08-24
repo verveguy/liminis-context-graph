@@ -823,8 +823,14 @@ async fn http_transport_embed_batch_empty_input_issues_no_request() {
 /// FR-005/Acceptance Scenario 4: a response whose entry count doesn't match the request (here,
 /// a server bug returning a fixed count regardless of input) surfaces as a single error, not a
 /// partial or silently-truncated/padded result.
-#[tokio::test]
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"` — this test
+// calls `embed_batch` with a non-empty slice, so it reads `LCG_EMBED_BATCH_SIZE` and must take
+// the same guard as every other test that does.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
 async fn http_transport_embed_batch_mismatched_response_errors() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
     let dim = 4;
     let (addr, _server) = spawn_stub_http_fixed_count_server(dim, 2).await;
     let url = format!("http://{addr}/v1/embeddings");

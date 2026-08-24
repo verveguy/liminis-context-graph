@@ -3,8 +3,8 @@
 //! each per chunk, instead of one `embed()` call per item.
 //!
 //! Uses `NameMapEmbedder` (a pure string->vector lookup) wrapped in `CountingEmbedder`, so a test
-//! can assert both the number of round-trips issued (`batch_call_count()`/`call_count()`) and —
-//! via retrieval — that each vector landed on the correct entity/edge, which a wrong batch/index
+//! can assert both the number of calls issued (`batch_call_count()`/`call_count()`) and — via
+//! retrieval — that each vector landed on the correct entity/edge, which a wrong batch/index
 //! offset would silently scramble.
 
 use std::collections::HashMap;
