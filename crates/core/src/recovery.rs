@@ -437,11 +437,9 @@ pub fn run_full_recovery_sequence(
         }
         // WAL replay above bypassed insert_entity/update_entity_created_at — every replayed
         // row's lookup_key is NULL — so backfill it before build_indices_and_constraints below
-        // ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
-        if let Err(e) = schema::backfill_entity_lookup_keys(&conn) {
-            eprintln!("liminis-context-graph: run_full_recovery_sequence: backfill Entity.lookup_key failed (non-fatal): {e}");
-            conn.mark_lookup_key_migration_failed();
-        }
+        // ever builds entity_lookup_key_idx over the column (issue #221 FR-006). Persists the
+        // outcome to SchemaState too, not just the in-process flag.
+        schema::backfill_entity_lookup_keys_and_record_status(&conn);
         conn.build_indices_and_constraints()?;
         // Persist the applied-WAL-seq position(s) (issue #353) — a deliberate extension beyond
         // FR-004's literal text (which names knowledge_rebuild_from_wal), since this autonomous

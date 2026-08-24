@@ -194,15 +194,9 @@ impl Db {
             // WAL replay executes raw recorded Cypher templates, bypassing insert_entity's
             // lookup_key write — backfill any row replay left with a NULL lookup_key before
             // the caller's own build_indices_and_constraints() builds the ART index over the
-            // column (issue #221 FR-006).
-            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                eprintln!(
-                    "liminis-context-graph: open_or_rebuild: lookup_key backfill failed (non-fatal): {e}"
-                );
-                // FR-012: a failed backfill can leave rows with a NULL lookup_key, so
-                // knowledge_status must not report a clean migration.
-                conn.mark_lookup_key_migration_failed();
-            }
+            // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
+            // in-process flag — see backfill_entity_lookup_keys_and_record_status's doc comment.
+            crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
             // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
             // the replay just computed — a fresh rebuild is exactly as authoritative as
             // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
@@ -1908,11 +1902,24 @@ impl<'db> Conn<'db> {
     ///
     /// This is not a cold path — it fires for every name an extractor mentions but never
     /// resolves, which in `episode.rs`'s Phase C is routine LLM output. The `RETURN` list is
-    /// therefore kept to the scalar columns needed to find the winner (`uuid`, `name`,
+    /// therefore kept to the scalar columns needed to find candidates (`uuid`, `name`,
     /// `group_id`, `created_at`); it deliberately excludes `name_embedding`/`summary`/
-    /// `attributes` so a full-group scan doesn't also transfer and sort every row's vector.
-    /// The winning row (at most one) is hydrated separately via `get_entity_by_uuid` — one
-    /// extra point lookup on a hit, nothing at all on the (common) miss.
+    /// `attributes` so a full-group scan doesn't also transfer and sort every row's vector. Each
+    /// candidate's full row is hydrated separately via `get_entity_by_uuid` — at most one extra
+    /// point lookup on the common case, nothing at all on a miss.
+    ///
+    /// The scalar scan and a candidate's hydration are two independent statements, not one
+    /// transaction, so a candidate that wins the scan can be concurrently deleted (e.g. by
+    /// `corrections::merge_entities`'s `DETACH DELETE`, or a group purge) before hydration runs
+    /// — `get_entity_by_uuid` then returns `None` for a candidate the scan just saw as live. A
+    /// single hydration miss must not be reported as an overall "not found": that would let this
+    /// endpoint-authority path (FR-010) tell `episode.rs` a live, matching entity doesn't exist,
+    /// prompting it to create a duplicate. Instead, fall through to the next same-named candidate
+    /// in scan order, exactly as `get_entity_by_name_ci_with_scan_fallback`'s sibling test
+    /// (`deleting_the_winner_falls_through_to_the_next_same_named_row`) already establishes for
+    /// the indexed path's single atomic `ORDER BY ... LIMIT 1` query — this loop reproduces that
+    /// same "next surviving candidate" behavior across two statements instead of getting it for
+    /// free from one.
     fn scan_entity_by_name_ci(
         &self,
         name: &str,
@@ -1925,14 +1932,16 @@ impl<'db> Conn<'db> {
              ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "gid": group_id }),
         )?;
-        let winner_uuid = rows
+        for row in rows
             .into_iter()
-            .find(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
-            .map(|row| value_as_string(&row[0]));
-        match winner_uuid {
-            Some(uuid) => self.get_entity_by_uuid(&uuid),
-            None => Ok(None),
+            .filter(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
+        {
+            let uuid = value_as_string(&row[0]);
+            if let Some(entity) = self.get_entity_by_uuid(&uuid)? {
+                return Ok(Some(entity));
+            }
         }
+        Ok(None)
     }
 
     /// Whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed

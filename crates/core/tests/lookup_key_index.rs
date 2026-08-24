@@ -453,6 +453,22 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
         "rebuilt-1",
         "open_or_rebuild must backfill lookup_key from the replayed WAL, not just populate the DB"
     );
+
+    // PR #483 review: this call site (db.rs's open_or_rebuild) originally only flipped the
+    // in-process LookupKeyStatus flag on a backfill failure, never persisting SchemaState —
+    // reopening the exact "next restart's migrate() probe skips a still-broken backfill" gap
+    // the migrate()-only fix (migrate_retries_lookup_key_backfill_after_a_prior_failure, in
+    // schema_migrate.rs) was built to close. Asserting the marker here confirms this call site
+    // now goes through the same persisting path, not just that the in-process flag is healthy.
+    let status = conn
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .unwrap();
+    assert_eq!(
+        status,
+        vec![vec!["complete".to_string()]],
+        "open_or_rebuild's post-replay backfill must persist its outcome to SchemaState, not \
+         just the in-process LookupKeyStatus flag"
+    );
 }
 
 // ── User Story 3 #3 / FR-010 / SC-007: Site 1 authority guarantee survives a stale/missing \
@@ -544,6 +560,44 @@ fn scan_fallback_matches_a_stored_name_with_incidental_whitespace() {
              trimmed query, not just an untrimmed lower(e.name)",
         );
     assert_eq!(found.uuid, "raw-ws");
+}
+
+/// TOCTOU regression (PR #483 review): `scan_entity_by_name_ci` finds a winning candidate's
+/// uuid in one query and hydrates its full row via a separate `get_entity_by_uuid` call — not
+/// one atomic statement. A concurrent delete of the winning candidate between those two calls
+/// must not make the whole fallback report a false "not found" (a false negative at this
+/// FR-010 authority site could make `episode.rs` create a duplicate entity for a name that
+/// still resolves via a surviving candidate). This uses two raw-Cypher rows (no `lookup_key`,
+/// so the lookup always takes the scan-fallback path) with the older (winning) row deleted
+/// before the fallback call, approximating — without literal thread interleaving — a hydration
+/// miss on the winning candidate, and asserts the fallback falls through to the next
+/// surviving same-named candidate rather than giving up.
+#[test]
+fn scan_fallback_falls_through_when_the_winning_candidate_is_gone() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    for (uuid, created_at) in [
+        ("older", "2026-01-01 00:00:00"),
+        ("newer", "2026-02-01 00:00:00"),
+    ] {
+        conn.run_cypher(&format!(
+            "CREATE (:Entity {{uuid: '{uuid}', name: 'Dana', group_id: 'liminis', \
+             labels: ['Entity'], created_at: timestamp('{created_at}'), \
+             name_embedding: [1.0, 0.0, 0.0, 0.0], summary: 's', attributes: '{{}}'}})"
+        ))
+        .unwrap();
+    }
+
+    conn.run_cypher("MATCH (e:Entity {uuid: 'older'}) DETACH DELETE e")
+        .unwrap();
+
+    let found = conn
+        .get_entity_by_name_ci_with_scan_fallback("Dana", GROUP)
+        .unwrap()
+        .expect("the surviving same-named candidate must still resolve via the scan fallback");
+    assert_eq!(found.uuid, "newer");
 }
 
 // ── SC-001: EXPLAIN shows the ART-indexed access path, not a full table scan ───────────

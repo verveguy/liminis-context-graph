@@ -2467,10 +2467,8 @@ async fn handle_rebuild_from_wal(
                     // Replay bypassed insert_entity/update_entity_created_at — every replayed
                     // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
-                    if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                        eprintln!("liminis-context-graph: reload: backfill Entity.lookup_key failed (non-fatal): {e}");
-                        conn.mark_lookup_key_migration_failed();
-                    }
+                    // Persists the outcome to SchemaState too, not just the in-process flag.
+                    crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -2907,10 +2905,8 @@ async fn handle_rebuild_from_wal(
                     // Replay bypassed insert_entity/update_entity_created_at — every replayed
                     // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
-                    if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                        eprintln!("liminis-context-graph: reload(bg): backfill Entity.lookup_key failed (non-fatal): {e}");
-                        conn.mark_lookup_key_migration_failed();
-                    }
+                    // Persists the outcome to SchemaState too, not just the in-process flag.
+                    crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -4513,13 +4509,9 @@ async fn recover_drop_lbug_wal(
             // backfill again as a safety net (issue #221; cheap no-op when nothing is NULL).
             // Non-fatal, matching every other backfill call site added by this issue: the
             // checkpoint/backup DB file itself is perfectly valid, so a transient backfill
-            // query error here shouldn't fail an otherwise-successful recovery.
-            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                eprintln!(
-                    "liminis-context-graph: recover_drop_lbug_wal: lookup_key backfill failed (non-fatal): {e}"
-                );
-                conn.mark_lookup_key_migration_failed();
-            }
+            // query error here shouldn't fail an otherwise-successful recovery. Persists the
+            // outcome to SchemaState too, not just the in-process flag.
+            crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
             // This strategy's whole premise is reopening an already-indexed checkpoint (see
             // the file-existence guard above), which holds for HNSW/FTS on any checkpoint that
             // has ever completed a normal startup — but a checkpoint predating issue #221 has
@@ -4644,11 +4636,9 @@ async fn recover_rebuild_from_workspace_wal(
             // WAL replay above bypassed insert_entity/update_entity_created_at — every
             // replayed row's lookup_key is NULL — so backfill it before
             // build_indices_and_constraints below ever builds entity_lookup_key_idx over the
-            // column (issue #221 FR-006).
-            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                eprintln!("liminis-context-graph: rebuild_from_workspace_wal: backfill Entity.lookup_key failed (non-fatal): {e}");
-                conn.mark_lookup_key_migration_failed();
-            }
+            // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
+            // in-process flag.
+            crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
             conn.build_indices_and_constraints()?;
         }
         Ok(RecoverOutcome {
@@ -4710,13 +4700,8 @@ async fn recover_restore_from_backup(
             // when nothing is NULL). Non-fatal, matching every other backfill call site added
             // by this issue: the restored backup file itself is perfectly valid, so a
             // transient backfill query error here shouldn't fail an otherwise-successful
-            // recovery.
-            if let Err(e) = crate::schema::backfill_entity_lookup_keys(&conn) {
-                eprintln!(
-                    "liminis-context-graph: recover_restore_from_backup: lookup_key backfill failed (non-fatal): {e}"
-                );
-                conn.mark_lookup_key_migration_failed();
-            }
+            // recovery. Persists the outcome to SchemaState too, not just the in-process flag.
+            crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
             // See recover_drop_lbug_wal's identical comment: a backup predating issue #221
             // never had entity_lookup_key_idx built, and this call is idempotent.
             if let Err(e) = conn.create_entity_lookup_key_index() {

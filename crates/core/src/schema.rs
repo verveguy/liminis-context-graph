@@ -454,6 +454,34 @@ fn run_lookup_key_backfill_and_record_status(conn: &Conn<'_>) {
     }
 }
 
+/// Runs `backfill_entity_lookup_keys` and persists the outcome to both `SchemaState` and the
+/// in-process `LookupKeyStatus` flag — the entry point for every `lookup_key` backfill call site
+/// outside `migrate()` itself: the WAL-rebuild and recovery paths (`Db::open_or_rebuild`,
+/// `handle_rebuild_from_wal`, the `knowledge_recover*` family).
+///
+/// Before this function existed, those call sites called `backfill_entity_lookup_keys` directly
+/// and, on failure, only flipped the in-process `LookupKeyStatus` flag — never persisting
+/// `SchemaState`. That reopened the exact gap `ensure_lookup_key_backfill` was built to close
+/// (see its doc comment below), via a different trigger: `migrate()` runs once against an empty
+/// `Entity` table and marks `SchemaState` `"complete"`; WAL replay then creates rows with a NULL
+/// `lookup_key` via raw Cypher, and if *this* backfill then failed, only the in-process flag
+/// noticed. `SchemaState` still said `"complete"`, so the next restart's `migrate()` probe took
+/// the O(1) skip path and never retried, leaving NULL-keyed rows invisible to the three
+/// no-scan-fallback FR-011 call sites (PR #483 review).
+///
+/// `ensure_schema_state_table` is called here too, even though every current call site runs
+/// after `init_schema`/`migrate` has already created the table once: `CREATE NODE TABLE IF NOT
+/// EXISTS` is a cheap catalog check, not a scan, and calling it removes the ordering assumption
+/// entirely rather than relying on every future call site getting it right.
+pub(crate) fn backfill_entity_lookup_keys_and_record_status(conn: &Conn<'_>) {
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: lookup_key backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    run_lookup_key_backfill_and_record_status(conn);
+}
+
 /// Ensures `Entity.lookup_key` is fully backfilled, retrying a previously-failed attempt
 /// without reintroducing an O(N) `Entity` scan on every clean startup (issue #221, human
 /// review on PR #483).
