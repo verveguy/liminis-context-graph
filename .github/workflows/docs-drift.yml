@@ -22,12 +22,11 @@ jobs:
       - name: Regenerate llms-full.txt
         run: bash scripts/generate-docs-llms-full.sh
 
-      - name: Fail if llms-full.txt (or docs/_config.yml's version) is out of date
+      - name: Fail if llms-full.txt is out of date
         run: |
-          if ! git diff --exit-code docs/llms-full.txt docs/_config.yml; then
+          if ! git diff --exit-code docs/llms-full.txt; then
             echo ""
-            echo "docs/llms-full.txt is out of date, or docs/_config.yml's version doesn't"
-            echo "match Cargo.toml's [workspace.package] version."
+            echo "docs/llms-full.txt is out of date."
             echo "Run 'scripts/generate-docs-llms-full.sh' and commit the result alongside"
             echo "your doc changes."
             exit 1
@@ -41,38 +40,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+      # Version given explicitly. The action otherwise reads `packageManager`
+      # from a package.json at the repository root, and this is a Rust workspace
+      # — there is no root package.json for it to read, so it fails outright.
+      - uses: pnpm/action-setup@v4
         with:
-          # The `github-pages` gem pins jekyll 3.9.0 / liquid 4.0.3 to mirror GitHub Pages'
-          # actual build environment. liquid 4.0.3 calls the deprecated String#tainted?,
-          # which Ruby removed in 3.2 — on 3.2+ every page render fails with
-          # `NoMethodError: undefined method 'tainted?'`. Pin 3.1 (last version that still
-          # has it) rather than bumping liquid, since overriding a github-pages-pinned
-          # dependency risks drifting from what Pages itself actually builds with.
-          ruby-version: "3.1"
-          bundler-cache: true
-          working-directory: docs
+          version: 10.32.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: site
+        run: pnpm install --frozen-lockfile
 
       - name: Build site
-        working-directory: docs
-        run: bundle exec jekyll build
+        working-directory: site
+        run: pnpm build
 
+      # The specific failure this catches: docs/*.md link to each other as
+      # `configuration.md`, which is right on GitHub and rewritten for the site
+      # by sync-docs.mjs. A link that slips through unrewritten looks correct in
+      # the repository and 404s on the site.
       - name: Check internal links
-        working-directory: docs
-        run: bundle exec htmlproofer ./_site --disable-external --allow-hash-href
+        working-directory: site
+        run: pnpm links
 
-      # Continuous regression coverage for the --baseurl override that
+      # A committed SVG that no longer matches the fence it came from is a stale
+      # picture on github.com. Stale documentation is worse than none.
+      - name: Check the rendered diagrams are current
+        working-directory: site
+        run: pnpm diagrams:check
+
+      # Continuous regression coverage for the base override that
       # docs-publish-build.sh relies on to build every non-root version (see
-      # docs/adr/0477-tag-based-versioned-docs-publishing.md). Internal links are
-      # relative_url-filtered and cross-file ADR links go through
-      # jekyll-relative-links, not hardcoded, so this is a real assertion that a
-      # non-root baseurl still rewrites them correctly (FR-005) -- not just a
-      # one-off manual check.
-      - name: Build site (versioned baseurl)
-        working-directory: docs
-        run: bundle exec jekyll build --baseurl /liminis-context-graph/v0.0.0-baseurl-check --destination _site-versioned
+      # docs/adr/0477-tag-based-versioned-docs-publishing.md). The links between
+      # these pages are rewritten by sync-docs.mjs and are relative, so this is a
+      # real assertion that a non-root base still resolves them (FR-005) rather
+      # than a one-off manual check.
+      - name: Build site (versioned base)
+        working-directory: site
+        env:
+          DOCS_BASE: /liminis-context-graph/v0.0.0-baseurl-check
+          DOCS_VERSION: 0.0.0-baseurl-check
+        run: pnpm build --outDir dist-versioned
 
-      - name: Check internal links (versioned baseurl)
-        working-directory: docs
-        run: bundle exec htmlproofer ./_site-versioned --disable-external --allow-hash-href
+      - name: Check internal links (versioned base)
+        working-directory: site
+        env:
+          DOCS_BASE: /liminis-context-graph/v0.0.0-baseurl-check
+        run: node scripts/check-links.mjs dist-versioned

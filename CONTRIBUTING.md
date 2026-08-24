@@ -103,9 +103,10 @@ never commit release prep directly to `main` — then tag the merge commit.
    `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
    `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
    Add any newly-introduced workspace member to that command — a crate left out keeps a stale version
-   in the lockfile. Also update `docs/_config.yml`'s `version:` field to match, and run
-   `scripts/generate-docs-llms-full.sh` to regenerate `docs/llms-full.txt` — the docs-drift CI
-   check fails the PR if either is left stale (see [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)).
+   in the lockfile. Then run `scripts/generate-docs-llms-full.sh` to regenerate
+   `docs/llms-full.txt` — the docs-drift CI check fails the PR if it is left stale (see
+   [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)). There is no
+   second version to update any more: the docs site reads `Cargo.toml` directly.
 2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
    `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
    tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).

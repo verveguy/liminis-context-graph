@@ -6,15 +6,15 @@
 #
 # Output: docs/llms-full.txt — committed concatenated bundle checked by CI
 #
-# Also verifies docs/_config.yml's `version:` matches Cargo.toml's
-# [workspace.package] version (FR-010) — a mismatch fails the script, not just a
-# content diff, since llms-full.txt wouldn't change on a pure version bump.
+# The version comes from Cargo.toml's [workspace.package]. It used to live in
+# docs/_config.yml as well, with this script asserting the two matched (FR-010);
+# the Jekyll site is gone and with it that second copy, so there is nothing left
+# to disagree and nothing to check.
 #
 # Workflow:
 #   1. Run this script after modifying any canonical doc page listed in ORDERED below,
 #      or after bumping Cargo.toml's [workspace.package] version
-#   2. Commit docs/llms-full.txt (and docs/_config.yml if the version changed) alongside
-#      your doc changes
+#   2. Commit docs/llms-full.txt alongside your doc changes
 #   3. CI (docs-drift.yml) verifies the committed file matches what this script produces
 
 set -euo pipefail
@@ -23,28 +23,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DOCS_DIR="${REPO_ROOT}/docs"
 OUT="${DOCS_DIR}/llms-full.txt"
-CONFIG="${DOCS_DIR}/_config.yml"
 CARGO_TOML="${REPO_ROOT}/Cargo.toml"
 
-# ── Version-sync check (FR-010) ─────────────────────────────────────────────
+# ── Version, from the one place it is written down ──────────────────────────
 
-docs_version=$(awk -F'"' '/^version:/{print $2; exit}' "${CONFIG}")
-cargo_version=$(awk -F'"' '/^\[workspace.package\]/{found=1} found && /^version = /{print $2; exit}' "${CARGO_TOML}")
-site_repository=$(awk '/^repository:/{print $2; exit}' "${CONFIG}")
+docs_version=$(awk -F'"' '/^\[workspace.package\]/{found=1} found && /^version = /{print $2; exit}' "${CARGO_TOML}")
+site_repository="verveguy/liminis-context-graph"
 
 if [[ -z "${docs_version}" ]]; then
-  echo "error: could not find a version: field in ${CONFIG}" >&2
-  exit 1
-fi
-if [[ -z "${cargo_version}" ]]; then
   echo "error: could not find [workspace.package] version in ${CARGO_TOML}" >&2
-  exit 1
-fi
-if [[ "${docs_version}" != "${cargo_version}" ]]; then
-  echo "error: docs/_config.yml version (${docs_version}) does not match Cargo.toml's" >&2
-  echo "[workspace.package] version (${cargo_version})." >&2
-  echo "Update docs/_config.yml's version: field to \"${cargo_version}\" and re-run" >&2
-  echo "scripts/generate-docs-llms-full.sh." >&2
   exit 1
 fi
 
@@ -55,7 +42,12 @@ trap 'rm -f "${TMPFILE}" "${OUT_TMP}"' EXIT
 # Strip YAML front matter (---...---) from a file into TMPFILE, then substitute the small set
 # of Liquid variables used in page bodies (site.version/site.repository) with their resolved
 # values — this script emits plain text, not Jekyll-rendered HTML, so unresolved `{{ ... }}`
-# tags would otherwise leak into llms-full.txt verbatim. Front matter is only recognized when
+# tags would otherwise leak into llms-full.txt verbatim. (The site resolves the same two
+# variables in site/scripts/sync-docs.mjs, from the same source.)
+#
+# The generated <picture> beside each ```c4 fence is dropped: it points at a relative SVG
+# path that means nothing in a flat text bundle. The fence itself stays — it is the diagram
+# in textual form, which is exactly what this file is for. Front matter is only recognized when
 # the very first line is `---`, matching Jekyll's own detection rule — this way a body's own
 # `---` horizontal rules (at any position, in a page with or without front matter) are never
 # misidentified as a front-matter delimiter.
@@ -67,6 +59,7 @@ strip_front_matter_to_tmp() {
     { print }
   ' "$1" \
     | sed -e "s|{{ *site\.version *}}|${docs_version}|g" -e "s|{{ *site\.repository *}}|${site_repository}|g" \
+    | sed -e '/<picture>.*\/diagrams\//d' \
     > "${TMPFILE}"
 }
 
@@ -89,7 +82,11 @@ ORDERED=(
   "eval-full-corpus-runbook.md:${SITE_URL}/eval-full-corpus-runbook"
   "extraction-quality-evaluation.md:${SITE_URL}/extraction-quality-evaluation"
   "release-process.md:${SITE_URL}/release-process"
-  "adr/index.md:${SITE_URL}/adr/index"
+  # The decision records are not part of the site any more — the site redirects
+  # /adr/* to GitHub. The index still belongs in this bundle, since it is real
+  # documentation of how the records are meant to be read; only its canonical
+  # URL moves.
+  "adr/index.md:https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md"
 )
 
 > "$OUT_TMP"

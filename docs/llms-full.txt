@@ -18,6 +18,37 @@ Source: [github.com/verveguy/liminis-context-graph](https://github.com/verveguy/
 [`README`](https://github.com/verveguy/liminis-context-graph/blob/main/README.md) has a short overview
 and a standalone quickstart; this site is the full reference.
 
+## How it fits together
+
+One process, one socket, one database directory. A client speaks JSON-RPC (or MCP)
+over a Unix socket; extraction calls out to an LLM; everything else — graph storage,
+vector index, full-text search, the write-ahead log — is embedded.
+
+```c4 static height=26rem
+Person(user, "You", "Or an agent acting for you")
+System_Ext(client, "MCP or JSON-RPC client", "Claude Desktop, an editor, your own code")
+
+System_Boundary(proc, "liminis-context-graph (one process)") {
+  Container(ipc, "IPC surface", "JSON-RPC + MCP over a Unix socket", "The whole API, and the trust boundary")
+  Container(core, "Graph engine", "Rust", "Episodes, entities, relations, dedup, canonicalisation")
+  Container(extract, "Extraction", "Rust", "Turns text into entities and relations")
+  ContainerDb(store, "Embedded stores", "LadybugDB", "Property graph, HNSW vectors, full-text index, WAL")
+}
+
+System_Ext(llm, "LLM provider", "Local or hosted — the only network call")
+
+Rel(user, client, "Asks questions, adds documents")
+Rel(client, ipc, "JSON-RPC / MCP over a socket")
+Rel(ipc, core, "Dispatches")
+Rel(core, extract, "Sends episode text to")
+Rel(extract, llm, "Prompts")
+Rel(core, store, "Reads and writes")
+```
+
+Everything inside that boundary is one binary and files in a directory you own. The
+only arrow leaving it is the LLM call, and a local model keeps even that on your
+machine.
+
 **Multi-graph, not multi-tenant.** One process can hold many graphs, each with its own `group_id`
 and its own WAL stream — see [IPC & MCP Reference: group_ids semantics](ipc-mcp-reference.md#group_ids-semantics-omitted-vs-empty)
 and [Operations](operations.md) for the mechanics. That's a data-organisation capability for one
@@ -3101,9 +3132,11 @@ GitHub Release.
    gh workflow run docs-publish.yml -f version=0.13.3 -f ref=main
    ```
 
-   `docs-publish-build.sh` force-patches `docs/_config.yml`'s `version:` field to
-   `0.13.3` regardless of which ref you build from, so the published page footer
-   still reads the correct version even though the content came from `main`.
+   `docs-publish-build.sh` passes `DOCS_VERSION=0.13.3` to the site build
+   regardless of which ref you build from, so the published page footer still
+   reads the correct version even though the content came from `main`. (It used
+   to patch `docs/_config.yml` for this; the Astro site takes the value from the
+   environment instead, leaving the working tree alone.)
 
 3. "Latest stable" is recomputed fresh from the Releases API on this run too, so
    the root URL is updated automatically if (and only if) `0.13.3` is still the
@@ -3121,13 +3154,15 @@ live site keeps serving from `main` as before:
 1. **Pages source switch.** In the repository's Settings → Pages, switch
    `source.branch` from `main` to `gh-pages` (`source.path` to `/`,
    `build_type` left as `legacy`).
-2. **Backfill.** Publish `v0.12.0` through `v0.13.3` — the tags with a working
-   `docs/_config.yml` — once each via
-   `gh workflow run docs-publish.yml -f version=<x.y.z>`, in ascending order, so
-   `v0.13.3` ends up promoted to root. `v0.9.0`–`v0.11.0` predate the Jekyll docs
-   setup entirely (no `docs/_config.yml` at those refs) and should **not** be
-   backfilled — building them would mean inventing config that version never
-   shipped with.
+2. **Backfill.** Only tags carrying `site/` can be built by this workflow, since
+   that is what it runs. Every tag up to and including `v0.13.3` shipped the
+   Jekyll site instead and cannot be rebuilt under this scheme — the build script
+   says so and exits rather than producing something misleading. Publish from the
+   first release that includes the Astro site onward; there is nothing to
+   backfill before it.
+
+   Backfilling the Jekyll-era versions would mean building them with a site they
+   never shipped with, which is the opposite of what per-version copies are for.
 
 If Pages ever needs to be re-pointed (e.g. after a repository transfer), redo
 step 1; the `gh-pages` branch itself is unaffected by that setting.
@@ -3148,7 +3183,7 @@ step 1; the `gh-pages` branch itself is unaffected by that setting.
 
 # Architecture Decision Records
 
-Source: https://v3rv.com/liminis-context-graph/adr/index
+Source: https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md
 
 
 **These are historical decision records, not current-state documentation.** Each ADR captures

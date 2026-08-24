@@ -10,3 +10,15 @@ Cargo.lock.bak
 .idea/
 .vscode/
 *.swp
+
+# Astro/Starlight documentation site (site/ is its own package).
+# Every page under src/content/docs/ is generated from docs/ by
+# site/scripts/sync-docs.mjs, which also copies the llms bundles into public/.
+site/node_modules/
+site/dist/
+site/dist-versioned/
+site/dist-publish/
+site/.astro/
+site/src/content/docs/
+site/public/llms.txt
+site/public/llms-full.txt
