@@ -74,6 +74,13 @@ pub struct RelatesToEdge {
     pub attributes: String,
     #[serde(default)]
     pub relation_type: Option<String>,
+    /// Episodes mentioning either this edge's source or target entity (deduplicated),
+    /// per ADR-0012's either-endpoint semantics — NOT evidence for this specific
+    /// relationship. Populated only by read paths that call
+    /// `enrich_edge_from_entity_ep_info` (`knowledge_list_relationships`,
+    /// `knowledge_get_entity_neighbors`); other read paths (e.g.
+    /// `knowledge_find_relationships`, `knowledge_get_edges_by_group`,
+    /// `knowledge_get_edges_by_uuids`) leave this at its default empty vec.
     #[serde(default)]
     pub episode_uuids: Vec<String>,
     #[serde(default)]
