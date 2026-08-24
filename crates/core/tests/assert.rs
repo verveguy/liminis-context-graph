@@ -18,7 +18,7 @@ use arc_swap::ArcSwapOption;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::{MockEmbedder, OaiEmbedder},
+    embedder::{CountingEmbedder, MockEmbedder, OaiEmbedder},
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
@@ -85,6 +85,16 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         Some((wal_dir, wal_writer)),
         db_path,
     )
+}
+
+/// A `MockEmbedder` wrapped in `CountingEmbedder` — for asserting the embedder is (or isn't)
+/// called at all, not just what it returns (issue #444).
+fn make_state_counting(db: Arc<Db>) -> (Arc<AppState>, Arc<CountingEmbedder>) {
+    let inner: Arc<dyn lcg_core::Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let counting = Arc::new(CountingEmbedder::new(inner));
+    let embedder: Arc<dyn lcg_core::Embedder> = counting.clone();
+    let state = make_state_with(db, embedder, None, "test.db".to_string());
+    (state, counting)
 }
 
 fn make_state_with(
@@ -1063,5 +1073,224 @@ async fn assert_api_write_to_one_group_leaves_another_groups_applied_seq_untouch
     assert!(
         a_applied > 0,
         "group A must show real progress from its 2 writes: {status_after}"
+    );
+}
+
+// ── issue #444: existence is resolved before the embedder is ever called ───────
+
+/// User Story 1 / SC-001: re-asserting an already-known entity by name updates it via
+/// `update_entity_core` without ever calling the embedder for `name` or `summary`, since
+/// neither value is persisted on the update path.
+#[tokio::test]
+async fn assert_entity_reassert_by_name_skips_embedder() {
+    let (db, _dir) = make_db(DIM);
+    let (state, counting) = make_state_counting(db);
+
+    let created = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "g1", "summary": "first summary"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+    assert_eq!(created["result"]["created"], true);
+    // One call for `name`, one for the non-empty `summary`.
+    assert_eq!(
+        counting.call_count(),
+        2,
+        "create must embed both name and summary exactly once each"
+    );
+
+    let reasserted = dispatch_val(
+        2,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "g1", "summary": "updated summary"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&reasserted, 2);
+    assert_eq!(reasserted["result"]["created"], false);
+    assert_eq!(
+        counting.call_count(),
+        2,
+        "re-asserting a known entity by name must not call the embedder at all"
+    );
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    let uuid = reasserted["result"]["entity_uuid"].as_str().unwrap();
+    let row = conn.get_entity_by_uuid(uuid).unwrap().unwrap();
+    assert_eq!(
+        row.summary, "updated summary",
+        "the update must still apply via update_entity_core"
+    );
+}
+
+/// User Story 1, Acceptance Scenario 3 / SC-001: resolving an existing entity via `entity_uuid`
+/// (rather than by name) also skips the embedder — matching the by-name update case.
+#[tokio::test]
+async fn assert_entity_reassert_by_uuid_skips_embedder() {
+    let (db, _dir) = make_db(DIM);
+    let (state, counting) = make_state_counting(db);
+
+    let created = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "g1", "summary": "seed"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+    let uuid = created["result"]["entity_uuid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let count_after_create = counting.call_count();
+    assert!(count_after_create > 0);
+
+    let reasserted = dispatch_val(
+        2,
+        "knowledge_assert_entity",
+        json!({
+            "name": "Bob",
+            "entity_uuid": uuid,
+            "group_id": "g1",
+            "summary": "changed via uuid",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&reasserted, 2);
+    assert_eq!(reasserted["result"]["created"], false);
+    assert_eq!(
+        counting.call_count(),
+        count_after_create,
+        "re-asserting a known entity by entity_uuid must not call the embedder"
+    );
+}
+
+/// User Story 2 / SC-002: re-asserting an already-active relationship updates it via
+/// `update_relates_to_core` without ever calling the embedder for `fact`.
+#[tokio::test]
+async fn assert_relationship_reassert_skips_embedder() {
+    let (db, _dir) = make_db(DIM);
+    {
+        // Seed the two endpoints directly (bypassing dispatch) so only the assert_relationship
+        // calls themselves are visible in the embedder's call count.
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&make_entity(
+            "alice-444",
+            "Alice",
+            "g1",
+            vec!["Entity".to_string()],
+            "{}",
+        ))
+        .unwrap();
+        conn.insert_entity(&make_entity(
+            "bob-444",
+            "Bob",
+            "g1",
+            vec!["Entity".to_string()],
+            "{}",
+        ))
+        .unwrap();
+    }
+    let (state, counting) = make_state_counting(db);
+
+    let created = dispatch_val(
+        1,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice",
+            "target_name": "Bob",
+            "predicate": "KNOWS",
+            "group_id": "g1",
+            "fact": "Alice knows Bob",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&created, 1);
+    assert_eq!(created["result"]["created"], true);
+    assert_eq!(
+        counting.call_count(),
+        1,
+        "create must embed fact exactly once"
+    );
+
+    let reasserted = dispatch_val(
+        2,
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "Alice",
+            "target_name": "Bob",
+            "predicate": "KNOWS",
+            "group_id": "g1",
+            "fact": "Alice still knows Bob",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&reasserted, 2);
+    assert_eq!(reasserted["result"]["created"], false);
+    assert_eq!(
+        counting.call_count(),
+        1,
+        "re-asserting a known relationship must not call the embedder"
+    );
+
+    let db2 = state.db.load_full().unwrap();
+    let conn = db2.connect().unwrap();
+    let uuid = reasserted["result"]["edge_uuid"].as_str().unwrap();
+    let edge = conn.get_edge_by_uuid(uuid).unwrap().unwrap();
+    assert_eq!(
+        edge.fact, "Alice still knows Bob",
+        "the update must still apply via update_relates_to_core"
+    );
+}
+
+/// Edge Case: a resolved-existing-row path that ends in an error (the rename-collision check)
+/// must not have called the embedder either — FR-006's general "resolved existing → no embed"
+/// rule applies even when the resolved branch subsequently errors out.
+#[tokio::test]
+async fn assert_entity_rename_collision_rejected_skips_embedder() {
+    let (db, _dir) = make_db(DIM);
+    let (state, counting) = make_state_counting(db);
+
+    let alice = dispatch_val(
+        1,
+        "knowledge_assert_entity",
+        json!({"name": "Alice", "group_id": "g1"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&alice, 1);
+    let alice_uuid = alice["result"]["entity_uuid"].as_str().unwrap().to_string();
+
+    let bob = dispatch_val(
+        2,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "group_id": "g1"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&bob, 2);
+
+    let count_before_collision = counting.call_count();
+
+    // Attempt to rename Alice (by entity_uuid) onto Bob's already-active name.
+    let rejected = dispatch_val(
+        3,
+        "knowledge_assert_entity",
+        json!({"name": "Bob", "entity_uuid": alice_uuid, "group_id": "g1"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&rejected, 3);
+    assert_eq!(
+        counting.call_count(),
+        count_before_collision,
+        "a rejected rename-collision must not have called the embedder"
     );
 }
