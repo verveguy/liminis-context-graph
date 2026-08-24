@@ -440,6 +440,7 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
         db_path.to_str().unwrap(),
         wal_dir.path().to_str().unwrap(),
         DIM,
+        None,
     )
     .unwrap();
     let conn = db.connect().unwrap();
