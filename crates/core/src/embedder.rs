@@ -6,9 +6,19 @@ use crate::{env::lcg_env_var, error::Error};
 
 // ── OpenAI-compatible wire types ──────────────────────────────────────────────
 
+/// `input` accepts either a single string or an array of strings per the OpenAI-compatible
+/// contract (ADR-0006/ADR-0016). `Single` keeps the existing one-text wire shape byte-for-byte
+/// unchanged; `Batch` is the array form this issue (#445) starts actually sending.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OaiEmbedInput<'a> {
+    Single(&'a str),
+    Batch(&'a [&'a str]),
+}
+
 #[derive(Serialize)]
 struct OaiEmbedRequest<'a> {
-    input: &'a str,
+    input: OaiEmbedInput<'a>,
     model: &'a str,
 }
 
@@ -22,6 +32,10 @@ struct OaiEmbedResponse {
 struct OaiEmbedding {
     // Deserialize as f64 (the Swift sidecar returns [Double]) then convert to f32 explicitly.
     embedding: Vec<f64>,
+    // Per-entry position in the request's input array (ADR-0016's documented contract). Used to
+    // correlate a batch response back to request order rather than trusting `data` array order,
+    // which a nonconforming server could reorder without any other signal (see #445 research).
+    index: usize,
 }
 
 // ── Transport ─────────────────────────────────────────────────────────────────
@@ -196,6 +210,27 @@ impl Drop for PoisonGuard<'_> {
 pub trait Embedder: Send + Sync {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>>;
 
+    /// Embeds multiple texts in one logical call, returning one vector per input text in the
+    /// same order as `texts` (FR-001). The default implementation is expressed in terms of
+    /// `embed` so every existing implementor keeps compiling and behaving identically without
+    /// any code change (FR-002) — but it runs those calls *concurrently* via
+    /// `try_join_all`, not in a sequential loop, so an implementor that forgets to override
+    /// this method degrades to no wire-level batching (still N round-trips) rather than silently
+    /// serializing what looks like a batching improvement. Returns an error if any input fails
+    /// to embed, rather than a partial result (FR-005). Empty input returns an empty vector
+    /// without calling `embed` at all (FR-006).
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(Vec::new());
+            }
+            futures::future::try_join_all(texts.iter().map(|t| self.embed(t))).await
+        })
+    }
+
     /// Embedding dimension. Used when pre-populating DB rows in tests/benches.
     fn dim(&self) -> usize {
         768
@@ -285,14 +320,14 @@ impl OaiEmbedder {
     ///
     /// Used at startup to auto-detect embedding dimension and confirm the embedder is reachable.
     pub async fn probe(&self) -> Result<(usize, String), Error> {
-        let resp = self.do_embed_raw("probe").await?;
+        let resp = self.do_embed_raw(OaiEmbedInput::Single("probe")).await?;
         let model = resp.model.clone();
         let vec = extract_embedding(resp)?;
         Ok((vec.len(), model))
     }
 
     async fn do_embed(&self, text: &str) -> Result<Vec<f32>, Error> {
-        let resp = self.do_embed_raw(text).await?;
+        let resp = self.do_embed_raw(OaiEmbedInput::Single(text)).await?;
         let vec = extract_embedding(resp)?;
         if vec.len() != self.dim {
             return Err(Error::Ipc(format!(
@@ -304,18 +339,48 @@ impl OaiEmbedder {
         Ok(vec)
     }
 
-    async fn do_embed_raw(&self, text: &str) -> Result<OaiEmbedResponse, Error> {
+    /// Embeds `texts` by splitting into `resolve_embed_batch_size()`-sized chunks (FR-004),
+    /// issuing one array-valued `/v1/embeddings` request per chunk, and reassembling the full,
+    /// correctly-ordered result (FR-001). Chunks are requested concurrently — each chunk's own
+    /// response is independently ordered via `extract_embeddings_ordered`, so running them
+    /// concurrently and reassembling by chunk position afterwards is safe. Any chunk's failure
+    /// fails the whole call (FR-005). Empty input issues no request (FR-006).
+    async fn do_embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk_size = resolve_embed_batch_size()?;
+        let chunk_results =
+            futures::future::try_join_all(texts.chunks(chunk_size).map(|chunk| async move {
+                let resp = self.do_embed_raw(OaiEmbedInput::Batch(chunk)).await?;
+                let vecs = extract_embeddings_ordered(resp, chunk.len())?;
+                for v in &vecs {
+                    if v.len() != self.dim {
+                        return Err(Error::Ipc(format!(
+                            "embedding response shape mismatch: expected {} dimensions, got {}",
+                            self.dim,
+                            v.len()
+                        )));
+                    }
+                }
+                Ok::<_, Error>(vecs)
+            }))
+            .await?;
+        Ok(chunk_results.into_iter().flatten().collect())
+    }
+
+    async fn do_embed_raw(&self, input: OaiEmbedInput<'_>) -> Result<OaiEmbedResponse, Error> {
         match &self.transport {
             EmbedTransport::Http {
                 client,
                 url,
                 api_key,
             } => {
-                self.do_embed_http_raw(client, url, api_key.as_deref(), text)
+                self.do_embed_http_raw(client, url, api_key.as_deref(), input)
                     .await
             }
             #[cfg(unix)]
-            EmbedTransport::Uds { path, pool } => self.do_embed_uds_raw(path, pool, text).await,
+            EmbedTransport::Uds { path, pool } => self.do_embed_uds_raw(path, pool, input).await,
         }
     }
 
@@ -324,10 +389,10 @@ impl OaiEmbedder {
         client: &Client,
         url: &str,
         api_key: Option<&str>,
-        text: &str,
+        input: OaiEmbedInput<'_>,
     ) -> Result<OaiEmbedResponse, Error> {
         let body = OaiEmbedRequest {
-            input: text,
+            input,
             model: &self.model,
         };
         let mut req = client.post(url).json(&body);
@@ -347,7 +412,7 @@ impl OaiEmbedder {
         &self,
         path: &str,
         pool: &UdsPool,
-        text: &str,
+        input: OaiEmbedInput<'_>,
     ) -> Result<OaiEmbedResponse, Error> {
         let idx = pool
             .cursor
@@ -357,7 +422,7 @@ impl OaiEmbedder {
 
         let body_bytes = hyper::body::Bytes::from(
             serde_json::to_vec(&OaiEmbedRequest {
-                input: text,
+                input,
                 model: &self.model,
             })
             .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?,
@@ -545,9 +610,84 @@ fn extract_embedding(resp: OaiEmbedResponse) -> Result<Vec<f32>, Error> {
     Ok(embedding.into_iter().map(|v| v as f32).collect())
 }
 
+/// Reassembles a batch response into request order using each entry's `index` field, rather
+/// than trusting `data` array order — a nonconforming server that reorders results would
+/// otherwise silently misassign an embedding to the wrong entity/edge with no error (FR-004).
+/// Errors if the response has the wrong number of entries, an out-of-range or duplicate index,
+/// or a zero-length embedding.
+fn extract_embeddings_ordered(
+    resp: OaiEmbedResponse,
+    expected_len: usize,
+) -> Result<Vec<Vec<f32>>, Error> {
+    if resp.data.len() != expected_len {
+        return Err(Error::Ipc(format!(
+            "embedding response shape mismatch: expected {expected_len} entries, got {}",
+            resp.data.len()
+        )));
+    }
+    let mut slots: Vec<Option<Vec<f32>>> = vec![None; expected_len];
+    for item in resp.data {
+        let idx = item.index;
+        if idx >= expected_len {
+            return Err(Error::Ipc(format!(
+                "embedding response index {idx} out of range for batch of {expected_len}"
+            )));
+        }
+        if slots[idx].is_some() {
+            return Err(Error::Ipc(format!(
+                "embedding response: duplicate index {idx}"
+            )));
+        }
+        if item.embedding.is_empty() {
+            return Err(Error::Ipc(
+                "embedding response shape mismatch: zero-length vector".to_string(),
+            ));
+        }
+        // Convert f64 → f32 explicitly, as `extract_embedding` does for the single-item path.
+        slots[idx] = Some(item.embedding.into_iter().map(|v| v as f32).collect());
+    }
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| v.ok_or_else(|| Error::Ipc(format!("embedding response: missing index {i}"))))
+        .collect()
+}
+
+/// Resolves the chunk size for `OaiEmbedder::embed_batch` from the `LCG_EMBED_BATCH_SIZE` env
+/// var. Valid range is 1–256; default 64 (mirrors `replay.rs::resolve_batch_size`'s validation
+/// shape). The endpoint's real per-request limit is unmeasured (spec Assumptions), so this is a
+/// conservative default with an escape-hatch override rather than a hardcoded, unverified
+/// constant.
+fn resolve_embed_batch_size() -> Result<usize, Error> {
+    let size = std::env::var("LCG_EMBED_BATCH_SIZE")
+        .ok()
+        .map(|v| {
+            v.parse::<usize>().map_err(|_| {
+                Error::Config(format!(
+                    "LCG_EMBED_BATCH_SIZE={v:?} is not a valid integer; expected 1–256"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(64);
+    if size == 0 || size > 256 {
+        return Err(Error::Config(format!(
+            "LCG_EMBED_BATCH_SIZE {size} is out of range; expected 1–256"
+        )));
+    }
+    Ok(size)
+}
+
 impl Embedder for OaiEmbedder {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         Box::pin(self.do_embed(text))
+    }
+
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        Box::pin(self.do_embed_batch(texts))
     }
 
     fn dim(&self) -> usize {
@@ -663,6 +803,7 @@ impl Embedder for NameMapEmbedder {
 pub struct CountingEmbedder {
     inner: std::sync::Arc<dyn Embedder>,
     calls: std::sync::atomic::AtomicUsize,
+    batch_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl CountingEmbedder {
@@ -670,11 +811,20 @@ impl CountingEmbedder {
         Self {
             inner,
             calls: std::sync::atomic::AtomicUsize::new(0),
+            batch_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     pub fn call_count(&self) -> usize {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Number of `embed_batch` round-trips (one per call, regardless of how many texts it
+    /// carries) — distinct from `call_count()`, which counts single-text `embed()` calls. Used
+    /// by tests asserting a converted call site issues one batch call per chunk rather than one
+    /// call per item (#445).
+    pub fn batch_call_count(&self) -> usize {
+        self.batch_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -682,6 +832,18 @@ impl Embedder for CountingEmbedder {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.embed(text)
+    }
+
+    // Overridden explicitly (rather than relying on the trait's default `embed_batch`, which
+    // would call `self.embed()` per item and count each item as a "call") so this counter
+    // reflects round-trips actually issued by `inner`, not items processed.
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        self.batch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed_batch(texts)
     }
 
     fn dim(&self) -> usize {
@@ -921,5 +1083,32 @@ mod tests {
     #[test]
     fn unconfigured_embedder_dim_uses_trait_default() {
         assert_eq!(UnconfiguredEmbedder.dim(), 768);
+    }
+
+    // FR-002/Acceptance Scenario 1: an implementor defining only `embed` gets a working
+    // `embed_batch` for free, matching N sequential `embed()` calls in order.
+    #[tokio::test]
+    async fn default_embed_batch_matches_sequential_embed_calls_in_order() {
+        let embedder = HashEmbedder::new(8);
+        let texts = ["alpha", "beta", "gamma"];
+        let batch_result = embedder.embed_batch(&texts).await.unwrap();
+
+        let mut sequential = Vec::new();
+        for t in &texts {
+            sequential.push(embedder.embed(t).await.unwrap());
+        }
+
+        assert_eq!(batch_result, sequential);
+    }
+
+    // FR-006: empty input returns an empty vector without calling `embed` at all.
+    #[tokio::test]
+    async fn default_embed_batch_empty_input_issues_no_embed_calls() {
+        let inner = std::sync::Arc::new(HashEmbedder::new(8));
+        let counting = CountingEmbedder::new(inner);
+        let texts: [&str; 0] = [];
+        let result = counting.embed_batch(&texts).await.unwrap();
+        assert!(result.is_empty());
+        assert_eq!(counting.call_count(), 0);
     }
 }
