@@ -53,6 +53,8 @@ export function workspaceVersion() {
 }
 
 const REPOSITORY = 'verveguy/liminis-context-graph'
+/** Where the real source files live, for the "Edit this page" link. */
+const EDIT_BASE = `https://github.com/${REPOSITORY}/edit/main/docs`
 const GITHUB_BLOB = `https://github.com/${REPOSITORY}/blob/main/docs`
 
 const yaml = (s) => `"${s.replace(/"/g, '\\"')}"`
@@ -78,6 +80,32 @@ function rewriteLinks(body, { fromRoot }) {
     if (target.startsWith('adr/')) return `](${GITHUB_BLOB}/${target}.md${anchor})`
     return `](${prefix}${target}/${anchor})`
   })
+}
+
+/**
+ * The page's H1, and where it starts.
+ *
+ * Scanned line by line with fence state tracked, rather than matched with
+ * `/^#\s+/m`: these pages are full of shell examples, and a `# comment` inside a
+ * fenced block is not a heading. Taking the regex's first match could title a
+ * page after a comment and then delete that comment from the body.
+ */
+function findHeading(body) {
+  const lines = body.split('\n')
+  let fence = null
+  let offset = 0
+  for (const line of lines) {
+    const delimiter = /^\s*(`{3,}|~{3,})/.exec(line)
+    if (delimiter) {
+      if (fence === null) fence = delimiter[1][0]
+      else if (line.trimStart().startsWith(fence)) fence = null
+    } else if (fence === null) {
+      const heading = /^#\s+(.+?)\s*$/.exec(line)
+      if (heading) return { title: heading[1], index: offset, length: line.length }
+    }
+    offset += line.length + 1
+  }
+  return null
 }
 
 /** Jekyll's own rule: front matter only when the very first line is `---`. */
@@ -118,24 +146,26 @@ for (const file of pages) {
   )
 
   const declared = /^title:\s*(.+?)\s*$/m.exec(front)
-  const heading = /^#\s+(.+?)\s*$/m.exec(body)
-  const title = declared?.[1] ?? heading?.[1]
+  const heading = findHeading(body)
+  const title = declared?.[1] ?? heading?.title
   if (!title) {
     console.error(`${file}: no title in front matter and no H1 to fall back on`)
     process.exit(1)
   }
 
-  // Strip the H1 only where it is, rather than the first match anywhere: a
-  // fenced code block containing a `# comment` line must not be mistaken for
-  // the page heading and deleted.
   const withoutHeading = heading
-    ? body.slice(0, heading.index) + body.slice(heading.index + heading[0].length)
+    ? body.slice(0, heading.index) + body.slice(heading.index + heading.length)
     : body
 
   const order = ORDER.indexOf(slug)
   const frontmatter = [
     '---',
     `title: ${yaml(title.replace(/`/g, ''))}`,
+    // Per page, not a site-wide editLink.baseUrl: Starlight builds that link by
+    // appending the page's path relative to src/content/docs, which here is the
+    // generated copy — gitignored and never committed, so every link would 404.
+    // Only this script knows which real file a page came from.
+    `editUrl: ${yaml(`${EDIT_BASE}/${file}`)}`,
     order === -1 ? null : `sidebar:\n  order: ${order + 1}`,
     '---',
   ]

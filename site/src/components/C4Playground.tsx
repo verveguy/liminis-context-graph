@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { parseC4, validateC4 } from '@liminis/diagrams/core'
 import { C4InteractiveRenderer, C4ErrorDisplay } from '@liminis/diagrams/react'
@@ -81,11 +81,16 @@ export default function C4Playground({
       if (items.length === 0) return
       const first = items[0]
       const last = items[items.length - 1]
+      // Focus can be outside the panel entirely — the browser's own UI hands it
+      // back to the document, an extension moves it. Both directions have to
+      // catch that case, or Tab walks into the page behind the backdrop, which
+      // is exactly what aria-modal promises cannot happen.
       const active = document.activeElement
-      if (e.shiftKey && (active === first || !panel?.contains(active))) {
+      const escaped = !panel?.contains(active)
+      if (e.shiftKey && (escaped || active === first)) {
         e.preventDefault()
         last.focus()
-      } else if (!e.shiftKey && active === last) {
+      } else if (!e.shiftKey && (escaped || active === last)) {
         e.preventDefault()
         first.focus()
       }
@@ -158,6 +163,9 @@ export default function C4Playground({
           className="c4-playground__expand"
           onClick={() => setIsExpanded((v) => !v)}
           aria-pressed={isExpanded}
+          // The glyph is not an accessible name — a screen reader announces the
+          // character, or nothing. `title` is not reliably announced either.
+          aria-label={isExpanded ? 'Close expanded diagram' : 'Expand diagram'}
           title={isExpanded ? 'Close (Esc)' : 'Expand'}
         >
           {isExpanded ? '✕' : '⤡'}
