@@ -28,6 +28,25 @@ pub struct OntologyDriftState {
     pub drift_summary: Option<String>,
 }
 
+/// Per-group generalization of [`OntologyDriftState`] (issue #451). A group's entry is absent
+/// from `AppState::group_ontologies` until that group's ontology is first resolved in this
+/// process (FR-007) — callers distinguish "not yet computed" from "not drifted" by checking for
+/// the group's presence in the cache, not by any field on this struct.
+#[derive(Debug, Default, Clone)]
+pub struct GroupDriftStatus {
+    pub drifted: bool,
+    pub drift_summary: Option<String>,
+}
+
+/// Cached per-group resolution result (issue #446/#451): the fully-resolved ontology for a group
+/// alongside that group's drift status, computed together on the same first-use trigger under the
+/// same lock — see [`AppState::resolve_ontology`].
+#[derive(Debug, Clone)]
+pub struct GroupOntologyEntry {
+    pub ontology: Option<Arc<Ontology>>,
+    pub drift: GroupDriftStatus,
+}
+
 pub struct AppState {
     /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
     /// under the write lock without holding an inner Mutex. `None` represents degraded state
@@ -87,12 +106,19 @@ pub struct AppState {
     /// Per-group ontology resolution cache (issue #446), keyed by `group_id`. Populated lazily
     /// by [`AppState::resolve_ontology`] on first use per group, mirroring `wal_writers`'
     /// lazy-populate pattern rather than an eager startup scan of `.lcg/ontology/*.yaml` — a
-    /// group this process never touches never pays the file read. The cached value is already
-    /// the *fully resolved* ontology for that group (a per-group file if one exists and is
-    /// valid, otherwise the workspace-wide `ontology` above), so callers never need to
+    /// group this process never touches never pays the file read. The cached value's `ontology`
+    /// is already the *fully resolved* ontology for that group (a per-group file if one exists
+    /// and is valid, otherwise the workspace-wide `ontology` above), so callers never need to
     /// re-apply the fallback themselves. Like `ontology`, requires a restart to pick up
     /// changes — hot-reload is out of scope (see the issue's Assumptions).
-    pub group_ontologies: Arc<Mutex<HashMap<String, Option<Arc<Ontology>>>>>,
+    ///
+    /// Since issue #451, each entry's `drift` field also carries that group's drift status,
+    /// computed on the same first-resolution trigger (FR-007) — folded into this existing cache
+    /// rather than a new sibling field so that every one of `AppState`'s 54 literal-construction
+    /// call sites (tests, a bench, `wal_exec.rs`'s helper) needs no edit: they all write
+    /// `group_ontologies: Arc::new(Mutex::new(HashMap::new()))` with the value type inferred
+    /// from this field's declaration alone. See ADR-0451.
+    pub group_ontologies: Arc<Mutex<HashMap<String, GroupOntologyEntry>>>,
 }
 
 impl AppState {
@@ -259,20 +285,71 @@ impl AppState {
     pub fn resolve_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
         if let Ok(guard) = self.group_ontologies.lock() {
             if let Some(cached) = guard.get(group_id) {
-                return cached.clone();
+                return cached.ontology.clone();
             }
         }
 
-        let resolved = self
+        let resolved = self.load_resolved_ontology(group_id);
+
+        // Per-group drift (issue #451, FR-001/FR-007): computed on this same first-resolution
+        // trigger, against whatever this group actually resolved through (own file, workspace
+        // fallback, or neither) — never the raw per-group file, consistent with #446's own
+        // malformed-file-falls-back-silently behavior (ADR-0446 Decision 2).
+        //
+        // has_prior_data (FR-010) mirrors `from_env`'s workspace-level gate exactly, scoped to
+        // this group: only queried when a workspace_root is configured AND this group has no
+        // prior drift sidecar of its own — a group with an existing record never pays the DB
+        // round trip, and a direct-construction caller with no workspace_root never touches the
+        // DB at all (`is_none_or` short-circuits to `false` on `None`).
+        let has_prior_data = if self
             .workspace_root
             .as_deref()
-            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
-            .map(Arc::new)
-            .or_else(|| self.ontology.clone());
+            .is_none_or(|root| ontology_sidecar::read_group_sidecar(root, group_id).is_some())
+        {
+            false
+        } else {
+            let db_opt = self.db.load_full();
+            db_opt
+                .as_ref()
+                .and_then(|d| d.connect().ok())
+                .and_then(|c| c.count_episodics_by_group_ids(&[group_id]).ok())
+                .unwrap_or(0)
+                > 0
+        };
+        let (drifted, drift_summary) = ontology_sidecar::compute_group_drift(
+            self.workspace_root.as_deref(),
+            group_id,
+            resolved.as_deref(),
+            has_prior_data,
+        );
+        if drifted {
+            eprintln!(
+                "liminis-context-graph: ontology: drift detected for group {group_id:?} — {} — recommend Recreate + re-ingest",
+                drift_summary.as_deref().unwrap_or("unknown change")
+            );
+        }
 
+        let entry = GroupOntologyEntry {
+            ontology: resolved.clone(),
+            drift: GroupDriftStatus {
+                drifted,
+                drift_summary,
+            },
+        };
+        // Known race (issue #451 review): this computation reads `group_id`'s sidecar without
+        // holding `group_ontologies`'s lock across the read-compute-insert sequence. If a
+        // concurrent remediation for the same never-before-resolved group (a WAL rebuild, or a
+        // successful `add_episode`) writes a new sidecar and clears drift *between* this call's
+        // sidecar read and this insert, this insert can overwrite that clear with a stale
+        // `drifted: true` computed against the pre-remediation sidecar — `knowledge_status` would
+        // then report the group as drifted until it's next genuinely used. Not fixed here:
+        // closing it correctly needs either holding this lock across a DB round trip (new
+        // contention affecting unrelated groups) or a versioned sidecar read, and it self-heals
+        // on that group's next successful `add_episode` (FR-009 always clears unconditionally on
+        // ingest) — narrow, self-bounded, and lower severity than a false negative would be.
         match self.group_ontologies.lock() {
             Ok(mut guard) => {
-                guard.insert(group_id.to_string(), resolved.clone());
+                guard.insert(group_id.to_string(), entry);
             }
             Err(e) => {
                 eprintln!(
@@ -281,6 +358,79 @@ impl AppState {
             }
         }
         resolved
+    }
+
+    /// Loads the ontology `group_id` resolves to (its own per-group file if present and valid,
+    /// otherwise the workspace-wide fallback), without caching it or computing drift. The shared
+    /// resolution step behind [`Self::resolve_ontology`] (which layers caching + drift on top)
+    /// and [`Self::peek_or_load_ontology`] (which needs only the value, not those side effects).
+    fn load_resolved_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
+        self.workspace_root
+            .as_deref()
+            .and_then(|root| crate::ontology::load_group_ontology(root, group_id))
+            .map(Arc::new)
+            .or_else(|| self.ontology.clone())
+    }
+
+    /// Returns `group_id`'s already-resolved ontology if this process has cached one, otherwise
+    /// loads (without caching, and without computing or warning about drift) the value it would
+    /// resolve to.
+    ///
+    /// Used by drift-clear sites (issue #451, FR-009 — the two `handle_rebuild_from_wal` paths)
+    /// that need the currently-resolved ontology only to record it into that group's sidecar as
+    /// part of clearing drift. Calling [`Self::resolve_ontology`] there instead would, for a
+    /// group this process hasn't touched yet (the realistic case for an admin-triggered WAL
+    /// rebuild used as degraded-mode recovery — see this repo's "WAL-corruption recovery" runbook
+    /// in CLAUDE.md), compute drift against the *pre-remediation* sidecar and emit a "drift
+    /// detected ... recommend Recreate + re-ingest" warning in the middle of the very operation
+    /// that performs that remediation, immediately followed by this call's own clear — a
+    /// misleading false alarm, not a real signal, since nothing about the group's state was ever
+    /// observed by a caller in between.
+    pub fn peek_or_load_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
+        if let Ok(guard) = self.group_ontologies.lock() {
+            if let Some(cached) = guard.get(group_id) {
+                return cached.ontology.clone();
+            }
+        }
+        self.load_resolved_ontology(group_id)
+    }
+
+    /// Returns `group_id`'s cached drift status, or `None` if that group's ontology has not yet
+    /// been resolved in this process (User Story 4, Scenario 2) — distinct from `Some(status)`
+    /// with `drifted: false`.
+    pub fn group_drift_status(&self, group_id: &str) -> Option<GroupDriftStatus> {
+        self.group_ontologies
+            .lock()
+            .ok()?
+            .get(group_id)
+            .map(|e| e.drift.clone())
+    }
+
+    /// Returns every group's cached drift status for `knowledge_status` (FR-002a) — purely from
+    /// the in-memory cache, never a disk scan, so a group this process has never resolved is
+    /// simply absent rather than falsely reported as "not drifted".
+    pub fn all_group_drift_statuses(&self) -> Vec<(String, GroupDriftStatus)> {
+        self.group_ontologies
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(gid, entry)| (gid.clone(), entry.drift.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Clears `group_id`'s cached drift status (FR-009), scoped to that one group only — called
+    /// after a successful remediation (a WAL rebuild or a fresh `add_episode` ingest) for that
+    /// specific group, never for every cached group (see ADR-0451). A no-op if the group has no
+    /// cache entry yet (nothing to clear).
+    pub fn clear_group_drift(&self, group_id: &str) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            if let Some(entry) = guard.get_mut(group_id) {
+                entry.drift = GroupDriftStatus::default();
+            }
+        }
     }
 
     /// Locks `wal_writers`, lazily creating `group_id`'s writer (and its WAL directory) on

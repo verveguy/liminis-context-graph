@@ -899,6 +899,22 @@ pub async fn add_episode(
         } else if let Ok(mut guard) = state.ontology_drift.lock() {
             *guard = OntologyDriftState::default();
         }
+
+        // Per-group clear (issue #451, FR-009): "Recreate + re-ingest" (the documented
+        // remediation, User Story 5's own example) routes through add_episode, not just
+        // handle_rebuild_from_wal — extend the clear to this group specifically, using the same
+        // resolved ontology (`resolved_ontology`, Phase A above) that just guided this episode's
+        // extraction, so the recorded hash matches what the DB now actually reflects.
+        if let Err(e) =
+            ontology_sidecar::write_group_sidecar(root, group_id, resolved_ontology.as_deref())
+        {
+            eprintln!(
+                "liminis-context-graph: ontology-sidecar: failed to update group sidecar for {:?}: {} — drift indicator may persist",
+                group_id, e
+            );
+        } else {
+            state.clear_group_drift(group_id);
+        }
     }
 
     // Publish the ontology that guided this episode's extraction as a documentation-only sidecar

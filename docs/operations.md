@@ -18,6 +18,9 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ├── ontology.yaml           # optional workspace-wide extraction vocabulary (yours to edit)
 ├── ontology/                # optional per-group extraction vocabulary (issue #446)
 │   └── <group_id>.yaml      #   one file per group_id, overrides ontology.yaml for that group
+├── ontology-hash.json       # workspace-level ontology drift sidecar (issue #83)
+├── ontology-hash/            # per-group ontology drift sidecars (issue #451)
+│   └── <group_id>.json      #   one file per group_id, drift state for its resolved ontology
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
