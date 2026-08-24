@@ -1,0 +1,662 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-mysng3d7"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Operations | liminis-context-graph</title><link rel="canonical" href="https://v3rv.com/liminis-context-graph/v0.13.3/operations/"/><link rel="sitemap" href="/liminis-context-graph/v0.13.3/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/v0.13.3/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.32.6"/><meta property="og:title" content="Operations"/><meta property="og:type" content="article"/><meta property="og:url" content="https://v3rv.com/liminis-context-graph/v0.13.3/operations/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg> <svg aria-hidden="true" class="dark astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg> <svg aria-hidden="true" class="auto astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> </template><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/print.BJ0teN4y.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/index.B-28p481.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-mysng3d7"> <a href="#_top" class="astro-wqmw2k6g">Skip to content</a>  <div class="page sl-flex astro-of3kkadl"> <header class="header astro-of3kkadl"><div class="header sl-flex astro-wrrcn5ux"> <div class="title-wrapper sl-flex astro-wrrcn5ux"> <a href="/liminis-context-graph/v0.13.3/" class="site-title sl-flex astro-yuo4yrvu">  <span class="astro-yuo4yrvu" translate="no"> liminis-context-graph </span> </a>  </div> <div class="sl-flex print:hidden astro-wrrcn5ux"> <site-search class="astro-wrrcn5ux astro-yg5rfrxv" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-yg5rfrxv"> <svg aria-hidden="true" class="astro-yg5rfrxv astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg>  <span class="sl-hidden md:sl-block astro-yg5rfrxv" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-yg5rfrxv" style="display: none;"> <kbd class="astro-yg5rfrxv">Ctrl</kbd><kbd class="astro-yg5rfrxv">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-yg5rfrxv"> <div class="dialog-frame sl-flex astro-yg5rfrxv">  <button data-close-modal class="sl-flex md:sl-hidden astro-yg5rfrxv"> Cancel </button> <div class="search-container astro-yg5rfrxv"> <div id="starlight__search" class="astro-yg5rfrxv"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/Search.astro_astro_type_script_index_0_lang.DNOR3ugD.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-wrrcn5ux"> <div class="sl-flex social-icons astro-wrrcn5ux"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-of3kkadl" aria-label="Main"> <starlight-menu-button class="print:hidden astro-siku6wqb"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-siku6wqb"> <svg aria-hidden="true" class="astro-siku6wqb astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg>  </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-of3kkadl"> <div class="sidebar-content sl-flex astro-of3kkadl"> <sl-sidebar-state-persist data-hash="118hnfo" class="astro-vtxilowo"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-kugjn6tz"> <li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Overview</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/getting-started/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Getting Started</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/configuration/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Configuration</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ipc-mcp-reference/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">IPC &amp; MCP Reference</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/telemetry/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Telemetry</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ontology/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Ontology</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/operations/" aria-current="page" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Operations</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/testing-and-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Testing &amp; Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/eval-full-corpus-runbook/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Full-Corpus Benchmark Runbook</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/extraction-quality-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Extraction-Quality Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/release-process/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Release Process</span>  </a> </li><li class="astro-kugjn6tz"> <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md" aria-current="false" class="large astro-kugjn6tz" target="_blank" rel="noopener"> <span class="astro-kugjn6tz">Decision records</span> <span class="sl-badge note small  astro-kugjn6tz astro-cdpyiwzk">GitHub</span>  </a> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-2wb6o6sd"> <div class="sl-flex social-icons astro-2wb6o6sd"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-of3kkadl">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-uaqswrp5"> <aside class="right-sidebar-container print:hidden astro-uaqswrp5"> <div class="right-sidebar astro-uaqswrp5"> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/liminis-context-graph/v0.13.3/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-tb5tla7j"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-g7l5jp3x"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-g7l5jp3x"><details id="starlight__mobile-toc" class="astro-g7l5jp3x"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-g7l5jp3x"><div class="toggle sl-flex astro-g7l5jp3x">On this page<svg aria-hidden="true" class="caret astro-g7l5jp3x astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </div><span class="display-current astro-g7l5jp3x"></span></summary><div class="dropdown astro-g7l5jp3x"><ul class="isMobile astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#on-disk-layout" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">On-disk layout</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#publishing-a-wal-stream-issue-414" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Publishing a WAL stream (issue #414)</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#wal-administration" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">WAL administration</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#self-healing-and-degraded-mode" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Self-healing and degraded mode</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#knowledge_status-health-fields" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">knowledge_status health fields</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#streaming-progress" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Streaming progress</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#recovery-and-export-tools" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Recovery and export tools</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-tb5tla7j"><div class="sl-container astro-tb5tla7j"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#on-disk-layout" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">On-disk layout</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#publishing-a-wal-stream-issue-414" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Publishing a WAL stream (issue #414)</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#wal-administration" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">WAL administration</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#self-healing-and-degraded-mode" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Self-healing and degraded mode</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#knowledge_status-health-fields" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">knowledge_status health fields</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#streaming-progress" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Streaming progress</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#recovery-and-export-tools" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Recovery and export tools</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-uaqswrp5">  <main data-pagefind-body class="astro-mysng3d7" lang="en" dir="ltr">   <script type="module">fetch("/liminis-context-graph/versions.json").then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;const s=document.getElementById("version-switcher");if(!s)return;const t=document.createElement("select");t.setAttribute("aria-label","Switch documented version");const l=e.versions.filter(o=>!o.includes("-")),c=l.length>0?l[0]:e.versions[0],i=document.createElement("option");i.value="/liminis-context-graph/",i.textContent=`latest (v${c})`,t.appendChild(i);for(const o of e.versions){const n=document.createElement("option");n.value=`/liminis-context-graph/v${o}/`,n.textContent=`v${o}`,window.location.pathname.startsWith(n.value)&&(n.selected=!0),t.appendChild(n)}t.addEventListener("change",()=>{window.location.href=t.value}),s.appendChild(t)}).catch(()=>{});</script> <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <h1 id="_top" class="astro-hybe2sjw">Operations</h1>  </div> </div>  <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <div class="sl-markdown-content"> <h2 id="on-disk-layout">On-disk layout</h2>
+<p>Everything the service manages lives under <code dir="auto">.lcg/</code> in the workspace:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/ec.tm3va.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/ec.8zarh.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">.lcg/</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">├── wal/                    # WAL root — one subdirectory per group_id (issue #378)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">│   └── liminis/            # the default group's stream: *.jsonl, .checkpoints/, .wal-bounds.json,</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">│                            #   .wal-generation.json, .wal-ontology.json (issue #446),</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">│                            #   .wal-embedding-model.json (issue #440)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">├── ontology.yaml           # optional workspace-wide extraction vocabulary (yours to edit)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">├── ontology/                # optional per-group extraction vocabulary (issue #446)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">│   └── &#x3C;group_id>.yaml      #   one file per group_id, overrides ontology.yaml for that group</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">└── service.sock            # JSON-RPC 2.0 endpoint while the service runs</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code=".lcg/├── wal/                    # WAL root — one subdirectory per group_id (issue #378)│   └── liminis/            # the default group&#x27;s stream: *.jsonl, .checkpoints/, .wal-bounds.json,│                            #   .wal-generation.json, .wal-ontology.json (issue #446),│                            #   .wal-embedding-model.json (issue #440)├── db/liminis.db           # LadybugDB files — a derived index, rebuildable from the WAL├── ontology.yaml           # optional workspace-wide extraction vocabulary (yours to edit)├── ontology/                # optional per-group extraction vocabulary (issue #446)│   └── <group_id>.yaml      #   one file per group_id, overrides ontology.yaml for that group└── service.sock            # JSON-RPC 2.0 endpoint while the service runs"><div></div></button></div></figure></div>
+<p><strong>The write-ahead log is the source of truth — and it’s just JSON.</strong> Every mutation is appended
+to plain JSONL files in <code dir="auto">.lcg/wal/&#x3C;group_id>/</code> before it touches the database. The WAL is
+human-readable, append-only, and git-friendly: check it into the same repository as your notes or
+documents, diff it, and carry it across machines. The database is a derived index — delete it and
+<code dir="auto">knowledge_rebuild_from_wal</code> reconstructs the entire graph from the log.</p>
+<p><strong><code dir="auto">.lcg/wal/</code> is a WAL root, not a single stream (issue #378).</strong> Each <code dir="auto">group_id</code> gets its own
+subdirectory — its own <code dir="auto">*.jsonl</code> files, its own <code dir="auto">.checkpoints/</code> store, its own
+<code dir="auto">.wal-bounds.json</code> manifest, its own <code dir="auto">.wal-generation.json</code> identity, and its own independent
+<code dir="auto">seq</code> numbering starting at 0. A group’s subdirectory is created lazily on that group’s first
+write; a group that has never been written to simply has no subdirectory yet. A single-group
+deployment (the common case — everything under the default <code dir="auto">"liminis"</code> group, no caller ever
+passing a different <code dir="auto">group_id</code>) behaves exactly as a pre-378 deployment did: one subdirectory, one
+writer, one recorded position. An <strong>existing</strong> pre-378 <code dir="auto">.lcg/wal/</code> (loose
+<code dir="auto">*.jsonl</code>/<code dir="auto">.checkpoints/</code>/<code dir="auto">.wal-bounds.json</code> directly under <code dir="auto">wal/</code>, no <code dir="auto">liminis/</code> subdirectory) is
+migrated automatically and idempotently on first boot under the upgraded binary — see
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0378-multi-stream-wal-per-group-directory.md">ADR-0378</a> for the migration mechanics; no
+operator action is required. As of issue #431, this migration also mints a
+<code dir="auto">.wal-generation.json</code> for the group it relocates content into: a legacy flat WAL predates
+generation identity (issue #387) entirely, and migration <em>assumes</em> it is locally owned — this is
+an assumption, not something provable from the directory contents alone (see issue #431’s
+<code dir="auto">## Assumptions</code> for why it holds today and what would invalidate it) — rather than leaving it
+with an unknown generation (see the unknown-generation refusal below, and
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0414-wal-generation-unknown-refuses-replay.md">ADR-0414</a>’s amendment note). No operator
+action is required for this either — it happens as part of the same migration.</p>
+<p><strong><code dir="auto">.wal-generation.json</code> (issue #387) gives each group’s stream a stable identity, distinct from
+its <code dir="auto">seq</code> numbering.</strong> <code dir="auto">seq</code> identifies a position <em>within</em> a stream; it says nothing about
+<em>which</em> stream a position belongs to — so nothing distinguishes “the same stream, further along”
+from “a different stream that happens to also number its lines from 0.” A publisher can
+legitimately reset a group’s stream (re-extract a corpus and republish from <code dir="auto">seq: 0</code> with
+entirely different content and entity identities); the generation is what lets a consumer tell
+that apart from ordinary forward progress. It is minted once, the first time a group’s directory
+is created with no prior content, and never changes for the life of that stream — appending never
+changes it, and it is opaque (compared for equality only, never interpreted or ordered). The file
+holds a single JSON object:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"generation"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">3f9a1c2e-4b7d-4e21-9c8a-1a2b3c4d5e6f</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;generation&#x22;: &#x22;3f9a1c2e-4b7d-4e21-9c8a-1a2b3c4d5e6f&#x22;}"><div></div></button></div></figure></div>
+<p>Any string value works — lcg mints a UUID, but nothing requires that shape. <strong>This file is
+publisher-writable</strong>: an external, non-lcg publisher (e.g. a distributed, git-published WAL model)
+that creates a group’s stream directory directly, without going through lcg, MUST write this file
+itself (a plain <code dir="auto">json.dump({"generation": &#x3C;any unique string>}, f)</code> from Python is sufficient) for
+<code dir="auto">knowledge_rebuild_from_wal</code>’s reset detection (below) to work against that stream — lcg never
+retroactively mints one into a directory it didn’t create, and a directory with no
+<code dir="auto">.wal-generation.json</code> is treated as having an unknown generation (see <code dir="auto">generation_status</code> in
+<a href="#knowledge_status-health-fields">the generation-scoped <code dir="auto">applied_seq</code> fields below</a>). Whether that
+is silently tolerated or an outright failure depends on whether a position for the group has
+already been recorded — see issue #414 below. Like <code dir="auto">.checkpoints/</code> and <code dir="auto">.wal-bounds.json</code>, it is
+invisible to every existing non-recursive <code dir="auto">*.jsonl</code> scan.</p>
+<h3 id="publishing-a-wal-stream-issue-414">Publishing a WAL stream (issue #414)</h3>
+<p><strong>Publishing a group’s stream directory means copying the entire directory, dot-namespace
+included — never a <code dir="auto">*.jsonl</code> or <code dir="auto">wal/*</code> glob.</strong> A shell glob does not match a leading dot by
+default, so <code dir="auto">git add wal/*</code>, <code dir="auto">cp wal/*.jsonl</code>, <code dir="auto">rsync --include='*.jsonl'</code>, and <code dir="auto">tar wal/*</code> all
+silently drop every dotfile in the directory while appearing to publish the complete stream. This
+was confirmed as the root cause of a real-world reset-detection outage (issue #414): a publisher’s
+<code dir="auto">*.jsonl</code>-only copy step dropped <code dir="auto">.wal-generation.json</code> on every publish, so every consumer that
+hydrated from it reported <code dir="auto">generation: null</code> forever and <code dir="auto">knowledge_rebuild_from_wal</code>’s reset
+detection never once had a generation to compare.</p>
+<p>Use a whole-directory copy instead — <code dir="auto">cp -R</code>/<code dir="auto">rsync -a</code> with no include-filter, or <code dir="auto">git add -A</code> —
+and know what each entry in the dot-namespace costs you if you omit it anyway:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>entry</th><th>requirement</th><th>consequence if dropped</th></tr></thead><tbody><tr><td><code dir="auto">.wal-generation.json</code> (issue #387)</td><td><strong>MUST travel</strong> — load-bearing</td><td>reset detection can never run for this stream again; every consumer that already recorded a position for this group starts hard-failing <code dir="auto">knowledge_rebuild_from_wal</code> (issue #414, below) until the stream is republished with its generation intact</td></tr><tr><td><code dir="auto">.wal-bounds.json</code> (issue #375)</td><td>MAY be omitted</td><td>not wrong, just slow — a cache; the consumer regenerates it by rescanning every <code dir="auto">*.jsonl</code> file on next read</td></tr><tr><td><code dir="auto">.wal-ontology.json</code> (issue #446)</td><td>MAY be omitted — informational</td><td>not wrong, not slow either — replay and correctness are entirely unaffected; the consumer just loses the ability to see what vocabulary produced this group’s graph. Never applied to the consumer’s own extraction, validation, canonicalization, or reprocessing even when present (see <a href="../ontology/#per-group-ontologies">Ontology</a>) — it is provenance, not policy</td></tr><tr><td><code dir="auto">.checkpoints/</code> (issue #365)</td><td>MAY be excluded</td><td>local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation</td></tr><tr><td><code dir="auto">.wal-embedding-model.json</code> (issue #440)</td><td>MAY be omitted, but you lose a diagnostic permanently</td><td>diagnostic-only, unlike <code dir="auto">.wal-generation.json</code> above — recompute (FR-001) never reads it, so replay and rebuild are unaffected either way, and nothing hard-fails the way a missing generation can. Losing it silences the replay-time <code dir="auto">[WAL WARN] embedding-model mismatch: ...</code> check (FR-006) for good: a missing sidecar reads as “unknown” (never a false mismatch), and there is no other place that reads the <em>WAL’s own</em> claimed identity, so a genuine embedder change for that stream stays undetectable via FR-006 once the sidecar is gone. <code dir="auto">knowledge_status</code>’s <code dir="auto">embedding_model_status</code> (FR-007) is a separate, independent comparison — the <em>graph’s currently-applied</em> vectors’ identity against the running embedder — and does not read this sidecar either; it only happens to also read “mismatch” if the graph’s applied identity itself differs from the runner (e.g. a prior rebuild under a different embedder, or a rebuild whose recompute attempts failed), not as a substitute diagnostic for the missing sidecar</td></tr></tbody></table>
+<p>Only <code dir="auto">.wal-generation.json</code> is load-bearing — every other entry is safe to omit deliberately, but
+never safe to omit <em>by accident</em> as a side effect of a glob pattern that was only ever meant to
+select <code dir="auto">*.jsonl</code> files. <code dir="auto">.wal-bounds.json</code> and <code dir="auto">.checkpoints/</code> degrade performance or local
+recovery convenience if dropped; <code dir="auto">.wal-ontology.json</code> degrades only documentation — a stream
+published with it present must never have it change the consumer’s own behavior (issue #446);
+<code dir="auto">.wal-embedding-model.json</code> degrades only a diagnostic — recompute never reads it, so replay and
+rebuild are unaffected, but the replay-time mismatch warning is permanently silenced, since
+nothing else reads the WAL’s own claimed identity (issue #440).</p>
+<h2 id="wal-administration">WAL administration</h2>
+<ul>
+<li><strong>Rebuild</strong> one group’s data from its own WAL directory with <code dir="auto">knowledge_rebuild_from_wal {group_id, ...}</code> (<code dir="auto">group_id</code> defaults to <code dir="auto">"liminis"</code>, so a single-group deployment needs no
+change). A <code dir="auto">from_seq: 0</code> (default) rebuild against a <em>group</em> that already has data in it fails
+fast with an explicit error instead of silently producing a duplicate-key failure per node —
+pass <code dir="auto">force_clear: true</code> to clear that group’s data automatically first (issue #378: this
+clears only the target group via the same primitive <code dir="auto">knowledge_delete_by_group</code> uses, not the
+whole database file), or clear it yourself with <code dir="auto">knowledge_delete_by_group</code> before calling
+rebuild. Rebuilding one group never touches another group’s <code dir="auto">WalPosition</code>, WAL directory, or
+data. A successful non-dry-run rebuild automatically rebuilds the entity/relationship search
+indices, so <code dir="auto">knowledge_find_entities</code>/<code dir="auto">knowledge_find_relationships</code> are immediately queryable
+afterward — <code dir="auto">knowledge_build_indices</code> is not normally required.</li>
+<li><strong>Unknown-generation refusal (issue #414).</strong> Before comparing anything, <code dir="auto">knowledge_rebuild_from_wal</code>
+checks whether the group already has a previously recorded position (<code dir="auto">applied_seq</code> not null —
+note a <code dir="auto">knowledge_status</code> call can itself cause this to become true via its own backfill, so
+this can trip on what looks like the first explicit rebuild call ever made against a group) and
+whether the group’s current on-disk generation is unknown (missing or corrupt
+<code dir="auto">.wal-generation.json</code> — the two are indistinguishable by design, see below). If both hold, the
+call fails outright with an explicit error naming the group and pointing at the publish contract
+above — replay does not proceed, <code dir="auto">from_seq</code>/<code dir="auto">to_seq</code>/<code dir="auto">force_clear</code> are not applied, and this
+applies uniformly to <code dir="auto">dry_run: true</code> as well (there is nothing safe to preview). No
+configuration flag, environment variable, or request parameter bypasses this check. The refusal
+is scoped to the affected group only — a sibling group sharing the same WAL root whose own
+generation is known remains independently replayable in the same or a later call. A group with
+no previously recorded position is unaffected: it performs ordinary first-time adoption, including
+adopting an unknown generation, exactly as before this issue. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0414-wal-generation-unknown-refuses-replay.md">ADR-0414</a> for the full rationale.
+A workspace migrated from a legacy flat WAL by a binary containing issue #431’s fix does not
+hit this refusal — migration itself stamps a generation, so the group’s current on-disk
+generation is never unknown afterward (see the migration paragraph above). If it still fires,
+the error message gives two possible remedies, since the two situations that can produce this
+state are indistinguishable on disk: republish the stream’s full directory if it was received
+from a publisher (above), or — for a local workspace with no publisher, e.g. one migrated by a
+binary older than issue #431’s fix — create <code dir="auto">.wal-generation.json</code> in the group’s WAL directory
+by hand with any unique string value, <code dir="auto">{"generation": "&#x3C;any unique string>"}</code>, as a one-time,
+deliberate assertion of ownership.</li>
+<li><strong>Reset detection (issue #387).</strong> Once the check above has passed, <code dir="auto">knowledge_rebuild_from_wal</code>
+compares the group’s recorded generation against what’s currently on disk
+(<code dir="auto">.wal-generation.json</code>). If they differ (both known and unequal — see <code dir="auto">wal.generation_status</code>
+below for the unknown-generation case, handled by the refusal above instead), the caller’s
+<code dir="auto">from_seq</code>/<code dir="auto">to_seq</code>/<code dir="auto">force_clear</code> are overridden
+entirely: this is always a full, automatic self-heal — purge the group, replay it from scratch
+against the new generation, then re-bind any cross-group pointers into it — rather than
+silently replaying new-generation mutations on top of old-generation data (the corruption this
+issue exists to prevent; the two do not reconcile, since the native write path emits <code dir="auto">CREATE</code>
+rather than <code dir="auto">MERGE</code>). The result reports <code dir="auto">reset_detected: true</code>, <code dir="auto">previous_generation</code>,
+<code dir="auto">generation</code> (the generation just replayed), and <code dir="auto">cross_group_rebind</code> (the same counts
+<code dir="auto">knowledge_rebind_pointers</code> reports), on both the streaming response and the background-job’s
+polled <code dir="auto">result</code>, so a caller can tell this apart from an ordinary incremental replay. A
+<code dir="auto">dry_run: true</code> call against a mismatched group reports the same <code dir="auto">reset_detected</code>/
+<code dir="auto">previous_generation</code>/<code dir="auto">generation</code> fields but purges and replays nothing — report-only, like
+every other dry-run path in this codebase.</li>
+<li><strong>Bounded rebuild</strong> with <code dir="auto">to_seq</code>: pass an inclusive upper bound (<code dir="auto">from_seq &#x3C;= seq &#x3C;= to_seq</code>)
+to exclude a known-bad mutation and everything after it — e.g. recovering from an operator
+mistake that is itself recorded in the WAL. <code dir="auto">knowledge_rebuild_from_wal {from_seq: 0, to_seq: &#x3C;seq before the bad mutation>, force_clear: true}</code> rebuilds the graph as it stood just
+before the mistake. This is <strong>not durable</strong>: WAL entries beyond <code dir="auto">to_seq</code> are left on disk,
+unapplied — they are not truncated or archived. A later unbounded rebuild, or a <code dir="auto">from_seq</code>
+resume that covers the excluded range, reapplies everything that was excluded, including a
+previously-excluded bad mutation. Durable rollback (truncating/archiving the WAL tail) is not
+provided by this primitive.</li>
+<li><strong>Dump</strong> the database back to a compacted log with <code dir="auto">knowledge_dump_wal</code> — this is also the
+way to take a restore-point snapshot before a large or destructive operation, since WAL replay
+is forward-only. The output directory starts with no checkpoints: any WAL marks (below)
+recorded against the source directory are not carried forward, since dump_wal renumbers
+sequence numbers and a copied mark’s <code dir="auto">seq</code> would be meaningless against the new numbering. For
+the same reason, the output always gets a freshly minted generation (issue #387) — never the
+source’s: it is a new stream, not a copy of the source’s identity, so a consumer must not treat
+it as “the same stream” it was tracking before.</li>
+<li><strong>Name a known-good position</strong> with <code dir="auto">knowledge_wal_mark_create {name, group_id}</code> (<code dir="auto">group_id</code>
+defaults to <code dir="auto">"liminis"</code>) — a lightweight alternative to a full <code dir="auto">knowledge_dump_wal</code> snapshot
+when all you need is a durable pointer back to “this group’s stream was good here,” not a
+materialized copy. A <code dir="auto">name</code> must be 1-200 characters of <code dir="auto">[A-Za-z0-9_-]</code>, because it becomes a
+single directory name under that group’s own <code dir="auto">.checkpoints/</code>. It records the target group’s
+current <code dir="auto">applied_seq</code>, <strong>and the group’s current generation (issue #387)</strong>, under
+<code dir="auto">&#x3C;wal_root>/&#x3C;group_id>/.checkpoints/</code>, is O(1) (no WAL scan or replay), and fails if the
+position is unknown (<code dir="auto">applied_seq</code> is <code dir="auto">null</code>) or the name is already in use by an active mark
+<strong>within that group</strong> — two different groups may each have an active mark of the same name,
+since each group’s checkpoint store is independent. <code dir="auto">knowledge_wal_mark_list {group_id}</code> (also defaulting to <code dir="auto">"liminis"</code>, and always scoped to exactly one group — there is
+no cross-group aggregate listing) lists every active mark in that group with its <code dir="auto">seq</code>, its
+<code dir="auto">generation</code>, its <code dir="auto">wal_min_seq</code>/<code dir="auto">wal_max_seq</code> (the bounds of that group’s WAL content currently
+on disk), and whether it is currently <code dir="auto">reachable</code>: this requires both the existing bounds check
+(<code dir="auto">wal_min_seq == 0</code> — the WAL’s own prefix has not been externally truncated, e.g. by routine
+retention deleting old WAL files — and <code dir="auto">seq &#x3C;= wal_max_seq</code>) <strong>and</strong>, independently, that the
+mark’s recorded <code dir="auto">generation</code> matches the group’s current on-disk generation whenever both are
+known (issue #387, FR-007) — a mark taken against a generation that has since been reset is
+never reachable, even when its <code dir="auto">seq</code> still falls comfortably inside
+<code dir="auto">[wal_min_seq, wal_max_seq]</code> (exactly the “looks like forward progress, isn’t” case issue #387
+exists to close). Separately, on the bounds side, a mark whose <code dir="auto">seq</code> merely falls inside
+<code dir="auto">[wal_min_seq, wal_max_seq]</code> is still reported unreachable if <code dir="auto">wal_min_seq > 0</code>, since a restore
+would silently omit everything before it. Neither check detects a gap in the <em>middle</em> of that
+range. <code dir="auto">knowledge_wal_mark_delete {name, group_id}</code> removes a mark from that group (recording a tombstone, never rewriting the original
+record) and frees the name for reuse within that group. To restore: <code dir="auto">knowledge_rebuild_from_wal {group_id, from_seq: 0, to_seq: &#x3C;seq>, force_clear: true}</code> for a mark with an integer <code dir="auto">seq</code>, or
+<code dir="auto">knowledge_delete_by_group {group_ids: [group_id]}</code> for a mark with <code dir="auto">seq: null</code> (a genuinely
+empty group) — or <code dir="auto">knowledge_clear_all</code> if you mean to reset every group, not just one. These
+tools are unrelated to <code dir="auto">knowledge_prepare_checkpoint</code> below — they name a WAL position, not
+flush a writer — and each group’s <code dir="auto">.checkpoints/</code> store lives in its own subdirectory precisely
+so it is invisible to the WAL file scans that discover <code dir="auto">.jsonl</code> mutation files
+(<code dir="auto">knowledge_dump_wal</code> and the replayer among them), and so it travels with that group’s WAL
+directory itself when checked into git. Exactly-one-wins under concurrent <code dir="auto">create</code> for the same
+name (within one group) relies on exclusive file creation (<code dir="auto">O_EXCL</code>), a local-filesystem
+guarantee — not reliable on an NFS-mounted WAL directory (see
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0365-wal-checkpoints-directory-per-name-store.md">ADR-0365</a>).</li>
+<li><strong>Checkpoint</strong> before backups with <code dir="auto">knowledge_prepare_checkpoint</code> — this rotates and flushes
+every group’s live WAL writer (issue #378: an instance-wide operation now spans however many
+groups this process has written to, not one writer) so pending mutations are on disk before an
+external filesystem backup. It shares the word “checkpoint” with <code dir="auto">knowledge_wal_mark_*</code> above
+by coincidence, not by relation, and takes no <code dir="auto">group_id</code> — it is always whole-instance.</li>
+<li><strong>Rotation.</strong> <code dir="auto">LCG_WAL_MAX_BYTES_PER_FILE</code> (default 5 MB) and <code dir="auto">LCG_WAL_MAX_EVENTS_PER_FILE</code>
+(default 10000) bound each WAL file’s size; rotation fires when either threshold is reached
+and emits a <code dir="auto">wal_rotated</code> <a href="../telemetry/#wal_rotated">telemetry event</a>.</li>
+<li><strong>Failure reporting.</strong> Failure reports from replay dedupe by <code dir="auto">(template, error)</code>, so a schema
+gap on one mutation type can no longer hide an unrelated failure category behind a wall of
+identical samples. Use <code dir="auto">LCG_REPLAY_FAILURE_SAMPLES</code> to control how many distinct failing
+lines are retained per replay.</li>
+</ul>
+<p>See <a href="../configuration/">Configuration</a> for the full set of <code dir="auto">LCG_WAL_*</code>/<code dir="auto">LCG_REPLAY_*</code> environment
+variables, and <a href="../ipc-mcp-reference/#mcp-over-stdio-transport">IPC &#x26; MCP Reference</a> for the
+<code dir="auto">knowledge_rebuild_from_wal</code> non-empty-database refusal behavior in detail.</p>
+<h2 id="self-healing-and-degraded-mode">Self-healing and degraded mode</h2>
+<p>The service binds its socket <strong>before</strong> opening the database, so a corrupted store leaves it
+reachable in degraded mode rather than dead (<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0009-degraded-mode-startup-recovery.md">ADR-0009</a>).
+Legacy <code dir="auto">.graphiti/</code>→<code dir="auto">.lcg/</code> workspace migration runs <em>before</em> the bind; the issue #378 WAL-root
+relocation (<code dir="auto">migrate_wal_root_if_needed()</code>) runs <em>after</em> the socket is already bound, in the same
+pre-<code dir="auto">Db::open()</code> window as the DB open itself. Autonomous startup recovery (<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0027-autonomous-wal-startup-recovery.md">ADR-0027</a>)
+then reopens at the last good checkpoint, replays the WAL tail, and rebuilds indices without
+intervention. Recovery progress is observable via the <a href="../telemetry/#wal_auto_recovery"><code dir="auto">wal_auto_recovery</code> telemetry event</a>,
+whose <code dir="auto">phase</code> field steps through <code dir="auto">corruption_detected</code> → <code dir="auto">checkpoint_drop_complete</code> →
+<code dir="auto">cursor_derived</code> → <code dir="auto">replay_complete</code> → <code dir="auto">index_build_complete</code> → <code dir="auto">recovery_complete</code> (or
+<code dir="auto">fallback_triggered</code>, if automatic recovery gives up and manual intervention via
+<code dir="auto">knowledge_recover</code>/<code dir="auto">knowledge_recover_full</code> is needed).</p>
+<p><strong>Readiness: a successful connect is not readiness.</strong> Because the socket is bound before the
+database opens, a bare <code dir="auto">connect()</code> to <code dir="auto">.lcg/service.sock</code> can succeed while the service is still
+relocating the WAL root or replaying WAL — before it has started actually serving graph requests.
+(The process’s own accept loop, in <code dir="auto">run_socket_service</code>, only starts after <code dir="auto">bootstrap_app_state()</code>
+resolves, so a request sent on such a connection queues in the kernel and is not read until
+startup work has already finished — it does not race migration and get served with stale state.
+The actual risk is a client that treats the <code dir="auto">connect()</code> succeeding as sufficient evidence of
+readiness by itself — e.g. proceeding to inspect on-disk WAL state, or reporting “ready” in its
+own UI — without waiting for a <code dir="auto">health_check</code> round-trip.) The correct readiness signal is a
+<code dir="auto">health_check</code> request/response round-trip reporting <code dir="auto">"healthy"</code>: <code dir="auto">handle_health_check</code> can only
+return <code dir="auto">healthy</code> once <code dir="auto">Db::open()</code> has succeeded, which is after both legacy-workspace migration
+(which completes before the bind) and WAL-root migration (which runs after it) have finished.
+Poll <code dir="auto">health_check</code> until it reports <code dir="auto">healthy</code> (or <code dir="auto">knowledge_status</code> until <code dir="auto">connected</code> and
+<code dir="auto">queryable</code> are both <code dir="auto">true</code> and <code dir="auto">initializing</code> is <code dir="auto">false</code> — <code dir="auto">knowledge_status</code> has no <code dir="auto">healthy</code>
+field of its own) before treating the service as ready.</p>
+<h2 id="knowledge_status-health-fields"><code dir="auto">knowledge_status</code> health fields</h2>
+<p>Beyond the <a href="../ontology/#knowledge_status-summary">ontology summary</a>, <code dir="auto">knowledge_status</code> reports:</p>
+<p><strong><code dir="auto">indices_built</code></strong> (boolean) — whether the entity/relationship FTS + HNSW search indices are
+currently built and reflect the graph’s current contents. The service builds these indices
+<strong>eagerly at startup</strong> — immediately after schema init on a fresh DB, or as part of
+self-recovery after a WAL-corruption auto-heal — before the socket accepts any request, so
+<code dir="auto">indices_built</code> is normally <code dir="auto">true</code> from the very first <code dir="auto">knowledge_status</code> call onward (see
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0036-eager-index-build-at-startup.md">ADR-0036</a>). A genuine build failure during that eager
+startup build fails startup outright rather than silently leaving indices unbuilt.</p>
+<p>A runtime recovery — any <code dir="auto">knowledge_recover</code> strategy (<code dir="auto">drop_lbug_wal</code>,
+<code dir="auto">rebuild_from_workspace_wal</code>, <code dir="auto">restore_from_backup</code>) or <code dir="auto">knowledge_recover_full</code> — also leaves
+<code dir="auto">indices_built</code> correctly <code dir="auto">true</code> on success: <code dir="auto">drop_lbug_wal</code>/<code dir="auto">restore_from_backup</code> reopen an
+already-indexed checkpoint or backup, while <code dir="auto">rebuild_from_workspace_wal</code>/<code dir="auto">knowledge_recover_full</code>
+explicitly rebuild the indices before reporting success. Failure handling differs by strategy:
+<code dir="auto">rebuild_from_workspace_wal</code> and <code dir="auto">knowledge_recover_full</code> invalidate indices as part of the
+attempt, so a failure that aborts before the rebuild completes leaves the flag <code dir="auto">false</code> rather than
+reporting stale readiness; <code dir="auto">drop_lbug_wal</code> and <code dir="auto">restore_from_backup</code> never touch indices, so a
+failed call leaves the flag at whatever it was before the attempt.</p>
+<p><code dir="auto">indices_built</code> still goes back to <code dir="auto">false</code> in narrower, later situations: after
+<code dir="auto">knowledge_clear_all</code>, or if a post-rebuild index build genuinely fails (as opposed to the
+common, harmless “already built” case). In those cases <code dir="auto">false</code> does not mean search or ingest
+is broken — <code dir="auto">knowledge_find_entities</code>/<code dir="auto">knowledge_find_relationships</code>, and the ingest
+hybrid-dedup path used once a <code dir="auto">group_id</code> passes the dedup threshold, all auto-heal by
+transparently rebuilding indices and retrying on their first call after a <code dir="auto">false</code> state. The
+field exists so a caller can <em>observe</em> readiness proactively instead of discovering it only via
+a search or ingest attempt. The same field appears on <code dir="auto">knowledge_rebuild_from_wal</code>’s result (and
+on <code dir="auto">knowledge_rebuild_status</code>’s <code dir="auto">result</code> for the background-job path) for the specific rebuild
+that produced it; it is omitted from dry-run rebuild results, since a dry run never touches
+indices.</p>
+<p><strong><code dir="auto">name_index_trusted</code></strong> (boolean) and <strong><code dir="auto">name_index_fallback_scans</code></strong> (integer) — report the
+health of the in-process <code dir="auto">NameIndex</code> accelerator behind case-insensitive entity name lookups
+(<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0038-in-process-name-index.md">ADR-0038</a>). <code dir="auto">name_index_trusted</code> is <code dir="auto">true</code> unless a write path
+is known to have bypassed the index — e.g. a raw-Cypher mutation via <code dir="auto">knowledge_query_cypher</code>
+whose follow-up rebuild failed, or a post-replay <code dir="auto">rebuild_name_index()</code> failure inside
+<code dir="auto">knowledge_rebuild_from_wal</code> — and goes back to <code dir="auto">true</code> once the next rebuild succeeds.
+<code dir="auto">name_index_fallback_scans</code> counts how many times an endpoint-existence lookup (the
+“does this entity exist anywhere in the group” check used during edge-endpoint resolution)
+missed the index and fell back to a bounded database scan; it only increments on a miss; a
+healthy, coherent index keeps this at (or near) <code dir="auto">0</code>. Both fields are <code dir="auto">null</code> while the service is
+degraded (no connected database). A rising <code dir="auto">name_index_fallback_scans</code> count, or a
+<code dir="auto">name_index_trusted: false</code> that doesn’t clear on its own, signals index desync worth
+investigating — see <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md">ADR-0283</a> for the
+mechanism.</p>
+<p><strong><code dir="auto">wal_groups</code></strong> (issue #378) — an additive map, keyed by <code dir="auto">group_id</code>, of every group that
+currently has a WAL directory, each entry shaped like the flat <code dir="auto">wal</code> object below
+(<code dir="auto">{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model, embedding_dim, embedding_model_status}</code> — the last three added by issue #440, mirroring each
+group’s own embedding identity the same way <code dir="auto">generation</code> is already mirrored per group). This is
+the multi-group view; the flat
+<code dir="auto">wal.applied_seq</code>/<code dir="auto">wal.max_seq</code>/<code dir="auto">wal.generation</code>/<code dir="auto">wal.generation_status</code>/<code dir="auto">wal.hydration_status</code>/<code dir="auto">wal.embedding_model</code>/<code dir="auto">wal.embedding_dim</code>/<code dir="auto">wal.embedding_model_status</code>
+fields described next remain present and
+<strong>pinned specifically to the default <code dir="auto">"liminis"</code> group</strong>, unchanged in meaning from a pre-378
+single-group deployment — a caller that only reads the flat fields (e.g. an existing integration
+written before this issue) needs no change. If the default group has no WAL directory at all
+(e.g. a pure replica that has only ever hydrated non-default groups), the flat fields report
+<code dir="auto">null</code>/absent rather than an error — a documented signal that this instance has no default group,
+not a broken or un-hydrated instance. Do not confuse “not in <code dir="auto">wal_groups</code>” with “at position 0”: a
+group present in the map with <code dir="auto">applied_seq: 0</code> has a directory and a known position; a group
+absent from the map entirely has no WAL directory yet.</p>
+<p><strong><code dir="auto">wal.applied_seq</code></strong> and <strong><code dir="auto">wal.max_seq</code></strong> (issue #353; scoped to the default group by issue
+#378) — let a caller decide, from a single <code dir="auto">knowledge_status</code> call and an integer comparison,
+whether its local DB is already consistent with the default group’s WAL, needs an incremental
+resume, or needs a full rebuild. <code dir="auto">wal.applied_seq</code> is read from a persisted DB row on every call —
+never cached in memory, so the value survives a service restart. <code dir="auto">wal.max_seq</code> always reports the
+true highest <code dir="auto">seq</code> actually present on disk for the default group (or
+<code dir="auto">None</code>/<code dir="auto">null</code> if the WAL is empty or unconfigured); an externally-updated WAL (e.g. a distributed,
+git-published WAL pulled by another process) is observed on the very next call, at worst after one
+reconciling full scan (issue #375). In the common case it’s computed from a small manifest sidecar
+(<code dir="auto">&#x3C;wal_dir>/.wal-bounds.json</code>) rather than by rereading every <code dir="auto">.jsonl</code> file in the WAL directory on
+every call — see <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0375-wal-max-seq-bounds-manifest.md">ADR-0375</a> for the caching mechanism and
+why an earlier “never cached” design was revised. The same manifest and fast path also back
+<code dir="auto">wal_min_seq</code>, so <code dir="auto">knowledge_wal_mark_list</code>’s reachability check (below) does not scale with WAL
+file count either.</p>
+<p><strong><code dir="auto">wal.generation</code></strong> (issue #387; also scoped to the default group, and mirrored per-group inside
+<code dir="auto">wal_groups</code>) — the group’s current <strong>on-disk (source-side)</strong> generation, read from
+<code dir="auto">.wal-generation.json</code> alongside the same <code dir="auto">wal_max_seq</code> machinery above, so reporting it costs
+nothing beyond what <code dir="auto">applied_seq</code>/<code dir="auto">max_seq</code> already pay (no new full-directory scan). This is
+deliberately the on-disk value, not lcg’s own DB-recorded consumer-side position — an external
+consumer (e.g. orac) compares this against its <em>own</em> bookkeeping to answer “is this the same
+stream I was tracking?”, the same on-disk-authoritative role <code dir="auto">max_seq</code> already plays. <code dir="auto">null</code> means
+the stream currently has no generation recorded — its own <code dir="auto">generation_status</code> (next) says whether
+that is “no stream yet” or “unknown” (both used to collapse indistinguishably to this same <code dir="auto">null</code>,
+issue #414). Opaque: compare for equality only, never interpret or order it. lcg’s own
+internally-recorded generation (paired with its own <code dir="auto">applied_seq</code>, and what
+<code dir="auto">knowledge_rebuild_from_wal</code>’s reset detection actually compares against) is not surfaced by
+<code dir="auto">knowledge_status</code> at all — it is a purely internal bookkeeping value with no separate
+consumer-facing use.</p>
+<p><strong><code dir="auto">wal.generation_status</code></strong> (issue #414; also scoped to the default group, and mirrored per-group
+inside <code dir="auto">wal_groups</code>) — a sibling string field alongside <code dir="auto">generation</code>, classifying why <code dir="auto">generation</code>
+reads the way it does, since <code dir="auto">generation: null</code> alone cannot distinguish “no stream” from “stream,
+but generation unknown.” Pure classification of <code dir="auto">max_seq</code>/<code dir="auto">generation</code>, no new I/O:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">generation_status</code></th><th>meaning</th></tr></thead><tbody><tr><td><code dir="auto">"not_applicable"</code></td><td>no WAL stream exists yet for this group (no <code dir="auto">*.jsonl</code> content, no generation record)</td></tr><tr><td><code dir="auto">"unknown"</code></td><td>a stream exists (<code dir="auto">*.jsonl</code> content is present) but its generation is currently unrecoverable — missing or corrupt <code dir="auto">.wal-generation.json</code>, most commonly because a publish step dropped the dot-namespace (see <a href="#publishing-a-wal-stream-issue-414">Publishing a WAL stream</a> above)</td></tr><tr><td><code dir="auto">"known"</code></td><td>a stream exists with a recorded generation — including a freshly-minted, still-empty stream (<code dir="auto">max_seq: null</code>, <code dir="auto">generation</code> non-null)</td></tr></tbody></table>
+<p><code dir="auto">generation_status: "unknown"</code> is exactly the condition that makes <code dir="auto">knowledge_rebuild_from_wal</code>
+refuse once a position has been recorded for that group (see Unknown-generation refusal above) —
+checking this field before calling rebuild lets an operator see the condition coming rather than
+discovering it as an abrupt failure.</p>
+<p><strong><code dir="auto">wal.hydration_status</code></strong> (issue #456; also scoped to the default group, and mirrored per-group
+inside <code dir="auto">wal_groups</code>) — a sibling string field alongside <code dir="auto">applied_seq</code>/<code dir="auto">max_seq</code>, classifying
+whether the group’s database contents are caught up with its WAL, so a caller no longer needs to
+compare the two fields itself to tell “genuinely empty” apart from “not yet hydrated.” Pure
+comparison of <code dir="auto">applied_seq</code>/<code dir="auto">max_seq</code>, no new I/O — an absent or never-backfilled <code dir="auto">applied_seq</code> is
+treated as <code dir="auto">0</code> for the comparison:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">hydration_status</code></th><th>meaning</th></tr></thead><tbody><tr><td><code dir="auto">"not_applicable"</code></td><td>the group has no WAL content at all (<code dir="auto">max_seq</code> is zero or absent) — there is nothing to be behind on, regardless of <code dir="auto">applied_seq</code></td></tr><tr><td><code dir="auto">"wal_ahead"</code></td><td>the WAL holds content the database has not applied (<code dir="auto">max_seq</code> is nonzero and exceeds the effective <code dir="auto">applied_seq</code>) — this is the state that motivated the issue: a wiped or fresh database beside a populated WAL directory must not be mistaken for an authoritative empty corpus</td></tr><tr><td><code dir="auto">"hydrated"</code></td><td>the database is caught up with its WAL (<code dir="auto">applied_seq >= max_seq</code>, and <code dir="auto">max_seq</code> is nonzero) — this includes <code dir="auto">applied_seq > max_seq</code> (e.g. following a generation reset elsewhere), which is deliberately classified as caught-up rather than as a distinct anomaly state</td></tr></tbody></table>
+<p><strong>Known narrow limitation</strong>: <code dir="auto">max_seq</code> is 0-indexed (a group’s very first WAL write has <code dir="auto">seq: 0</code>),
+so a group whose entire WAL history is exactly one entry has <code dir="auto">max_seq == 0</code> — indistinguishable,
+via <code dir="auto">max_seq</code> alone, from “no content at all,” and reported as <code dir="auto">"not_applicable"</code>. This is the one
+case where a wiped-DB-beside-a-populated-WAL condition (the state this field exists to surface) can
+go unreported; it resolves itself once the group’s WAL receives a second write. See the
+<code dir="auto">wal_hydration_status</code> doc comment in <code dir="auto">handlers.rs</code> for why this can’t be resolved by classifying
+<code dir="auto">max_seq == 0</code> as content-bearing instead — <code dir="auto">applied_seq == 0</code> is itself an overloaded sentinel for
+both “nothing ever applied” and “genuinely caught up through seq 0,” so doing so would trade this
+narrow false <code dir="auto">"not_applicable"</code> for an equally narrow but more actively misleading false
+<code dir="auto">"hydrated"</code> in the same colliding case.</p>
+<p><code dir="auto">hydration_status</code> does not change <code dir="auto">health_check</code>’s <code dir="auto">healthy</code>/<code dir="auto">degraded</code> determination in any
+way: a <code dir="auto">wal_ahead</code> group is a normal, fully-queryable state from the process’s own point of view
+(it can still serve reads over whatever content it does hold) — the hydration question is per-group
+data state, not process health, and is answered here rather than by <code dir="auto">health_check</code>.</p>
+<p><strong><code dir="auto">wal.embedding_model</code>, <code dir="auto">wal.embedding_dim</code>, and <code dir="auto">wal.embedding_model_status</code></strong> (issue #440;
+scoped to the default group, and mirrored per-group inside <code dir="auto">wal_groups</code>) — report the embedding
+model identity under which the group’s <em>currently-applied</em> vectors were computed, alongside
+<code dir="auto">applied_seq</code>/<code dir="auto">generation</code> in the same <code dir="auto">WalPosition</code> row (no extra query). This is distinct from
+replay reconstructing a graph from a WAL captured under a different embedder: as of this issue,
+replay (<code dir="auto">knowledge_rebuild_from_wal</code>, <code dir="auto">knowledge_recover</code> with any strategy that replays WAL
+content, and startup WAL-corruption self-recovery) always <strong>recomputes</strong> each embedding vector
+from its co-located source text
+(<code dir="auto">name</code>/<code dir="auto">fact</code>/<code dir="auto">content</code>) using the <em>currently running</em> embedder, rather than binding whatever
+vector the WAL happened to store — so the graph’s vectors stay coherent with the process actually
+querying them, and upgrading the embedder is self-healing (rebuild, and search stays consistent).
+A record with no co-located source text (a malformed or pre-recompute-era shape) still falls back
+to the WAL’s stored vector verbatim, unchanged from prior behavior. Recomputation failing for a
+record that <em>does</em> have source text (embedder unreachable, or a recomputed vector whose length or
+finiteness makes it unbindable) falls back the same way — the stored vector stays bound and replay
+does not fail for that row; each cause is counted separately in <code dir="auto">ReplayStats</code>
+(<code dir="auto">embeddings_recompute_fallback</code> vs. <code dir="auto">embeddings_recompute_failed</code>) so the two are distinguishable.</p>
+<p><code dir="auto">embedding_model_status</code> classifies the comparison between the recorded identity and the
+<em>currently running</em> embedder’s own <code dir="auto">(embedding_model, embedding_dim)</code> (the top-level fields also
+present on <code dir="auto">knowledge_status</code>) — independent of whether a replay has happened in this session, so
+a restart under a different embedder is caught regardless of whether the group has ever been
+rebuilt. <code dir="auto">WalPosition.embedding_model</code>/<code dir="auto">embedding_dim</code> are re-derived from the running embedder
+and re-stamped on <strong>every</strong> successful WAL-position advance — a full replay/rebuild, and every
+ordinary write (<code dir="auto">add_episode</code>, assertion/merge/rebind/correction handlers, backfill, canonicalize,
+reprocess) alike — the same “re-derived and persisted on every write” treatment <code dir="auto">generation</code>
+already gets, not something limited to replay call sites. This is a best-effort marker, not a
+full-graph audit: a write stamps the identity of the embedder that <em>ran</em> it, not a claim that
+every vector currently in the group was computed under that identity — a group that changed
+embedders mid-life without an intervening full rebuild can still carry some stale, un-recomputed
+vectors from before the change even while <code dir="auto">embedding_model_status</code> reads <code dir="auto">"match"</code> (the status
+reflects the most recent write’s embedder, and a delete/correction/relabel write stamps the
+running identity the same way a content-embedding write does, even though it touched no vector
+itself). The one case still uncovered is genuinely fresh: a group with an <code dir="auto">applied_seq</code> recorded
+before this issue shipped (or via a caller with recompute unavailable) shows <code dir="auto">"unknown"</code> until its
+next write or an explicit rebuild — never a false <code dir="auto">"match"</code>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">embedding_model_status</code></th><th>meaning</th></tr></thead><tbody><tr><td><code dir="auto">"not_applicable"</code></td><td>nothing has ever been applied for this group (<code dir="auto">applied_seq</code> itself is <code dir="auto">null</code>)</td></tr><tr><td><code dir="auto">"unknown"</code></td><td>a position is recorded, but no embedding identity was recorded alongside it — a pre-#440 write, or a call site with recompute unavailable</td></tr><tr><td><code dir="auto">"match"</code></td><td>the recorded identity equals the running embedder’s <code dir="auto">(model, dim)</code></td></tr><tr><td><code dir="auto">"mismatch"</code></td><td>the recorded identity differs from the running embedder’s — by model name, by dimension (e.g. a <code dir="auto">LCG_EMBEDDING_DIM</code> override under the same model name still counts), or both</td></tr></tbody></table>
+<p>A <code dir="auto">"mismatch"</code> is never a hard failure — it is deliberately self-healing, the same way a
+<code dir="auto">generation</code> mismatch triggers a full replay rather than refusing outright: the fix is to rebuild
+(<code dir="auto">knowledge_rebuild_from_wal</code>), which recomputes every vector it can under the now-running embedder
+and updates the recorded identity to match — but only if no recompute <em>attempt</em> actually failed
+during that rebuild (e.g. the embedder was unreachable partway through); if one did, the identity
+is left unstamped (<code dir="auto">"unknown"</code>) rather than persisted as a <code dir="auto">"match"</code> it can’t back up, so a rebuild
+that didn’t fully succeed never reports a false confirmation. A row with no co-located source text
+to recompute from (<code dir="auto">embeddings_recompute_fallback</code>, FR-002) does <em>not</em> by itself block the
+<code dir="auto">"match"</code> write — that fallback is normal, ongoing WAL shape (e.g. a targeted <code dir="auto">SET</code> that updates
+only a vector field), not evidence the rebuild failed. Until a mismatch is resolved, it is a live
+signal that vector
+search results may be degraded — the previously-active vectors were computed under a different
+model than the one now serving queries. The service also logs a <code dir="auto">[WAL WARN] embedding-model mismatch: ...</code> line at replay time (before a rebuild starts) when the WAL directory’s own recorded
+write-time identity (an independent, per-WAL-directory <code dir="auto">.wal-embedding-model.json</code> sidecar,
+mirroring <code dir="auto">.wal-generation.json</code>’s pattern) differs from the running embedder — this is the
+replay-time check (comparing the WAL’s stamp against the runner), distinct from
+<code dir="auto">embedding_model_status</code> (comparing the graph’s currently-applied vectors against the runner),
+though both answer the same underlying question from different angles and both are populated by
+this issue.</p>
+<p>The consumer decision, comparing the two fields — check both for <code dir="auto">null</code> before any numeric
+comparison. <code dir="auto">hydration_status</code> above is a documented shortcut for the common case, but it treats
+an absent/never-backfilled <code dir="auto">applied_seq</code> the same as <code dir="auto">0</code> (per FR-001(b)); it does not distinguish
+that from the <code dir="auto">applied_seq: null</code> “position unknown, full rebuild required” row below, which is a
+more serious, overriding condition. A caller that needs to detect the unknown-position case
+specifically must still check <code dir="auto">applied_seq</code> for <code dir="auto">null</code> itself — <code dir="auto">hydration_status</code> alone is not a
+complete substitute for this table:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th><code dir="auto">applied_seq</code></th><th><code dir="auto">max_seq</code></th><th>Meaning</th><th>Action</th></tr></thead><tbody><tr><td><code dir="auto">null</code></td><td>any</td><td>position unknown</td><td>full rebuild</td></tr><tr><td>any</td><td><code dir="auto">null</code></td><td>WAL empty or unconfigured</td><td>nothing to resume from; treat like an empty WAL</td></tr><tr><td><code dir="auto">N</code></td><td><code dir="auto">N</code> (equal)</td><td>DB is caught up</td><td>none</td></tr><tr><td><code dir="auto">N</code></td><td><code dir="auto">M > N</code></td><td>DB is behind, as a forward extension</td><td>incremental resume from <code dir="auto">applied_seq + 1</code> (not <code dir="auto">applied_seq</code> — replay’s <code dir="auto">from_seq</code> filter keeps lines with <code dir="auto">seq >= from_seq</code>, so resuming <em>at</em> <code dir="auto">applied_seq</code> would re-replay the last-applied line)</td></tr><tr><td><code dir="auto">N</code></td><td><code dir="auto">M &#x3C; N</code></td><td>DB has advanced beyond what the currently-visible WAL contains (e.g. a corpus reset, or a stale copied-back WAL) — not a forward extension</td><td>full rebuild</td></tr></tbody></table>
+<p>A bounded rebuild (<code dir="auto">to_seq</code> set — see <a href="#wal-administration">WAL administration</a> above) is one
+deliberate way to land in the “DB is behind, as a forward extension” row: <code dir="auto">applied_seq</code> reports
+the bounded landing point (<code dir="auto">&#x3C;= to_seq</code>), while <code dir="auto">max_seq</code> still reflects the WAL’s true, unbounded
+on-disk maximum. This is expected, not a fault to recover from automatically — an incremental
+resume covering the gap (or a later unbounded rebuild) reapplies everything the bounded rebuild
+excluded, including a previously-excluded bad mutation.</p>
+<p><strong><code dir="auto">applied_seq</code> has three distinct values, not two — treat them as different types, not points
+on a number line:</strong></p>
+<ul>
+<li><strong><code dir="auto">null</code></strong> — unknown position. Reported when a pre-existing DB has no recorded position and
+the one-time backfill (below) fails to derive one: either a populated DB (has <code dir="auto">Entity</code> or
+<code dir="auto">Episodic</code> content) whose last episode’s uuid isn’t found in the WAL, or a DB with no
+<code dir="auto">Episodic</code> nodes but surviving <code dir="auto">Entity</code>/relationship content (episode deletion removes only
+the <code dir="auto">Episodic</code> node, never the entities it created, so a graph can be non-empty with zero
+episodes — there is nothing left to derive a position from, but real content to lose track
+of). The documented action is always a full rebuild.</li>
+<li><strong><code dir="auto">0</code></strong> (integer) — a known position: nothing has been applied yet. Reported for a
+fresh/cleared DB (including a pre-existing DB with <em>no</em> <code dir="auto">Episodic</code> nodes <strong>and</strong> no
+<code dir="auto">Entity</code>/relationship content either — genuinely nothing to derive a position from and
+nothing to lose track of, so the backfill writes <code dir="auto">0</code> directly without a WAL scan), or
+immediately after <code dir="auto">knowledge_clear_all</code>.</li>
+<li><strong>A positive integer</strong> — a known, applied WAL position.</li>
+</ul>
+<p>Do not treat <code dir="auto">null</code> as if it sorted below <code dir="auto">0</code>. <strong>This distinction is not just a Rust/Python
+concern — it changes behavior across languages.</strong> <code dir="auto">null &#x3C; 5</code> throws or is a type error in Rust
+and Python (arithmetic on <code dir="auto">null</code>/<code dir="auto">None</code> isn’t defined), which tends to surface the bug
+immediately. But in JavaScript, <code dir="auto">null &#x3C; 5</code> coerces to <code dir="auto">true</code> — a naive port of the “if behind,
+resume” comparison silently takes the <em>incremental resume</em> branch on an <em>unknown</em> position,
+skipping the full rebuild the <code dir="auto">null</code> state actually calls for. The same footgun applies to a
+<code dir="auto">null</code> <code dir="auto">max_seq</code>: <code dir="auto">5 &#x3C; null</code> coerces to <code dir="auto">false</code> in JavaScript, so a check written only as
+<code dir="auto">applied_seq &#x3C; max_seq</code> silently falls through neither branch when the WAL is empty or
+unconfigured. Check both fields for <code dir="auto">null</code> explicitly, before doing any numeric comparison, in
+every client language.</p>
+<p><strong>Upgrading an existing deployment</strong>: a DB populated before this feature existed has content but
+no recorded position on its first boot under the new version. Rather than reporting <code dir="auto">null</code> for
+that (indistinguishable from a genuinely unknown position, and prone to a client either skipping
+a needed rebuild or being unable to tell “empty” from “unknown”), the service backfills a
+conservative position on first open, derived from the last <code dir="auto">Episodic</code> node’s location in the WAL
+(the retroactive episode-cursor mechanism from
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0026-episode-cursor-wal-resume.md">ADR-0026</a>; see <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0353-persist-and-expose-applied-wal-seq.md">ADR-0353</a>
+for why this issue persists a cursor for the fast path in addition to ADR-0026’s own recovery-time
+use of the same mechanism). This backfill runs once at startup and is a no-op on every subsequent
+boot once a position is recorded.</p>
+<h2 id="streaming-progress">Streaming progress</h2>
+<p>Long operations accept a <code dir="auto">_progress_token</code> and stream progress frames before the terminal
+result — see <a href="../ipc-mcp-reference/#progress-notifications">Progress notifications</a> for the MCP
+bridge and the list of operations that support it.</p>
+<h2 id="recovery-and-export-tools">Recovery and export tools</h2>
+<p><code dir="auto">knowledge_dump_wal</code>, <code dir="auto">knowledge_prepare_checkpoint</code>, <code dir="auto">knowledge_wal_mark_create</code>,
+<code dir="auto">knowledge_wal_mark_list</code>, <code dir="auto">knowledge_wal_mark_delete</code>, <code dir="auto">knowledge_rebuild_from_wal</code>,
+<code dir="auto">knowledge_recover</code>, and <code dir="auto">knowledge_recover_full</code> are all <code dir="auto">admin</code>-scope IPC/MCP tools — see
+<a href="../ipc-mcp-reference/#scopes">Scopes</a> for the full admin-scope list and the MCP <code dir="auto">--scope</code> flag.</p> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/operations.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/v0.13.3/ontology/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Ontology</span> </span> </a> <a href="/liminis-context-graph/v0.13.3/testing-and-evaluation/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Testing &amp; Evaluation</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.13.3.
+<span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>

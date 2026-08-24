@@ -1,0 +1,370 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-mysng3d7"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Testing & Evaluation | liminis-context-graph</title><link rel="canonical" href="https://v3rv.com/liminis-context-graph/v0.13.3/testing-and-evaluation/"/><link rel="sitemap" href="/liminis-context-graph/v0.13.3/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/v0.13.3/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.32.6"/><meta property="og:title" content="Testing &#38; Evaluation"/><meta property="og:type" content="article"/><meta property="og:url" content="https://v3rv.com/liminis-context-graph/v0.13.3/testing-and-evaluation/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg> <svg aria-hidden="true" class="dark astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg> <svg aria-hidden="true" class="auto astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> </template><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/print.BJ0teN4y.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/index.B-28p481.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-mysng3d7"> <a href="#_top" class="astro-wqmw2k6g">Skip to content</a>  <div class="page sl-flex astro-of3kkadl"> <header class="header astro-of3kkadl"><div class="header sl-flex astro-wrrcn5ux"> <div class="title-wrapper sl-flex astro-wrrcn5ux"> <a href="/liminis-context-graph/v0.13.3/" class="site-title sl-flex astro-yuo4yrvu">  <span class="astro-yuo4yrvu" translate="no"> liminis-context-graph </span> </a>  </div> <div class="sl-flex print:hidden astro-wrrcn5ux"> <site-search class="astro-wrrcn5ux astro-yg5rfrxv" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-yg5rfrxv"> <svg aria-hidden="true" class="astro-yg5rfrxv astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg>  <span class="sl-hidden md:sl-block astro-yg5rfrxv" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-yg5rfrxv" style="display: none;"> <kbd class="astro-yg5rfrxv">Ctrl</kbd><kbd class="astro-yg5rfrxv">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-yg5rfrxv"> <div class="dialog-frame sl-flex astro-yg5rfrxv">  <button data-close-modal class="sl-flex md:sl-hidden astro-yg5rfrxv"> Cancel </button> <div class="search-container astro-yg5rfrxv"> <div id="starlight__search" class="astro-yg5rfrxv"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/Search.astro_astro_type_script_index_0_lang.DNOR3ugD.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-wrrcn5ux"> <div class="sl-flex social-icons astro-wrrcn5ux"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-of3kkadl" aria-label="Main"> <starlight-menu-button class="print:hidden astro-siku6wqb"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-siku6wqb"> <svg aria-hidden="true" class="astro-siku6wqb astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg>  </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-of3kkadl"> <div class="sidebar-content sl-flex astro-of3kkadl"> <sl-sidebar-state-persist data-hash="118hnfo" class="astro-vtxilowo"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-kugjn6tz"> <li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Overview</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/getting-started/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Getting Started</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/configuration/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Configuration</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ipc-mcp-reference/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">IPC &amp; MCP Reference</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/telemetry/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Telemetry</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ontology/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Ontology</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/operations/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Operations</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/testing-and-evaluation/" aria-current="page" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Testing &amp; Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/eval-full-corpus-runbook/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Full-Corpus Benchmark Runbook</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/extraction-quality-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Extraction-Quality Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/release-process/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Release Process</span>  </a> </li><li class="astro-kugjn6tz"> <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md" aria-current="false" class="large astro-kugjn6tz" target="_blank" rel="noopener"> <span class="astro-kugjn6tz">Decision records</span> <span class="sl-badge note small  astro-kugjn6tz astro-cdpyiwzk">GitHub</span>  </a> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-2wb6o6sd"> <div class="sl-flex social-icons astro-2wb6o6sd"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-of3kkadl">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-uaqswrp5"> <aside class="right-sidebar-container print:hidden astro-uaqswrp5"> <div class="right-sidebar astro-uaqswrp5"> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/liminis-context-graph/v0.13.3/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-tb5tla7j"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-g7l5jp3x"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-g7l5jp3x"><details id="starlight__mobile-toc" class="astro-g7l5jp3x"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-g7l5jp3x"><div class="toggle sl-flex astro-g7l5jp3x">On this page<svg aria-hidden="true" class="caret astro-g7l5jp3x astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </div><span class="display-current astro-g7l5jp3x"></span></summary><div class="dropdown astro-g7l5jp3x"><ul class="isMobile astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#recordreplay-cassettes" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Record/replay cassettes</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#recording" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Recording</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#replaying" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Replaying</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#format" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Format</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#failure-record-sidecar" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Failure-record sidecar</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#extraction-quality-eval-harness" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Extraction-quality eval harness</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#running-the-harness" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Running the harness</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#previewing-a-run---dry-run" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Previewing a run (--dry-run)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#adding-a-candidate-backend" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Adding a candidate backend</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#running-under-an-ontology-openstrict" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Running under an ontology (Open/Strict)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#blind-pairwise-judging---judge-mode" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Blind pairwise judging (--judge-mode)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#cost-implications" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Cost implications</span> </a>  </li> </ul>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-tb5tla7j"><div class="sl-container astro-tb5tla7j"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#recordreplay-cassettes" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Record/replay cassettes</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#recording" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Recording</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#replaying" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Replaying</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#format" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Format</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#failure-record-sidecar" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Failure-record sidecar</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#extraction-quality-eval-harness" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Extraction-quality eval harness</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#running-the-harness" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Running the harness</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#previewing-a-run---dry-run" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Previewing a run (--dry-run)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#adding-a-candidate-backend" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Adding a candidate backend</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#running-under-an-ontology-openstrict" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Running under an ontology (Open/Strict)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#blind-pairwise-judging---judge-mode" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Blind pairwise judging (--judge-mode)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#cost-implications" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Cost implications</span> </a>  </li> </ul>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-uaqswrp5">  <main data-pagefind-body class="astro-mysng3d7" lang="en" dir="ltr">   <script type="module">fetch("/liminis-context-graph/versions.json").then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;const s=document.getElementById("version-switcher");if(!s)return;const t=document.createElement("select");t.setAttribute("aria-label","Switch documented version");const l=e.versions.filter(o=>!o.includes("-")),c=l.length>0?l[0]:e.versions[0],i=document.createElement("option");i.value="/liminis-context-graph/",i.textContent=`latest (v${c})`,t.appendChild(i);for(const o of e.versions){const n=document.createElement("option");n.value=`/liminis-context-graph/v${o}/`,n.textContent=`v${o}`,window.location.pathname.startsWith(n.value)&&(n.selected=!0),t.appendChild(n)}t.addEventListener("change",()=>{window.location.href=t.value}),s.appendChild(t)}).catch(()=>{});</script> <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <h1 id="_top" class="astro-hybe2sjw">Testing &amp; Evaluation</h1>  </div> </div>  <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <div class="sl-markdown-content"> <h2 id="recordreplay-cassettes">Record/replay cassettes</h2>
+<p>Every test that exercises the real extraction pipeline used to face a choice: pay for a live
+LLM call, or fall back to <code dir="auto">MockExtractor</code>’s fixed <code dir="auto">Alice</code>/<code dir="auto">Acme Corp</code> output regardless of input.
+Neither lets you regression-test a prompt change, a response-parsing change, or the ingest
+pipeline’s real entity/edge yield without spending money on every run. <strong>LLM cassettes</strong> close
+that gap: record one real extraction pass to a file, then replay it deterministically and for
+free — with no network access — for as long as the recorded calls still match.</p>
+<h3 id="recording">Recording</h3>
+<p>Set <code dir="auto">LCG_RECORD_LLM=&#x3C;path></code> and run a real ingest (<code dir="auto">ANTHROPIC_API_KEY</code> or a local extractor must
+still be configured normally — recording wraps whichever provider is resolved). Every extraction
+call — <code dir="auto">knowledge_add_episode</code>’s entity/edge extraction, and the <code dir="auto">knowledge_reprocess_*</code> type
+classification calls — appends one line to <code dir="auto">&#x3C;path></code>. Re-running recording against an existing
+path always <strong>appends</strong>, never truncates, matching the WAL’s convention.</p>
+<h3 id="replaying">Replaying</h3>
+<p>Set <code dir="auto">LCG_REPLAY_LLM=&#x3C;path></code> and run the identical ingest again. Extraction is served entirely
+from the cassette: no provider is resolved, no <code dir="auto">ANTHROPIC_API_KEY</code>/<code dir="auto">--extractor-*</code> flag is
+needed, and no network call is ever made. <code dir="auto">LCG_RECORD_LLM</code> and <code dir="auto">LCG_REPLAY_LLM</code> are mutually
+exclusive — setting both is a startup error.</p>
+<p>A replay request that doesn’t match any recorded entry — because the episode text differs, or
+because a prompt/parsing change altered what’s semantically being asked — fails immediately with
+an identifiable cassette-miss error rather than silently falling through to a live call or
+producing divergent output. <strong>To re-record after a cassette miss</strong>: delete or move aside the
+stale cassette (or point <code dir="auto">LCG_RECORD_LLM</code> at a fresh path), re-run the affected ingest with
+recording enabled against a live provider, then switch back to <code dir="auto">LCG_REPLAY_LLM</code> to confirm the
+new cassette replays cleanly.</p>
+<h3 id="format">Format</h3>
+<p>A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record
+carries a <code dir="auto">key</code> (a SHA-256 hex digest used for matching), <code dir="auto">call_type</code> (<code dir="auto">extract</code>,
+<code dir="auto">classify_entities</code>, or <code dir="auto">classify_relations</code>), <code dir="auto">provider</code>, <code dir="auto">model</code>, an RFC 3339 <code dir="auto">timestamp</code>,
+the human-readable <code dir="auto">request</code> content, and the call’s <code dir="auto">response</code>. Records are matched by <code dir="auto">key</code>
+alone, independent of file order — a cassette assembled from multiple recording runs (or, for
+<code dir="auto">LlmRouter</code>, from more than one primary/fallback leaf) replays correctly as a single flat file.
+Two calls with identical semantic content are served FIFO, in the order they were recorded.</p>
+<p><strong>What’s in the matching key, precisely</strong> (and what isn’t): for <code dir="auto">extract</code>, the rendered entity
+and edge system/user prompts plus <code dir="auto">episode_body</code>/<code dir="auto">group_id</code>/<code dir="auto">reference_time</code>/
+<code dir="auto">custom_instructions</code>/<code dir="auto">source_type</code> — rendering the prompts (not just hashing the raw options)
+means editing a prompt template or the injected ontology correctly invalidates stale cassette
+entries. For <code dir="auto">classify_entities</code>/<code dir="auto">classify_relations</code>, the raw call arguments only. Timestamps,
+request nonces, and anything transport-specific (headers, API keys, URLs) are never part of the
+key, and never reach the cassette at all — the record/replay seam sits at the <code dir="auto">Extractor</code> trait
+boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
+to see or need to scrub. See the
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/cassette.rs"><code dir="auto">crates/core/src/cassette.rs</code></a>
+module doc for the full, authoritative scope (including one documented, narrow gap around the
+edge extraction user prompt).</p>
+<p>Cassettes carry no credential material — the record/replay seam sits above HTTP request
+construction, so there’s nothing transport-level for it to see. But a cassette’s <code dir="auto">request</code> and
+<code dir="auto">response</code> fields are the actual episode text and model output, so <strong>review content before
+committing or sharing a cassette</strong>: source text drawn from a real workspace can carry
+proprietary or personal data that has nothing to do with authentication. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md"><code dir="auto">crates/core/tests/fixtures/README.md</code></a>
+for this repo’s fixture-capture conventions.</p>
+<h3 id="failure-record-sidecar">Failure-record sidecar</h3>
+<p>A failed extraction call — an HTTP error, a malformed/unparseable response, or budget
+exhaustion that persists after one retry — appends one record to a sidecar file,
+<code dir="auto">&#x3C;cassette-path>.failures.jsonl</code>. A call that ends in an error never produces a cassette
+record (the cassette’s success-only invariant is unaffected). Edge-budget exhaustion is the one
+non-fatal class: the call still succeeds with an empty edge list, so it produces both a cassette
+record and a sidecar record — entity-budget exhaustion, by contrast, is fatal to the call and
+produces only the sidecar record. This is created wherever a cassette is being recorded (both
+<code dir="auto">LCG_RECORD_LLM</code> and <code dir="auto">lcg-eval --record-cassette</code>) — never in replay mode, since no live failure
+can occur there. The file is created eagerly (empty, if no failures occur) alongside the
+cassette itself.</p>
+<p>Each record is a JSON object with:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">ts_ms</code></td><td>Unix epoch milliseconds</td></tr><tr><td><code dir="auto">model</code></td><td>The model name in force for this call</td></tr><tr><td><code dir="auto">call_type</code></td><td><code dir="auto">"entities"</code> or <code dir="auto">"edges"</code></td></tr><tr><td><code dir="auto">chunk_key</code></td><td>The episode name (production) or corpus chunk title (<code dir="auto">lcg-eval</code>), or <code dir="auto">null</code></td></tr><tr><td><code dir="auto">classification</code></td><td><code dir="auto">"http_error"</code>, <code dir="auto">"truncation"</code>, or <code dir="auto">"malformed"</code></td></tr><tr><td><code dir="auto">raw_body</code></td><td>The <strong>complete</strong> raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above.</td></tr><tr><td><code dir="auto">finish_reason</code></td><td>The provider’s stop/finish reason, or <code dir="auto">null</code> for an HTTP-level failure</td></tr><tr><td><code dir="auto">completion_tokens</code></td><td>Output token count, or <code dir="auto">null</code> if unavailable</td></tr><tr><td><code dir="auto">max_tokens</code></td><td>The <code dir="auto">max_tokens</code> value in force for the failing call</td></tr></tbody></table>
+<p>A single sidecar file is capped at 20MB; once appending would exceed that, it’s rotated to a
+numbered <code dir="auto">&#x3C;cassette-path>.failures.N.jsonl</code> file (matching the WAL’s own byte-size rotation
+convention) so a long-running service’s sidecar can’t grow without limit. Individual records are
+never truncated to hit this cap — only the aggregate is bounded. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0306-extraction-failure-sidecar-and-truncation-visibility.md">ADR-0306</a> for the design
+rationale, and <a href="../telemetry/#extraction_failure">Telemetry</a> for the event that drives this sink.</p>
+<h2 id="extraction-quality-eval-harness">Extraction-quality eval harness</h2>
+<p>The <code dir="auto">lcg-eval</code> binary (<code dir="auto">crates/eval</code>) measures extraction quality directly against this
+engine’s own prompts and extractor clients — no captured/copied prompts, so a prompt change
+either updates the eval or breaks its build. It closes the gap noted in
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0041-local-openai-compatible-extraction-adapter.md">ADR 0041</a>: the local extraction
+adapter’s quality claim used to rest on a manual-testing caveat instead of anything
+measurable. See <a href="../extraction-quality-evaluation/">extraction-quality-evaluation.md</a> for the prior
+research findings this harness re-baselines, and
+<a href="../eval-full-corpus-runbook/">eval-full-corpus-runbook.md</a> for the maintainer-run full-corpus model
+comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it, with the exact commands.</p>
+<h3 id="running-the-harness">Running the harness</h3>
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/ec.tm3va.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/ec.8zarh.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">export</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">ANTHROPIC_API_KEY</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#C5E478;--1:#3B61B0">sk-ant-</span><span style="--0:#D6DEEB;--1:#403F53">...   </span><span style="--0:#919F9F;--1:#5F636F"># hosted baseline + LLM-as-judge scoring</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline=anthropic</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--reference</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="export ANTHROPIC_API_KEY=sk-ant-...   # hosted baseline + LLM-as-judge scoringcargo run --release -p lcg-eval -- \  --backend baseline=anthropic \  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \  --reference baseline"><div></div></button></div></figure></div>
+<p>This runs both backends over the default corpus subset (the first 50 chunks of the public Simple
+English Wikipedia fixture,
+<code dir="auto">crates/core/tests/fixtures/real_corpus_wal/corpus_prose.jsonl</code>) and prints a report with, per
+backend: strict-string and LLM-as-judge F1 for entities/edges/summaries, latency percentiles,
+error rate, and structured-output reliability (clean/recovered/malformed JSON parse counts).
+Pass <code dir="auto">--output report.json</code> to also write the report as JSON. Run <code dir="auto">cargo run -p lcg-eval -- --help</code> for the full flag reference.</p>
+<p>Each candidate also carries a <code dir="auto">truncated</code> count — <code dir="auto">retry_succeeded</code> (a doubled <code dir="auto">max_tokens</code>
+retry recovered) and <code dir="auto">exhausted</code> (it didn’t) — surfaced separately from <code dir="auto">clean</code>/<code dir="auto">recovered</code>/
+<code dir="auto">malformed</code>. Edge-budget exhaustion is deliberately non-fatal (it returns an empty edge list
+rather than erroring), which is otherwise indistinguishable in the report from a chunk where the
+model genuinely extracted zero edges; a non-zero <code dir="auto">exhausted</code> count on a chunk means the low
+count is suppressed output, not a quality signal. The human-readable report only prints a
+<code dir="auto">truncated:</code> line when the count is non-zero, so a clean run’s output is unchanged. Pair this
+with <code dir="auto">--record-cassette</code> to get the exact raw response for any exhausted call from the
+<a href="#failure-record-sidecar">failure-record sidecar</a>.</p>
+<p>To validate the judge itself rather than compare backends, point <code dir="auto">--reference</code> and a second
+<code dir="auto">--backend</code> at the <em>same</em> spec (a baseline-vs-itself run): the judged score should land near
+1.0 (pure wording-variance noise floor) while the strict-string score is materially lower —
+this is what the <code dir="auto">eval.yml</code> workflow’s on-demand smoke pass checks.</p>
+<h3 id="previewing-a-run---dry-run">Previewing a run (<code dir="auto">--dry-run</code>)</h3>
+<p>Before committing to a multi-hour, real-money run, add <code dir="auto">--dry-run</code> to any invocation:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline=cassette:path=baseline.jsonl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">candidate=anthropic:model=claude-haiku-4-5-20251001</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--reference</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--all</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--dry-run</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="cargo run --release -p lcg-eval -- \  --backend baseline=cassette:path=baseline.jsonl \  --backend candidate=anthropic:model=claude-haiku-4-5-20251001 \  --reference baseline \  --all \  --dry-run"><div></div></button></div></figure></div>
+<p>This resolves every <code dir="auto">--backend</code> spec exactly the way a real run would — the replay-or-live
+decision, a cassette backend’s on-disk record count, and the requested scope (<code dir="auto">--limit N</code>
+or the full corpus) — and prints the plan without making a single outbound call. It also
+names any guard that would abort a real run: two backends resolving to the same cassette
+(by path or by byte-identical content), or a cassette that’s corrupt or has a duplicate
+key. <code dir="auto">--dry-run</code> itself always exits 0 for a syntactically valid invocation, even when the
+plan shows a guard that would abort a real run — the point is to see the plan, not to run
+the guard as a separate pass-fail check. Combining <code dir="auto">--dry-run</code> with <code dir="auto">--record-cassette</code>
+writes nothing.</p>
+<p>These are the same guards a real run enforces unconditionally before touching the network:
+a duplicate-keyed or otherwise corrupt cassette is rejected at load time (distinguishable by
+error type — <code dir="auto">Error::CassetteDuplicateKey</code> vs. <code dir="auto">Error::CassetteCorrupt</code> — not just by exit
+code), and two cassette backends that would make the comparison degenerate (identical path
+or identical content) are rejected before any extraction happens. A cassette covering fewer
+chunks than the requested scope is not an abort condition — it’s reported as a coverage
+note, since the shortfall already shows up honestly in <code dir="auto">error_rate</code>. <code dir="auto">--dry-run</code> and a real
+run share this resolution code exactly (see <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0052-lcg-eval-dry-run-shares-the-real-run-resolution-path.md">ADR-0052</a>),
+so the preview cannot drift from what actually happens.</p>
+<p>A pair of backends <code dir="auto">--record-cassette</code>d fresh in the <em>same</em> invocation can’t be checked this
+way — there’s nothing on disk to hash until the run finishes — so that half of the identity
+guard runs post-run instead, before the report is ever printed or written: if two freshly
+recorded cassettes come out byte-identical, the run still fails loudly, just after capture
+rather than before it.</p>
+<h3 id="adding-a-candidate-backend">Adding a candidate backend</h3>
+<p><code dir="auto">--backend NAME=SPEC</code> is repeatable. <code dir="auto">SPEC</code> is one of:</p>
+<ul>
+<li><code dir="auto">anthropic[:model=&#x3C;MODEL>]</code> — the hosted baseline, via <code dir="auto">AnthropicExtractor</code>. Reads
+<code dir="auto">ANTHROPIC_API_KEY</code>.</li>
+<li><code dir="auto">oai-http:url=&#x3C;URL>[,model=&#x3C;MODEL>]</code> — an OpenAI-compatible local endpoint over HTTP, via
+<code dir="auto">OaiExtractor</code>.</li>
+<li><code dir="auto">oai-uds:path=&#x3C;SOCKET_PATH>[,model=&#x3C;MODEL>]</code> — the same, over a Unix domain socket (e.g. a
+local <code dir="auto">mlx_lm.server</code> instance).</li>
+<li><code dir="auto">cassette:path=&#x3C;PATH></code> — replay a previously recorded cassette instead of making live LLM
+calls, via <code dir="auto">ReplayingExtractor</code>. Makes zero outbound requests; a cassette miss fails loudly
+with <code dir="auto">Error::CassetteMiss</code> rather than falling through to a live call. Cannot be combined
+with <code dir="auto">--record-cassette</code> for the same backend name (recording a replay is meaningless).</li>
+</ul>
+<p>No new backend <em>kind</em> should be needed for a new model — point an <code dir="auto">oai-http</code>/<code dir="auto">oai-uds</code> spec
+at any OpenAI-compatible server. Adding a genuinely new provider means extending
+<code dir="auto">crates/eval/src/backend.rs</code>’s <code dir="auto">BackendKind</code>/<code dir="auto">build_extractor</code> the same way <code dir="auto">OaiExtractor</code> was
+added to <code dir="auto">crates/core/src/extractor.rs</code> — reuse an existing <code dir="auto">Extractor</code> implementation rather
+than writing new HTTP/JSON client logic in the harness.</p>
+<p>Add <code dir="auto">--record-cassette NAME=PATH</code> to wrap a configured backend in a cassette recorder
+(see <a href="#recordreplay-cassettes">Record/replay cassettes</a> above) so a single corpus pass yields
+both the eval report and a recorded cassette. To replay a cassette recorded this way on a
+later run without paying for the extraction calls again, use a <code dir="auto">cassette:path=&#x3C;PATH></code> backend
+spec instead — see <a href="../eval-full-corpus-runbook/">eval-full-corpus-runbook.md</a>’s “Resuming a
+partial run” section for a worked example.</p>
+<h3 id="running-under-an-ontology-openstrict">Running under an ontology (<code dir="auto">Open</code>/<code dir="auto">Strict</code>)</h3>
+<p>By default every run above is <strong>freeform</strong>: the model invents its own entity/relation type
+vocabulary, and <code dir="auto">ExtractOptions.ontology</code> is <code dir="auto">None</code>. Pass <code dir="auto">--ontology &#x3C;PATH></code> to load an
+<code dir="auto">Ontology</code> from a bare YAML file (not necessarily inside a <code dir="auto">.lcg</code>-rooted workspace — this is a
+standalone eval fixture) and thread it through every extraction call instead, exercising the
+same <code dir="auto">Open</code>/<code dir="auto">Strict</code> prompt-injection regimes production ingestion uses:</p>
+<ul>
+<li><code dir="auto">--ontology &#x3C;PATH></code> — load the ontology. Omit for the unchanged freeform behavior.</li>
+<li><code dir="auto">--ontology-mode &#x3C;open|strict></code> — which regime to apply; defaults to <code dir="auto">strict</code> when
+<code dir="auto">--ontology</code> is given without it, and overrides any <code dir="auto">mode:</code> the file itself declares. Rejected
+as a usage error if given without <code dir="auto">--ontology</code> (there’s nothing to apply the mode to).</li>
+</ul>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline=anthropic</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--reference</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--ontology</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">crates/core/tests/fixtures/real_corpus_wal/ontology.yaml</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--ontology-mode</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">strict</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="cargo run --release -p lcg-eval -- \  --backend baseline=anthropic \  --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \  --reference baseline \  --ontology crates/core/tests/fixtures/real_corpus_wal/ontology.yaml \  --ontology-mode strict"><div></div></button></div></figure></div>
+<p>The report’s top-level <code dir="auto">ontology_mode</code> field records which regime produced it
+(<code dir="auto">"freeform"</code>/<code dir="auto">"open"</code>/<code dir="auto">"strict"</code>), and — <code dir="auto">Strict</code> only — each candidate also carries a
+<code dir="auto">vocabulary_compliance</code> metric: how often that backend emitted an entity or relation type
+outside the ontology’s declared vocabulary, tracked separately from
+<code dir="auto">structured_output.{clean,recovered,malformed}</code> so a model producing syntactically valid JSON
+that simply ignores the closed type list isn’t scored as if its structured-output reliability
+were perfect. See <a href="../eval-full-corpus-runbook/">eval-full-corpus-runbook.md</a>’s “Running the
+ontology mode matrix” section for the full freeform/<code dir="auto">Open</code>/<code dir="auto">Strict</code> three-command comparison
+procedure and <code dir="auto">crates/eval/scripts/run_mode_matrix.sh</code> for a runnable version of it.</p>
+<h3 id="blind-pairwise-judging---judge-mode">Blind pairwise judging (<code dir="auto">--judge-mode</code>)</h3>
+<p>The reference-mode report above measures <strong>similarity to <code dir="auto">--reference</code></strong>, not quality — the
+reference is one more model’s output, not ground truth, so a candidate that extracts something
+the reference missed is scored as a false positive for being right. <code dir="auto">--judge-mode pairwise</code>
+adds a second, reference-agnostic signal: for every pair of configured backends, the
+judge sees the source chunk plus the two extractions <em>unlabelled</em> (slot A / slot B, no backend
+name, model id, or provider reachable by the judge) and picks which better captures the
+content, per axis (entities/edges/summary). No backend is privileged.</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">run</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline=cassette:path=baseline.jsonl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">candidate=cassette:path=candidate.jsonl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--backend</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">qwen=cassette:path=qwen.jsonl</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--reference</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">baseline</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--judge-mode</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">pairwise</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="cargo run --release -p lcg-eval -- \  --backend baseline=cassette:path=baseline.jsonl \  --backend candidate=cassette:path=candidate.jsonl \  --backend qwen=cassette:path=qwen.jsonl \  --reference baseline \  --judge-mode pairwise"><div></div></button></div></figure></div>
+<ul>
+<li><code dir="auto">--judge-mode &#x3C;reference|pairwise|both></code> (default <code dir="auto">reference</code>) — <code dir="auto">reference</code> is the
+unchanged pre-pairwise behavior (omitting the flag leaves output byte-identical). <code dir="auto">pairwise</code>
+runs only the blind pairwise pass above — the reference-mode judge calls above are skipped
+entirely, not run-and-ignored, so a candidate that’s only interested in the pairwise signal
+doesn’t pay for reference-mode judge calls it didn’t ask for. <code dir="auto">both</code> runs both passes.</li>
+<li>Every chunk is judged in <strong>both</strong> slot orders (an extraction placed in slot A once, slot B
+once), with slot assignment derived deterministically from a hash of the chunk key and the
+two backend names — never wall-clock or RNG, so a re-run reproduces the same result exactly.
+Agreeing verdicts count as a win for the agreed side; disagreeing verdicts count as a tie and
+increment an <strong>order-inconsistency</strong> counter — a judge that flips its answer when the
+operands swap is reporting position bias, not model quality, and that must surface as a
+number rather than be averaged away.</li>
+<li>The report’s <code dir="auto">pairwise</code> section (present only when <code dir="auto">--judge-mode</code> requested it — absent
+entirely, not null, under the default <code dir="auto">reference</code> mode) lists, per backend pair and per
+axis: wins, losses, ties, win rate (excluding ties from the denominator), the
+order-inconsistency rate, chunks compared, and chunks skipped (present on only one side of
+the pair — e.g. differing cassette coverage — never silently counted as a loss).</li>
+<li><strong>The reference-vs-candidate pair is always included</strong> — pairwise mode covers every
+unordered pair among the configured <code dir="auto">--backend</code>s, not just candidates against the
+designated reference.</li>
+<li><strong>Judge calibration control</strong>: configure the same model as two independently-recorded
+cassettes under different backend names (the pairwise analogue of the reference-mode
+noise-floor pattern above) and judge that pair too. Two independent samples of the same
+model should split near 50/50 on every axis. A run prints a stderr note for <strong>every</strong> pair
+whose win rate falls outside <strong>45–55%</strong> (<code dir="auto">pairwise::CALIBRATION_BAND_LOW</code>/<code dir="auto">_HIGH</code>) — which
+pair is <em>the</em> calibration control is operator knowledge the harness can’t derive from
+<code dir="auto">--backend</code> specs alone (two independently-recorded <code dir="auto">cassette:path=</code> files of the same
+model, the pattern above, share no spec string to detect it by), so the note doesn’t assert
+bias outright: if the flagged pair is your calibration control, the deviation likely means
+judge position bias and every pairwise result in the run should be treated with suspicion;
+if it’s a genuine candidate-vs-candidate pair, landing outside the band is the expected,
+desired signal (the whole point of pairwise judging), not evidence of bias. A separate
+warning fires for every pair whenever its order-inconsistency rate exceeds <strong>20%</strong>
+(<code dir="auto">pairwise::ORDER_INCONSISTENCY_UNTRUSTED_THRESHOLD</code>) — above that, the judge is flipping
+its answer often enough that the win rate isn’t distinguishable from noise; this one is not
+conditional on which pair is the calibration control. Neither warning blocks the run; both
+are stderr-only, so the report artifact itself stays pure data. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0050-blind-pairwise-judging.md">ADR-0050</a> for the rationale behind both numbers.</li>
+<li>A degenerate pair — two backends whose specs resolve to the <em>identical</em> <code dir="auto">cassette:path=</code>
+— is rejected at CLI parse time, before any judge call, naming the offending backend names.
+This does <strong>not</strong> reject the same <em>live</em> spec (e.g. <code dir="auto">anthropic:model=X</code>) configured twice
+under different names — that’s the calibration pattern above, which produces two
+independently-sampled, non-degenerate outputs and must keep working.</li>
+<li>Pairwise mode reuses the same <code dir="auto">run_results</code> reference mode already produced — it makes
+<strong>zero additional extraction calls</strong>, whether the backends are live or <code dir="auto">cassette:path=</code>
+replays, and reuses <code dir="auto">--judge-cache</code> under a disjoint <code dir="auto">prompt_name</code> family so pairwise and
+reference-mode cache entries can never collide.</li>
+</ul>
+<h3 id="cost-implications">Cost implications</h3>
+<p>Every corpus chunk costs two extraction calls (entities, then edges) per configured backend,
+plus one LLM-as-judge call per scored comparison (entities/edges/summaries) against the
+<code dir="auto">--reference</code> backend. Judge calls are the expensive part — they hit a hosted model
+(<code dir="auto">claude-sonnet-4-6</code> by default, <code dir="auto">--judge-model</code> to override) regardless of which backends are
+under test. The <strong>on-disk judge cache is mandatory, not optional</strong>: pass <code dir="auto">--judge-cache &#x3C;path></code> (default <code dir="auto">judge_cache.jsonl</code> in the current directory) and re-runs against the same
+corpus and backends make zero new judge calls — always reuse the same cache path across
+repeated runs rather than deleting it. The default corpus subset (50 chunks, override with
+<code dir="auto">--limit N</code> / <code dir="auto">--all</code>) is sized to keep a default run affordable; widening it multiplies cost
+roughly linearly in chunk count. Without <code dir="auto">ANTHROPIC_API_KEY</code> set, the harness still runs and
+reports strict-string F1, but skips judge scoring entirely (no cost, no judged F1 in the
+report).</p>
+<p><code dir="auto">--judge-mode pairwise</code>/<code dir="auto">both</code> multiplies judge-call volume further: every unordered backend
+pair (C(N,2), not N-1) is judged in both slot orders across all three axes — a 3-backend
+<code dir="auto">pairwise</code> run costs 3 pairs × 2 orders × 3 axes = 18 judge calls per chunk, versus reference
+mode’s 2 candidates × 1 order × 3 axes = 6. Still <strong>zero extraction calls</strong> either way — the
+judge cache applies identically, so a re-run against the same <code dir="auto">--judge-cache</code> path costs
+nothing.</p> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/testing-and-evaluation.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/v0.13.3/operations/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Operations</span> </span> </a> <a href="/liminis-context-graph/v0.13.3/eval-full-corpus-runbook/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Full-Corpus Benchmark Runbook</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.13.3.
+<span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>

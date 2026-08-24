@@ -1,0 +1,611 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-mysng3d7"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>IPC & MCP Reference | liminis-context-graph</title><link rel="canonical" href="https://v3rv.com/liminis-context-graph/ipc-mcp-reference/"/><link rel="sitemap" href="/liminis-context-graph/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.32.6"/><meta property="og:title" content="IPC &#38; MCP Reference"/><meta property="og:type" content="article"/><meta property="og:url" content="https://v3rv.com/liminis-context-graph/ipc-mcp-reference/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg> <svg aria-hidden="true" class="dark astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg> <svg aria-hidden="true" class="auto astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> </template><link rel="stylesheet" href="/liminis-context-graph/_astro/print.BJ0teN4y.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/_astro/index.B-28p481.css"><script type="module" src="/liminis-context-graph/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-mysng3d7"> <a href="#_top" class="astro-wqmw2k6g">Skip to content</a>  <div class="page sl-flex astro-of3kkadl"> <header class="header astro-of3kkadl"><div class="header sl-flex astro-wrrcn5ux"> <div class="title-wrapper sl-flex astro-wrrcn5ux"> <a href="/liminis-context-graph/" class="site-title sl-flex astro-yuo4yrvu">  <span class="astro-yuo4yrvu" translate="no"> liminis-context-graph </span> </a>  </div> <div class="sl-flex print:hidden astro-wrrcn5ux"> <site-search class="astro-wrrcn5ux astro-yg5rfrxv" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-yg5rfrxv"> <svg aria-hidden="true" class="astro-yg5rfrxv astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg>  <span class="sl-hidden md:sl-block astro-yg5rfrxv" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-yg5rfrxv" style="display: none;"> <kbd class="astro-yg5rfrxv">Ctrl</kbd><kbd class="astro-yg5rfrxv">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-yg5rfrxv"> <div class="dialog-frame sl-flex astro-yg5rfrxv">  <button data-close-modal class="sl-flex md:sl-hidden astro-yg5rfrxv"> Cancel </button> <div class="search-container astro-yg5rfrxv"> <div id="starlight__search" class="astro-yg5rfrxv"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/liminis-context-graph/_astro/Search.astro_astro_type_script_index_0_lang.CFTd6jw3.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-wrrcn5ux"> <div class="sl-flex social-icons astro-wrrcn5ux"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-of3kkadl" aria-label="Main"> <starlight-menu-button class="print:hidden astro-siku6wqb"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-siku6wqb"> <svg aria-hidden="true" class="astro-siku6wqb astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg>  </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-of3kkadl"> <div class="sidebar-content sl-flex astro-of3kkadl"> <sl-sidebar-state-persist data-hash="07ok4z4" class="astro-vtxilowo"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-kugjn6tz"> <li class="astro-kugjn6tz"> <a href="/liminis-context-graph/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Overview</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/getting-started/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Getting Started</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/configuration/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Configuration</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/ipc-mcp-reference/" aria-current="page" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">IPC &amp; MCP Reference</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/telemetry/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Telemetry</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/ontology/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Ontology</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/operations/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Operations</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/testing-and-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Testing &amp; Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/eval-full-corpus-runbook/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Full-Corpus Benchmark Runbook</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/extraction-quality-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Extraction-Quality Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/release-process/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Release Process</span>  </a> </li><li class="astro-kugjn6tz"> <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md" aria-current="false" class="large astro-kugjn6tz" target="_blank" rel="noopener"> <span class="astro-kugjn6tz">Decision records</span> <span class="sl-badge note small  astro-kugjn6tz astro-cdpyiwzk">GitHub</span>  </a> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-2wb6o6sd"> <div class="sl-flex social-icons astro-2wb6o6sd"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-of3kkadl">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-uaqswrp5"> <aside class="right-sidebar-container print:hidden astro-uaqswrp5"> <div class="right-sidebar astro-uaqswrp5"> <script type="module" src="/liminis-context-graph/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/liminis-context-graph/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-tb5tla7j"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-g7l5jp3x"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-g7l5jp3x"><details id="starlight__mobile-toc" class="astro-g7l5jp3x"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-g7l5jp3x"><div class="toggle sl-flex astro-g7l5jp3x">On this page<svg aria-hidden="true" class="caret astro-g7l5jp3x astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </div><span class="display-current astro-g7l5jp3x"></span></summary><div class="dropdown astro-g7l5jp3x"><ul class="isMobile astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#ipc-methods-44" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">IPC methods (44)</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#readiness" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Readiness</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#mcp-over-stdio-transport" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">MCP-over-stdio transport</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#flags" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Flags</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#db-access-modes" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">DB-access modes</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#scopes" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Scopes</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#group_ids-semantics-omitted-vs-empty" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">group_ids semantics: omitted vs. empty</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#deletion-delete_chunk_episode-delete_by_source" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Deletion (delete_chunk_episode, delete_by_source)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#direct-assertion-assert_entity-assert_relationship" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Direct assertion (assert_entity, assert_relationship)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Relation typing (canonicalize_relations, backfill_relation_types, reprocess_relation_types)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#semantic-search-maintenance-backfill_summary_embeddings" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Semantic search maintenance (backfill_summary_embeddings)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#cross-group-pointers-add_cross_group_edge-rebind_pointers" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Cross-group pointers (add_cross_group_edge, rebind_pointers)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#ingestion-results-process_chunk" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Ingestion results (process_chunk)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#progress-notifications" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Progress notifications</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#example-mcp-client-config" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Example MCP client config</span> </a>  </li> </ul>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-tb5tla7j"><div class="sl-container astro-tb5tla7j"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#ipc-methods-44" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">IPC methods (44)</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#readiness" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Readiness</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#mcp-over-stdio-transport" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">MCP-over-stdio transport</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#flags" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Flags</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#db-access-modes" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">DB-access modes</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#scopes" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Scopes</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#group_ids-semantics-omitted-vs-empty" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">group_ids semantics: omitted vs. empty</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#deletion-delete_chunk_episode-delete_by_source" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Deletion (delete_chunk_episode, delete_by_source)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#direct-assertion-assert_entity-assert_relationship" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Direct assertion (assert_entity, assert_relationship)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Relation typing (canonicalize_relations, backfill_relation_types, reprocess_relation_types)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#semantic-search-maintenance-backfill_summary_embeddings" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Semantic search maintenance (backfill_summary_embeddings)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#cross-group-pointers-add_cross_group_edge-rebind_pointers" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Cross-group pointers (add_cross_group_edge, rebind_pointers)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#ingestion-results-process_chunk" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Ingestion results (process_chunk)</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#progress-notifications" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Progress notifications</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#example-mcp-client-config" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">Example MCP client config</span> </a>  </li> </ul>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-uaqswrp5">  <main data-pagefind-body class="astro-mysng3d7" lang="en" dir="ltr">   <script type="module">fetch("/liminis-context-graph/versions.json").then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;const s=document.getElementById("version-switcher");if(!s)return;const t=document.createElement("select");t.setAttribute("aria-label","Switch documented version");const l=e.versions.filter(o=>!o.includes("-")),c=l.length>0?l[0]:e.versions[0],i=document.createElement("option");i.value="/liminis-context-graph/",i.textContent=`latest (v${c})`,t.appendChild(i);for(const o of e.versions){const n=document.createElement("option");n.value=`/liminis-context-graph/v${o}/`,n.textContent=`v${o}`,window.location.pathname.startsWith(n.value)&&(n.selected=!0),t.appendChild(n)}t.addEventListener("change",()=>{window.location.href=t.value}),s.appendChild(t)}).catch(()=>{});</script> <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <h1 id="_top" class="astro-hybe2sjw">IPC &amp; MCP Reference</h1>  </div> </div>  <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <div class="sl-markdown-content"> <p><code dir="auto">liminis-context-graph</code> serves the same graph over <strong>two transport surfaces</strong>, both routed
+through the same core dispatch in
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs"><code dir="auto">crates/core/src/handlers.rs</code></a> —
+no graph logic is duplicated between them:</p>
+<ul>
+<li><strong>JSON-RPC 2.0 over a Unix domain socket</strong> (default). Newline-delimited requests/responses over <code dir="auto">.lcg/service.sock</code>.</li>
+<li><strong><a href="https://modelcontextprotocol.io">Model Context Protocol</a> over stdin/stdout</strong> (<code dir="auto">--mcp-stdio</code>). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.</li>
+</ul>
+<h2 id="ipc-methods-44">IPC methods (44)</h2>
+<p>The socket dispatch handles <strong>44 methods</strong>: 43 <code dir="auto">knowledge_*</code> methods plus <code dir="auto">health_check</code>.
+<code dir="auto">health_check</code> is the one method not prefixed <code dir="auto">knowledge_*</code>, and it is the reason the IPC
+surface (44) and the MCP tool registry (43, below) differ by exactly one — <code dir="auto">health_check</code> is
+not exposed as an MCP tool.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Category</th><th>Methods</th></tr></thead><tbody><tr><td>Health</td><td><code dir="auto">health_check</code></td></tr><tr><td>Status</td><td><code dir="auto">knowledge_status</code>, <code dir="auto">knowledge_rebuild_status</code></td></tr><tr><td>Ingestion</td><td><code dir="auto">knowledge_process_chunk</code>, <code dir="auto">knowledge_add_episode</code></td></tr><tr><td>Direct assertion</td><td><code dir="auto">knowledge_assert_entity</code>, <code dir="auto">knowledge_assert_relationship</code></td></tr><tr><td>Search</td><td><code dir="auto">knowledge_find_entities</code>, <code dir="auto">knowledge_find_relationships</code>, <code dir="auto">knowledge_search_passages</code>, <code dir="auto">knowledge_query_cypher</code></td></tr><tr><td>Graph reads</td><td><code dir="auto">knowledge_get_episodes</code>, <code dir="auto">knowledge_get_nodes_by_group</code>, <code dir="auto">knowledge_get_edges_by_group</code>, <code dir="auto">knowledge_get_edges_by_uuids</code>, <code dir="auto">knowledge_list_entities</code>, <code dir="auto">knowledge_list_relationships</code>, <code dir="auto">knowledge_get_entity_neighbors</code>, <code dir="auto">knowledge_get_entities_by_source</code></td></tr><tr><td>Deletion</td><td><code dir="auto">knowledge_delete_episode</code>, <code dir="auto">knowledge_delete_by_source</code>, <code dir="auto">knowledge_delete_chunk_episode</code>, <code dir="auto">knowledge_delete_by_group</code>, <code dir="auto">knowledge_clear_all</code></td></tr><tr><td>Curation</td><td><code dir="auto">knowledge_merge_entities</code>, <code dir="auto">knowledge_validate_corrections</code>, <code dir="auto">knowledge_apply_corrections</code>, <code dir="auto">knowledge_reprocess_entity_types</code></td></tr><tr><td>Relation typing</td><td><code dir="auto">knowledge_canonicalize_relations</code>, <code dir="auto">knowledge_backfill_relation_types</code> (deprecated), <code dir="auto">knowledge_reprocess_relation_types</code></td></tr><tr><td>Semantic search maintenance</td><td><code dir="auto">knowledge_backfill_summary_embeddings</code></td></tr><tr><td>Cross-group pointers</td><td><code dir="auto">knowledge_add_cross_group_edge</code>, <code dir="auto">knowledge_rebind_pointers</code></td></tr><tr><td>WAL administration</td><td><code dir="auto">knowledge_dump_wal</code>, <code dir="auto">knowledge_prepare_checkpoint</code>, <code dir="auto">knowledge_wal_mark_create</code>, <code dir="auto">knowledge_wal_mark_list</code>, <code dir="auto">knowledge_wal_mark_delete</code>, <code dir="auto">knowledge_rebuild_from_wal</code>, <code dir="auto">knowledge_build_indices</code></td></tr><tr><td>Recovery / lifecycle</td><td><code dir="auto">knowledge_recover</code>, <code dir="auto">knowledge_recover_full</code>, <code dir="auto">knowledge_close</code></td></tr></tbody></table>
+<p>For request/response shapes and parameter details, the dispatch <code dir="auto">match</code> arms in
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs"><code dir="auto">handlers.rs</code></a>
+and their handler functions are the source of truth — this page is the method index, not a
+copy of each handler’s parameter parsing.</p>
+<p><code dir="auto">knowledge_status</code>’s WAL fields — including <code dir="auto">wal.hydration_status</code> (issue #456), which
+distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
+field-by-field in <a href="../operations/#knowledge_status-health-fields">Operations: <code dir="auto">knowledge_status</code> health fields</a>
+rather than here.</p>
+<p>Every long-running method above (the six WAL/recovery/reclassification operations most likely
+to run for a while) accepts a <code dir="auto">_progress_token</code> and streams <code dir="auto">{"type":"progress",...}</code> frames
+before the terminal result — see <a href="#progress-notifications">Progress notifications</a> below.</p>
+<h3 id="readiness">Readiness</h3>
+<p>A successful connection to <code dir="auto">.lcg/service.sock</code> is <strong>not</strong> evidence the service is ready. The
+socket is bound before the database opens — deliberately, so <code dir="auto">health_check</code> and recovery IPC stay
+reachable during degraded-mode recovery (<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0009-degraded-mode-startup-recovery.md">ADR-0009</a>)
+— and issue #378’s WAL-root migration also runs in that same pre-open window, after the bind.
+(Legacy <code dir="auto">.graphiti/</code>→<code dir="auto">.lcg/</code> workspace migration runs earlier still, before the socket is even
+bound.) The process’s own accept loop only starts once startup work has fully resolved, so a
+request sent immediately after <code dir="auto">connect()</code> queues in the kernel rather than racing the migration
+with stale state — the real risk is a client that treats <code dir="auto">connect()</code> succeeding as readiness by
+itself and acts on that assumption (e.g. inspecting on-disk state) without waiting for a
+<code dir="auto">health_check</code> round-trip.</p>
+<p>The correct readiness signal is a <code dir="auto">health_check</code> round-trip reporting <code dir="auto">"healthy"</code>:
+<code dir="auto">handle_health_check</code> only returns <code dir="auto">healthy</code> once <code dir="auto">Db::open()</code> has succeeded, which is after
+migration has completed. Poll <code dir="auto">health_check</code> until it reports <code dir="auto">healthy</code> (or <code dir="auto">knowledge_status</code>
+until <code dir="auto">connected</code> and <code dir="auto">queryable</code> are both <code dir="auto">true</code> and <code dir="auto">initializing</code> is <code dir="auto">false</code> —
+<code dir="auto">knowledge_status</code> has no <code dir="auto">healthy</code> field of its own) before sending real work; see
+<a href="../operations/#self-healing-and-degraded-mode">Operations: Self-healing and degraded mode</a>
+for the full rationale. A <code dir="auto">degraded</code> response after startup has otherwise settled is a legitimate
+outcome (e.g. unrecovered corruption) — not something to retry indefinitely.</p>
+<h2 id="mcp-over-stdio-transport">MCP-over-stdio transport</h2>
+<p><code dir="auto">liminis-context-graph --mcp-stdio</code> starts a native <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
+server over stdin/stdout, using the official Rust SDK (<code dir="auto">rmcp</code>). Any MCP client (Claude Code,
+Claude Desktop, other agents) can query and mutate the knowledge graph directly — no Electron
+app, no Node, no custom JSON-RPC client required. This is an <em>additional</em> external-facing
+surface; the Unix-socket JSON-RPC protocol above is unchanged.</p>
+<p>Every MCP tool is derived from the <code dir="auto">knowledge_*</code> dispatch methods above — tool names match the
+IPC method names verbatim, and each <code dir="auto">tools/call</code> is translated into an <code dir="auto">IpcRequest</code> and routed
+straight through the same core dispatch the socket service uses. Tool descriptions and JSON
+schemas are maintained in the
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs"><code dir="auto">ToolSpec</code> registry in <code dir="auto">crates/service/src/mcp/tools.rs</code></a> —
+that file is the canonical source for per-tool descriptions; they are not duplicated here.</p>
+<h3 id="flags">Flags</h3>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Flag</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">--mcp-stdio</code></td><td>Starts the MCP server over stdin/stdout instead of binding the Unix socket.</td></tr><tr><td><code dir="auto">--scope=&#x3C;list></code></td><td>Comma-separated list of scopes to advertise in <code dir="auto">tools/list</code> (default <code dir="auto">all</code>). See <a href="#scopes">Scopes</a> below.</td></tr><tr><td><code dir="auto">--connect &#x3C;path></code></td><td>Attached mode: forward every <code dir="auto">tools/call</code> as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly.</td></tr><tr><td><code dir="auto">--allow-remote-close</code></td><td>Attached mode only: advertise and allow <code dir="auto">knowledge_close</code>, forwarding the shutdown to the remote service. No effect in standalone mode (no <code dir="auto">--connect</code>).</td></tr></tbody></table>
+<h3 id="db-access-modes">DB-access modes</h3>
+<ul>
+<li><strong>Standalone (default, no <code dir="auto">--connect</code>)</strong>: the MCP process opens the <code dir="auto">.lcg</code> database directly,
+reusing the same startup and self-recovery path as the socket service (<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0009-degraded-mode-startup-recovery.md">ADR 0009</a>).
+Zero-dependency — works with no other process running.</li>
+<li><strong>Attached (<code dir="auto">--connect &#x3C;socket-path></code>)</strong>: the MCP process never opens the database; it
+forwards each call over the given socket to a service that already has it open. Use this to
+add MCP access to a workspace where another socket-service instance is already running,
+without contending for lbug’s single-writer lock.
+<ul>
+<li><strong>Idle timeout.</strong> <code dir="auto">LCG_ATTACHED_CALL_TIMEOUT_MS</code> (default 30s) is a <strong>per-read-line</strong> idle
+timeout, not a whole-call timeout: it resets on every line read off the socket, including
+<code dir="auto">{"type":"progress"}</code> lines. A call that keeps emitting progress is never bounded by it, no
+matter how long the call runs in total — only genuine silence (no output at all for the full
+timeout window) trips it. If the remote stops responding mid-call (e.g. it crashes), the
+attached client fails that call with a clean timeout error rather than blocking forever.</li>
+<li><strong>Reconnect and retry.</strong> If the connection to the remote breaks, the client transparently
+re-dials the same socket path rather than staying wedged. If the break is detected while
+writing the outgoing request — treated as safe to retry, since the write failing is the
+client’s best available signal that the request didn’t get through — the client
+automatically retries that request exactly once over the freshly-dialed connection. If the
+break is detected only after the request was fully written — while waiting for or reading
+the response — the call is <strong>not</strong> retried automatically, since the remote’s execution
+status is unknown and blind retry could double-apply a non-idempotent write (e.g.
+<code dir="auto">knowledge_add_episode</code>); that call fails with a clear “connection lost mid-call” error, but
+the connection is marked dead so the <em>next</em> call reconnects fresh. If a reconnect attempt
+itself fails (no listener at that path), the call fails with a clear, descriptive error —
+never a hang — and a later call will try reconnecting again. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0040-attached-mode-reconnect-retry-boundary.md">ADR-0040</a> for the full rationale.</li>
+</ul>
+</li>
+</ul>
+<h3 id="scopes">Scopes</h3>
+<p>Scopes are additive and composable (e.g. <code dir="auto">--scope=read,admin</code>). <code dir="auto">tools/list</code> advertises the
+union of all active scopes.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Scope</th><th>Methods</th></tr></thead><tbody><tr><td><code dir="auto">read</code></td><td><code dir="auto">knowledge_status</code>, <code dir="auto">knowledge_find_entities</code>, <code dir="auto">knowledge_find_relationships</code>, <code dir="auto">knowledge_get_episodes</code>, <code dir="auto">knowledge_get_nodes_by_group</code>, <code dir="auto">knowledge_get_edges_by_group</code>, <code dir="auto">knowledge_get_edges_by_uuids</code>, <code dir="auto">knowledge_search_passages</code>, <code dir="auto">knowledge_list_entities</code>, <code dir="auto">knowledge_list_relationships</code>, <code dir="auto">knowledge_get_entity_neighbors</code>, <code dir="auto">knowledge_get_entities_by_source</code>, <code dir="auto">knowledge_rebuild_status</code>, <code dir="auto">knowledge_validate_corrections</code></td></tr><tr><td><code dir="auto">write</code></td><td><code dir="auto">knowledge_process_chunk</code>, <code dir="auto">knowledge_add_episode</code>, <code dir="auto">knowledge_delete_episode</code>, <code dir="auto">knowledge_delete_by_source</code>, <code dir="auto">knowledge_delete_chunk_episode</code>, <code dir="auto">knowledge_clear_all</code>, <code dir="auto">knowledge_apply_corrections</code>, <code dir="auto">knowledge_merge_entities</code>, <code dir="auto">knowledge_reprocess_entity_types</code>, <code dir="auto">knowledge_canonicalize_relations</code>, <code dir="auto">knowledge_backfill_relation_types</code>, <code dir="auto">knowledge_reprocess_relation_types</code>, <code dir="auto">knowledge_add_cross_group_edge</code>, <code dir="auto">knowledge_assert_entity</code>, <code dir="auto">knowledge_assert_relationship</code></td></tr><tr><td><code dir="auto">cypher</code></td><td><code dir="auto">knowledge_query_cypher</code></td></tr><tr><td><code dir="auto">admin</code></td><td><code dir="auto">knowledge_dump_wal</code>, <code dir="auto">knowledge_prepare_checkpoint</code>, <code dir="auto">knowledge_wal_mark_create</code>, <code dir="auto">knowledge_wal_mark_list</code>, <code dir="auto">knowledge_wal_mark_delete</code>, <code dir="auto">knowledge_rebuild_from_wal</code>, <code dir="auto">knowledge_recover</code>, <code dir="auto">knowledge_recover_full</code>, <code dir="auto">knowledge_close</code>, <code dir="auto">knowledge_build_indices</code>, <code dir="auto">knowledge_rebind_pointers</code>, <code dir="auto">knowledge_delete_by_group</code>, <code dir="auto">knowledge_backfill_summary_embeddings</code></td></tr><tr><td><code dir="auto">all</code></td><td>every scope above (default)</td></tr></tbody></table>
+<p><strong><code dir="auto">cypher</code> is a power scope, not bundled into anything else.</strong> <code dir="auto">knowledge_query_cypher</code> executes
+raw Cypher with no param interpolation or value coercion — despite being a “query” method, it can
+perform arbitrary mutations, and it bypasses the WAL-ordering and embedding invariants that the
+structured write tools maintain. It is never implicitly included in <code dir="auto">read</code>, <code dir="auto">write</code>, or <code dir="auto">admin</code>;
+operators must opt in explicitly (or via <code dir="auto">all</code>).</p>
+<p><strong><code dir="auto">knowledge_close</code> in attached mode is a footgun without <code dir="auto">--allow-remote-close</code>.</strong> In
+<strong>standalone</strong> mode, <code dir="auto">knowledge_close</code> is always advertised under <code dir="auto">admin</code> scope and shuts down
+only this MCP process’s own DB connection. In <strong>attached</strong> mode, calling it would shut down the
+<em>running remote service</em>. Without <code dir="auto">--allow-remote-close</code>, <code dir="auto">knowledge_close</code> is omitted from
+<code dir="auto">tools/list</code> entirely in attached mode (not merely rejected when called). Pass
+<code dir="auto">--allow-remote-close</code> only when you specifically intend this MCP connection to be able to stop
+the remote service.</p>
+<p><strong>Recovery and export live under <code dir="auto">admin</code>.</strong> <code dir="auto">knowledge_rebuild_from_wal</code> (rebuild one group’s data
+from its own WAL directory — <code dir="auto">group_id</code>, default <code dir="auto">"liminis"</code>), <code dir="auto">knowledge_dump_wal</code>
+(snapshot/export the graph into a fresh compacted WAL directory), <code dir="auto">knowledge_wal_mark_create</code> /
+<code dir="auto">_list</code> / <code dir="auto">_delete</code> (name a retained WAL position within one group’s stream, without a full
+snapshot — each also takes <code dir="auto">group_id</code>, default <code dir="auto">"liminis"</code>, and <code dir="auto">_list</code> reports only that one
+group’s marks, never an aggregate across groups), and <code dir="auto">knowledge_recover</code> / <code dir="auto">knowledge_recover_full</code>
+are all <code dir="auto">admin</code>-scope tools — an attached client only sees them when launched with <code dir="auto">--scope=admin</code>
+(or <code dir="auto">all</code>). If a mutation goes wrong, this is the recovery path. See <a href="../operations/">Operations</a>
+for the recovery model in full. Note the WAL replays <strong>forward-only</strong>, so take periodic
+<code dir="auto">knowledge_dump_wal</code> snapshots, or a lighter-weight <code dir="auto">knowledge_wal_mark_create</code> named position, if
+you want restore points before large or destructive operations — a mark does not survive
+<code dir="auto">knowledge_dump_wal</code>, since dump_wal renumbers sequence numbers and a copied mark’s <code dir="auto">seq</code> would be
+meaningless against the new numbering.</p>
+<p><strong><code dir="auto">knowledge_rebuild_from_wal</code> refuses to run against a non-empty group, unless you ask it not
+to.</strong> Since issue #378, one instance holds an independent WAL directory and applied position per
+<code dir="auto">group_id</code>; <code dir="auto">knowledge_rebuild_from_wal {group_id, ...}</code> targets exactly one of them and never
+disturbs another group’s data or position. A <code dir="auto">from_seq: 0</code> (default) full rebuild against a group
+that already contains data fails fast with an explicit error rather than silently emitting a
+duplicate-primary-key failure for every existing <code dir="auto">Entity</code>/<code dir="auto">Episodic</code>/<code dir="auto">RelatesToNode_</code> row in that
+group — the native write path uses <code dir="auto">CREATE</code>, not <code dir="auto">MERGE</code>, for those labels. Pass <code dir="auto">force_clear: true</code> to have the call clear <em>that group’s</em> data automatically before replaying (the same
+group-scoped purge <code dir="auto">knowledge_delete_by_group</code> uses — this does <strong>not</strong> delete or reopen the
+database file, unlike the pre-378 whole-database <code dir="auto">force_clear</code> behavior), or clear it yourself
+first with <code dir="auto">knowledge_delete_by_group {group_ids: [group_id]}</code>. <code dir="auto">dry_run: true</code> always fails fast
+on a non-empty group regardless of <code dir="auto">force_clear</code>, since a dry run must never mutate the database —
+this lets a preview surface the problem before you commit to a real rebuild. None of this applies
+to an incremental <code dir="auto">from_seq > 0</code> resume, which intentionally targets a group that already has
+state.</p>
+<p><strong><code dir="auto">to_seq</code> bounds replay from the other end: <code dir="auto">from_seq &#x3C;= seq &#x3C;= to_seq</code>.</strong> Pass an inclusive
+upper bound to exclude a mutation (and everything after it) from a rebuild — e.g. a WAL-recorded
+mutation that corrupted the graph. Omit <code dir="auto">to_seq</code> for today’s unbounded behavior (replay to the
+end of the WAL); it must not be less than <code dir="auto">from_seq</code>, or the call is rejected before any WAL line
+is read or the database is touched. A bounded rebuild is <strong>not durable</strong>: WAL entries past
+<code dir="auto">to_seq</code> stay on disk, unapplied, not truncated or archived — a later unbounded rebuild, or a
+<code dir="auto">from_seq</code> resume that covers the excluded range, reapplies them, including a previously-excluded
+bad mutation. <code dir="auto">to_seq</code> bounds an endpoint; it does not add reverse/undo semantics to the
+forward-only replay noted above.</p>
+<h3 id="group_ids-semantics-omitted-vs-empty">group_ids semantics: omitted vs. empty</h3>
+<p>Every read tool that accepts <code dir="auto">group_ids</code> treats an <strong>omitted or <code dir="auto">null</code> <code dir="auto">group_ids</code> uniformly as
+“all groups”</strong> (issue #413) — this holds across all 9 read tools: <code dir="auto">knowledge_find_entities</code>,
+<code dir="auto">knowledge_find_relationships</code>, <code dir="auto">knowledge_search_passages</code>, <code dir="auto">knowledge_list_entities</code>,
+<code dir="auto">knowledge_list_relationships</code>, <code dir="auto">knowledge_get_entity_neighbors</code>, <code dir="auto">knowledge_get_entities_by_source</code>,
+<code dir="auto">knowledge_get_nodes_by_group</code>, <code dir="auto">knowledge_get_edges_by_group</code>.</p>
+<p><strong>An explicit <code dir="auto">group_ids: []</code> does not mean the same thing on every tool</strong>, and this split is
+deliberate, not an inconsistency to be fixed here:</p>
+<ul>
+<li>On <code dir="auto">knowledge_find_entities</code>, <code dir="auto">knowledge_find_relationships</code>, <code dir="auto">knowledge_get_nodes_by_group</code>,
+and <code dir="auto">knowledge_get_edges_by_group</code>, an explicit <code dir="auto">group_ids: []</code> is preserved as “exactly these
+groups” — i.e. <strong>zero rows</strong>, a filter matching nothing.</li>
+<li>On the other five read tools (<code dir="auto">knowledge_search_passages</code>, <code dir="auto">knowledge_list_entities</code>,
+<code dir="auto">knowledge_list_relationships</code>, <code dir="auto">knowledge_get_entity_neighbors</code>,
+<code dir="auto">knowledge_get_entities_by_source</code>), an explicit <code dir="auto">group_ids: []</code> collapses to the same
+behavior as omitting it — <strong>all groups</strong>.</li>
+</ul>
+<p>If you need “zero rows” as a filter result, use one of the four tools in the first list, or check
+the tool’s own <code dir="auto">ToolSpec</code> description in
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs"><code dir="auto">crates/service/src/mcp/tools.rs</code></a>
+before relying on <code dir="auto">[]</code> to mean “nothing” — on the other five it doesn’t.</p>
+<p>This section is the single, central statement of that contract; individual tool entries on this
+page don’t restate it.</p>
+<h3 id="deletion-delete_chunk_episode-delete_by_source">Deletion (<code dir="auto">delete_chunk_episode</code>, <code dir="auto">delete_by_source</code>)</h3>
+<p><strong>Breaking change in 0.13.2 (issue #406): <code dir="auto">group_ids</code> is required and non-empty on both
+<code dir="auto">knowledge_delete_chunk_episode</code> and <code dir="auto">knowledge_delete_by_source</code>.</strong> A call that previously
+omitted <code dir="auto">group_ids</code> deleted matching episodes across every group in the workspace; that was
+cross-group-unsafe, so as of 0.13.2 an omitted, <code dir="auto">null</code>, or empty <code dir="auto">group_ids</code> is rejected outright
+with an error, before any delete runs. <strong>There is no default to fall back to</strong> — a caller
+upgrading from a pre-0.13.2 client that relied on omission must start passing its own group(s)
+explicitly:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/_astro/ec.tm3va.css"><script type="module" src="/liminis-context-graph/_astro/ec.8zarh.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_id"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">notes-0001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"group_ids"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">liminis</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;chunk_id&#x22;: &#x22;notes-0001&#x22;, &#x22;group_ids&#x22;: [&#x22;liminis&#x22;]}"><div></div></button></div></figure></div>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"source_file"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">notes.md</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"group_ids"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">liminis</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;source_file&#x22;: &#x22;notes.md&#x22;, &#x22;group_ids&#x22;: [&#x22;liminis&#x22;]}"><div></div></button></div></figure></div>
+<p>This is a different contract from the read-tool one above — omitting <code dir="auto">group_ids</code> here never means
+“all groups”; it means “reject the call.” A <code dir="auto">group_ids</code> naming a group with no matching rows still
+succeeds, returning <code dir="auto">deleted_count: 0</code>.</p>
+<h3 id="direct-assertion-assert_entity-assert_relationship">Direct assertion (<code dir="auto">assert_entity</code>, <code dir="auto">assert_relationship</code>)</h3>
+<p><code dir="auto">knowledge_assert_entity</code> and <code dir="auto">knowledge_assert_relationship</code> (issue #379) are a direct write
+path: the caller already knows a fact and records it as a single entity or edge, without a prose
+round-trip through <code dir="auto">knowledge_process_chunk</code>’s LLM-driven extraction. Use <code dir="auto">process_chunk</code> when
+you have unstructured text and want the graph populated by extraction; use the assert tools when
+you already know exactly which entity or edge you want to write.</p>
+<p><strong><code dir="auto">knowledge_assert_entity</code></strong> accepts <code dir="auto">name</code> (required), <code dir="auto">entity_uuid</code> (optional), <code dir="auto">labels</code>,
+<code dir="auto">summary</code>, <code dir="auto">attributes</code>, and <code dir="auto">group_id</code> (default <code dir="auto">liminis</code>).</p>
+<ul>
+<li><strong>Upsert identity is <code dir="auto">(name, group_id)</code></strong>, unless <code dir="auto">entity_uuid</code> is supplied. <code dir="auto">entity_uuid</code>, when
+given, is a <strong>strict, group-scoped lookup</strong> — the call fails if no entity with that UUID exists
+in <code dir="auto">group_id</code>; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
+cannot mint an entity at a UUID of its own choosing.</li>
+<li><strong>On an update, omitting <code dir="auto">summary</code> or <code dir="auto">attributes</code> clears the previously stored value</strong> rather
+than leaving it untouched — both fields are always overwritten with whatever the call supplies:
+<code dir="auto">summary</code> defaults to <code dir="auto">""</code> if omitted, <code dir="auto">attributes</code> defaults to <code dir="auto">"{}"</code> (an empty JSON object,
+not an empty string) if omitted or non-object, matching how <code dir="auto">labels</code>/<code dir="auto">name</code> are handled.</li>
+<li><strong>Only <code dir="auto">name</code> is embedded for semantic search</strong> (<code dir="auto">name_embedding</code>). <code dir="auto">summary</code> is stored and is
+full-text searchable (it’s part of <code dir="auto">Entity</code>’s <code dir="auto">[name, summary]</code> FTS index), but is <strong>not</strong>
+semantically searchable — a <code dir="auto">knowledge_find_entities</code> vector query will not match on <code dir="auto">summary</code>
+content until issue #470 lands. <code dir="auto">attributes</code> is not indexed at all — full-text or semantic — and
+is retrievable only via direct UUID lookup or <code dir="auto">knowledge_query_cypher</code>.</li>
+<li><strong>An update never re-embeds <code dir="auto">name_embedding</code> — only a create does</strong> (ADR-0379 Decision 6, forced
+by a lbug constraint: the embedded column sits under an HNSW index once indexes are built, and
+lbug rejects a plain <code dir="auto">SET</code> on an indexed column). Re-asserting an existing entity with a changed
+<code dir="auto">name</code> updates the stored <code dir="auto">name</code>, but <code dir="auto">name_embedding</code> keeps reflecting the <em>old</em> name until the
+entity is deleted and recreated. There is currently no supported way to refresh it in place.</li>
+</ul>
+<p><strong><code dir="auto">knowledge_assert_relationship</code></strong> accepts <code dir="auto">source_name</code>, <code dir="auto">target_name</code>, <code dir="auto">predicate</code> (all
+required), <code dir="auto">fact</code> (optional — auto-derived as <code dir="auto">"{source_name} {predicate} {target_name}"</code> if
+omitted), <code dir="auto">attributes</code>, <code dir="auto">relation_type</code>, <code dir="auto">valid_at</code>, and <code dir="auto">group_id</code> (default <code dir="auto">liminis</code>).</p>
+<ul>
+<li><strong>Upsert identity is <code dir="auto">(source_node_uuid, predicate, target_node_uuid, group_id)</code></strong>, resolved via
+<code dir="auto">find_active_relates_to_uuid</code> (an invalidated edge is skipped, so re-asserting after an
+invalidation creates a fresh edge rather than resurrecting the old one).</li>
+<li><strong>Endpoint resolution is strictly scoped to the call’s own <code dir="auto">group_id</code> — it never falls back to a
+cross-group search.</strong> If <code dir="auto">source_name</code> or <code dir="auto">target_name</code> doesn’t resolve to an entity already in
+that group, the call fails with an error naming
+<a href="#cross-group-pointers-add_cross_group_edge-rebind_pointers"><code dir="auto">knowledge_add_cross_group_edge</code></a>
+as the tool to use for connecting entities across groups.</li>
+<li><strong><code dir="auto">fact</code> is the field embedded for semantic search</strong> (<code dir="auto">fact_embedding</code>) — not <code dir="auto">name</code>/<code dir="auto">predicate</code>,
+the opposite of <code dir="auto">knowledge_assert_entity</code>. <code dir="auto">fact</code> is also part of <code dir="auto">RelatesToNode_</code>’s <code dir="auto">[name, fact]</code> FTS index, so it’s both full-text and semantically searchable; <code dir="auto">attributes</code> is indexed
+neither way, same as on the entity side.</li>
+<li><strong>Same never-re-embed-on-update caveat as <code dir="auto">knowledge_assert_entity</code></strong> (ADR-0379 Decision 6): a
+re-assert that changes <code dir="auto">fact</code> updates the stored <code dir="auto">fact</code> text but leaves <code dir="auto">fact_embedding</code>
+reflecting the prior text until the edge is deleted and recreated.</li>
+</ul>
+<p>See <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0379-direct-assertion-conventions.md">ADR-0379</a> for the full rationale behind these
+upsert and embedding decisions.</p>
+<h3 id="relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types">Relation typing (<code dir="auto">canonicalize_relations</code>, <code dir="auto">backfill_relation_types</code>, <code dir="auto">reprocess_relation_types</code>)</h3>
+<p>Three tools populate an edge’s <code dir="auto">relation_type</code>, with different tradeoffs:</p>
+<p><strong><code dir="auto">knowledge_canonicalize_relations</code></strong> maps each edge’s <strong>existing raw predicate</strong> onto your
+ontology’s declared <code dir="auto">relation_types</code>. Its behavior has four caveats worth knowing before you
+rely on it:</p>
+<ul>
+<li><strong><code dir="auto">group_id</code> is required</strong> (issue #447) — candidate selection and the resulting WAL mutations
+are both restricted to that one group; no other group’s edges or WAL stream are ever touched. An
+omitted, <code dir="auto">null</code>, or empty <code dir="auto">group_id</code> is rejected before any candidate selection or write, rather
+than falling back to a database-wide rewrite or the default group — there is no supported way to
+canonicalize every group in one call.</li>
+<li><strong>The primary pass is lexical, over the predicate — not the <code dir="auto">fact</code>.</strong> It matches the edge’s
+predicate / current <code dir="auto">relation_type</code> against ontology type names, aliases, and keywords. It does
+<strong>not</strong> read the edge’s <code dir="auto">fact</code> sentence, so an edge whose <code dir="auto">relation_type</code> was cleared cannot be
+re-mapped from its fact by this pass.</li>
+<li><strong><code dir="auto">embedding_threshold</code> tunes only the fallback promoter</strong> (default <code dir="auto">0.7</code>). The fallback embeds
+each residual edge’s <code dir="auto">fact</code> against the ontology types’ <em>descriptions</em> and force-assigns the single
+nearest type at or above the threshold. Lowering it types more edges, but by nearest-neighbor
+force-fit with <strong>no abstention</strong> — an idiosyncratic fact (e.g. “<em>X is affiliated with Y</em>”) can land
+on a wrong type (e.g. <code dir="auto">HOLDS</code>).</li>
+<li><strong>Re-runs are only partly idempotent, and clearing <code dir="auto">relation_type</code> can’t be undone by
+canonicalize.</strong> A re-run skips an edge only when it’s already at its target — a <code dir="auto">Mapped</code> edge
+already equal to the canonical type, or a residual edge already <code dir="auto">UNCLASSIFIED</code>; an edge whose
+classification <em>changes</em> is overwritten (including a previously-assigned type), while
+arrow-named “noise” edges keep any existing predicate. Critically, canonicalize’s only input is
+the edge’s existing predicate / <code dir="auto">relation_type</code> — if you <strong>null that field to “start clean,”
+canonicalize has nothing to map from and cannot rebuild it.</strong> Snapshot with <code dir="auto">knowledge_dump_wal</code>
+before such an operation.</li>
+</ul>
+<p><strong><code dir="auto">knowledge_backfill_relation_types</code></strong> (DEPRECATED) does not classify at all — it mints
+uppercased fact-prefix pseudo-types (e.g. <code dir="auto">THE_SPECIFICATION_DOCUMENT_DEFINES</code>) for edges with no
+<code dir="auto">relation_type</code>, rather than matching against the ontology. Avoid it for building a typed
+taxonomy; prefer <code dir="auto">knowledge_reprocess_relation_types</code> below, which supersedes it for that purpose.
+Like <code dir="auto">knowledge_canonicalize_relations</code>, <strong><code dir="auto">group_id</code> is required</strong> (issue #447): candidate
+selection and WAL attribution are both restricted to that one group, and an omitted, <code dir="auto">null</code>, or
+empty <code dir="auto">group_id</code> is rejected rather than running database-wide or against the default group.</p>
+<p><strong><code dir="auto">knowledge_reprocess_relation_types</code></strong> is the relation-side twin of
+<code dir="auto">knowledge_reprocess_entity_types</code>: for each in-scope edge, it sends the edge’s <code dir="auto">fact</code> and the
+ontology’s declared relation types (name + description) to the configured extraction LLM and asks
+it to pick exactly one type, or honestly abstain. This is the tool to reach for when you want
+genuine fact-based classification instead of lexical matching or pseudo-typing:</p>
+<ul>
+<li><strong>Always reads the <code dir="auto">fact</code>, never the predicate.</strong> Unlike <code dir="auto">canonicalize_relations</code>, classification
+is grounded in the edge’s natural-language fact sentence against the ontology’s declared menu —
+not lexical/alias/keyword matching on the existing predicate string.</li>
+<li><strong>A declared ontology relation-type menu is always required.</strong> Unlike
+<code dir="auto">knowledge_reprocess_entity_types</code> (whose <code dir="auto">untyped</code> scope works with no ontology via open-ended
+classification), every scope value (<code dir="auto">untyped</code>, <code dir="auto">off_ontology</code>, <code dir="auto">all</code>) fails with a structured
+<code dir="auto">{success: false, error: ...}</code> if the ontology declares no relation types — there is no
+open-ended fallback (see <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0037-relation-classification-abstention-writes-unclassified.md">ADR-0037</a>).</li>
+<li><strong>Abstention is an honest, real write of <code dir="auto">UNCLASSIFIED</code>.</strong> If the LLM cannot map a fact to any
+declared type, the edge’s <code dir="auto">relation_type</code> is set to the literal string <code dir="auto">UNCLASSIFIED</code> — never a
+force-assigned nearest match. This differs from <code dir="auto">knowledge_reprocess_entity_types</code>, where an
+unclassifiable entity is simply left unchanged (see ADR-0037).</li>
+<li><strong><code dir="auto">scope</code></strong> controls candidates: <code dir="auto">"untyped"</code> (default) — <code dir="auto">relation_type</code> NULL/empty, the same
+predicate <code dir="auto">backfill_relation_types</code> uses; <code dir="auto">"off_ontology"</code> — untyped edges plus edges whose
+<code dir="auto">relation_type</code> isn’t a declared type (this naturally covers prior <code dir="auto">UNCLASSIFIED</code> sentinels and
+<code dir="auto">backfill_relation_types</code>’s fact-prefix pseudo-types with no special-casing); <code dir="auto">"all"</code> — every
+edge in the group.</li>
+<li><strong>Idempotent.</strong> An edge whose computed verdict already matches its current <code dir="auto">relation_type</code>
+(including an edge already correctly <code dir="auto">UNCLASSIFIED</code>) is left unchanged — no write, no WAL entry.</li>
+<li><strong><code dir="auto">dry_run: true</code></strong> returns <code dir="auto">would_reclassify_count</code>, a <code dir="auto">plan</code> array of per-edge
+<code dir="auto">{edge_id, fact, old_type, new_type}</code> entries, and a <code dir="auto">breakdown</code> object counting edges per
+assigned <code dir="auto">new_type</code> (including an <code dir="auto">UNCLASSIFIED</code> count) — without mutating the graph.</li>
+<li><strong><code dir="auto">dry_run: false</code> (apply)</strong> returns <code dir="auto">reclassified_count</code>, <code dir="auto">unchanged_count</code>, and — since
+issue #332 — the same <code dir="auto">breakdown</code> object as the dry-run path, so callers can see the per-type
+classification distribution (including how many candidates abstained to <code dir="auto">UNCLASSIFIED</code>)
+without a separate dry-run call. <code dir="auto">plan</code> and <code dir="auto">would_reclassify_count</code> remain dry-run-only, since
+they describe a proposed mutation rather than one that already happened; <code dir="auto">breakdown</code> is always
+present on a successful apply response, as <code dir="auto">{}</code> when there were zero in-scope candidates.</li>
+</ul>
+<h3 id="semantic-search-maintenance-backfill_summary_embeddings">Semantic search maintenance (<code dir="auto">backfill_summary_embeddings</code>)</h3>
+<p><strong><code dir="auto">knowledge_backfill_summary_embeddings</code></strong> (issue #470) computes <code dir="auto">summary_embedding</code> for every
+entity in <code dir="auto">group_id</code> that has a non-empty <code dir="auto">summary</code>, so entities created before this capability
+existed become semantically retrievable by summary paraphrase — not just by name-vector or
+full-text match. <code dir="auto">knowledge_find_entities</code> already fuses a summary-vector match into its hybrid
+retrieval for entities embedded going forward (both <code dir="auto">knowledge_assert_entity</code> and the extraction
+path embed <code dir="auto">summary</code> on creation); this tool is what makes that retrieval available for entities
+that predate the capability.</p>
+<ul>
+<li><strong>Every candidate is unconditionally re-embedded on each call.</strong> There is no cheap way to tell
+“already has a real embedding” apart from “still carries the schema migration’s zero-vector
+placeholder” from a stored <code dir="auto">FLOAT[]</code> value alone, so re-running this backfills the same rows
+again. This is safe (idempotent in effect) but not free (an embedder round-trip per candidate,
+same as <code dir="auto">knowledge_backfill_relation_types</code> and subject to the same no-batching caveat, #445) —
+use <code dir="auto">dry_run: true</code> first to see the candidate count.</li>
+<li><strong>Holds an exclusive lock for the whole run, blocking all other reads and writes.</strong> Unlike most
+admin operations, the summary-vector HNSW index is dropped for the run’s duration and rebuilt
+at the end — this is the only way an indexed embedding column can be refreshed for existing
+rows at all (a plain <code dir="auto">SET</code> on an HNSW-indexed column is rejected once the index exists). Prefer
+running this at a low-traffic time, especially for a large group.</li>
+<li><strong><code dir="auto">group_id</code> is required</strong> (matching <code dir="auto">knowledge_backfill_relation_types</code>’s convention):
+candidate selection and WAL attribution are both restricted to that one group; an omitted,
+<code dir="auto">null</code>, or empty <code dir="auto">group_id</code> is rejected rather than running database-wide or against the
+default group.</li>
+<li><strong>A partially-completed backfill is not an error.</strong> Entities not yet processed simply retrieve
+via existing name/lexical behavior, exactly as before this issue — running the tool again
+covers more of the group each time.</li>
+<li><strong><code dir="auto">summary_embedding</code> stays write-once after backfill, same as on creation.</strong> A later
+<code dir="auto">knowledge_assert_entity</code> re-assert that changes an entity’s <code dir="auto">summary</code> does not refresh its
+<code dir="auto">summary_embedding</code> — the vector reflects whichever summary was embedded last (at creation, or
+at the most recent backfill run), not necessarily the current <code dir="auto">summary</code> text. Re-run this tool
+to bring a changed summary’s vector back in sync.</li>
+</ul>
+<h3 id="cross-group-pointers-add_cross_group_edge-rebind_pointers">Cross-group pointers (<code dir="auto">add_cross_group_edge</code>, <code dir="auto">rebind_pointers</code>)</h3>
+<p><code dir="auto">knowledge_add_cross_group_edge</code> creates an edge whose endpoint(s) may live in a <code dir="auto">group_id</code>
+other than the edge’s own — the hub/layer-graph topology introduced by issue #369 (see
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0369-resolvable-cross-group-pointers.md">ADR-0369</a>). Every intra-group edge write
+(<code dir="auto">knowledge_add_episode</code>, <code dir="auto">knowledge_process_chunk</code>, and every other existing write path) is
+completely unaffected: pointers only ever exist on edges created through this tool.</p>
+<ul>
+<li><strong>Each endpoint is either a bare UUID or a name to resolve.</strong> <code dir="auto">{"uuid": "..."}</code> names an
+entity already known to live in the edge’s own <code dir="auto">group_id</code> — no resolution, no pointer. <code dir="auto"> {"source_group_id": "...", "endpoint_name": "..."}</code> names a <em>foreign</em> endpoint: it is resolved
+by case-insensitive name lookup against that group (the same authority
+<code dir="auto">get_entity_by_name_ci_with_scan_fallback</code> uses for extraction-time endpoint resolution, per
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0283-name-index-scan-fallback-for-endpoint-authority.md">ADR-0283</a>), and the edge carries
+a <code dir="auto">cross_group_pointers.{src,dst}</code> object recording the assertion (<code dir="auto">source_group_id</code>,
+<code dir="auto">endpoint_name</code>) and the resolution cache (<code dir="auto">resolved_uuid</code>, <code dir="auto">bound_at_seq</code>, <code dir="auto">binding_state</code>).</li>
+<li><strong>A foreign endpoint that doesn’t currently resolve is <code dir="auto">unbound</code>, not dropped.</strong> Unlike
+ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0051-edge-endpoint-salvage-and-deferred-drop.md">ADR-0051</a>), the edge is still created;
+only the hop to that side is missing until a later <code dir="auto">knowledge_rebind_pointers</code> call resolves
+it. A <code dir="auto">binding_state</code> of <code dir="auto">ambiguous</code> means more than one entity currently matches the name —
+also retained, also missing that hop, never a silently-guessed winner.</li>
+<li><strong>A bare-UUID endpoint that turns out to belong to a different group than the edge is
+rejected</strong> before any write happens — this is what keeps a cross-group edge from silently
+losing its pointer fields the first time a caller passes a UUID instead of a name.</li>
+<li><strong><code dir="auto">knowledge_rebind_pointers</code></strong> (<code dir="auto">{"source_group_id": "..."}</code>, required) re-resolves every
+pointer whose <code dir="auto">source_group_id</code> matches, after that source group’s own hydration, incremental
+replay, or refresh cycle — including an ordinary <code dir="auto">knowledge_rebuild_from_wal</code> targeting that one
+group, not only a full purge-and-rehydrate (issue #378). A pointer currently <code dir="auto">bound</code> is skipped
+once its <code dir="auto">bound_at_seq</code> is already at or past <code dir="auto">source_group_id</code>’s <strong>own</strong> applied WAL position —
+never any other group’s, even when the edge carrying the pointer lives in a third, different
+group — this staleness gate is what makes a second call with no intervening change to
+<code dir="auto">source_group_id</code>’s stream a true no-op for pointers that are already correct. A pointer
+currently <code dir="auto">unbound</code> or <code dir="auto">ambiguous</code> is always re-resolved regardless of <code dir="auto">bound_at_seq</code> (issue
+#392): a known-broken pointer is repaired unconditionally, since the position comparison alone
+cannot tell “nothing changed” apart from “the source group was purged and then restored to the
+same position the pointer was originally bound at.” A resolution that would create a self-loop
+or duplicate an existing directed edge invalidates the edge instead of writing a broken or
+redundant one, reusing <code dir="auto">knowledge_merge_entities</code>’s own self-loop/dedup handling rather than a
+new policy. Returns <code dir="auto">{checked, bound, unbound, ambiguous, invalidated_self_loop, invalidated_duplicate, staleness_skipped}</code> — <code dir="auto">staleness_skipped</code> counts pointers skipped by the
+gate above, distinct from <code dir="auto">checked</code> (pointers actually re-resolved), so a <code dir="auto">checked: 0</code> result is
+never ambiguous about whether anything was examined.</li>
+<li><strong>Unbound and ambiguous edges are excluded from normal reads.</strong> Every existing two-hop
+traversal, search, and MCP read path requires both hops to exist — a pointer that hasn’t
+resolved is invisible the same way any other incomplete edge would be, no special-casing
+needed. Aggregate counts are visible via <code dir="auto">knowledge_status</code>’s <code dir="auto">cross_group_pointers: {bound, unbound, ambiguous}</code> field, so a refresh in progress is observable without a dedicated
+inspection endpoint.</li>
+</ul>
+<h3 id="ingestion-results-process_chunk">Ingestion results (<code dir="auto">process_chunk</code>)</h3>
+<p><code dir="auto">knowledge_process_chunk</code> reports what it could not write, not only how much. Two additive
+result fields exist for that, both introduced in 0.13.2.</p>
+<ul>
+<li>
+<p><strong><code dir="auto">dropped_edges</code> reports the edges behind <code dir="auto">edges_dropped_unresolvable</code>.</strong> An extracted edge
+whose source or target endpoint resolves to no entity — neither in the current extraction batch
+nor in the persisted graph — is dropped rather than written
+(<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0051-edge-endpoint-salvage-and-deferred-drop.md">ADR-0051</a>). <code dir="auto">edges_dropped_unresolvable</code>
+counts those drops; <code dir="auto">dropped_edges</code> describes them, with one entry per counted edge, in
+extraction order:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"edges_dropped_unresolvable"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"dropped_edges"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"source_name"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Ada Lovelace</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"target_name"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Analytical Engine</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"relation_type"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">WROTE_NOTES_ON</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"fact"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Ada Lovelace wrote the first published algorithm for the Analytical Engine.</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"unresolved_endpoint"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">target</span><span style="--0:#D9F5DD;--1:#111111">"</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">  </span></span><span style="--0:#D6DEEB;--1:#403F53">]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{  &#x22;edges_dropped_unresolvable&#x22;: 1,  &#x22;dropped_edges&#x22;: [    {      &#x22;source_name&#x22;: &#x22;Ada Lovelace&#x22;,      &#x22;target_name&#x22;: &#x22;Analytical Engine&#x22;,      &#x22;relation_type&#x22;: &#x22;WROTE_NOTES_ON&#x22;,      &#x22;fact&#x22;: &#x22;Ada Lovelace wrote the first published algorithm for the Analytical Engine.&#x22;,      &#x22;unresolved_endpoint&#x22;: &#x22;target&#x22;    }  ]}"><div></div></button></div></figure></div>
+<p><code dir="auto">unresolved_endpoint</code> is <code dir="auto">"source"</code>, <code dir="auto">"target"</code>, or <code dir="auto">"both"</code>. <code dir="auto">relation_type</code> may be <code dir="auto">null</code>,
+mirroring the fact that it is already optional on an extracted edge before resolution is
+attempted. The dropped edge’s content is not persisted anywhere, so this result is the only
+place it appears — a consumer that wants to tell a user which fact was lost must read it here
+rather than recover it later. <strong><code dir="auto">dropped_edges</code> is always present</strong>, an empty list when nothing
+was dropped, so it can be iterated unconditionally. <code dir="auto">edges_dropped_unresolvable</code>’s existing
+meaning is unchanged, and a caller reading only the count is unaffected (issue #411).</p>
+</li>
+<li>
+<p><strong><code dir="auto">warning</code> reports oversized input.</strong> A <code dir="auto">chunk_text</code> longer than the advisory threshold
+(<code dir="auto">LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS</code>, default 8,000 characters — see
+<a href="../configuration/">Configuration</a>) adds a <code dir="auto">warning</code> field naming the actual and recommended
+character counts, and emits a <code dir="auto">chunk_text_oversized</code> telemetry event. This is visibility only:
+nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
+Splitting oversized input is the caller’s responsibility (issue #407).</p>
+</li>
+</ul>
+<h3 id="progress-notifications">Progress notifications</h3>
+<p>The six long-running operations — <code dir="auto">knowledge_rebuild_from_wal</code>, <code dir="auto">knowledge_canonicalize_relations</code>,
+<code dir="auto">knowledge_backfill_relation_types</code>, <code dir="auto">knowledge_backfill_summary_embeddings</code>,
+<code dir="auto">knowledge_reprocess_relation_types</code>, and <code dir="auto">knowledge_reprocess_entity_types</code> — bridge to MCP
+progress notifications when the client
+attaches a progress token to the <code dir="auto">tools/call</code> request (<code dir="auto">_meta.progressToken</code>), in both
+standalone and attached mode. Without a progress token, these calls simply block until they
+complete, same as over the socket protocol. In attached mode, each progress notification also
+re-arms <code dir="auto">LCG_ATTACHED_CALL_TIMEOUT_MS</code>’s per-read-line idle timer (see
+<a href="#db-access-modes">DB-access modes</a> above), so a progress-tracked call isn’t falsely reported as
+timed out just because it runs longer than that timeout in total.</p>
+<h3 id="example-mcp-client-config">Example MCP client config</h3>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"mcpServers"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"liminis-context-graph"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"command"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">liminis-context-graph</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"args"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">--mcp-stdio</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">--scope=read,write</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">],</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"cwd"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">/path/to/your/workspace</span><span style="--0:#D9F5DD;--1:#111111">"</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">  </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{  &#x22;mcpServers&#x22;: {    &#x22;liminis-context-graph&#x22;: {      &#x22;command&#x22;: &#x22;liminis-context-graph&#x22;,      &#x22;args&#x22;: [&#x22;--mcp-stdio&#x22;, &#x22;--scope=read,write&#x22;],      &#x22;cwd&#x22;: &#x22;/path/to/your/workspace&#x22;    }  }}"><div></div></button></div></figure></div>
+<p>To attach to an already-running socket service instead of opening the DB directly:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"mcpServers"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"liminis-context-graph"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"command"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">liminis-context-graph</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">      </span><span style="--0:#7FDBCA;--1:#096E72">"args"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">--mcp-stdio</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">--connect</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">/path/to/your/workspace/.lcg/service.sock</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">--scope=read</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">  </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{  &#x22;mcpServers&#x22;: {    &#x22;liminis-context-graph&#x22;: {      &#x22;command&#x22;: &#x22;liminis-context-graph&#x22;,      &#x22;args&#x22;: [&#x22;--mcp-stdio&#x22;, &#x22;--connect&#x22;, &#x22;/path/to/your/workspace/.lcg/service.sock&#x22;, &#x22;--scope=read&#x22;]    }  }}"><div></div></button></div></figure></div>
+<p>See <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0035-mcp-stdio-transport.md">ADR 0035</a> for the transport’s internal architecture.</p> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/ipc-mcp-reference.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/configuration/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Configuration</span> </span> </a> <a href="/liminis-context-graph/telemetry/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Telemetry</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.13.3.
+<span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>

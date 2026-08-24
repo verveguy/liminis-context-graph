@@ -1,0 +1,721 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-mysng3d7"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Telemetry | liminis-context-graph</title><link rel="canonical" href="https://v3rv.com/liminis-context-graph/v0.13.3/telemetry/"/><link rel="sitemap" href="/liminis-context-graph/v0.13.3/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/v0.13.3/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.32.6"/><meta property="og:title" content="Telemetry"/><meta property="og:type" content="article"/><meta property="og:url" content="https://v3rv.com/liminis-context-graph/v0.13.3/telemetry/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg> <svg aria-hidden="true" class="dark astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg> <svg aria-hidden="true" class="auto astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> </template><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/print.BJ0teN4y.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/index.B-28p481.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-mysng3d7"> <a href="#_top" class="astro-wqmw2k6g">Skip to content</a>  <div class="page sl-flex astro-of3kkadl"> <header class="header astro-of3kkadl"><div class="header sl-flex astro-wrrcn5ux"> <div class="title-wrapper sl-flex astro-wrrcn5ux"> <a href="/liminis-context-graph/v0.13.3/" class="site-title sl-flex astro-yuo4yrvu">  <span class="astro-yuo4yrvu" translate="no"> liminis-context-graph </span> </a>  </div> <div class="sl-flex print:hidden astro-wrrcn5ux"> <site-search class="astro-wrrcn5ux astro-yg5rfrxv" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-yg5rfrxv"> <svg aria-hidden="true" class="astro-yg5rfrxv astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg>  <span class="sl-hidden md:sl-block astro-yg5rfrxv" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-yg5rfrxv" style="display: none;"> <kbd class="astro-yg5rfrxv">Ctrl</kbd><kbd class="astro-yg5rfrxv">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-yg5rfrxv"> <div class="dialog-frame sl-flex astro-yg5rfrxv">  <button data-close-modal class="sl-flex md:sl-hidden astro-yg5rfrxv"> Cancel </button> <div class="search-container astro-yg5rfrxv"> <div id="starlight__search" class="astro-yg5rfrxv"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/Search.astro_astro_type_script_index_0_lang.DNOR3ugD.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-wrrcn5ux"> <div class="sl-flex social-icons astro-wrrcn5ux"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-of3kkadl" aria-label="Main"> <starlight-menu-button class="print:hidden astro-siku6wqb"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-siku6wqb"> <svg aria-hidden="true" class="astro-siku6wqb astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg>  </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-of3kkadl"> <div class="sidebar-content sl-flex astro-of3kkadl"> <sl-sidebar-state-persist data-hash="118hnfo" class="astro-vtxilowo"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-kugjn6tz"> <li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Overview</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/getting-started/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Getting Started</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/configuration/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Configuration</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ipc-mcp-reference/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">IPC &amp; MCP Reference</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/telemetry/" aria-current="page" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Telemetry</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/ontology/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Ontology</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/operations/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Operations</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/testing-and-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Testing &amp; Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/eval-full-corpus-runbook/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Full-Corpus Benchmark Runbook</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/extraction-quality-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Extraction-Quality Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/v0.13.3/release-process/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Release Process</span>  </a> </li><li class="astro-kugjn6tz"> <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md" aria-current="false" class="large astro-kugjn6tz" target="_blank" rel="noopener"> <span class="astro-kugjn6tz">Decision records</span> <span class="sl-badge note small  astro-kugjn6tz astro-cdpyiwzk">GitHub</span>  </a> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-2wb6o6sd"> <div class="sl-flex social-icons astro-2wb6o6sd"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-of3kkadl">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-uaqswrp5"> <aside class="right-sidebar-container print:hidden astro-uaqswrp5"> <div class="right-sidebar astro-uaqswrp5"> <script type="module" src="/liminis-context-graph/v0.13.3/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/liminis-context-graph/v0.13.3/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-tb5tla7j"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-g7l5jp3x"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-g7l5jp3x"><details id="starlight__mobile-toc" class="astro-g7l5jp3x"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-g7l5jp3x"><div class="toggle sl-flex astro-g7l5jp3x">On this page<svg aria-hidden="true" class="caret astro-g7l5jp3x astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </div><span class="display-current astro-g7l5jp3x"></span></summary><div class="dropdown astro-g7l5jp3x"><ul class="isMobile astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#transport" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Transport</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#event-types" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Event Types</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#ipc_call" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">ipc_call</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#token_usage" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">token_usage</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#extraction_truncated" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">extraction_truncated</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#llm_fallback" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">llm_fallback</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_append" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_append</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#service_state" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">service_state</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_replay_complete" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_replay_complete</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#structured_output_parse" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">structured_output_parse</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#entities_missing_summary" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">entities_missing_summary</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#extraction_failure" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">extraction_failure</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_rotated" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_rotated</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#workspace_migration" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">workspace_migration</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_auto_recovery" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_auto_recovery</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#chunk_text_oversized" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">chunk_text_oversized</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#sample-output" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Sample Output</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#pricing-table" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Pricing Table</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#environment-variables" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Environment Variables</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-tb5tla7j"><div class="sl-container astro-tb5tla7j"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#transport" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Transport</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#event-types" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Event Types</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#ipc_call" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">ipc_call</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#token_usage" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">token_usage</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#extraction_truncated" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">extraction_truncated</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#llm_fallback" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">llm_fallback</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_append" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_append</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#service_state" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">service_state</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_replay_complete" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_replay_complete</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#structured_output_parse" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">structured_output_parse</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#entities_missing_summary" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">entities_missing_summary</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#extraction_failure" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">extraction_failure</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_rotated" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_rotated</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#workspace_migration" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">workspace_migration</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#wal_auto_recovery" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">wal_auto_recovery</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#chunk_text_oversized" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">chunk_text_oversized</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#sample-output" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Sample Output</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#pricing-table" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Pricing Table</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#environment-variables" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Environment Variables</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-uaqswrp5">  <main data-pagefind-body class="astro-mysng3d7" lang="en" dir="ltr">   <script type="module">fetch("/liminis-context-graph/versions.json").then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;const s=document.getElementById("version-switcher");if(!s)return;const t=document.createElement("select");t.setAttribute("aria-label","Switch documented version");const l=e.versions.filter(o=>!o.includes("-")),c=l.length>0?l[0]:e.versions[0],i=document.createElement("option");i.value="/liminis-context-graph/",i.textContent=`latest (v${c})`,t.appendChild(i);for(const o of e.versions){const n=document.createElement("option");n.value=`/liminis-context-graph/v${o}/`,n.textContent=`v${o}`,window.location.pathname.startsWith(n.value)&&(n.selected=!0),t.appendChild(n)}t.addEventListener("change",()=>{window.location.href=t.value}),s.appendChild(t)}).catch(()=>{});</script> <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <h1 id="_top" class="astro-hybe2sjw">Telemetry</h1>  </div> </div>  <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <div class="sl-markdown-content"> <p>The <code dir="auto">liminis-context-graph</code> service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.</p>
+<h2 id="transport">Transport</h2>
+<p><strong>Default</strong>: Events are written to <strong>stderr</strong>, one JSON object per line.</p>
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/v0.13.3/_astro/ec.tm3va.css"><script type="module" src="/liminis-context-graph/v0.13.3/_astro/ec.8zarh.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">{"type":"ipc_call","ts_ms":1716100000000,"method":"knowledge_find_entities","request_id":1,"duration_ms":42,"success":true}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;ipc_call&#x22;,&#x22;ts_ms&#x22;:1716100000000,&#x22;method&#x22;:&#x22;knowledge_find_entities&#x22;,&#x22;request_id&#x22;:1,&#x22;duration_ms&#x22;:42,&#x22;success&#x22;:true}"><div></div></button></div></figure></div>
+<p><strong>Future</strong>: Set <code dir="auto">LIMINIS_TELEMETRY_SOCKET</code> to a UNIX socket path to stream events there instead of (or in addition to) stderr. This transport is not yet implemented.</p>
+<p>To capture events from the default transport:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="sh"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">./liminis-context-graph</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#7FDBCA;--1:#096E72">2></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">telemetry.jsonl</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="./liminis-context-graph 2> telemetry.jsonl"><div></div></button></div></figure></div>
+<h2 id="event-types">Event Types</h2>
+<p>Telemetry is scoped to the process, not to individual graphs within it: no event type carries a
+<code dir="auto">group_id</code> (or similar per-graph) field today, including <code dir="auto">ipc_call</code> for calls that operate on a
+specific group — this is a gap for anyone trying to attribute telemetry to one graph in a
+multi-graph workspace, not a documentation omission.</p>
+<p>All events share two common fields:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">type</code></td><td>string</td><td>Discriminant identifying the event kind (see table below)</td></tr><tr><td><code dir="auto">ts_ms</code></td><td>u64</td><td>Unix epoch timestamp in milliseconds when the event was emitted</td></tr></tbody></table>
+<h3 id="ipc_call"><code dir="auto">ipc_call</code></h3>
+<p>Emitted after every IPC request completes, from <code dir="auto">handlers::dispatch()</code>. This is a <strong>hot-path event</strong> — it fires on every request.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">method</code></td><td>string</td><td>JSON-RPC method name (e.g. <code dir="auto">knowledge_add_episode</code>)</td></tr><tr><td><code dir="auto">request_id</code></td><td>any</td><td>JSON-RPC request <code dir="auto">id</code> value as-is</td></tr><tr><td><code dir="auto">duration_ms</code></td><td>u64</td><td>Wall-clock time from request receipt to response, in milliseconds</td></tr><tr><td><code dir="auto">success</code></td><td>bool</td><td><code dir="auto">true</code> if the handler returned <code dir="auto">Ok</code>, <code dir="auto">false</code> for any error</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">ipc_call</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"method"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">knowledge_add_episode</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"request_id"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">42</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"success"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;ipc_call&#x22;,&#x22;ts_ms&#x22;:1716100000000,&#x22;method&#x22;:&#x22;knowledge_add_episode&#x22;,&#x22;request_id&#x22;:1,&#x22;duration_ms&#x22;:42,&#x22;success&#x22;:true}"><div></div></button></div></figure></div>
+<h3 id="token_usage"><code dir="auto">token_usage</code></h3>
+<p>Emitted after every successful Anthropic API call from <code dir="auto">extractor.rs</code>. This is a <strong>hot-path event</strong> for <code dir="auto">knowledge_add_episode</code> calls.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">role</code></td><td>string</td><td>Which LLM use-case produced these tokens (<code dir="auto">"extraction"</code>, future: <code dir="auto">"dedup"</code>)</td></tr><tr><td><code dir="auto">model</code></td><td>string</td><td>Anthropic model identifier (e.g. <code dir="auto">claude-haiku-4-5-20251001</code>)</td></tr><tr><td><code dir="auto">input_tokens</code></td><td>u64</td><td>Input tokens billed by the API</td></tr><tr><td><code dir="auto">output_tokens</code></td><td>u64</td><td>Output tokens billed by the API</td></tr><tr><td><code dir="auto">cache_read_tokens</code></td><td>u64</td><td>Tokens served from the prompt cache (cheaper rate)</td></tr><tr><td><code dir="auto">cache_creation_tokens</code></td><td>u64</td><td>Tokens written into the prompt cache</td></tr><tr><td><code dir="auto">estimated_cost_usd</code></td><td>f64 or null</td><td>Estimated cost in USD, or <code dir="auto">null</code> if the model is not in the pricing table</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">token_usage</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000001</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"role"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">extraction</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-haiku-4-5-20251001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"input_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">512</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"output_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">128</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"cache_read_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">384</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"cache_creation_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"estimated_cost_usd"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0.000512</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;token_usage&#x22;,&#x22;ts_ms&#x22;:1716100000001,&#x22;role&#x22;:&#x22;extraction&#x22;,&#x22;model&#x22;:&#x22;claude-haiku-4-5-20251001&#x22;,&#x22;input_tokens&#x22;:512,&#x22;output_tokens&#x22;:128,&#x22;cache_read_tokens&#x22;:384,&#x22;cache_creation_tokens&#x22;:0,&#x22;estimated_cost_usd&#x22;:0.000512}"><div></div></button></div></figure></div>
+<h3 id="extraction_truncated"><code dir="auto">extraction_truncated</code></h3>
+<p>Emitted when <code dir="auto">do_extract</code> detects a <code dir="auto">stop_reason: "max_tokens"</code> response and triggers a budget-doubling retry. Emitted once per chunk, after the retry resolves (either with success or with a second budget overflow). If <code dir="auto">retry_succeeded</code> is <code dir="auto">false</code>, the chunk was lost and an error was returned to the caller.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">ts_ms</code></td><td>integer</td><td>Unix timestamp in milliseconds</td></tr><tr><td><code dir="auto">model</code></td><td>string</td><td>Anthropic model identifier that triggered the overflow</td></tr><tr><td><code dir="auto">chunk_len_bytes</code></td><td>integer</td><td>Length of the episode body chunk in bytes</td></tr><tr><td><code dir="auto">initial_max_tokens</code></td><td>integer</td><td>The <code dir="auto">max_tokens</code> value used for the first (overflowing) attempt</td></tr><tr><td><code dir="auto">retry_succeeded</code></td><td>bool</td><td><code dir="auto">true</code> if the doubled-budget retry produced a valid result; <code dir="auto">false</code> if the retry also overflowed</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">extraction_truncated</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000050</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-sonnet-4-6</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_len_bytes"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">12480</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"initial_max_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">8192</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"retry_succeeded"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;extraction_truncated&#x22;,&#x22;ts_ms&#x22;:1716100000050,&#x22;model&#x22;:&#x22;claude-sonnet-4-6&#x22;,&#x22;chunk_len_bytes&#x22;:12480,&#x22;initial_max_tokens&#x22;:8192,&#x22;retry_succeeded&#x22;:true}"><div></div></button></div></figure></div>
+<h3 id="llm_fallback"><code dir="auto">llm_fallback</code></h3>
+<p>Emitted when the primary LLM is unavailable and extraction falls back to the secondary model
+configured via <code dir="auto">LCG_EXTRACTION_LLM</code>’s <code dir="auto">primary:fallback</code> form.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">role</code></td><td>string</td><td>Which LLM use-case triggered the fallback</td></tr><tr><td><code dir="auto">primary_model</code></td><td>string</td><td>Model that failed</td></tr><tr><td><code dir="auto">fallback_model</code></td><td>string</td><td>Model being used instead</td></tr><tr><td><code dir="auto">error_reason</code></td><td>string</td><td>Reason the primary model was unavailable (e.g. <code dir="auto">"rate_limit_exceeded"</code>)</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">llm_fallback</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000002</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"role"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">extraction</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"primary_model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-sonnet-4-6</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"fallback_model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-haiku-4-5-20251001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"error_reason"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">rate_limit_exceeded</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;llm_fallback&#x22;,&#x22;ts_ms&#x22;:1716100000002,&#x22;role&#x22;:&#x22;extraction&#x22;,&#x22;primary_model&#x22;:&#x22;claude-sonnet-4-6&#x22;,&#x22;fallback_model&#x22;:&#x22;claude-haiku-4-5-20251001&#x22;,&#x22;error_reason&#x22;:&#x22;rate_limit_exceeded&#x22;}"><div></div></button></div></figure></div>
+<h3 id="wal_append"><code dir="auto">wal_append</code></h3>
+<p>Emitted after each WAL entry is written. <strong>Not yet emitted</strong> — pending issue #3 (WAL implementation).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">duration_us</code></td><td>u64</td><td>Time to append the WAL entry, in microseconds</td></tr><tr><td><code dir="auto">bytes</code></td><td>integer</td><td>Size of the appended WAL entry in bytes</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">wal_append</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000003</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_us"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">180</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"bytes"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1024</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;wal_append&#x22;,&#x22;ts_ms&#x22;:1716100000003,&#x22;duration_us&#x22;:180,&#x22;bytes&#x22;:1024}"><div></div></button></div></figure></div>
+<h3 id="service_state"><code dir="auto">service_state</code></h3>
+<p>Emitted when the daemon changes operational state: on degraded startup, after successful recovery, and during graceful shutdown.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">state</code></td><td>string</td><td>One of <code dir="auto">"degraded"</code>, <code dir="auto">"healthy"</code>, <code dir="auto">"shutting_down"</code>, or <code dir="auto">"stopped"</code></td></tr><tr><td><code dir="auto">reason</code></td><td>string or absent</td><td>Machine-readable reason code (e.g. <code dir="auto">"lbug_wal_corrupt"</code>). Present when <code dir="auto">state = "degraded"</code>.</td></tr><tr><td><code dir="auto">detail</code></td><td>JSON value or absent</td><td>Structured detail, typically a string carrying the lbug error. Present when <code dir="auto">state = "degraded"</code></td></tr></tbody></table>
+<p>Degraded example (emitted at startup when lbug WAL is corrupt):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">service_state</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716523200000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"state"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">degraded</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"reason"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">lbug_wal_corrupt</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"detail"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">database error: Lbug(Runtime exception: Corrupted wal file. Read out invalid WAL record type.)</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;service_state&#x22;,&#x22;ts_ms&#x22;:1716523200000,&#x22;state&#x22;:&#x22;degraded&#x22;,&#x22;reason&#x22;:&#x22;lbug_wal_corrupt&#x22;,&#x22;detail&#x22;:&#x22;database error: Lbug(Runtime exception: Corrupted wal file. Read out invalid WAL record type.)&#x22;}"><div></div></button></div></figure></div>
+<p>Healthy example (emitted after successful <code dir="auto">knowledge_recover</code>):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">service_state</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716523260000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"state"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">healthy</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;service_state&#x22;,&#x22;ts_ms&#x22;:1716523260000,&#x22;state&#x22;:&#x22;healthy&#x22;}"><div></div></button></div></figure></div>
+<p>Shutting-down example (emitted at the start of graceful shutdown, before in-flight tasks are drained):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">service_state</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716523270000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"state"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">shutting_down</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;service_state&#x22;,&#x22;ts_ms&#x22;:1716523270000,&#x22;state&#x22;:&#x22;shutting_down&#x22;}"><div></div></button></div></figure></div>
+<p>Stopped example (emitted immediately before <code dir="auto">exit(0)</code>, after initiating the WAL checkpoint; if the inner shutdown timeout was exceeded, in-flight tasks may still be winding down and the checkpoint is best-effort):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">service_state</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716523271000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"state"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">stopped</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;service_state&#x22;,&#x22;ts_ms&#x22;:1716523271000,&#x22;state&#x22;:&#x22;stopped&#x22;}"><div></div></button></div></figure></div>
+<p>The renderer uses this event to update the recovery UI state without polling <code dir="auto">knowledge_status</code>. On every clean exit, the telemetry stream ends with <code dir="auto">"shutting_down"</code> → <code dir="auto">"stopped"</code>.</p>
+<h3 id="wal_replay_complete"><code dir="auto">wal_replay_complete</code></h3>
+<p>Emitted once when WAL replay finishes — at startup, after <code dir="auto">knowledge_rebuild_from_wal</code>, and at the end
+of autonomous recovery.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">mutations_replayed</code></td><td>u64</td><td>WAL mutations successfully applied</td></tr><tr><td><code dir="auto">unrecognised_lines</code></td><td>u64</td><td>Lines whose shape matched no known mutation template</td></tr><tr><td><code dir="auto">failed_lines</code></td><td>u64</td><td>Lines that parsed but whose statement failed to execute</td></tr><tr><td><code dir="auto">unparseable_lines</code></td><td>u64</td><td>Lines that were not valid JSON</td></tr><tr><td><code dir="auto">legacy_skipped_lines</code></td><td>u64</td><td>Lines skipped as a superseded legacy format</td></tr><tr><td><code dir="auto">duration_ms</code></td><td>u64</td><td>Total replay wall-clock time in milliseconds</td></tr></tbody></table>
+<p>A nonzero <code dir="auto">failed_lines</code>, <code dir="auto">unrecognised_lines</code>, or <code dir="auto">unparseable_lines</code> means the rebuilt graph is
+not a faithful reconstruction of the WAL — each counts a line whose content did not make it into
+the graph, whether it failed to execute, matched no known template, or was not valid JSON. Use
+<code dir="auto">LCG_REPLAY_FAILURE_SAMPLES</code> to surface examples. <code dir="auto">legacy_skipped_lines</code> is the one counter that
+does not indicate loss: those lines are a superseded format that is intentionally not replayed.</p>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">wal_replay_complete</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000004</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"mutations_replayed"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1284</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"unrecognised_lines"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"failed_lines"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"unparseable_lines"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"legacy_skipped_lines"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">380</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;wal_replay_complete&#x22;,&#x22;ts_ms&#x22;:1716100000004,&#x22;mutations_replayed&#x22;:1284,&#x22;unrecognised_lines&#x22;:0,&#x22;failed_lines&#x22;:0,&#x22;unparseable_lines&#x22;:0,&#x22;legacy_skipped_lines&#x22;:0,&#x22;duration_ms&#x22;:380}"><div></div></button></div></figure></div>
+<h3 id="structured_output_parse"><code dir="auto">structured_output_parse</code></h3>
+<p>Emitted by <code dir="auto">OaiExtractor</code> for every entity/edge extraction response on the local /
+OpenAI-compatible path, recording whether the model’s structured output was usable as-is.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">model</code></td><td>string</td><td>Model that produced the response</td></tr><tr><td><code dir="auto">call_type</code></td><td>string</td><td><code dir="auto">"entities"</code> or <code dir="auto">"edges"</code></td></tr><tr><td><code dir="auto">outcome</code></td><td>string</td><td><code dir="auto">"clean"</code> (valid JSON as returned), <code dir="auto">"recovered"</code> (needed fence/prefix stripping), <code dir="auto">"malformed"</code> (not valid JSON at all), or <code dir="auto">"schema_invalid"</code> (valid JSON that failed schema/field validation on a genuinely required field, <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0314-missing-summary-salvage-and-schema-invalid-classification.md">ADR-0314</a>)</td></tr></tbody></table>
+<p>A high <code dir="auto">"recovered"</code> or <code dir="auto">"malformed"</code> rate is the main signal that a local model is a poor fit for
+extraction. The Anthropic path uses tool-use and does not emit this event.</p>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">structured_output_parse</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000060</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">qwen3.6-27b</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"call_type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">edges</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"outcome"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">recovered</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;structured_output_parse&#x22;,&#x22;ts_ms&#x22;:1716100000060,&#x22;model&#x22;:&#x22;qwen3.6-27b&#x22;,&#x22;call_type&#x22;:&#x22;edges&#x22;,&#x22;outcome&#x22;:&#x22;recovered&#x22;}"><div></div></button></div></figure></div>
+<h3 id="entities_missing_summary"><code dir="auto">entities_missing_summary</code></h3>
+<p>Emitted by <code dir="auto">OaiExtractor::do_extract_entities</code> on every successful entity-extraction parse that
+produced at least one entity — OAI-only; the Anthropic path’s tool-use schema doesn’t need this
+signal and never emits it. Its <code dir="auto">tool_use</code> schema requires the <code dir="auto">summary</code> key to be present but not
+non-empty, so a model can satisfy the schema while still returning entities with no summary text.
+This event surfaces that missing-summary rate as its own signal, separate from the pass/fail
+classification in <code dir="auto">structured_output_parse</code>/<code dir="auto">extraction_failure</code>: an empty summary is a degraded
+entity, not a failed extraction. See <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0314-missing-summary-salvage-and-schema-invalid-classification.md">ADR-0314</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">model</code></td><td>string</td><td>Model that produced the response</td></tr><tr><td><code dir="auto">chunk_key</code></td><td>string or null</td><td>The episode name (production) or corpus chunk title (<code dir="auto">lcg-eval</code>), or <code dir="auto">null</code></td></tr><tr><td><code dir="auto">entities_extracted</code></td><td>usize</td><td>Total entities parsed from this chunk</td></tr><tr><td><code dir="auto">missing_summary</code></td><td>usize</td><td>Count of those entities whose <code dir="auto">summary</code> is empty — absent, explicit <code dir="auto">null</code>, and explicit <code dir="auto">""</code> in the source JSON are all indistinguishable after parsing and all count here</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">entities_missing_summary</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000058</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">qwen3.6-27b</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_key"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">notes-0001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"entities_extracted"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">6</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"missing_summary"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;entities_missing_summary&#x22;,&#x22;ts_ms&#x22;:1716100000058,&#x22;model&#x22;:&#x22;qwen3.6-27b&#x22;,&#x22;chunk_key&#x22;:&#x22;notes-0001&#x22;,&#x22;entities_extracted&#x22;:6,&#x22;missing_summary&#x22;:1}"><div></div></button></div></figure></div>
+<h3 id="extraction_failure"><code dir="auto">extraction_failure</code></h3>
+<p>Emitted at all three extraction-call failure sites (HTTP error, budget exhaustion that persists
+after one retry, or a malformed/unparseable response) from inside <code dir="auto">AnthropicExtractor</code> /
+<code dir="auto">OaiExtractor</code>. This is the heavier, complete-body sibling of <code dir="auto">extraction_truncated</code> and
+<code dir="auto">structured_output_parse</code> — it carries the full raw response body for forensics, where those two
+stay lightweight counting-only events. It is consumed only by the sidecar-writing
+<code dir="auto">ExtractionFailureSink</code> (see the <a href="../testing-and-evaluation/#failure-record-sidecar">failure-record sidecar</a>),
+not by the counting sink <code dir="auto">ipc_call</code>/<code dir="auto">token_usage</code> use.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">model</code></td><td>string</td><td>The model name in force for the failing call</td></tr><tr><td><code dir="auto">call_type</code></td><td>string</td><td><code dir="auto">"entities"</code> or <code dir="auto">"edges"</code></td></tr><tr><td><code dir="auto">chunk_key</code></td><td>string or null</td><td>The episode name (production) or corpus chunk title (<code dir="auto">lcg-eval</code>), or <code dir="auto">null</code></td></tr><tr><td><code dir="auto">classification</code></td><td>string</td><td><code dir="auto">"http_error"</code>, <code dir="auto">"truncation"</code>, <code dir="auto">"malformed"</code> (content that never parsed as JSON at all), or <code dir="auto">"schema_invalid"</code> (valid JSON that failed schema/field validation, <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0314-missing-summary-salvage-and-schema-invalid-classification.md">ADR-0314</a>)</td></tr><tr><td><code dir="auto">raw_body</code></td><td>string</td><td>The complete raw response body — never truncated to a prefix. A UTF-8 decoding failure is stored lossily rather than dropping the record. May echo back source-text content from the failing call; apply the same review-before-sharing care as <a href="../testing-and-evaluation/#recordreplay-cassettes">LLM cassettes</a>.</td></tr><tr><td><code dir="auto">finish_reason</code></td><td>string or null</td><td>The provider’s stop/finish reason, or <code dir="auto">null</code> for an HTTP-level failure</td></tr><tr><td><code dir="auto">completion_tokens</code></td><td>u64 or null</td><td>Output token count, or <code dir="auto">null</code> if unavailable</td></tr><tr><td><code dir="auto">max_tokens</code></td><td>u32</td><td>The <code dir="auto">max_tokens</code> value in force for the failing call</td></tr><tr><td><code dir="auto">entities_extracted</code></td><td>usize or null</td><td>Entities already extracted for this chunk before an edge-call failure discarded them from the caller’s return value. <code dir="auto">Some(count)</code> only at <code dir="auto">call_type: "edges"</code> failure sites; <code dir="auto">None</code> at <code dir="auto">call_type: "entities"</code> sites, where there is nothing to report yet.</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">extraction_failure</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000055</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">qwen3.6-27b</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"call_type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">edges</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_key"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">notes-0001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"classification"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">truncation</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"raw_body"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">{</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">choices</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">:[{</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">message</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">:{</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">content</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">:</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">[{</span><span style="--0:#F78C6C;--1:#AA0982">\\\"</span><span style="--0:#C789D6;--1:#7C5686">predicate</span><span style="--0:#F78C6C;--1:#AA0982">\\\"</span><span style="--0:#C789D6;--1:#7C5686">...</span><span style="--0:#F78C6C;--1:#AA0982">\"</span><span style="--0:#C789D6;--1:#7C5686">}}]}</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"finish_reason"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">length</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"completion_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">8192</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"max_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">8192</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"entities_extracted"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">4</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;extraction_failure&#x22;,&#x22;ts_ms&#x22;:1716100000055,&#x22;model&#x22;:&#x22;qwen3.6-27b&#x22;,&#x22;call_type&#x22;:&#x22;edges&#x22;,&#x22;chunk_key&#x22;:&#x22;notes-0001&#x22;,&#x22;classification&#x22;:&#x22;truncation&#x22;,&#x22;raw_body&#x22;:&#x22;{\&#x22;choices\&#x22;:[{\&#x22;message\&#x22;:{\&#x22;content\&#x22;:\&#x22;[{\\\&#x22;predicate\\\&#x22;...\&#x22;}}]}&#x22;,&#x22;finish_reason&#x22;:&#x22;length&#x22;,&#x22;completion_tokens&#x22;:8192,&#x22;max_tokens&#x22;:8192,&#x22;entities_extracted&#x22;:4}"><div></div></button></div></figure></div>
+<p>See <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0306-extraction-failure-sidecar-and-truncation-visibility.md">ADR-0306</a> for the design
+rationale, and <a href="../testing-and-evaluation/#failure-record-sidecar">Testing &#x26; Evaluation</a> for the
+on-disk sidecar file this event’s consumer writes.</p>
+<h3 id="wal_rotated"><code dir="auto">wal_rotated</code></h3>
+<p>Emitted when the WAL rolls over to a new file.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">from_file_seq</code></td><td>u32</td><td>Sequence number of the file just closed</td></tr><tr><td><code dir="auto">to_file_seq</code></td><td>u32</td><td>Sequence number of the file now being written</td></tr><tr><td><code dir="auto">closed_bytes</code></td><td>u64</td><td>Size of the closed file in bytes</td></tr><tr><td><code dir="auto">closed_events</code></td><td>u64</td><td>Number of events in the closed file</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">wal_rotated</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000070</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"from_file_seq"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">3</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"to_file_seq"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">4</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"closed_bytes"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">8388608</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"closed_events"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">15220</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;wal_rotated&#x22;,&#x22;ts_ms&#x22;:1716100000070,&#x22;from_file_seq&#x22;:3,&#x22;to_file_seq&#x22;:4,&#x22;closed_bytes&#x22;:8388608,&#x22;closed_events&#x22;:15220}"><div></div></button></div></figure></div>
+<h3 id="workspace_migration"><code dir="auto">workspace_migration</code></h3>
+<p>Emitted at each phase of a workspace layout migration.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">phase</code></td><td>string</td><td>Migration phase reached</td></tr><tr><td><code dir="auto">detail</code></td><td>JSON value or absent</td><td>Structured phase detail</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">workspace_migration</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000080</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"phase"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">complete</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;workspace_migration&#x22;,&#x22;ts_ms&#x22;:1716100000080,&#x22;phase&#x22;:&#x22;complete&#x22;}"><div></div></button></div></figure></div>
+<h3 id="wal_auto_recovery"><code dir="auto">wal_auto_recovery</code></h3>
+<p>Emitted at each phase of autonomous WAL-corruption self-recovery — the observability for the
+self-healing path described in <a href="../operations/">Operations</a>. Every field except <code dir="auto">phase</code> is optional
+and present only where the phase produces it.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">phase</code></td><td>string</td><td>One of <code dir="auto">"corruption_detected"</code>, <code dir="auto">"checkpoint_drop_complete"</code>, <code dir="auto">"cursor_derived"</code>, <code dir="auto">"replay_complete"</code>, <code dir="auto">"index_build_complete"</code>, <code dir="auto">"recovery_complete"</code>, <code dir="auto">"fallback_triggered"</code></td></tr><tr><td><code dir="auto">from_seq</code></td><td>u64 or absent</td><td>WAL sequence the replay resumed from</td></tr><tr><td><code dir="auto">cursor_reason</code></td><td>string or absent</td><td>How the resume cursor was derived</td></tr><tr><td><code dir="auto">mutations_replayed</code></td><td>u64 or absent</td><td>Mutations applied during recovery replay</td></tr><tr><td><code dir="auto">elapsed_ms</code></td><td>u64 or absent</td><td>Wall-clock time for the phase</td></tr><tr><td><code dir="auto">fallback_reason</code></td><td>string or absent</td><td>Why automatic recovery gave up, on <code dir="auto">"fallback_triggered"</code></td></tr></tbody></table>
+<p>A stream ending in <code dir="auto">"recovery_complete"</code> means the service healed itself; one ending in
+<code dir="auto">"fallback_triggered"</code> means it needs manual intervention.</p>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">wal_auto_recovery</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000090</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"phase"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">replay_complete</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"from_seq"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">7</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"mutations_replayed"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">412</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"elapsed_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1830</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;wal_auto_recovery&#x22;,&#x22;ts_ms&#x22;:1716100000090,&#x22;phase&#x22;:&#x22;replay_complete&#x22;,&#x22;from_seq&#x22;:7,&#x22;mutations_replayed&#x22;:412,&#x22;elapsed_ms&#x22;:1830}"><div></div></button></div></figure></div>
+<h3 id="chunk_text_oversized"><code dir="auto">chunk_text_oversized</code></h3>
+<p>Emitted by <code dir="auto">knowledge_process_chunk</code> when <code dir="auto">chunk_text</code>’s character count exceeds the advisory
+threshold (default <code dir="auto">8000</code>, overridable via <code dir="auto">LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS</code> — see
+<a href="../configuration/">Configuration</a>). A lightweight, counting-only event mirroring
+<code dir="auto">extraction_truncated</code>’s shape, so oversized ingestion is visible in aggregate across a telemetry
+stream, not just in the single call’s response <code dir="auto">warning</code> field. Ingestion itself is unaffected —
+no rejection, truncation, or splitting — this event is purely observational, and fires on every
+oversized call, including repeated resubmissions of the same <code dir="auto">chunk_id</code>.</p>
+<p><strong>The threshold and this event’s <code dir="auto">chunk_text_chars</code> field are measured in characters, not
+bytes.</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Type</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">ts_ms</code></td><td>integer</td><td>Unix timestamp in milliseconds</td></tr><tr><td><code dir="auto">chunk_id</code></td><td>string</td><td>The oversized call’s <code dir="auto">chunk_id</code></td></tr><tr><td><code dir="auto">source_file</code></td><td>string</td><td>The oversized call’s <code dir="auto">source_file</code></td></tr><tr><td><code dir="auto">chunk_text_chars</code></td><td>integer</td><td>Character count of <code dir="auto">chunk_text</code> (not bytes)</td></tr><tr><td><code dir="auto">threshold_chars</code></td><td>integer</td><td>The advisory threshold in effect for this call</td></tr></tbody></table>
+<p>Example:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">chunk_text_oversized</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000095</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_id"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">page-042</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"source_file"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">webbrain/page-042.html</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"chunk_text_chars"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">21953</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"threshold_chars"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">8000</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;chunk_text_oversized&#x22;,&#x22;ts_ms&#x22;:1716100000095,&#x22;chunk_id&#x22;:&#x22;page-042&#x22;,&#x22;source_file&#x22;:&#x22;webbrain/page-042.html&#x22;,&#x22;chunk_text_chars&#x22;:21953,&#x22;threshold_chars&#x22;:8000}"><div></div></button></div></figure></div>
+<hr>
+<h2 id="sample-output">Sample Output</h2>
+<p>A complete session ingesting one episode and running one search:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="jsonl"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">ipc_call</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000000</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"method"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">knowledge_build_indices</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"request_id"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">12</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"success"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">token_usage</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000100</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"role"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">extraction</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"model"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">claude-haiku-4-5-20251001</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"input_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">512</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"output_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">128</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"cache_read_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">384</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"cache_creation_tokens"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"estimated_cost_usd"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">0.000512</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">ipc_call</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000150</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"method"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">knowledge_add_episode</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"request_id"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">2</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">320</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"success"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"type"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">ipc_call</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"ts_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">1716100000500</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"method"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">knowledge_find_entities</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"request_id"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">3</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"duration_ms"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#F78C6C;--1:#AA0982">18</span><span style="--0:#D6DEEB;--1:#403F53">,</span><span style="--0:#7FDBCA;--1:#096E72">"success"</span><span style="--0:#D6DEEB;--1:#403F53">:</span><span style="--0:#FF6A83;--1:#A24848">true</span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;type&#x22;:&#x22;ipc_call&#x22;,&#x22;ts_ms&#x22;:1716100000000,&#x22;method&#x22;:&#x22;knowledge_build_indices&#x22;,&#x22;request_id&#x22;:1,&#x22;duration_ms&#x22;:12,&#x22;success&#x22;:true}{&#x22;type&#x22;:&#x22;token_usage&#x22;,&#x22;ts_ms&#x22;:1716100000100,&#x22;role&#x22;:&#x22;extraction&#x22;,&#x22;model&#x22;:&#x22;claude-haiku-4-5-20251001&#x22;,&#x22;input_tokens&#x22;:512,&#x22;output_tokens&#x22;:128,&#x22;cache_read_tokens&#x22;:384,&#x22;cache_creation_tokens&#x22;:0,&#x22;estimated_cost_usd&#x22;:0.000512}{&#x22;type&#x22;:&#x22;ipc_call&#x22;,&#x22;ts_ms&#x22;:1716100000150,&#x22;method&#x22;:&#x22;knowledge_add_episode&#x22;,&#x22;request_id&#x22;:2,&#x22;duration_ms&#x22;:320,&#x22;success&#x22;:true}{&#x22;type&#x22;:&#x22;ipc_call&#x22;,&#x22;ts_ms&#x22;:1716100000500,&#x22;method&#x22;:&#x22;knowledge_find_entities&#x22;,&#x22;request_id&#x22;:3,&#x22;duration_ms&#x22;:18,&#x22;success&#x22;:true}"><div></div></button></div></figure></div>
+<hr>
+<h2 id="pricing-table">Pricing Table</h2>
+<p>Token cost estimates use the compiled-in pricing table at <code dir="auto">assets/llm_pricing.json</code>. To override at runtime without recompiling:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="sh"><code><div class="ec-line"><div class="code"><span style="--0:#C5E478;--1:#3B61B0">LIMINIS_LLM_COST_TABLE_PATH</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#ECC48D;--1:#3B61B0">/path/to/my_pricing.json</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">./liminis-context-graph</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="LIMINIS_LLM_COST_TABLE_PATH=/path/to/my_pricing.json ./liminis-context-graph"><div></div></button></div></figure></div>
+<p>The JSON schema matches the built-in table:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"claude-haiku-4-5-20251001"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"input_per_mtok"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">0.80</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"output_per_mtok"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">4.00</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"cache_read_per_mtok"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">0.08</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"cache_creation_per_mtok"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">1.00</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">  </span></span><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><button title="Copy to clipboard" data-copied="Copied!" data-code="{  &#x22;claude-haiku-4-5-20251001&#x22;: {    &#x22;input_per_mtok&#x22;: 0.80,    &#x22;output_per_mtok&#x22;: 4.00,    &#x22;cache_read_per_mtok&#x22;: 0.08,    &#x22;cache_creation_per_mtok&#x22;: 1.00  }}"><div></div></button></div></figure></div>
+<p>Rates are in USD per million tokens. Models not present in the table produce <code dir="auto">"estimated_cost_usd": null</code>.</p>
+<hr>
+<h2 id="environment-variables">Environment Variables</h2>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead><tbody><tr><td><code dir="auto">LIMINIS_LLM_COST_TABLE_PATH</code></td><td><em>(built-in)</em></td><td>Path to a JSON pricing table; overrides the compiled-in defaults</td></tr><tr><td><code dir="auto">LIMINIS_TELEMETRY_SOCKET</code></td><td><em>(unset)</em></td><td>UNIX socket path for telemetry output (<strong>not yet implemented</strong>)</td></tr><tr><td><code dir="auto">LCG_SHUTDOWN_TIMEOUT_MS</code></td><td><code dir="auto">30000</code></td><td>Inner shutdown timeout in milliseconds; process aborts in-flight tasks after this and exits (best-effort WAL checkpoint). Sized to leave headroom under the liminis-app outer budget of 60 s.</td></tr></tbody></table> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/telemetry.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/v0.13.3/ipc-mcp-reference/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">IPC &amp; MCP Reference</span> </span> </a> <a href="/liminis-context-graph/v0.13.3/ontology/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Ontology</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.13.3.
+<span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>

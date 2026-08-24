@@ -1,0 +1,310 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-mysng3d7"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Extraction-Quality Evaluation | liminis-context-graph</title><link rel="canonical" href="https://v3rv.com/liminis-context-graph/extraction-quality-evaluation/"/><link rel="sitemap" href="/liminis-context-graph/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.32.6"/><meta property="og:title" content="Extraction-Quality Evaluation"/><meta property="og:type" content="article"/><meta property="og:url" content="https://v3rv.com/liminis-context-graph/extraction-quality-evaluation/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg> <svg aria-hidden="true" class="dark astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg> <svg aria-hidden="true" class="auto astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> </template><link rel="stylesheet" href="/liminis-context-graph/_astro/print.BJ0teN4y.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/_astro/index.B-28p481.css"><script type="module" src="/liminis-context-graph/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-mysng3d7"> <a href="#_top" class="astro-wqmw2k6g">Skip to content</a>  <div class="page sl-flex astro-of3kkadl"> <header class="header astro-of3kkadl"><div class="header sl-flex astro-wrrcn5ux"> <div class="title-wrapper sl-flex astro-wrrcn5ux"> <a href="/liminis-context-graph/" class="site-title sl-flex astro-yuo4yrvu">  <span class="astro-yuo4yrvu" translate="no"> liminis-context-graph </span> </a>  </div> <div class="sl-flex print:hidden astro-wrrcn5ux"> <site-search class="astro-wrrcn5ux astro-yg5rfrxv" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-yg5rfrxv"> <svg aria-hidden="true" class="astro-yg5rfrxv astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg>  <span class="sl-hidden md:sl-block astro-yg5rfrxv" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-yg5rfrxv" style="display: none;"> <kbd class="astro-yg5rfrxv">Ctrl</kbd><kbd class="astro-yg5rfrxv">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-yg5rfrxv"> <div class="dialog-frame sl-flex astro-yg5rfrxv">  <button data-close-modal class="sl-flex md:sl-hidden astro-yg5rfrxv"> Cancel </button> <div class="search-container astro-yg5rfrxv"> <div id="starlight__search" class="astro-yg5rfrxv"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/liminis-context-graph/_astro/Search.astro_astro_type_script_index_0_lang.CFTd6jw3.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-wrrcn5ux"> <div class="sl-flex social-icons astro-wrrcn5ux"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-of3kkadl" aria-label="Main"> <starlight-menu-button class="print:hidden astro-siku6wqb"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-siku6wqb"> <svg aria-hidden="true" class="astro-siku6wqb astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg>  </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-of3kkadl"> <div class="sidebar-content sl-flex astro-of3kkadl"> <sl-sidebar-state-persist data-hash="07ok4z4" class="astro-vtxilowo"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-kugjn6tz"> <li class="astro-kugjn6tz"> <a href="/liminis-context-graph/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Overview</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/getting-started/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Getting Started</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/configuration/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Configuration</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/ipc-mcp-reference/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">IPC &amp; MCP Reference</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/telemetry/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Telemetry</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/ontology/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Ontology</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/operations/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Operations</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/testing-and-evaluation/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Testing &amp; Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/eval-full-corpus-runbook/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Full-Corpus Benchmark Runbook</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/extraction-quality-evaluation/" aria-current="page" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Extraction-Quality Evaluation</span>  </a> </li><li class="astro-kugjn6tz"> <a href="/liminis-context-graph/release-process/" aria-current="false" class="large astro-kugjn6tz"> <span class="astro-kugjn6tz">Release Process</span>  </a> </li><li class="astro-kugjn6tz"> <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md" aria-current="false" class="large astro-kugjn6tz" target="_blank" rel="noopener"> <span class="astro-kugjn6tz">Decision records</span> <span class="sl-badge note small  astro-kugjn6tz astro-cdpyiwzk">GitHub</span>  </a> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-2wb6o6sd"> <div class="sl-flex social-icons astro-2wb6o6sd"> <a href="https://github.com/verveguy/liminis-context-graph" rel="me" class="sl-flex astro-au35etyt"><span class="sr-only astro-au35etyt">GitHub</span><svg aria-hidden="true" class="astro-au35etyt astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg> </a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-pxznu4lk"> <span class="sr-only astro-pxznu4lk">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg>  <select value="auto" autocomplete="off" class="astro-pxznu4lk"> <option value="dark" class="astro-pxznu4lk">Dark</option><option value="light" class="astro-pxznu4lk">Light</option><option value="auto" selected class="astro-pxznu4lk">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-pxznu4lk astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg>  </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-of3kkadl">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-uaqswrp5"> <aside class="right-sidebar-container print:hidden astro-uaqswrp5"> <div class="right-sidebar astro-uaqswrp5"> <script type="module" src="/liminis-context-graph/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/liminis-context-graph/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-tb5tla7j"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-g7l5jp3x"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-g7l5jp3x"><details id="starlight__mobile-toc" class="astro-g7l5jp3x"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-g7l5jp3x"><div class="toggle sl-flex astro-g7l5jp3x">On this page<svg aria-hidden="true" class="caret astro-g7l5jp3x astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </div><span class="display-current astro-g7l5jp3x"></span></summary><div class="dropdown astro-g7l5jp3x"><ul class="isMobile astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#read-this-first-what-these-numbers-are-and-arent" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Read this first: what these numbers are and aren’t</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#measured-results-this-engine--status-pending-not-yet-measured" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Measured results (this engine) — Status: Pending, not yet measured</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#ontology-constrained-results-openstrict--status-pending-not-yet-measured" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Ontology-constrained results (Open/Strict) — Status: Pending, not yet measured</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#methodology-replay-against-frozen-inputs-not-a-fresh-pipeline-run-per-candidate" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Methodology: replay against frozen inputs, not a fresh pipeline run per candidate</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#why-every-f1-number-here-is-a-judged-score-not-a-strict-string-one" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Why every F1 number here is a judged score, not a strict-string one</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#the-noise-floor" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">The noise floor</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#the-two-evaluation-corpora" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">The two evaluation corpora</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#rankings" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Rankings</span> </a> <ul class="isMobile astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#this-rankings-table-is-a-reconstruction-not-a-verbatim-transcription" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">This rankings table is a reconstruction, not a verbatim transcription</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#dedup-finding" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Dedup finding</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#apple-foundation-models-assessed-and-not-recommended-for-extraction" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Apple Foundation Models: assessed and not recommended for extraction</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#guidance" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Guidance</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-tb5tla7j"><div class="sl-container astro-tb5tla7j"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-jjp7ybmf" style="--depth: 0;"> <li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#_top" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#read-this-first-what-these-numbers-are-and-arent" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Read this first: what these numbers are and aren’t</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#measured-results-this-engine--status-pending-not-yet-measured" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Measured results (this engine) — Status: Pending, not yet measured</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#ontology-constrained-results-openstrict--status-pending-not-yet-measured" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Ontology-constrained results (Open/Strict) — Status: Pending, not yet measured</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#methodology-replay-against-frozen-inputs-not-a-fresh-pipeline-run-per-candidate" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Methodology: replay against frozen inputs, not a fresh pipeline run per candidate</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#why-every-f1-number-here-is-a-judged-score-not-a-strict-string-one" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Why every F1 number here is a judged score, not a strict-string one</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#the-noise-floor" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">The noise floor</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#the-two-evaluation-corpora" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">The two evaluation corpora</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#rankings" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Rankings</span> </a> <ul class="astro-jjp7ybmf" style="--depth: 1;"> <li class="astro-jjp7ybmf" style="--depth: 1;"> <a href="#this-rankings-table-is-a-reconstruction-not-a-verbatim-transcription" class="astro-jjp7ybmf" style="--depth: 1;"> <span class="astro-jjp7ybmf" style="--depth: 1;">This rankings table is a reconstruction, not a verbatim transcription</span> </a>  </li> </ul>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#dedup-finding" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Dedup finding</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#apple-foundation-models-assessed-and-not-recommended-for-extraction" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Apple Foundation Models: assessed and not recommended for extraction</span> </a>  </li><li class="astro-jjp7ybmf" style="--depth: 0;"> <a href="#guidance" class="astro-jjp7ybmf" style="--depth: 0;"> <span class="astro-jjp7ybmf" style="--depth: 0;">Guidance</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-uaqswrp5">  <main data-pagefind-body class="astro-mysng3d7" lang="en" dir="ltr">   <script type="module">fetch("/liminis-context-graph/versions.json").then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;const s=document.getElementById("version-switcher");if(!s)return;const t=document.createElement("select");t.setAttribute("aria-label","Switch documented version");const l=e.versions.filter(o=>!o.includes("-")),c=l.length>0?l[0]:e.versions[0],i=document.createElement("option");i.value="/liminis-context-graph/",i.textContent=`latest (v${c})`,t.appendChild(i);for(const o of e.versions){const n=document.createElement("option");n.value=`/liminis-context-graph/v${o}/`,n.textContent=`v${o}`,window.location.pathname.startsWith(n.value)&&(n.selected=!0),t.appendChild(n)}t.addEventListener("change",()=>{window.location.href=t.value}),s.appendChild(t)}).catch(()=>{});</script> <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <h1 id="_top" class="astro-hybe2sjw">Extraction-Quality Evaluation</h1>  </div> </div>  <div class="content-panel astro-f5nelhnd"> <div class="sl-container astro-f5nelhnd"> <div class="sl-markdown-content"> <p>This document answers the question <code dir="auto">liminis-context-graph</code> has otherwise left unanswered: <strong>can
+extraction run fully local, and what does it cost in quality?</strong> It ports the methodology,
+findings, and resulting guidance from a prior extraction-quality evaluation into this repo, scrubbed
+of private corpus names, internal paths, and sample extraction text.</p>
+<h2 id="read-this-first-what-these-numbers-are-and-arent">Read this first: what these numbers are and aren’t</h2>
+<p>The evaluation below predates this engine. Concretely:</p>
+<ul>
+<li>It was measured <strong>before</strong> a 2026-04-30 prompt restructure (this repo’s extraction prompts were
+ported from graphiti afterward — see <code dir="auto">specs/92-port-graphiti-s-extraction/spec.md</code>).</li>
+<li>It was measured against a <strong>different, private corpus</strong> than anything in this repo.</li>
+<li>It was measured against a <strong>Python pipeline</strong>, not this repo’s Rust pipeline.</li>
+</ul>
+<p>Treat everything below as <strong>historical prior art indicating relative ranking</strong> — which local model
+family leads, roughly how far behind the hosted baseline it falls, which approaches failed — not as
+a current guarantee for this engine. Issue <a href="https://github.com/verveguy/liminis-context-graph/issues/228">#228</a>
+(an in-repo Rust eval harness) and issue <a href="https://github.com/verveguy/liminis-context-graph/issues/248">#248</a>
+(a benchmark run comparing the hosted baseline against <code dir="auto">qwen3.6-27b</code>, on this engine and corpus,
+with cassettes captured for both — see the <a href="../eval-full-corpus-runbook/">full-corpus runbook</a> for
+the exact maintainer-run procedure) are what will re-baseline these numbers against the current
+pipeline. Until then, this is the best evidence available, and it’s why
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0041-local-openai-compatible-extraction-adapter.md">ADR-0041</a> does not auto-select the bundled
+sidecar’s model for extraction.</p>
+<p><strong>Every figure below and in the next section describes freeform extraction only</strong> — the model
+inventing its own entity/relation type vocabulary. Issue
+<a href="https://github.com/verveguy/liminis-context-graph/issues/266">#266</a> added <code dir="auto">--ontology</code>/
+<code dir="auto">--ontology-mode</code> to <code dir="auto">lcg-eval</code> plus a corpus-derived fixture so the same corpus and backends can
+also be measured under <code dir="auto">Open</code>/<code dir="auto">Strict</code>, but <strong>no maintainer has run that mode matrix yet</strong> — see
+the runbook’s <a href="../eval-full-corpus-runbook/#running-the-ontology-mode-matrix-266">“Running the ontology mode matrix”</a>
+section for the procedure. Do not read the rankings below as applying to an ontology-constrained
+workspace until that matrix has actually been run; #266’s own fixture derivation notes observed
+that freeform entity typing already converges to a small set on this corpus (so a closed
+vocabulary may move entity F1 relatively little) while freeform relation naming does not converge
+at all (heavy synonym clustering), making edge F1 the figure most likely to move once a closed
+vocabulary is applied — but that is a hypothesis to verify by running the matrix, not a measured
+result.</p>
+<h2 id="measured-results-this-engine--status-pending-not-yet-measured">Measured results (this engine) — Status: Pending, not yet measured</h2>
+<p>This section is reserved for #248’s measured figures once a maintainer runs the
+<a href="../eval-full-corpus-runbook/">full-corpus runbook</a> and supplies its report and cassettes. <strong>No
+run has been executed yet as of this section being added</strong> — the numbers below are deliberately
+absent rather than estimated or copied from the historical section above, per the spec’s Edge
+Cases (“must say so explicitly rather than fabricate placeholder numbers”). Whatever #248
+eventually measures here will itself be a <strong>freeform-only</strong> result, per the same caveat above —
+it does not by itself say anything about <code dir="auto">Open</code>/<code dir="auto">Strict</code> extraction, which needs the separate
+mode-matrix run #266 documents.</p>
+<p>Once a run completes, this section is replaced (not the historical section below, which stays as
+labeled prior art) with:</p>
+<ul>
+<li>Judged F1 for nodes/edges/summaries for <code dir="auto">qwen3.6-27b</code>, read against this engine’s own measured
+hosted-vs-itself noise floor (not the historical 0.990/0.978/0.900 figures above, which were
+measured on a different pipeline and corpus).</li>
+<li>Structured-output reliability (clean/recovered/malformed JSON parse counts) for both the
+hosted and local backends — a dimension the historical evaluation above did not track at all,
+since the predecessor pipeline had no equivalent telemetry.</li>
+<li>A direct statement of whether this engine’s local-vs-hosted gap is in line with, narrower
+than, or wider than the inherited ~7 percentage-point gap — and, per FR-007, whether that
+changes the README’s “quality-verified” framing.</li>
+</ul>
+<h2 id="ontology-constrained-results-openstrict--status-pending-not-yet-measured">Ontology-constrained results (<code dir="auto">Open</code>/<code dir="auto">Strict</code>) — Status: Pending, not yet measured</h2>
+<p>This section is reserved for the freeform/<code dir="auto">Open</code>/<code dir="auto">Strict</code> mode-matrix figures (#266) once a
+maintainer runs <code dir="auto">crates/eval/scripts/run_mode_matrix.sh</code> (or the equivalent hand-typed commands
+in the runbook) and supplies the three resulting reports. <strong>No mode-matrix run has been executed
+yet</strong> — same discipline as the section above: no placeholder or estimated numbers here until a
+real run produces them.</p>
+<p>Once a run completes, this section is replaced with:</p>
+<ul>
+<li>Per-backend judged/strict F1 for entities and edges under <code dir="auto">Open</code> and <code dir="auto">Strict</code>, compared
+directly against the freeform figures in the section above — specifically, whether the
+freeform model ranking holds or reorders under a closed vocabulary (this issue’s central
+question — see the spec’s User Story 2).</li>
+<li>The <code dir="auto">Strict</code>-mode vocabulary-compliance rate (FR-007) per backend — how often each candidate
+emitted a type outside the ontology’s declared vocabulary, distinct from JSON-syntax
+structured-output reliability.</li>
+<li>A direct statement of whether entity F1 moved materially less than edge F1 under <code dir="auto">Strict</code>, per
+the hypothesis in “Read this first” above, and whether that changes any local-model
+recommendation stated elsewhere in this document.</li>
+</ul>
+<h2 id="methodology-replay-against-frozen-inputs-not-a-fresh-pipeline-run-per-candidate">Methodology: replay against frozen inputs, not a fresh pipeline run per candidate</h2>
+<p>The evaluation used a <strong>record-and-replay</strong> design: a single reference run drove a real indexing
+pipeline once, with every LLM call traced to a message array — full pre-mutation prompt, response,
+timing, and call site. Each candidate model then replayed the <em>same</em> captured calls: identical
+prompts, identical inputs, identical dispatch (which calls go to the “extraction” role vs. the
+“dedup” role). The only variable between runs was the model answering the call.</p>
+<p>This is deliberately preferred over re-running the full pipeline once per candidate. A fresh
+end-to-end run per candidate would let each model’s own extractions feed its own downstream dedup
+decisions, so different candidates would face different inputs by the time you get to comparing
+their outputs — pipeline and pass-order variance would be a confound sitting on top of the actual
+model-quality difference you’re trying to measure. Freezing the inputs removes that confound: every
+candidate is graded against exactly the same task.</p>
+<h2 id="why-every-f1-number-here-is-a-judged-score-not-a-strict-string-one">Why every F1 number here is a judged score, not a strict-string one</h2>
+<p>The first pass at scoring used strict-string comparison: entity name-set overlap, and an exact
+tuple match on edges (source, target, relation-label). This produced misleadingly low edge scores
+across every candidate, including a same-model self-comparison — running the reference model
+against itself.</p>
+<p>The cause turned out to be wording variance, not quality. A model would extract the same real-world
+relationship on both runs but label it slightly differently — for example <code dir="auto">won</code> on one pass and
+<code dir="auto">won_award</code> on the other. Strict string comparison scores that as a complete miss, even though it’s
+the same edge.</p>
+<p>The reference model compared against itself scored:</p>
+<ul>
+<li><strong>Strict-string F1 on edges: 0.771</strong> — roughly a 23% “disagreement” floor from wording variance
+alone, despite comparing a model against itself.</li>
+<li><strong>LLM-as-judge F1 on the same comparison: 0.978</strong> — using a second model to align items by
+semantic meaning (not exact string) before computing precision/recall, this same self-comparison
+scores far closer to what it should: near-perfect agreement.</li>
+</ul>
+<p>Because strict-string scoring is this misleading even on a same-model self-comparison, <strong>every F1
+figure in the rest of this document is an LLM-as-judge score</strong>, not a strict-string one. Numbers
+from the two metrics are not comparable to each other.</p>
+<h2 id="the-noise-floor">The noise floor</h2>
+<p>Before ranking any local candidate, it’s necessary to know the practical ceiling: how much
+disagreement exists even between two runs of the intended hosted configuration. That’s the noise
+floor, established via self-comparison under the judged metric, pairing the extraction role with
+a hosted model and the dedup role with a small local model (<code dir="auto">qwen-9b</code>):</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th></th><th align="right">nodes</th><th align="right">edges</th><th align="right">summaries</th></tr></thead><tbody><tr><td><strong>Noise floor (judged F1)</strong></td><td align="right"><strong>0.990</strong></td><td align="right"><strong>0.978</strong></td><td align="right"><strong>0.900</strong></td></tr></tbody></table>
+<p>Read every other candidate’s judged F1 in the tables below as “distance from this ceiling,” not
+“distance from 1.0.”</p>
+<h2 id="the-two-evaluation-corpora">The two evaluation corpora</h2>
+<p>Two corpora were used to check that rankings weren’t an artifact of one particular kind of content,
+described here only by shape and character (no titles, paths, or subject-matter detail beyond
+this):</p>
+<ul>
+<li><strong>Corpus A</strong> (a small, curated corpus): ~40 chunks, ~130 extraction calls. Character: personal
+reading notes on a fiction series — narrative prose with a dense cast of named characters,
+places, and factions, and relatively few technical/typed relations.</li>
+<li><strong>Corpus B</strong> (a larger, sampled corpus): ~75 chunks sampled from a ~360-chunk personal knowledge
+base, ~290 extraction calls. Character: a mixed personal/technical knowledge base — design notes,
+decisions, and reference material, with higher relational density than Corpus A.</li>
+</ul>
+<p><strong>Cross-corpus finding</strong>: quality dropped most on <strong>edges</strong> moving from Corpus A to Corpus B — the
+leading local model (<code dir="auto">qwen3.6-27b</code>) lost roughly <strong>9 percentage points on edges</strong>, a materially
+larger drop than its ~2-point drop on nodes. This is attributed to Corpus B’s greater relational
+density: more, and more varied, relationships per chunk gives a model more chances to phrase or
+miss an edge. This finding matters more than either corpus’s absolute per-model number in isolation
+— it says local-model extraction quality degrades specifically on higher-relational-density
+content, which is closer to what this engine’s own use cases target than the lower-density corpus
+is.</p>
+<h2 id="rankings">Rankings</h2>
+<p>Judged F1 (nodes / edges / summaries), read against the 0.990 / 0.978 / 0.900 noise floor above.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Candidate</th><th align="right">nodes</th><th align="right">edges</th><th align="right">summaries</th><th>Notes</th></tr></thead><tbody><tr><td><code dir="auto">qwen3.6-27b</code></td><td align="right"><strong>0.894</strong></td><td align="right"><strong>0.852</strong></td><td align="right"><strong>0.900</strong></td><td>Local winner. ~7 points off the noise floor on average (nodes and edges individually trail by more; summaries ties).</td></tr><tr><td><code dir="auto">qwen3.6-35b-a3b</code> (MoE)</td><td align="right">0.879</td><td align="right">0.764</td><td align="right">0.800</td><td>~14 points off the noise floor, but roughly <strong>4x faster</strong> than <code dir="auto">qwen3.6-27b</code> — a mixture-of-experts model with a much smaller active-parameter count per token.</td></tr><tr><td><code dir="auto">qwen3.6-27b-thinking</code> (thinking-mode variant of the winner)</td><td align="right"><em>lower than non-thinking, same model</em></td><td align="right">—</td><td align="right">—</td><td>Scored <strong>worse on nodes</strong> than the non-thinking baseline above, at roughly <strong>10x the latency</strong>. Included as a “more compute did not help” data point; no precise figure is reproduced here since the original result predates this doc and shouldn’t be treated as a re-verified number.</td></tr></tbody></table>
+<p><strong>Ruled out — graded, but below the quality bar.</strong> These were run through the full evaluation and
+scored, but fell meaningfully short of the leading candidates above: <code dir="auto">qwen2.5-72b</code>, <code dir="auto">llama-3.3-70b</code>,
+<code dir="auto">gemma-3-27b</code>, <code dir="auto">deepseek-r1-distill-32b</code>, <code dir="auto">qwen-claude-distill</code> (a Qwen model distilled from a
+hosted-model teacher — the distillation did not close the gap to the un-distilled winner).</p>
+<p><strong>Ruled out — pipeline failure, not a quality score.</strong> <code dir="auto">mistral-small-3</code> is a distinct failure
+mode from the models above: it produced a <strong>100% error rate</strong>, failing to produce usable
+structured output at all, rather than producing usable output that was simply graded lower. Don’t
+read this as “scored worst” — it never produced a comparable score.</p>
+<h3 id="this-rankings-table-is-a-reconstruction-not-a-verbatim-transcription">This rankings table is a reconstruction, not a verbatim transcription</h3>
+<p>The original evaluation covered <strong>13 configurations</strong>, including at least one mode variant of an
+already-listed model (<code dir="auto">qwen3.6-27b-thinking</code>, above) and a hosted routing combination used to
+establish the noise floor itself (the hosted extraction model paired with <code dir="auto">qwen-9b</code> for dedup,
+compared against itself under the judged metric). What’s published above is the <strong>attested
+subset</strong> — the candidates and figures that could be confirmed from summarized results — not a
+transcription of the original matrix. Treat the list as representative, not exhaustive, and don’t
+assume every label here matches the original evaluation’s own naming exactly.</p>
+<h2 id="dedup-finding">Dedup finding</h2>
+<p>Across every evaluated candidate that completed, including the smallest model tested (a 9B-parameter
+model, <code dir="auto">qwen-9b</code>), dedup scored <strong>F1 = 1.000</strong>. Dedup — deciding whether two extracted entities
+refer to the same real-world thing — did not differentiate between models at all in this
+evaluation. The implication: no model upgrade is needed for the dedup role specifically, independent
+of whatever extraction-model choice is made.</p>
+<h2 id="apple-foundation-models-assessed-and-not-recommended-for-extraction">Apple Foundation Models: assessed and not recommended for extraction</h2>
+<p>Apple Foundation Models were assessed for entity/relationship extraction as part of this evaluation
+and are <strong>not recommended</strong> — the model’s context window and general capability were judged
+insufficient for this task’s quality bar.</p>
+<p>This matters concretely for this repo: Apple Foundation Models are the backend served by the
+bundled CoreML sidecar’s <code dir="auto">/v1/chat/completions</code> route — the same route an operator would get if
+that socket were auto-selected for extraction. This finding is why <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0041-local-openai-compatible-extraction-adapter.md">ADR-0041</a>
+deliberately does <strong>not</strong> include a default-socket auto-detection tier for extraction (unlike the
+embedder, which does auto-detect the same sidecar): a live sidecar being present is not, by itself,
+evidence that its default model is a good extraction choice.</p>
+<h2 id="guidance">Guidance</h2>
+<ul>
+<li><strong>Quality-first, fully local</strong>: <code dir="auto">qwen3.6-27b</code>. The best-scoring local candidate on both corpora,
+roughly 7-9 points of judged F1 below the hosted noise floor depending on corpus and metric.</li>
+<li><strong>Speed-first, fully local</strong>: <code dir="auto">qwen3.6-35b-a3b</code>. Roughly 4x faster than <code dir="auto">qwen3.6-27b</code> at a
+further quality cost (~14 points off the noise floor) — a reasonable trade for high-volume
+indexing where throughput matters more than the last few points of extraction fidelity.</li>
+<li><strong>Hosted (Anthropic) remains the quality baseline.</strong> Nothing in this evaluation argues for
+moving away from the hosted API when quality is the priority; it exists to make the <em>local</em>
+trade-off legible, not to unseat the hosted default.</li>
+</ul>
+<p>Both local recommendations are reachable today via <code dir="auto">--extractor-uds</code>/<code dir="auto">--extractor-http</code> pointed at
+an OpenAI-compatible server running the chosen model (e.g. <code dir="auto">mlx_lm.server</code>) — see
+<a href="../configuration/#extractor-local-or-hosted">Configuration: Extractor: local or hosted</a> for the
+flags and selection precedence.</p> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/extraction-quality-evaluation.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/eval-full-corpus-runbook/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Full-Corpus Benchmark Runbook</span> </span> </a> <a href="/liminis-context-graph/release-process/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Release Process</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.13.3.
+<span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>
