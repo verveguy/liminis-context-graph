@@ -46,6 +46,15 @@ fn hash_embedding(text: &str, dim: usize) -> Vec<f32> {
 /// — see that function's doc comment for why a constant response is actively wrong once replay
 /// recomputes every embedding through this stub (issue #440), not merely "semantically empty but
 /// harmless".
+///
+/// Handles both wire shapes `OaiEmbedder` can send (issue #445): a bare-string `input` (a
+/// single-text `embed()` call) and an array-valued `input` (a batched `embed_batch()` call) —
+/// returning one correctly-`index`ed `data` entry per input text either way. Every real subprocess
+/// e2e test in this file routes through this stub, so once ingest batches multiple entity
+/// names/summaries/facts into one array-valued request, a stub that only understood the
+/// single-string shape would silently truncate the response to one entry regardless of how many
+/// texts were sent, surfacing as an "embedding response shape mismatch" error from any chunk with
+/// more than one entity or edge.
 pub fn spawn_stub_embedder() -> u16 {
     use std::io::Read;
     use std::net::TcpListener;
@@ -60,15 +69,31 @@ pub fn spawn_stub_embedder() -> u16 {
             let n = Read::read(&mut s, &mut buf).unwrap_or(0);
             let request = String::from_utf8_lossy(&buf[..n]);
             let request_body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-            let text: String = serde_json::from_str::<Value>(request_body)
+            let texts: Vec<String> = serde_json::from_str::<Value>(request_body)
                 .ok()
-                .and_then(|v| v["input"].as_str().map(str::to_string))
+                .and_then(|v| v.get("input").cloned())
+                .map(|input| match input {
+                    Value::String(s) => vec![s],
+                    Value::Array(items) => items
+                        .into_iter()
+                        .map(|v| v.as_str().unwrap_or_default().to_string())
+                        .collect(),
+                    _ => Vec::new(),
+                })
                 .unwrap_or_default();
 
-            let embedding = hash_embedding(&text, 768);
-            let embedding_json = serde_json::to_string(&embedding).unwrap();
+            let entries: Vec<String> = texts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let embedding = hash_embedding(text, 768);
+                    let embedding_json = serde_json::to_string(&embedding).unwrap();
+                    format!(r#"{{"object":"embedding","embedding":{embedding_json},"index":{i}}}"#)
+                })
+                .collect();
             let body = format!(
-                r#"{{"object":"list","data":[{{"object":"embedding","embedding":{embedding_json},"index":0}}],"model":"stub-model","usage":{{"prompt_tokens":1,"total_tokens":1}}}}"#
+                r#"{{"object":"list","data":[{}],"model":"stub-model","usage":{{"prompt_tokens":1,"total_tokens":1}}}}"#,
+                entries.join(",")
             );
             let http_response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
