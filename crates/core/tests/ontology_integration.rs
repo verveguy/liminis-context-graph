@@ -70,6 +70,42 @@ fn make_state(db: Arc<Db>, ontology: Option<Ontology>) -> Arc<AppState> {
     })
 }
 
+/// Like `make_state`, but with a `workspace_root` configured (issue #451) — needed for any test
+/// that exercises `.lcg/ontology-hash.json` / `.lcg/ontology-hash/<group>.json` on disk, or
+/// per-group drift via `AppState::resolve_ontology`.
+fn make_state_with_root(
+    db: Arc<Db>,
+    workspace_root: &std::path::Path,
+    ontology: Option<Ontology>,
+) -> Arc<AppState> {
+    let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(MockEmbedder::new(EMB_DIM)),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink,
+        db_path: "test.db".to_string(),
+        wal_root: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: Some(workspace_root.to_path_buf()),
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: ontology.map(Arc::new),
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
+    })
+}
+
 fn make_state_with_extractor(
     db: Arc<Db>,
     ontology: Option<Ontology>,
@@ -1876,4 +1912,185 @@ async fn knowledge_status_surfaces_drift_when_ontology_is_none() {
         result["ontology"]["drift_summary"],
         json!("entity types removed: [Person]")
     );
+}
+
+// ── issue #451, FR-004/SC-003: single-ontology workspaces are unaffected ────────────────────
+
+// FR-004: `.lcg/ontology-hash.json`'s content/shape must stay byte-identical for an existing
+// single-ontology workspace, even once a group's per-group drift is also computed and stored
+// (additively, under a separate `.lcg/ontology-hash/` directory) alongside it.
+#[tokio::test]
+async fn workspace_ontology_hash_json_unchanged_when_group_drift_is_also_tracked() {
+    let dir = TempDir::new().unwrap();
+    write_ontology_file(
+        &dir,
+        "mode: strict\nentity_types:\n  - name: Person\n  - name: Organization\n",
+    );
+    let ontology = load_ontology(Some(dir.path()));
+    let (db, _db_dir) = make_db();
+    let state = make_state_with_root(db, dir.path(), ontology.clone());
+
+    episode::add_episode(
+        Arc::clone(&state),
+        "ep",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "g1",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let workspace_sidecar = ontology_sidecar::read_sidecar(dir.path())
+        .expect(".lcg/ontology-hash.json must exist, exactly as before issue #451");
+    assert_eq!(workspace_sidecar.hash, content_hash(ontology.as_ref()));
+    assert_eq!(workspace_sidecar.mode.as_deref(), Some("strict"));
+    assert_eq!(
+        workspace_sidecar.entity_types,
+        vec!["Person".to_string(), "Organization".to_string()]
+    );
+    assert!(workspace_sidecar.relation_types.is_empty());
+
+    // The raw JSON on disk has exactly the same shape (same keys) as before this issue — no
+    // group_id, no map, no new top-level field folded into the single-valued file.
+    let raw = std::fs::read_to_string(ontology_sidecar::sidecar_path(dir.path())).unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, vec!["entity_types", "hash", "mode", "relation_types"]);
+
+    // Additive only: per-group tracking lives in a separate directory, never inside the
+    // workspace file above.
+    assert!(
+        ontology_sidecar::group_sidecar_path(dir.path(), "g1")
+            .unwrap()
+            .exists(),
+        "issue #451's per-group sidecar must exist alongside the unchanged workspace file"
+    );
+}
+
+// SC-003: a workspace with no `.lcg/ontology/` directory (no group has ever had a per-group
+// file) reports an empty `group_ontology_drift` in knowledge_status until a group is actually
+// used in this process, then reports exactly that group.
+#[tokio::test]
+async fn knowledge_status_group_ontology_drift_empty_until_a_group_is_used() {
+    let dir = TempDir::new().unwrap();
+    write_ontology_file(&dir, "mode: open\nentity_types:\n  - name: Person\n");
+    let ontology = load_ontology(Some(dir.path()));
+    let (db, _db_dir) = make_db();
+    let state = make_state_with_root(db, dir.path(), ontology);
+
+    let resp = handlers::dispatch(
+        req(1, "knowledge_status", json!({})),
+        Arc::clone(&state),
+        None,
+    )
+    .await;
+    let resp_val = serde_json::to_value(resp).unwrap();
+    assert_eq!(
+        resp_val["result"]["group_ontology_drift"],
+        json!([]),
+        "no group has been resolved in this process yet — must be empty, not a false negative \
+         for any on-disk group"
+    );
+
+    episode::add_episode(
+        Arc::clone(&state),
+        "ep",
+        "Alice works at Acme Corp",
+        "test",
+        "test source",
+        "2026-01-01T00:00:00Z",
+        "g1",
+        SourceType::Text,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let resp2 = handlers::dispatch(req(2, "knowledge_status", json!({})), state, None).await;
+    let resp2_val = serde_json::to_value(resp2).unwrap();
+    let breakdown = resp2_val["result"]["group_ontology_drift"]
+        .as_array()
+        .expect("group_ontology_drift must be an array");
+    assert_eq!(breakdown.len(), 1, "only g1 has been used: {breakdown:?}");
+    assert_eq!(breakdown[0]["group_id"], json!("g1"));
+    assert_eq!(
+        breakdown[0]["drifted"],
+        json!(false),
+        "g1 was just freshly ingested under the current ontology — no drift"
+    );
+}
+
+// User Story 4, Scenario 1: knowledge_status's group_ontology_drift array must distinguish a
+// drifted group from a non-drifted sibling in the actual JSON response, including drift_summary
+// — not just via the internal AppState::group_drift_status accessor other tests exercise.
+#[tokio::test]
+async fn knowledge_status_group_ontology_drift_distinguishes_drifted_and_clean_groups() {
+    let dir = TempDir::new().unwrap();
+    write_ontology_file(&dir, "mode: open\nentity_types:\n  - name: Person\n");
+    let ontology = load_ontology(Some(dir.path()));
+    let (db, _db_dir) = make_db();
+
+    // group-a's recorded sidecar reflects a stale ontology, so its first resolution drifts.
+    let stale = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![EntityTypeDef {
+            name: "StaleType".to_string(),
+            description: None,
+            parent: None,
+        }],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    ontology_sidecar::write_group_sidecar(dir.path(), "group-a", Some(&stale)).unwrap();
+
+    let state = make_state_with_root(db, dir.path(), ontology);
+    state.resolve_ontology("group-a");
+    state.resolve_ontology("group-b");
+
+    let resp = handlers::dispatch(
+        req(1, "knowledge_status", json!({})),
+        Arc::clone(&state),
+        None,
+    )
+    .await;
+    let resp_val = serde_json::to_value(resp).unwrap();
+    let breakdown = resp_val["result"]["group_ontology_drift"]
+        .as_array()
+        .expect("group_ontology_drift must be an array");
+    assert_eq!(breakdown.len(), 2, "{breakdown:?}");
+
+    let a = breakdown
+        .iter()
+        .find(|e| e["group_id"] == json!("group-a"))
+        .expect("group-a entry present");
+    assert_eq!(
+        a["drifted"],
+        json!(true),
+        "group-a's sidecar was stale: {a:?}"
+    );
+    assert!(
+        a["drift_summary"].as_str().is_some_and(|s| !s.is_empty()),
+        "a drifted group's summary must be a non-empty string: {a:?}"
+    );
+
+    let b = breakdown
+        .iter()
+        .find(|e| e["group_id"] == json!("group-b"))
+        .expect("group-b entry present");
+    assert_eq!(
+        b["drifted"],
+        json!(false),
+        "group-b has no prior sidecar or data — first use, not drift: {b:?}"
+    );
+    assert_eq!(b["drift_summary"], json!(null));
 }
