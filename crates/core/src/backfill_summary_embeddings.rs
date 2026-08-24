@@ -191,10 +191,6 @@ pub async fn backfill_summary_embeddings(
     // dropped, so a concurrent search that races in and hits a missing-index error takes the
     // auto-heal branch (`build_indices_once`, which blocks on `write_lock` until this pass
     // releases it) instead of a hard failure — see module doc.
-    // Mirrors `handle_rebuild_from_wal`'s bookkeeping: cleared before the index is actually
-    // dropped, so a concurrent search that races in and hits a missing-index error takes the
-    // auto-heal branch (`build_indices_once`, which blocks on `write_lock` until this pass
-    // releases it) instead of a hard failure — see module doc.
     state.indices_built.store(false, Ordering::Release);
 
     let db_drop = Arc::clone(&db);
