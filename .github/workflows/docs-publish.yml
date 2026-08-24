@@ -92,7 +92,12 @@ jobs:
           ref: ${{ needs.determine.outputs.ref }}
           path: docs-src
 
+      # Version given explicitly. The action otherwise reads `packageManager`
+      # from a package.json at the repository root, and this is a Rust workspace
+      # — there is no root package.json for it to read, so it fails outright.
       - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
 
       - uses: actions/setup-node@v4
         with:
