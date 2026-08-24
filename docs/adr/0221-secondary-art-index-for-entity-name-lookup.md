@@ -99,13 +99,24 @@ a stale/missing `lookup_key` produces a **wrong** answer, not merely a **slow** 
 - **The one authority call site** (`episode.rs`'s Phase C `get_entity_by_name_ci_with_scan_fallback`
   — ADR-0283's Site 1, "does this entity exist anywhere in the group"): a miss here is wrong, not
   slow, so an equivalent guarantee to ADR-0283's bounded scan fallback is preserved. On an
-  indexed miss, this falls back to `scan_entity_by_name_ci` — reused verbatim, unmodified, since
-  it already correctly resolves through `Merged` tombstones (see below) — and on a scan hit,
-  self-heals by writing `SET e.lookup_key = $key` on that row so every subsequent lookup, at any
-  call site, hits the index directly. Because `lookup_key` is derived purely from `group_id` and
-  `name` (both already in hand at the point of the scan hit), this is a cheap, targeted
-  correction, not a full scan — and it is what turns "permanently wrong" back into "self-healing"
-  for the specific rows that pass through this call site.
+  indexed miss, this falls back to `scan_entity_by_name_ci`, which resolves through `Merged`
+  tombstones exactly as before (see below) — and on a scan hit, self-heals by writing
+  `SET e.lookup_key = $key` on that row so every subsequent lookup, at any call site, hits the
+  index directly. Because `lookup_key` is derived purely from `group_id` and `name` (both already
+  in hand at the point of the scan hit), this is a cheap, targeted correction, not a full scan —
+  and it is what turns "permanently wrong" back into "self-healing" for the specific rows that
+  pass through this call site.
+
+  **This fallback is not a cold path** — it fires for every name an extractor mentions but never
+  emitted as an entity, which is routine LLM output, not an edge case. The PR's human review
+  caught that `scan_entity_by_name_ci`'s `RETURN` list originally still carried
+  `name_embedding`/`summary`/`attributes`, so every fallback scan transferred and sorted *every
+  row in the group*, vectors included, to select at most one. Fixed by narrowing the `RETURN` to
+  the scalar columns needed to find the winner (`uuid`, `name`, `group_id`, `created_at`) and
+  hydrating only the single winning row via `get_entity_by_uuid` — one extra point lookup on a
+  hit, nothing on the (common) miss. Measured on a 10k-entity, 768-dim (bge-base-en-v1.5) graph:
+  ~275ms → ~26ms (hit, self-heal path included), ~269ms → ~7ms (miss) — see
+  `crates/core/benches/name_lookup.rs`'s `bench_name_lookup_scan_fallback_10k`.
 
 ### Resolution semantics preserved exactly (FR-007)
 
@@ -171,6 +182,48 @@ own internal WAL as a single record for indexes under a 256 MiB threshold
 (`LBUG_CREATE_INDEX_WAL_THRESHOLD`); above that threshold it switches to a blocking checkpoint
 instead. Either way, the build is synchronous. Migration duration at realistic production scale
 is unmeasured by this issue — flagged here rather than assumed low-risk.
+
+### Retrying a failed backfill without an O(N) scan on every clean startup
+
+The Review stage's dependency-injection review and the PR's human review both caught the same
+gap: `migrate`'s original design decides whether to run the `ALTER`+backfill purely from whether
+`Entity.lookup_key` *exists as a column*. If `ALTER` succeeds but the backfill that follows it
+then fails, the column is already present on the next open — the probe succeeds, the whole `if`
+block is skipped, and the backfill never retries. Worse, `LookupKeyStatus::migrated` is an
+in-process `AtomicBool` that resets to its `true` default on every fresh `Db`, so a restart after
+a failed backfill silently makes `knowledge_status` report `name_index_trusted: true` while rows
+are still missing `lookup_key`. That is a real dedup-corruption path for the three FR-011 sites
+(Phase B dedup, Phase C's two per-edge lookups), not merely stale observability — those sites have
+no scan fallback by design (FR-011), so a `NULL`/missing `lookup_key` there creates a duplicate
+entity rather than degrading to a slower lookup.
+
+The constraint on the fix was firm: it must not reintroduce an O(N) `Entity` scan on the clean
+(already-migrated) startup path — eliminating that scan is a large part of why this issue exists.
+A `WHERE lookup_key IS NULL … LIMIT 1` probe on every open would scan the whole table on a healthy
+database just to confirm there's nothing to do.
+
+The fix adds a minimal, generic migration-state table, `SchemaState (key STRING PRIMARY KEY,
+status STRING)`, and persists the backfill's outcome there under the key
+`entity_lookup_key_backfill` instead of re-deriving it from column presence:
+
+- **Column absent** (pre-#221 database): unchanged — `ALTER`, then backfill, then record
+  `"complete"` or `"failed"`.
+- **Column present, marker `"complete"`**: nothing to do. One `SchemaState` point lookup by
+  primary key — O(1), not a scan. This is the steady-state path every healthy restart takes.
+- **Column present, marker `"failed"`**: retry the backfill (still bounded to `WHERE lookup_key
+  IS NULL`, so only the still-`NULL` rows are touched) instead of trusting a stale success signal
+  forever.
+- **Column present, no marker**: either a genuinely fresh database (its `Entity` table is empty,
+  so the backfill's scan costs nothing) or a database migrated by a pre-`SchemaState` build of
+  this feature. Either way the backfill runs once — free for the fresh-DB case, a one-time cost
+  for the pre-marker case, paid on exactly one startup and never again once the marker is
+  written.
+
+`CREATE NODE TABLE IF NOT EXISTS SchemaState` is called unconditionally at the top of every
+`migrate()` run — a catalog check, not a scan, so it costs nothing to make idempotent on every
+open regardless of database age. `SchemaState` is itself a Rust-only bookkeeping table (like
+`WalPosition`), not something graphiti's `kuzu_driver.py` needs to mirror — it exists purely to
+give this migration a persisted memory, not as domain data.
 
 ## Consequences
 

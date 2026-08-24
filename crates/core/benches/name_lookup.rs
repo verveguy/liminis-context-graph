@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 
 #[path = "common/mod.rs"]
 mod bench_common;
@@ -71,9 +71,65 @@ fn bench_name_lookup_art_indexed_10k(c: &mut Criterion) {
     });
 }
 
+/// Measures `get_entity_by_name_ci_with_scan_fallback`'s scan-fallback path itself (issue
+/// #221's Site 1 authority guarantee, `db.rs::scan_entity_by_name_ci`) at a realistic
+/// embedding width (768, bge-base-en-v1.5 — the production default; the other benches in this
+/// file use `dim = 8` and never exercise this path, so they cannot see this regression). The
+/// indexed lookup is made to miss by deleting the row's `lookup_key` out from under it (the
+/// exact out-of-band-write shape this fallback exists to catch), forcing every call through
+/// the full-group scan. Before the fix that narrowed `scan_entity_by_name_ci`'s `RETURN` to
+/// scalar columns, this scan transferred and sorted every row's 768-dim `name_embedding`,
+/// `summary`, and `attributes`; after the fix it transfers only `uuid`/`name`/`group_id`/
+/// `created_at` and hydrates at most one row via a point lookup.
+fn bench_name_lookup_scan_fallback_10k(c: &mut Criterion) {
+    let dim = 768;
+    let (db, _dir) = setup_bench_db_n(10_000, dim);
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("MATCH (e:Entity) SET e.lookup_key = NULL")
+            .unwrap();
+    }
+
+    // The scan fallback self-heals a hit's `lookup_key` on the way out, so a naive `b.iter`
+    // would only exercise the scan on its first iteration — every iteration after that would
+    // hit the ART index directly. `iter_batched` re-nulls just this one row's `lookup_key`
+    // before every iteration so each call genuinely falls through to the scan.
+    c.bench_function("name_lookup_scan_fallback_10k_hit", |b| {
+        b.iter_batched(
+            || {
+                let conn = db.connect().unwrap();
+                conn.run_cypher(
+                    "MATCH (e:Entity {name: 'Entity 9999', group_id: 'bench'}) \
+                     SET e.lookup_key = NULL",
+                )
+                .unwrap();
+            },
+            |()| {
+                let conn = db.connect().unwrap();
+                let _ = conn
+                    .get_entity_by_name_ci_with_scan_fallback("Entity 9999", "bench")
+                    .unwrap();
+            },
+            BatchSize::PerIteration,
+        );
+    });
+
+    // A miss never has a `lookup_key` to self-heal, so every iteration already falls through
+    // to the scan — no per-iteration reset needed.
+    c.bench_function("name_lookup_scan_fallback_10k_miss", |b| {
+        b.iter(|| {
+            let conn = db.connect().unwrap();
+            let _ = conn
+                .get_entity_by_name_ci_with_scan_fallback("No Such Entity", "bench")
+                .unwrap();
+        });
+    });
+}
+
 criterion_group!(
     name_lookup,
     bench_name_lookup_scan_baseline_10k,
-    bench_name_lookup_art_indexed_10k
+    bench_name_lookup_art_indexed_10k,
+    bench_name_lookup_scan_fallback_10k
 );
 criterion_main!(name_lookup);

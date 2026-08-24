@@ -1904,9 +1904,15 @@ impl<'db> Conn<'db> {
     /// query for its trimmed name; and there is no guarantee lbug's Cypher `lower()` folds
     /// non-ASCII names identically to Rust's `str::to_lowercase()` (`compute_lookup_key`'s own
     /// doc comment). Both gaps land precisely on the out-of-band/raw-Cypher-written rows this
-    /// fallback exists to catch (FR-010) — reusing the query's own row set to filter in Rust
-    /// closes both by construction, at the cost of transferring every row in `group_id` rather
-    /// than only name-matching ones on the rare miss that reaches this path.
+    /// fallback exists to catch (FR-010).
+    ///
+    /// This is not a cold path — it fires for every name an extractor mentions but never
+    /// resolves, which in `episode.rs`'s Phase C is routine LLM output. The `RETURN` list is
+    /// therefore kept to the scalar columns needed to find the winner (`uuid`, `name`,
+    /// `group_id`, `created_at`); it deliberately excludes `name_embedding`/`summary`/
+    /// `attributes` so a full-group scan doesn't also transfer and sort every row's vector.
+    /// The winning row (at most one) is hydrated separately via `get_entity_by_uuid` — one
+    /// extra point lookup on a hit, nothing at all on the (common) miss.
     fn scan_entity_by_name_ci(
         &self,
         name: &str,
@@ -1915,27 +1921,18 @@ impl<'db> Conn<'db> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid \
-             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes \
+             RETURN e.uuid, e.name, e.group_id, e.created_at \
              ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "gid": group_id }),
         )?;
-        Ok(rows
+        let winner_uuid = rows
             .into_iter()
             .find(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
-            .map(|row| EntityRow {
-                uuid: value_as_string(&row[0]),
-                name: value_as_string(&row[1]),
-                group_id: value_as_string(&row[2]),
-                labels: value_as_str_list(&row[3]),
-                created_at: value_as_timestamp_str(&row[4]),
-                name_embedding: value_as_float_array(&row[5]),
-                summary: value_as_string(&row[6]),
-                attributes: value_as_string(&row[7]),
-                episode_uuids: vec![],
-                source_descriptions: vec![],
-                ..Default::default()
-            }))
+            .map(|row| value_as_string(&row[0]));
+        match winner_uuid {
+            Some(uuid) => self.get_entity_by_uuid(&uuid),
+            None => Ok(None),
+        }
     }
 
     /// Whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed
@@ -1970,6 +1967,19 @@ impl<'db> Conn<'db> {
         self.lookup_key_status
             .migrated
             .store(false, Ordering::Relaxed);
+    }
+
+    /// Marks the one-shot `lookup_key` backfill migration as healthy, e.g. when `schema::
+    /// migrate`'s persisted `SchemaState` retry (see `schema::ensure_lookup_key_backfill`)
+    /// succeeds after a prior failure. Without this, a `Db` that lived through a failed-then-
+    /// retried-and-fixed backfill within a single process lifetime would report
+    /// `name_index_trusted: false` forever after the first failure, even though the persisted
+    /// `SchemaState` marker (and the data itself) is correct — `mark_lookup_key_migration_failed`
+    /// is the only other writer of this flag, and it only ever sets it to `false`.
+    pub(crate) fn mark_lookup_key_migration_succeeded(&self) {
+        self.lookup_key_status
+            .migrated
+            .store(true, Ordering::Relaxed);
     }
 
     /// Counts Entity nodes whose lowercased name matches the given name (case-insensitive)

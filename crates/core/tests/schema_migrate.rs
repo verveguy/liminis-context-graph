@@ -219,3 +219,85 @@ fn migrate_adds_and_backfills_entity_lookup_key_on_existing_db() {
         "the migrated schema's lookup_key column must be served by the ART index, got: {plan_text}"
     );
 }
+
+/// Regression test for PR #483's human-review finding: if `ALTER TABLE Entity ADD lookup_key`
+/// succeeds but the backfill that follows it fails, the column already exists on the next
+/// `migrate()` call — the original design's probe would succeed and skip the whole step
+/// entirely, silently never retrying, while `lookup_key_migrated()` would reset to its `true`
+/// default on the next fresh `Db`. The fix persists the backfill's outcome in `SchemaState`
+/// (a point lookup by primary key, not a column-presence probe), so a `"failed"` marker causes
+/// the next `migrate()` call to retry the backfill even though the column is already present.
+#[test]
+fn migrate_retries_lookup_key_backfill_after_a_prior_failure() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+
+    conn.run_cypher(
+        "CREATE NODE TABLE Entity (uuid STRING PRIMARY KEY, name STRING, group_id STRING, \
+         labels STRING[], created_at TIMESTAMP, name_embedding FLOAT[4], summary STRING, \
+         attributes STRING)",
+    )
+    .unwrap();
+    conn.run_cypher(
+        "CREATE (:Entity {uuid:'en1', name:'Alice', group_id:'g1', labels:['Entity'], \
+         created_at: timestamp('2026-01-01 00:00:00'), name_embedding: [1.0, 0.0, 0.0, 0.0], \
+         summary:'s', attributes:'{}'})",
+    )
+    .unwrap();
+
+    // Break the backfill query specifically (it selects uuid/name/group_id), while leaving the
+    // ALTER itself unaffected — this reproduces "ALTER succeeded, backfill failed" in one
+    // migrate() call, the exact sequence the original design mishandled.
+    conn.run_cypher("ALTER TABLE Entity DROP group_id").unwrap();
+
+    schema::migrate(&conn, 4);
+
+    // The ALTER succeeded — the column now binds — but the backfill behind it failed.
+    conn.run_cypher("MATCH (n:Entity) RETURN n.lookup_key LIMIT 0")
+        .expect("ALTER TABLE Entity ADD lookup_key STRING must have succeeded");
+    assert!(
+        !conn.lookup_key_migrated(),
+        "a failed backfill must be reported as untrusted, not silently healthy"
+    );
+    let status_after_failure = conn
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .unwrap();
+    assert_eq!(
+        status_after_failure,
+        vec![vec!["failed".to_string()]],
+        "the failed backfill must be persisted in SchemaState, not just the in-process flag"
+    );
+
+    // Fix the underlying problem and retry. Because the fix only re-adds a *new* `group_id`
+    // column (NULL-valued for the pre-existing row), we drive `Alice`'s value back to `g1` by
+    // hand — this test only needs the retry to actually run and succeed, not to reconstruct the
+    // original pre-drop data losslessly.
+    conn.run_cypher("ALTER TABLE Entity ADD group_id STRING")
+        .unwrap();
+    conn.run_cypher("MATCH (n:Entity {uuid:'en1'}) SET n.group_id = 'g1'")
+        .unwrap();
+
+    schema::migrate(&conn, 4);
+
+    // The critical assertion: even though Entity.lookup_key already existed going into this
+    // second call (so a column-presence probe alone would have skipped straight past it), the
+    // persisted "failed" marker must have driven a retry, and that retry must have succeeded.
+    assert!(
+        conn.lookup_key_migrated(),
+        "a fixed backfill must retry and succeed on the next migrate() call, not stay stuck \
+         reporting failure forever"
+    );
+    let status_after_retry = conn
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .unwrap();
+    assert_eq!(status_after_retry, vec![vec!["complete".to_string()]]);
+    let rows = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.lookup_key")
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![vec!["g1\u{1f}alice".to_string()]],
+        "the retried backfill must actually populate lookup_key, not just flip the status flag"
+    );
+}
