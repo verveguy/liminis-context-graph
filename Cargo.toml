@@ -3,7 +3,7 @@ members = ["crates/core", "crates/service", "crates/eval"]
 resolver = "2"
 
 [workspace.package]
-version = "0.13.3"
+version = "0.13.4"
 repository = "https://github.com/verveguy/liminis-context-graph"
 
 # Strip debuginfo from dev/test builds. Linking the ~50 integration-test
