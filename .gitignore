@@ -17,6 +17,7 @@ Cargo.lock.bak
 site/node_modules/
 site/dist/
 site/dist-versioned/
+site/dist-publish/
 site/.astro/
 site/src/content/docs/
 site/public/llms.txt

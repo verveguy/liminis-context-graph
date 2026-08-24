@@ -57,10 +57,23 @@ fi
 # commit instead. The Jekyll build did this by sed-patching a checked-in
 # _config.yml; an environment variable does the same job without editing a file
 # in the working tree.
+# Builds into a directory *inside* the site project, then copies out. Pointing
+# --outDir at a path outside the project root makes Astro emit its content-layer
+# internals (collections/, content-assets.mjs) alongside the site, and those
+# would be published to gh-pages as though they were content. Verified: 143 files
+# building into the project, 146 building outside it.
 build_site() {
   local baseurl="$1" dest="$2"
+  local staging="${SITE_DIR}/dist-publish"
+
+  rm -rf "${staging}"
   ( cd "${SITE_DIR}" \
-      && DOCS_BASE="${baseurl}" DOCS_VERSION="${VERSION}" pnpm build --outDir "${dest}" )
+      && DOCS_BASE="${baseurl}" DOCS_VERSION="${VERSION}" pnpm build --outDir dist-publish )
+
+  rm -rf "${dest:?}"
+  mkdir -p "${dest}"
+  cp -R "${staging}/." "${dest}/"
+  rm -rf "${staging}"
 }
 
 VERSIONED_DEST="$(mktemp -d)"
