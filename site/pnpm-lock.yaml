@@ -15,8 +15,8 @@ importers:
         specifier: ^0.32.2
         version: 0.32.6(astro@5.18.2(@types/node@24.13.3)(rollup@4.62.5)(typescript@5.9.3))
       '@liminis/diagrams':
-        specifier: ^0.1.4
-        version: 0.1.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        specifier: ^0.1.5
+        version: 0.1.5(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       astro:
         specifier: ^5.5.2
         version: 5.18.2(@types/node@24.13.3)(rollup@4.62.5)(typescript@5.9.3)
@@ -33,9 +33,6 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.5(@types/react@19.2.18)
-      unist-util-visit:
-        specifier: ^5.1.0
-        version: 5.1.0
 
 packages:
 
@@ -676,8 +673,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@liminis/diagrams@0.1.4':
-    resolution: {integrity: sha512-OlhgzZyi+Q3u3zSsHRE2BxHocsudNqT7d1VtEfaMDguLRW6gRSxvaZC/flJGxEHilkO8DuswY76qXLUhmZIkjg==}
+  '@liminis/diagrams@0.1.5':
+    resolution: {integrity: sha512-6ghdn1OK7hyxY5KbZgBrvUrOBlgddkGjgqGYBd8WCvhbkVNkuU9CMl43SoXt89v+R4sTwNZSn6ygrtEJf+xfQw==}
     engines: {node: '>=22'}
     hasBin: true
     peerDependencies:
@@ -2842,7 +2839,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@liminis/diagrams@0.1.4(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+  '@liminis/diagrams@0.1.5(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
     dependencies:
       '@dagrejs/dagre': 3.1.1
     optionalDependencies:

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'astro/config'
 import starlight from '@astrojs/starlight'
 import react from '@astrojs/react'
-import { remarkC4 } from './src/plugins/remark-c4.mjs'
+import { remarkC4 } from '@liminis/diagrams/remark'
 import { PAGES } from './src/pages-order.mjs'
 
 const REPO = new URL('../', import.meta.url)
@@ -69,8 +69,8 @@ function adrRedirects() {
 // https://v3rv.com/liminis-context-graph/ rather than verveguy.github.io — the
 // subpath is the same either way.
 export default defineConfig({
-  // `@site` so remark-c4's injected import resolves from any page depth. See
-  // the note beside IMPORT_FROM in that plugin.
+  // `@site` so the import remarkC4 injects resolves from any page depth. The
+  // plugin defaults to this alias; it lives in @liminis/diagrams/remark now.
   vite: {
     resolve: {
       alias: { '@site': fileURLToPath(new URL('./src', import.meta.url)) },
@@ -84,7 +84,7 @@ export default defineConfig({
   },
   // Turns ```c4 fences into live islands. The source pages stay readable as
   // plain markdown on GitHub, where the fence renders as a code block beside
-  // its committed SVG. See src/plugins/remark-c4.mjs.
+  // its committed SVG. See @liminis/diagrams/remark.
   markdown: { remarkPlugins: [remarkC4] },
   site: 'https://v3rv.com',
   base: siteBase(),
