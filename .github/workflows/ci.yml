@@ -2,7 +2,13 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # `maint/**` so a maintenance branch gets the same post-merge signal `main` has.
+    # Fabrik's `base:<branch>` puts release-line fixes on maint/* and its merge train is
+    # main-only (it pins `DefaultBaseBranch()`), so those merges are hand-landed with no
+    # post-merge run unless this trigger covers them. Note GitHub runs the workflow from
+    # the *pushed branch's own tree*, so this line must exist on each maint/* branch too
+    # — adding it only to main does not make it fire there.
+    branches: [main, 'maint/**']
   pull_request:
   workflow_dispatch:
     inputs:
