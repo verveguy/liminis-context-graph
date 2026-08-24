@@ -454,6 +454,50 @@ impl Embedder for MockEmbedder {
     }
 }
 
+// ── HashEmbedder ─────────────────────────────────────────────────────────────
+
+/// Deterministic, offline test embedder that derives a stable pseudo-random unit-ish vector from
+/// each input text's hash. Unlike `MockEmbedder`'s constant zero vector, distinct texts get
+/// distinct (though semantically meaningless) vectors — important for a test that recomputes an
+/// entire corpus's embeddings through this embedder (e.g. issue #440's WAL-replay recompute) and
+/// then runs vector/ANN search over the result: a constant embedding collapses every row to the
+/// same point, so "nearest neighbor" search degenerates into an artifact of index tie-breaking
+/// (e.g. insertion order) rather than harmless, unbiased noise — systematically favoring whichever
+/// entities happen to win that tie-break regardless of query, instead of the query-independent
+/// randomness a zero-information embedder is meant to approximate. `HashEmbedder` avoids that
+/// failure mode while remaining fully deterministic and offline.
+pub struct HashEmbedder {
+    dim: usize,
+}
+
+impl HashEmbedder {
+    pub fn new(dim: usize) -> Self {
+        Self { dim }
+    }
+}
+
+impl Embedder for HashEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        use std::hash::{Hash, Hasher};
+        let dim = self.dim;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let mut seed = hasher.finish().max(1); // xorshift64 requires a nonzero seed
+        let mut v = Vec::with_capacity(dim);
+        for _ in 0..dim {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            v.push(((seed as f64 / u64::MAX as f64) * 2.0 - 1.0) as f32);
+        }
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
 // ── NameMapEmbedder ───────────────────────────────────────────────────────────
 
 /// Test embedder that maps specific strings to caller-provided vectors.

@@ -893,7 +893,17 @@ pub async fn add_episode(
         // at construction, not a fresh disk read), so this highest-frequency write path pays no
         // extra filesystem I/O.
         if let Some((seq, generation)) = flushed {
-            if let Err(e) = conn.set_wal_position(&gid_wal, seq, generation.as_deref()) {
+            // issue #440 FR-007: this chunk's content_embedding/name_embedding values were just
+            // computed by state_c's running embedder above — record that identity alongside
+            // applied_seq/generation so embedding_model_status observes a live-ingest-only
+            // group's identity too, not only a group that has been explicitly rebuilt.
+            let embedding_identity = (state_c.embedding_model.as_str(), state_c.embedder.dim() as i64);
+            if let Err(e) = conn.set_wal_position(
+                &gid_wal,
+                seq,
+                generation.as_deref(),
+                Some(embedding_identity),
+            ) {
                 eprintln!(
                     "liminis-context-graph: add_episode: failed to persist applied_seq={seq} (non-fatal): {e}"
                 );

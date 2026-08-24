@@ -70,6 +70,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: &std::path::Path) -> Arc<AppState> 
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 

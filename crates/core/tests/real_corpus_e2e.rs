@@ -1,15 +1,22 @@
 // Golden real-corpus WAL fixture: rebuild -> assert e2e harness (#217).
 //
 // Replays the committed real-data WAL fixture (crates/core/tests/fixtures/real_corpus_wal/)
-// through the production knowledge_rebuild_from_wal IPC path with ZERO LLM/extractor/embedder
-// calls, then asserts against expected_results.json (recorded at capture time from a real
+// through the production knowledge_rebuild_from_wal IPC path with ZERO LLM/extractor calls,
+// then asserts against expected_results.json (recorded at capture time from a real
 // AnthropicExtractor + real OaiEmbedder ingest run). See FR-001..FR-015 in
 // specs/217-golden-real-corpus-wal/spec.md.
 //
-// Query-time embedding uses MockEmbedder (a zero vector, dim matched to the fixture) rather
-// than a live embedder, per FR-011's zero-network requirement — this makes the vector half of
-// RRF-fused search deterministic-but-uninformative, while the BM25/FTS half still carries a
-// real signal from the actual captured content. Golden-query assertions are therefore written
+// Query-time (and, since issue #440, WAL-replay recompute-time) embedding uses HashEmbedder — a
+// deterministic, offline, per-text pseudo-random vector, dim matched to the fixture — rather
+// than a live embedder, per FR-011's zero-network requirement. This makes the vector half of
+// RRF-fused search carry no real semantic signal, while the BM25/FTS half still carries a real
+// signal from the actual captured content. HashEmbedder (not a constant-zero embedder like
+// MockEmbedder) is deliberate: issue #440 makes replay recompute every entity's stored vector
+// through this same embedder, and a constant vector would collapse the entire corpus to one
+// point, turning "vector search" into an artifact of ANN index tie-breaking that systematically
+// favors whichever entities win that tie-break (in this fixture, the numerically-dominant
+// Apollo/Saturn cluster) regardless of query — rather than the query-independent noise a
+// zero-signal embedder is meant to approximate. Golden-query assertions are therefore written
 // as top-N set-membership, not exact top-1/ordering (see module docstring in
 // crates/core/scripts/capture_real_corpus.py and the fixture's expected_results.json).
 //
@@ -17,10 +24,14 @@
 // (knowledge_list_relationships) do not depend on embeddings at all, so those assertions are
 // exact-set-equality, not tolerant set-membership.
 //
-// "Zero LLM/extractor/embedder calls during replay" (FR-004) is checked explicitly, not just
-// assumed from wiring in Mock{Extractor,Embedder}: CountingExtractor/CountingEmbedder below
-// wrap the mocks with atomic call counters, and every test asserts those counters are zero
-// immediately after knowledge_rebuild_from_wal returns.
+// "Zero LLM/extractor calls during replay" (FR-004) is checked explicitly, not just assumed
+// from wiring in MockExtractor: CountingExtractor below wraps the mock with an atomic call
+// counter, and every test asserts that counter is zero immediately after
+// knowledge_rebuild_from_wal returns. The embedder side of that same FR-004 invariant was
+// deliberately superseded by issue #440 (recompute embeddings on WAL replay from co-located
+// source text instead of binding stored vectors verbatim) — replay now legitimately calls
+// the embedder once per recomputable row (deduplicated by the content-addressed embedding
+// cache), so CountingEmbedder's counter is asserted `> 0` after a rebuild, not `== 0`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +44,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::{Embedder, MockEmbedder},
+    embedder::{Embedder, HashEmbedder},
     error::Error as LcgError,
     extractor::{ExtractOptions, Extractor, MockExtractor},
     handlers,
@@ -49,10 +60,11 @@ use tokio_util::sync::CancellationToken;
 
 // ── call-counting Extractor/Embedder ─────────────────────────────────────────
 //
-// Wrap Mock{Extractor,Embedder} with atomic call counters so "zero LLM/embedder calls
+// Wrap Mock{Extractor,Embedder} with atomic call counters so "zero LLM/extractor calls
 // during replay" (FR-004) is an explicit, checked assertion rather than an assumption that
-// happens to hold because the wired-in implementation is a mock. Delegates entirely to the
-// Mock types for behavior; only adds counting.
+// happens to hold because the wired-in implementation is a mock — and so that "replay
+// recomputes embeddings" (issue #440) is likewise a checked invariant, not an assumption.
+// Delegates entirely to the Mock types for behavior; only adds counting.
 
 struct CountingExtractor {
     inner: MockExtractor,
@@ -88,7 +100,7 @@ impl Extractor for CountingExtractor {
 }
 
 struct CountingEmbedder {
-    inner: MockEmbedder,
+    inner: HashEmbedder,
     calls: Arc<AtomicUsize>,
 }
 
@@ -194,7 +206,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, TempDir, CallCounts) {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(CountingEmbedder {
-            inner: MockEmbedder::new(dim),
+            inner: HashEmbedder::new(dim),
             calls: Arc::clone(&embedder_calls),
         }),
         extractor: Arc::new(CountingExtractor {
@@ -219,6 +231,7 @@ fn make_state(dim: usize) -> (Arc<AppState>, TempDir, TempDir, CallCounts) {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
     (
         state,
@@ -248,7 +261,8 @@ async fn dispatch(id: i64, method: &str, params: Value, state: &Arc<AppState>) -
 }
 
 /// Rebuilds the fixture WAL into `state`'s (fresh, empty) DB via the production
-/// knowledge_rebuild_from_wal path — zero LLM/extractor/embedder calls (FR-004).
+/// knowledge_rebuild_from_wal path — zero LLM/extractor calls (FR-004), but embedder calls
+/// are expected as replay recomputes vectors from co-located source text (issue #440).
 ///
 /// A `progress_tx` must be supplied to get the synchronous path: with `progress_tx: None`,
 /// `handle_rebuild_from_wal` (handlers.rs) always spawns a background job and returns
@@ -324,23 +338,27 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
     let (state, _db_dir, _wal_dir, calls) = make_state(dim);
     let group_id = expected["group_id"].clone();
 
-    // Task 7 (FR-004, FR-005): rebuild with zero LLM/extractor/embedder calls; counts match.
+    // Task 7 (FR-004, FR-005): rebuild with zero LLM/extractor calls; counts match.
     let rebuild_result = rebuild(&state).await;
     assert_eq!(rebuild_result["success"], true, "{rebuild_result}");
     // Explicit assertion, not an assumption: replay mechanically re-executes the WAL's
-    // recorded Cypher and must never call Extractor::extract/classify_* or Embedder::embed —
-    // that's the entire point of the fixture (FR-004). CountingExtractor/CountingEmbedder
-    // (see above) make this a checked invariant instead of something that merely happens to
-    // be true because the wired-in implementation is a mock.
+    // recorded Cypher and must never call Extractor::extract/classify_* — that's the entire
+    // point of the fixture (FR-004). CountingExtractor (see above) makes this a checked
+    // invariant instead of something that merely happens to be true because the wired-in
+    // implementation is a mock.
     assert_eq!(
         calls.extractor.load(Ordering::SeqCst),
         0,
         "replay must never call the extractor"
     );
-    assert_eq!(
-        calls.embedder.load(Ordering::SeqCst),
-        0,
-        "replay must never call the embedder"
+    // Issue #440: replay now recomputes embedding vectors from each row's co-located source
+    // text instead of binding the WAL's stored vector verbatim, so — unlike the extractor
+    // above — the embedder IS legitimately called during replay. The fixture has 4,126
+    // embedding-carrying rows across (almost) as many distinct (model, dim, text) keys (see
+    // #440's cache-hit-rate measurement), so this must be nonzero, not merely "not asserted".
+    assert!(
+        calls.embedder.load(Ordering::SeqCst) > 0,
+        "replay must recompute embeddings from co-located source text (issue #440)"
     );
     assert!(
         rebuild_result["mutations_replayed"].as_u64().unwrap() > 0,
@@ -416,10 +434,10 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             .map(|n| n.as_str().unwrap_or_default().to_string())
             .collect();
 
-        // Query-time embedding is a mocked zero vector here (FR-011), so the fused top-N
-        // will not exactly reproduce capture time's real-embedder ranking — assert
-        // set-membership (at least one recorded hub entity still surfaces), not exact
-        // top-1/ordering (see module docstring, Edge Cases in the spec).
+        // Query-time (and corpus-side, via #440 recompute) embedding is semantically blind here
+        // (FR-011), so the fused top-N will not exactly reproduce capture time's real-embedder
+        // ranking — assert set-membership (at least one recorded hub entity still surfaces), not
+        // exact top-1/ordering (see module docstring, Edge Cases in the spec).
         let overlap = expected_names
             .iter()
             .filter(|n| actual_names.contains(*n))
@@ -465,9 +483,9 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             .collect();
 
         // Same tolerance rationale as the entity-query assertions above: relation_type is a
-        // coarser signal than exact fact/uuid identity, so it survives the MockEmbedder-induced
-        // re-ranking more reliably while still confirming real relation-typed data (FR-009's
-        // spirit) shows up for a real natural-language query.
+        // coarser signal than exact fact/uuid identity, so it survives the semantically-blind
+        // vector re-ranking more reliably while still confirming real relation-typed data
+        // (FR-009's spirit) shows up for a real natural-language query.
         let overlap = expected_relation_types
             .intersection(&actual_relation_types)
             .count();
@@ -614,12 +632,23 @@ async fn replay_is_deterministic_across_independent_processes() {
             0,
             "replay {label} must never call the extractor"
         );
-        assert_eq!(
-            counts.embedder.load(Ordering::SeqCst),
-            0,
-            "replay {label} must never call the embedder"
-        );
     }
+    // Issue #440: replay recomputes embeddings from co-located source text, so the embedder
+    // is legitimately called — and, since this test's whole point is proving replay is
+    // deterministic across two independent processes replaying the same fixture, the two
+    // independent replays must recompute the exact same number of embeddings, not just each
+    // be individually nonzero.
+    let embedder_calls_a = calls_a.embedder.load(Ordering::SeqCst);
+    let embedder_calls_b = calls_b.embedder.load(Ordering::SeqCst);
+    assert!(
+        embedder_calls_a > 0,
+        "replay a must recompute embeddings from co-located source text (issue #440)"
+    );
+    assert_eq!(
+        embedder_calls_a, embedder_calls_b,
+        "two independent replays of the same fixture must recompute the same number of \
+         embeddings"
+    );
 
     let status_a = dispatch(2, "knowledge_status", json!({}), &state_a).await;
     let status_b = dispatch(2, "knowledge_status", json!({}), &state_b).await;

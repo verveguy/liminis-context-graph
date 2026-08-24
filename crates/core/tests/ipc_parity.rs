@@ -117,6 +117,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -153,6 +154,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -197,6 +199,7 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -234,6 +237,7 @@ fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppStat
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -263,6 +267,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -494,6 +499,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -525,6 +531,7 @@ fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
     (state, capture)
 }
@@ -554,6 +561,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -629,6 +637,7 @@ fn make_state_with_ontology_and_extractor(
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -792,6 +801,21 @@ async fn test_knowledge_status_empty_db() {
     assert_eq!(r["relationship_count"], 0, "expected 0 relationships: {v}");
     assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
     assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
+    // issue #440 FR-007/FR-008: nothing has ever been applied for the default group on a fresh
+    // DB, so the embedding-identity comparison is "not_applicable" rather than "unknown" — same
+    // rule `wal.generation_status` already follows.
+    assert!(
+        r["wal"]["embedding_model"].is_null(),
+        "expected wal.embedding_model:null on an empty db: {v}"
+    );
+    assert!(
+        r["wal"]["embedding_dim"].is_null(),
+        "expected wal.embedding_dim:null on an empty db: {v}"
+    );
+    assert_eq!(
+        r["wal"]["embedding_model_status"], "not_applicable",
+        "expected wal.embedding_model_status:not_applicable on an empty db: {v}"
+    );
     assert!(
         r["database_path"]
             .as_str()
@@ -1382,6 +1406,7 @@ fn make_state_with_extractor(db: Arc<Db>, extractor: Arc<dyn Extractor>) -> Arc<
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
 
@@ -3020,7 +3045,7 @@ async fn parity_rebind_pointers_flips_unbound_to_bound() {
         // an absent position: every pointer is re-resolved on every pass rather than gated,
         // since there is no position to compare a cached bound_at_seq against). Without this,
         // the second dispatch below could never observe a gated no-op.
-        conn.set_wal_position("source-a", 1, None).unwrap();
+        conn.set_wal_position("source-a", 1, None, None).unwrap();
     }
 
     let rebind = dispatch_val(
@@ -5206,7 +5231,7 @@ async fn wal_mark_create_succeeds_against_nonzero_applied_seq() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 42, None).unwrap();
+        conn.set_wal_position("liminis", 42, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let group_dir = wal_dir.path().join("liminis");
@@ -5271,7 +5296,7 @@ async fn wal_mark_create_rejects_case_insensitive_collision_with_existing_group_
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("acme", 0, None).unwrap();
+        conn.set_wal_position("acme", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     // "Acme" already has a directory on disk (e.g. from an earlier write to that group), but no
@@ -5346,11 +5371,31 @@ async fn knowledge_status_reports_per_group_wal_positions() {
             entry["max_seq"].is_u64(),
             "{group_id} must report a known max_seq: {status_v}"
         );
+        // issue #440 FR-007/FR-008: each group's own embedding identity is mirrored alongside
+        // its applied_seq/max_seq, and — since this state's embedder never changes between the
+        // write above and this status call — compares as a "match" against itself.
+        assert_eq!(
+            entry["embedding_model"], "bge-base-en-v1.5",
+            "{group_id} must report the running embedder's model: {status_v}"
+        );
+        assert_eq!(
+            entry["embedding_dim"], 4,
+            "{group_id} must report the running embedder's dim: {status_v}"
+        );
+        assert_eq!(
+            entry["embedding_model_status"], "match",
+            "{group_id} must report embedding_model_status:match: {status_v}"
+        );
     }
 
     // The flat fields stay pinned to the default group ("liminis"), which never received a
     // write in this test — reporting null/absent, not either non-default group's position.
     assert_eq!(status_v["result"]["wal"]["applied_seq"], Value::Null);
+    assert_eq!(
+        status_v["result"]["wal"]["embedding_model_status"], "not_applicable",
+        "the default group never wrote, so its embedding_model_status must stay \
+         not_applicable rather than leaking either non-default group's identity: {status_v}"
+    );
 }
 
 /// issue #378 Review finding: `handle_knowledge_status`'s per-group backfill must not run under
@@ -5419,7 +5464,7 @@ async fn wal_mark_create_rejects_duplicate_active_name() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5456,7 +5501,7 @@ async fn wal_mark_create_applied_seq_zero_empty_graph_records_seq_none() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5489,7 +5534,7 @@ async fn wal_mark_create_applied_seq_zero_nonempty_graph_records_seq_some_zero()
     {
         let conn = db.connect().unwrap();
         seed_entity(&conn, "first-chunk-entity");
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5542,7 +5587,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
         seed_entity(&conn, "low-marker");
-        conn.set_wal_position("liminis", 0, None).unwrap();
+        conn.set_wal_position("liminis", 0, None, None).unwrap();
     }
     let v_low = dispatch_val(
         1,
@@ -5556,7 +5601,7 @@ async fn wal_mark_list_reachability_after_deleting_covering_wal_files() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 10, None).unwrap();
+        conn.set_wal_position("liminis", 10, None, None).unwrap();
     }
     let v_high = dispatch_val(
         2,
@@ -5603,7 +5648,7 @@ async fn wal_mark_list_excludes_deleted_checkpoints() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 3, None).unwrap();
+        conn.set_wal_position("liminis", 3, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5650,7 +5695,7 @@ async fn wal_mark_delete_of_already_deleted_name_fails() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5679,7 +5724,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5723,7 +5768,7 @@ async fn wal_mark_delete_never_rewrites_create_record_and_name_is_reusable() {
     {
         let db = state.db.load_full().unwrap();
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 77, None).unwrap();
+        conn.set_wal_position("liminis", 77, None, None).unwrap();
     }
     let recreated = dispatch_val(
         3,
@@ -5754,7 +5799,7 @@ async fn wal_mark_list_and_delete_work_when_db_degraded_but_create_does_not() {
     let (db, _dbdir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let healthy_state =
         make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
@@ -5806,7 +5851,7 @@ async fn wal_mark_create_concurrent_same_name_exactly_one_wins() {
     let (db, _dir) = make_db(4);
     {
         let conn = db.connect().unwrap();
-        conn.set_wal_position("liminis", 1, None).unwrap();
+        conn.set_wal_position("liminis", 1, None, None).unwrap();
     }
     let wal_dir = TempDir::new().unwrap();
     let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
