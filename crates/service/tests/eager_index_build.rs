@@ -9,14 +9,14 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use lcg_core::db::Db;
 use tempfile::TempDir;
 
 mod common;
-use common::{binary_path, spawn_stub_embedder};
+use common::{binary_path, spawn_stub_embedder, ChildGuard};
 
 fn wait_for_socket(socket_path: &PathBuf, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
@@ -27,11 +27,6 @@ fn wait_for_socket(socket_path: &PathBuf, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     false
-}
-
-fn kill(child: &mut Child) {
-    child.kill().ok();
-    child.wait().ok();
 }
 
 /// Sends a single JSON-RPC request over a fresh connection to `socket_path` and returns the
@@ -85,25 +80,25 @@ fn fresh_startup_reports_indices_built_true() {
     let embedder_port = spawn_stub_embedder();
     let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
-    let mut child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .args(["--embedder-http", &embedder_url])
         // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
         // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
         // these tests (no extraction tool is called).
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn liminis-context-graph");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+    // before reaching the explicit cleanup below (#500) — e.g. `send_request`'s `.expect()`s.
+    let child = ChildGuard::spawn(cmd);
 
     if !wait_for_socket(&socket_path, Duration::from_secs(15)) {
-        kill(&mut child);
         panic!("service did not become ready within 15s");
     }
 
     let response = send_request(&socket_path, "knowledge_status", serde_json::json!({}));
-    kill(&mut child);
+    drop(child);
 
     let result = response
         .get("result")
@@ -139,25 +134,25 @@ fn post_recovery_startup_reports_indices_built_true() {
     let embedder_port = spawn_stub_embedder();
     let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
-    let mut child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .args(["--embedder-http", &embedder_url])
         // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
         // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
         // these tests (no extraction tool is called).
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn liminis-context-graph");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+    // before reaching the explicit cleanup below (#500) — e.g. `send_request`'s `.expect()`s.
+    let child = ChildGuard::spawn(cmd);
 
     if !wait_for_socket(&socket_path, Duration::from_secs(15)) {
-        kill(&mut child);
         panic!("service did not become ready within 15s");
     }
 
     let response = send_request(&socket_path, "knowledge_status", serde_json::json!({}));
-    kill(&mut child);
+    drop(child);
 
     let result = response
         .get("result")

@@ -6,6 +6,10 @@
 // 2. The DB can be re-opened without "Corrupted wal file" — the WAL was checkpointed.
 
 #[cfg(unix)]
+#[path = "common/mod.rs"]
+mod common;
+
+#[cfg(unix)]
 mod clean_shutdown_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -15,6 +19,8 @@ mod clean_shutdown_tests {
 
     use lcg_core::db::Db;
     use tempfile::TempDir;
+
+    use super::common::ChildGuard;
 
     fn wait_for_socket(socket_path: &PathBuf, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -109,8 +115,8 @@ mod clean_shutdown_tests {
         let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
         let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
-        let mut child = Command::new(binary)
-            .env("LCG_DB_PATH", db_path.to_str().unwrap())
+        let mut cmd = Command::new(binary);
+        cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
             .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
             // Short shutdown timeout so the test finishes quickly.
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
@@ -122,14 +128,14 @@ mod clean_shutdown_tests {
             // knowledge_build_indices), so this URL need not be reachable.
             .args(["--embedder-http", &embedder_url])
             .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("failed to spawn liminis-context-graph");
+            .stderr(Stdio::piped());
+        // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+        // or fails an assertion before reaching its own explicit SIGTERM/wait sequence (#500).
+        let mut child = ChildGuard::spawn(cmd);
         let stderr_handle = spawn_stderr_reader(child.stderr.take().expect("child stderr"));
 
         let ready = wait_for_socket(&socket_path, Duration::from_secs(15));
         if !ready {
-            child.kill().ok();
             panic!("service did not become ready within 15s");
         }
 
@@ -160,14 +166,8 @@ mod clean_shutdown_tests {
         let sender_pid = std::process::id();
         send_sigterm(child.id());
 
-        let status = wait_for_exit(&mut child, Duration::from_secs(10));
-        let status = match status {
-            Some(s) => s,
-            None => {
-                child.kill().ok();
-                panic!("service did not exit within 10s after SIGTERM");
-            }
-        };
+        let status = wait_for_exit(&mut child, Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("service did not exit within 10s after SIGTERM"));
 
         assert_eq!(
             status.code(),

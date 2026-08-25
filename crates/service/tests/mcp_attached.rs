@@ -16,7 +16,7 @@ use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{binary_path, spawn_stub_embedder, McpClient};
+use common::{binary_path, spawn_stub_embedder, ChildGuard, McpClient};
 
 fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
@@ -41,13 +41,14 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<std::process::E
 }
 
 /// Spawns the socket service (not MCP) — the "already-running app instance" this issue's
-/// attached mode is designed to coexist with.
-fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
+/// attached mode is designed to coexist with. Returned as a `ChildGuard` so a test panic
+/// between spawn and its own explicit cleanup doesn't leak the process (#500).
+fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (ChildGuard, PathBuf) {
     let db_path = dir.path().join("test.db");
     let socket_path = dir.path().join("service.sock");
 
-    let child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", dir.path().join("wal").to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
@@ -55,9 +56,8 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
         // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
         // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
         // these tests (no extraction tool is called).
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn socket service");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    let child = ChildGuard::spawn(cmd);
 
     assert!(
         wait_for_socket(&socket_path, Duration::from_secs(15)),
@@ -70,10 +70,10 @@ fn spawn_socket_service(dir: &TempDir, embedder_url: &str) -> (Child, PathBuf) {
 /// db/WAL directory — used to simulate a remote restart (kill the old instance, start a fresh
 /// one bound to the *same* socket path from a separate, clean db directory) without reusing a
 /// db directory that a just-killed process may have left in a transient state (#213 SC-003).
-fn spawn_socket_service_at(socket_path: &Path, db_dir: &TempDir, embedder_url: &str) -> Child {
+fn spawn_socket_service_at(socket_path: &Path, db_dir: &TempDir, embedder_url: &str) -> ChildGuard {
     let db_path = db_dir.path().join("test.db");
-    let child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", db_dir.path().join("wal").to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
@@ -81,9 +81,8 @@ fn spawn_socket_service_at(socket_path: &Path, db_dir: &TempDir, embedder_url: &
         // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
         // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
         // these tests (no extraction tool is called).
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn socket service");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    let child = ChildGuard::spawn(cmd);
     assert!(
         wait_for_socket(socket_path, Duration::from_secs(15)),
         "socket service did not become ready"
@@ -139,7 +138,7 @@ fn attached_mode_matches_socket_result_with_no_lock_conflict() {
     let port = spawn_stub_embedder();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
-    let (mut service, socket_path) = spawn_socket_service(&dir, &url);
+    let (_service, socket_path) = spawn_socket_service(&dir, &url);
 
     let mut mcp = spawn_attached(&socket_path, &[]);
     mcp.initialize();
@@ -166,8 +165,6 @@ fn attached_mode_matches_socket_result_with_no_lock_conflict() {
     assert_eq!(socket_result["connected"], json!(true));
 
     mcp.shutdown();
-    service.kill().ok();
-    service.wait().ok();
 }
 
 #[test]
@@ -176,7 +173,7 @@ fn attached_mode_omits_close_without_allow_remote_close() {
     let port = spawn_stub_embedder();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
-    let (mut service, socket_path) = spawn_socket_service(&dir, &url);
+    let (_service, socket_path) = spawn_socket_service(&dir, &url);
 
     let mut mcp = spawn_attached(&socket_path, &["--scope=admin"]);
     mcp.initialize();
@@ -195,8 +192,6 @@ fn attached_mode_omits_close_without_allow_remote_close() {
     );
 
     mcp.shutdown();
-    service.kill().ok();
-    service.wait().ok();
 }
 
 #[test]
@@ -385,7 +380,7 @@ fn attached_mode_reconnects_after_remote_service_restart() {
     service.wait().ok();
 
     let db_dir2 = TempDir::new().unwrap();
-    let mut service2 = spawn_socket_service_at(&socket_path, &db_dir2, &url);
+    let _service2 = spawn_socket_service_at(&socket_path, &db_dir2, &url);
 
     let resp2 = mcp.call_tool("knowledge_status", json!({}));
     assert!(
@@ -395,8 +390,6 @@ fn attached_mode_reconnects_after_remote_service_restart() {
     );
 
     mcp.shutdown();
-    service2.kill().ok();
-    service2.wait().ok();
 }
 
 // ── #213: write-time failure auto-retry (SC-004) ────────────────────────────────
