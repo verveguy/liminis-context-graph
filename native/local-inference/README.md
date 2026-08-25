@@ -90,7 +90,12 @@ This sidecar is an **optional** component. The Rust binary (`liminis-context-gra
    tar -xzf local-inference.tar.gz
    ```
 
-   The GitHub Releases API (`https://api.github.com/repos/verveguy/liminis-context-graph/releases?per_page=1`, filtered to tags matching `local-inference-v*`) can be used to discover the latest tag programmatically.
+   To discover the latest tag programmatically, filter client-side by tag prefix — this repo also publishes dotted-version Rust releases via `release.yml`/cargo-dist, so an unfiltered "most recent release" call (e.g. `GET /repos/.../releases?per_page=1`, which has no server-side tag-pattern filter) can just as easily return one of those instead:
+
+   ```bash
+   gh release list --repo verveguy/liminis-context-graph --limit 50 | awk -F'\t' '$3 ~ /^local-inference-v/' | head -1
+   # or: gh api /repos/verveguy/liminis-context-graph/releases --jq '[.[] | select(.tag_name | startswith("local-inference-v"))][0].tag_name'
+   ```
 
 2. **Manually trigger the release workflow.** [`.github/workflows/swift-release.yml`](../../.github/workflows/swift-release.yml) is a `workflow_dispatch`-only GitHub Actions workflow: builds the sidecar in release mode on `macos-latest`, runs `swift test`, and publishes the binary to a new `local-inference-v<N>`-tagged Release. Trigger it from the Actions tab (or `gh workflow run swift-release.yml`) when you need a fresh build without waiting for someone else to cut one.
 

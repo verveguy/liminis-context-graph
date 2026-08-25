@@ -60,6 +60,10 @@ jobs:
           if [ -z "$VERSION" ]; then
             VERSION="${{ github.run_number }}"
           fi
+          if ! echo "$VERSION" | grep -qE '^[0-9]+$'; then
+            echo "::error::version input must be a plain integer with no dots (got '$VERSION') — a dotted value would make the release tag match release.yml's digit.digit.digit trigger glob and collide with the Rust release workflow. See ADR-0503."
+            exit 1
+          fi
           TAG="local-inference-v${VERSION}"
           ARCHIVE="local-inference-aarch64-apple-macos.tar.gz"
 
