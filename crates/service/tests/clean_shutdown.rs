@@ -190,4 +190,73 @@ mod clean_shutdown_tests {
             db_result.err()
         );
     }
+
+    /// Regression guard for issue #500's startup-race window (FR-005/ADR-0500). Previously,
+    /// `main()` installed only `sigterm_diag`'s diagnostic (sender-PID-only, no-op) handler
+    /// before the tokio runtime existed; the real, cancellation-triggering handler wasn't
+    /// registered until `run_socket_service` was reached, *after* `bootstrap_app_state`'s
+    /// (network-probe-bound) startup work. A SIGTERM delivered in that window was silently and
+    /// irrecoverably swallowed — the OS does not requeue a signal once a handler has been
+    /// registered and returns — leaking the process exactly as this issue's 11 orphans did.
+    ///
+    /// This sends SIGTERM as early as the connect-only socket-bound readiness check allows —
+    /// deliberately *not* waiting for a full IPC round-trip, mirroring the exact race window
+    /// Research's own reproduction used (`main.rs` binds the socket, per ADR-0009, well before
+    /// `bootstrap_app_state` completes) — and asserts a fast, clean exit. Command-line shape
+    /// (`--embedder-http`/`--extractor-http`) mirrors the leaked processes' own.
+    #[test]
+    fn sigterm_sent_immediately_after_socket_bind_exits_promptly() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let socket_path = dir.path().join("service.sock");
+
+        let embedder_port = spawn_stub_embedder();
+        let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
+
+        let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
+        let mut cmd = Command::new(binary);
+        cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
+            .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
+            .env("LCG_SHUTDOWN_TIMEOUT_MS", "5000")
+            .args(["--embedder-http", &embedder_url])
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
+            .stderr(Stdio::piped());
+        let mut child = ChildGuard::spawn(cmd);
+        let stderr_handle = spawn_stderr_reader(child.stderr.take().expect("child stderr"));
+
+        // Connect-only readiness — true as soon as `listen()` has been called, which is before
+        // `bootstrap_app_state` runs (ADR-0009). This is deliberately the weaker, race-prone
+        // check (matching `mcp_attached.rs`'s/`eager_index_build.rs`'s `wait_for_socket` helpers)
+        // rather than a blocking IPC round-trip, so SIGTERM below can land as early as possible.
+        let ready = wait_for_socket(&socket_path, Duration::from_secs(15));
+        if !ready {
+            panic!("service did not become ready within 15s");
+        }
+
+        let sender_pid = std::process::id();
+        send_sigterm(child.id());
+
+        // Well within LCG_SHUTDOWN_TIMEOUT_MS above (5000ms) plus OS-signal-delivery slack —
+        // under the pre-fix bug this would need SIGKILL after the full wait_for_exit timeout.
+        let status = wait_for_exit(&mut child, Duration::from_secs(8)).unwrap_or_else(|| {
+            panic!(
+                "service did not exit within 8s after SIGTERM sent immediately post-socket-bind \
+                 — this is issue #500's startup-race window"
+            )
+        });
+
+        assert_eq!(
+            status.code(),
+            Some(0),
+            "expected a clean exit (code 0) for a SIGTERM sent during startup, got: {status:?}"
+        );
+
+        let stderr_lines = stderr_handle.join().expect("stderr reader thread panicked");
+        let expected = format!("sender pid={sender_pid}");
+        assert!(
+            stderr_lines.iter().any(|line| line.contains(&expected)),
+            "expected stderr to contain {expected:?} — a missing line here means the signal was \
+             swallowed instead of reaching the real shutdown handler, got: {stderr_lines:?}"
+        );
+    }
 }
