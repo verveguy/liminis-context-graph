@@ -77,4 +77,23 @@ See `Package.resolved` for the pinned dep tree.
 
 This sidecar is an **optional** component. The Rust binary (`liminis-context-graph`) does not depend on it being built or running — it only needs *some* OpenAI-compatible embedder reachable at startup. The sidecar happens to be the easiest such embedder on macOS.
 
-A near-identical copy lives at `liminis-app/native/local-inference/` in the (separate) Liminis app repo, which is its original home. The two copies are intentionally maintained side-by-side for now; future consolidation is tracked separately.
+`liminis-context-graph` is the **sole source of truth** for this sidecar's source. The Liminis app (`verveguy/liminis`) does not carry its own copy of `native/local-inference/` — it obtains a built binary via the distribution mechanism below. See [ADR-0503](../../docs/adr/0503-swift-sidecar-source-of-truth.md) for the consolidation history and rationale.
+
+## Distribution
+
+`verveguy/liminis` (or anyone else who wants a `LocalInference` binary without building it themselves) has three options, in order of convenience:
+
+1. **Download the latest release asset.** Every `local-inference-v*` [GitHub Release](../../releases) on this repo carries `local-inference-aarch64-apple-macos.tar.gz` (a single self-contained `local-inference` binary) and its `.sha256` checksum:
+
+   ```bash
+   curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/local-inference-aarch64-apple-macos.tar.gz -o local-inference.tar.gz
+   tar -xzf local-inference.tar.gz
+   ```
+
+   The GitHub Releases API (`https://api.github.com/repos/verveguy/liminis-context-graph/releases?per_page=1`, filtered to tags matching `local-inference-v*`) can be used to discover the latest tag programmatically.
+
+2. **Manually trigger the release workflow.** [`.github/workflows/swift-release.yml`](../../.github/workflows/swift-release.yml) is a `workflow_dispatch`-only GitHub Actions workflow: builds the sidecar in release mode on `macos-latest`, runs `swift test`, and publishes the binary to a new `local-inference-v<N>`-tagged Release. Trigger it from the Actions tab (or `gh workflow run swift-release.yml`) when you need a fresh build without waiting for someone else to cut one.
+
+3. **Build locally.** Follow "Build and run" below on a macOS 26 / Swift 6.2+ machine.
+
+This is deliberately **not** a tag-push-triggered release: this repo's `release.yml` (the Rust binary's cargo-dist pipeline) already triggers on any tag containing a `digit.digit.digit` substring, so a dotted version tag for the sidecar could collide with it. Release tags for this sidecar always use the undotted `local-inference-v<integer>` scheme instead — see ADR-0503 for the full reasoning.
