@@ -541,3 +541,41 @@ impl Drop for McpClient {
         let _ = self.child.wait();
     }
 }
+
+/// Kills and reaps a wrapped `std::process::Child` on drop — the same leak-prevention pattern
+/// as `McpClient`'s `Drop` impl above, for tests that spawn the binary directly (socket mode,
+/// migration, attached-mode "remote service") rather than driving it through `McpClient`'s
+/// stdio/JSON-RPC transport. Without this, a test that panics between spawn and its own manual
+/// `.kill()` call leaks the subprocess indefinitely (issue #500). `kill`/`wait` are idempotent
+/// against an already-exited or already-reaped child, so it's always safe to let this run
+/// unconditionally, including after code has already called `.kill()`/`.wait()` on the same
+/// child through `Deref`/`DerefMut`.
+pub struct ChildGuard(pub Child);
+
+impl ChildGuard {
+    /// Spawns `cmd`, wrapping the resulting child in a guard that kills and reaps it on drop.
+    /// Mirrors `McpClient::spawn`'s panic-on-failure convention.
+    pub fn spawn(mut cmd: Command) -> Self {
+        Self(cmd.spawn().expect("failed to spawn liminis-context-graph"))
+    }
+}
+
+impl std::ops::Deref for ChildGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ChildGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}

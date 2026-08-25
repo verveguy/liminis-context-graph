@@ -46,7 +46,7 @@ use serde_json::{json, Value};
 
 mod common;
 use common::real_corpus::{seed_real_corpus_workspace, SeededWorkspace};
-use common::{binary_path, spawn_stub_embedder, McpClient};
+use common::{binary_path, spawn_stub_embedder, ChildGuard, McpClient};
 
 /// The seven admin tool names FR-013 requires be both absent from `tools/list` and rejected
 /// when called anyway, under a non-admin scope.
@@ -152,31 +152,6 @@ fn wait_for_process_exit(child: &mut Child, timeout: Duration) -> Option<std::pr
     None
 }
 
-/// Kills and reaps the wrapped socket-service child on drop — a safety net so a test panic
-/// while a remote service is up in User Story 7's attached-mode scenarios doesn't leave an
-/// orphaned process holding the socket file open.
-struct ChildGuard(Child);
-
-impl std::ops::Deref for ChildGuard {
-    type Target = Child;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl std::ops::DerefMut for ChildGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// Spawns the socket (non-MCP) service against an existing `SeededWorkspace`'s already-rebuilt
 /// `db_path`/`wal_dir` — the "already-running app instance" attached-mode MCP coexists with.
 /// Mirrors `mcp_attached.rs`'s `spawn_socket_service`, but pointed at real-corpus-seeded files
@@ -188,20 +163,19 @@ fn spawn_socket_service_for(
     socket_path: &Path,
     embedder_url: &str,
 ) -> ChildGuard {
-    let child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "5000")
         .args(["--embedder-http", embedder_url])
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn socket service");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    let child = ChildGuard::spawn(cmd);
     assert!(
         wait_for_socket(socket_path, Duration::from_secs(15)),
         "socket service backing the real-corpus fixture did not become ready"
     );
-    ChildGuard(child)
+    child
 }
 
 fn socket_request(socket_path: &Path, method: &str, params: Value) -> Value {

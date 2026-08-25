@@ -5,14 +5,14 @@
 #![cfg(unix)]
 
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::Duration;
 
 use serde_json::json;
 use tempfile::TempDir;
 
 mod common;
-use common::{binary_path, spawn_stub_embedder, McpClient};
+use common::{binary_path, spawn_stub_embedder, ChildGuard, McpClient};
 
 fn wait_for_socket(socket_path: &std::path::Path, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
@@ -97,8 +97,8 @@ fn attached_rebuild_surfaces_bridged_progress() {
 
     let db_path = dir.path().join("test.db");
     let socket_path = dir.path().join("service.sock");
-    let mut service: Child = Command::new(binary_path())
-        .env("LCG_DB_PATH", db_path.to_str().unwrap())
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", db_path.to_str().unwrap())
         .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
         .env("LCG_WAL_DIR", wal_dir.to_str().unwrap())
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
@@ -106,9 +106,10 @@ fn attached_rebuild_surfaces_bridged_progress() {
         // No ANTHROPIC_API_KEY/sidecar/LCG_EXTRACTION_URL in the CI test environment: an
         // explicit --extractor-http avoids the FR-011 fatal-startup error. Never dialed in
         // this test (no extraction tool is called).
-        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-        .spawn()
-        .expect("failed to spawn socket service");
+        .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+    // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+    // before reaching the explicit cleanup below (#500).
+    let _service = ChildGuard::spawn(cmd);
     assert!(wait_for_socket(&socket_path, Duration::from_secs(15)));
 
     let mut mcp = McpClient::spawn({
@@ -142,6 +143,4 @@ fn attached_rebuild_surfaces_bridged_progress() {
     );
 
     mcp.shutdown();
-    service.kill().ok();
-    service.wait().ok();
 }
