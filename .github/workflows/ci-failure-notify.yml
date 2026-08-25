@@ -10,10 +10,10 @@ name: CI Failure Notify
 # Deliberately NOT a required PR check (FR-006) — it is a workflow_run listener that
 # fires strictly after the watched workflows complete, so it cannot appear in branch
 # protection's required_status_checks and cannot block a merge. Coverage today:
-# "CI" (ci.yml — see note below), bench.yml, eval.yml. swift.yml is excluded because it
-# is currently `if: false` (dormant pending a GHA macOS image update) — add "Swift" to
-# the `workflows:` list below when it's re-enabled. claude-review.yml is excluded
-# because it only triggers on pull_request and never runs against main directly.
+# "CI" (ci.yml — see note below), bench.yml, eval.yml, "Swift sidecar CI" (swift.yml,
+# re-enabled 2026-08-25 by #502 — see docs/adr/0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md).
+# claude-review.yml is excluded because it only triggers on pull_request and never runs
+# against main directly.
 #
 # #341: the five real-corpus e2e jobs used to live in their own top-level workflow file
 # ("Real-Corpus E2E") specifically so they'd have their own workflow_run identity for
@@ -32,6 +32,7 @@ on:
       - "CI"
       - "Perf Benchmarks"
       - "Extraction-Quality Eval"
+      - "Swift sidecar CI"
     types: [completed]
 
 permissions:
