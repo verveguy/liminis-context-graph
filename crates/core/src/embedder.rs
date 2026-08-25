@@ -675,6 +675,41 @@ impl Embedder for CountingEmbedder {
     }
 }
 
+// ── UnconfiguredEmbedder ────────────────────────────────────────────────────
+
+/// `AppState.degraded_reason` value set when standalone `--mcp-stdio` mode exhausts its bounded
+/// retry against an unreachable embedder at startup (issue #499, FR-003). Reuses the existing
+/// "DB never opened" degraded branch `knowledge_status` already exposes for other startup
+/// failures (e.g. `lbug_wal_corrupt`) — this is a new reason string on that same shape, not a
+/// new response field.
+pub const EMBEDDER_UNREACHABLE_DEGRADED_REASON: &str = "embedder_unreachable_at_startup";
+
+/// Stands in for "the embedder was unreachable at startup and the process degraded rather than
+/// exiting" (#499). Mirrors `UnconfiguredExtractor` (#331): every `embed()` call fails
+/// immediately rather than the process refusing to start. `AppState.embedder` is `Arc<dyn
+/// Embedder>`, not optional, so this placeholder satisfies that field without changing its type
+/// or touching any `.embed()` call site — none of them are reachable anyway while the DB is
+/// never opened, since `handle`'s degraded-mode guard rejects every method except a small exempt
+/// list (`crates/core/src/handlers.rs`).
+///
+/// `dim()` uses the trait's default (768) and is never actually read in this state: the only
+/// exempt-list handler that calls `state.embedder.dim()` (`knowledge_recover`) is itself
+/// rejected outright for this specific degraded reason before it gets there (see
+/// `handlers.rs`'s `handle_knowledge_recover`).
+pub struct UnconfiguredEmbedder;
+
+impl Embedder for UnconfiguredEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(async {
+            Err(Error::Ipc(
+                "embedder unreachable at startup; the process is running in degraded mode \
+                 (see knowledge_status) — restart once the embedder is reachable"
+                    .to_string(),
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +878,16 @@ mod tests {
         with_key_env(Some(""), Some(""), Some(""), || {
             assert_eq!(resolve_embedding_api_key(TEST_URL), None);
         });
+    }
+
+    #[tokio::test]
+    async fn unconfigured_embedder_embed_always_errors() {
+        let e = UnconfiguredEmbedder.embed("hello").await;
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn unconfigured_embedder_dim_uses_trait_default() {
+        assert_eq!(UnconfiguredEmbedder.dim(), 768);
     }
 }
