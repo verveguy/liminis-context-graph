@@ -34,15 +34,23 @@ fn reserve_unused_port() -> u16 {
 /// a URL before the delay elapses; every connection attempt before the delayed rebind gets
 /// "connection refused", exactly like a sidecar process that hasn't started listening yet.
 fn spawn_stub_embedder_after_delay(delay: Duration) -> u16 {
-    use std::io::Write;
+    use std::io::{Read, Write};
 
     let port = reserve_unused_port();
     std::thread::spawn(move || {
         std::thread::sleep(delay);
-        let listener =
-            std::net::TcpListener::bind(("127.0.0.1", port)).expect("rebind stub embedder port");
+        let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
+            return;
+        };
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
+            // The request must be read before writing a response — mirrors
+            // `common::spawn_stub_embedder`. Skipping this races the client's own write of the
+            // request against this thread's write of the response and can reset the connection
+            // before the client ever sees a reply, which reqwest surfaces as a generic
+            // transport-classified send failure indistinguishable from "still unreachable".
+            let mut buf = [0u8; 65536];
+            let _ = Read::read(&mut s, &mut buf);
             let embedding: Vec<f64> = (0..8).map(|i| i as f64 / 8.0).collect();
             let embedding_json = serde_json::to_string(&embedding).unwrap();
             let body = format!(
@@ -141,11 +149,20 @@ fn mcp_stdio_recovers_when_embedder_becomes_reachable_mid_retry() {
         status["result"]["isError"].as_bool() != Some(true),
         "{status:?}"
     );
+    // A healthy (non-degraded) knowledge_status response has no "degraded"/"reason" fields at
+    // all — that shape is specific to the db-never-opened degraded branch (see
+    // handle_knowledge_status) — so the non-degraded assertion is "connected"/"queryable", not
+    // "degraded: false".
     let content = &status["result"]["structuredContent"];
     assert_eq!(
-        content["degraded"],
-        json!(false),
+        content["connected"],
+        json!(true),
         "a mid-retry-window race should resolve to a normal, non-degraded startup: {status:?}"
+    );
+    assert_eq!(content["queryable"], json!(true), "{status:?}");
+    assert!(
+        content.get("degraded").is_none(),
+        "a healthy knowledge_status response should have no degraded field at all: {status:?}"
     );
 
     client.shutdown();

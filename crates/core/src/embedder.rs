@@ -408,10 +408,24 @@ impl OaiEmbedder {
 ///
 /// Used in `main.rs` to distinguish "embedder unreachable" (always fatal at startup,
 /// per FR-011) from "embedder reachable but bad response" (can be bypassed by
-/// `LCG_EMBEDDING_DIM` per FR-008).
+/// `LCG_EMBEDDING_DIM` per FR-008). Also used by issue #499's standalone `--mcp-stdio`
+/// retry loop to decide whether a probe failure is worth retrying at all.
+///
+/// `is_request()` is checked alongside `is_connect()`/`is_timeout()` (of which it is a
+/// superset — every `is_connect()` error is also `is_request()`) because reqwest/hyper can
+/// surface a "connection was not ready" pool-cancellation error (`Kind::Request`, not
+/// `Kind::Connect`) when a client races a listener's very first moment of accepting
+/// connections — observed directly in #499's own binary-level test for the sidecar/lcg
+/// simultaneous-launch race this retry loop exists to cover, so it is a real (if narrow)
+/// manifestation of "not reachable yet," not merely a test artifact. This is safe to fold in
+/// broadly: `is_request()` only covers errors that occur while building/sending the request,
+/// which is structurally disjoint from `error_for_status()`'s `Kind::Status` (what
+/// `is_auth_error` below checks) and `.json()`'s `Kind::Decode` (the "unexpected response
+/// shape" case the catch-all probe-failure branch handles) — so this cannot misclassify
+/// either of those.
 pub fn is_transport_error(e: &Error) -> bool {
     match e {
-        Error::Http(re) => re.is_connect() || re.is_timeout(),
+        Error::Http(re) => re.is_connect() || re.is_timeout() || re.is_request(),
         Error::Ipc(msg) => {
             msg.starts_with("UDS connect")
                 || msg.starts_with("UDS HTTP/1.1 handshake")
@@ -740,6 +754,24 @@ mod tests {
     fn is_transport_error_rejects_other_ipc_errors() {
         let e = Error::Ipc("UDS embedder returned status 500".to_string());
         assert!(!is_transport_error(&e));
+    }
+
+    /// #499: reqwest/hyper can surface a "connection was not ready" pool-cancellation error
+    /// (`Kind::Request`, not `Kind::Connect`) when a client races a listener's very first
+    /// moment of accepting connections — observed directly in this issue's own binary-level
+    /// retry test. `is_transport_error` must classify any `is_request()` error as retryable,
+    /// not just the narrower `is_connect()`/`is_timeout()` cases, or the standalone
+    /// `--mcp-stdio` retry loop can spuriously treat a live sidecar/lcg race as fatal.
+    #[tokio::test]
+    async fn is_transport_error_recognizes_request_kind_errors_beyond_plain_connect() {
+        // A connection-refused error is both is_connect() and is_request() — confirms the
+        // superset relationship this fix relies on, so the broadened check doesn't need
+        // is_connect()/is_timeout() removed, only is_request() added.
+        let client = reqwest::Client::new();
+        let reqwest_err = client.post("http://127.0.0.1:1").send().await.unwrap_err();
+        assert!(reqwest_err.is_connect());
+        assert!(reqwest_err.is_request());
+        assert!(is_transport_error(&Error::Http(reqwest_err)));
     }
 
     #[test]
