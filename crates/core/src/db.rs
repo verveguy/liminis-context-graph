@@ -764,9 +764,10 @@ impl<'db> Conn<'db> {
     /// Deliberately does **not** touch `fact_embedding`, for the same reason
     /// [`Self::update_entity_core`] doesn't touch `name_embedding`: lbug's HNSW vector index
     /// (built over `RelatesToNode_.fact_embedding`) rejects a plain `SET` on an indexed column —
-    /// "Try delete and then insert." The caller still generates a fresh fact embedding on every
-    /// call for the `embedding_warning` fallback to stay observable, but only the create path
-    /// (`insert_relates_to_edge`, before any index exists over the row) persists it.
+    /// "Try delete and then insert." Since only the create path (`insert_relates_to_edge`,
+    /// before any index exists over the row) ever persists a fact embedding, the caller no
+    /// longer computes one at all before calling this update path (issue #444) — the
+    /// embedder-unavailable `embedding_warning` fallback is therefore unreachable here.
     pub fn update_relates_to_core(
         &self,
         uuid: &str,
@@ -2464,11 +2465,11 @@ impl<'db> Conn<'db> {
     /// or more indexes. Try delete and then insert.` This is the same reason
     /// `episode.rs`'s dedup `DedupDecision::Merge` path (`SET e.summary = $summary`) never
     /// rewrites `name_embedding` on a re-matched entity either — it is this codebase's existing
-    /// precedent, not a new decision invented for this feature. The caller still generates the
-    /// embedding on every call (so the embedder-unavailable `embedding_warning` fallback stays
-    /// observable and consistent between create and update), but only the create path
-    /// (`insert_entity`, before any index exists over the row) actually persists it; an update
-    /// leaves the entity's previously-stored embedding untouched.
+    /// precedent, not a new decision invented for this feature. Since only the create path
+    /// (`insert_entity`, before any index exists over the row) ever persists an embedding, the
+    /// caller no longer computes one at all before calling this update path (issue #444) — the
+    /// embedder-unavailable `embedding_warning` fallback is therefore unreachable here; an
+    /// update always leaves the entity's previously-stored embedding untouched.
     pub fn update_entity_core(
         &self,
         existing: &EntityRow,

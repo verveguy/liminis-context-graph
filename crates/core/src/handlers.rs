@@ -3571,9 +3571,12 @@ fn attributes_param_to_string(p: &Value) -> String {
 /// `name` (or, if `entity_uuid` is supplied, by that strict group-scoped UUID lookup — FR-007)
 /// within `group_id`. Resolution (including forward-through-`Merged` per FR-008/FR-009) is
 /// delegated to `assert::resolve_entity_by_name`/`resolve_entity_by_uuid`; this handler owns
-/// only param parsing, the embed-with-fallback step (FR-012/FR-026), and the create-vs-update
-/// branch (FR-010/FR-011). `summary` always fully replaces the prior value — a re-assert that
-/// omits it clears it, matching `attributes`/`labels`.
+/// param parsing, the create-vs-update branch (FR-010/FR-011), and the embed-with-fallback step
+/// (FR-012/FR-026). Existence is resolved *before* any embedding is computed (issue #444): the
+/// embedder is only ever called on the branch that creates a new row, since
+/// `update_entity_core` never persists an embedding — see its doc comment. `summary` always
+/// fully replaces the prior value — a re-assert that omits it clears it, matching
+/// `attributes`/`labels`.
 async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let name = p["name"]
@@ -3598,40 +3601,46 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
 
-    let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
-        Ok(v) => (v, None),
-        // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
-        // variable-length LIST) — a literal zero-length vector fails to bind with a
-        // Conversion exception ("Unsupported casting LIST with incorrect list entry to
-        // ARRAY"). A same-dimension zero vector is the only physically valid stand-in for
-        // "no embedding" this schema can store on create; an update leaves the existing
-        // stored embedding untouched instead (see `update_entity_core`), so the warning text
-        // is finalized below once we know which branch ran.
-        Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
-    };
-
-    // `summary_embedding` (issue #470), mirroring `name_embedding`'s embed-with-fallback shape
-    // exactly (including the same before-existence-check timing — #444 tracks fixing that for
-    // both fields together, out of scope here). Per ADR-0314, an empty `summary` is a legitimate,
-    // common state, not an error: it's never sent to the embedder, and gets the same zero-vector
-    // sentinel a genuine embedder failure would produce. Like `name_embedding`, this is only ever
-    // persisted on the create branch below — `update_entity_core` never touches either embedding
-    // column once an HNSW index exists over it (see that function's own doc comment).
-    let (summary_embedding, summary_embed_err) = if summary.trim().is_empty() {
-        (vec![0.0f32; state.embedder.dim()], None)
-    } else {
-        match state.embedder.embed(&summary).await {
-            Ok(v) => (v, None),
-            Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
-        }
-    };
+    /// Outcome of the existence-resolution block: either the row already existed and was
+    /// updated in place (no embedding ever needed), or it must be created — in which case the
+    /// fields needed to build the new row are carried forward so the embedder can be called
+    /// exactly once per field, only on this branch (issue #444).
+    enum EntityAssertOutcome {
+        Updated {
+            uuid: String,
+        },
+        ToCreate {
+            name: String,
+            group_id: String,
+            labels: Vec<String>,
+            summary: String,
+            attributes: String,
+        },
+    }
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let gid_wal = group_id.clone();
+    // Held across both `spawn_blocking` sections below *and* the intervening
+    // `state.embedder.embed(...).await` calls on the create branch — not just around the DB
+    // work. This is required for correctness, not an oversight: `write_lock` is the only thing
+    // preventing two concurrent creates of the same not-yet-existing (name, group_id) from both
+    // resolving "not found" and both inserting, which would violate the upsert's uniqueness
+    // invariant (see `Db::connect`'s single-writer-instance doc comment). The tradeoff is that
+    // every create-path call now serializes unrelated writes for the duration of an embedder
+    // round-trip, where before this fix the embed ran unguarded; a narrower critical section
+    // (drop the guard during embed, then re-resolve under a freshly-acquired guard right before
+    // insert, falling back to update if another writer won the race) would recover that
+    // parallelism but was left as a follow-up rather than folded into this reordering.
     let _guard = state.write_lock.write().await;
-    let (entity_uuid_out, created) = tokio::task::spawn_blocking(move || {
-        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+
+    let db_resolve = Arc::clone(&db);
+    let state_resolve = Arc::clone(&state_c);
+    let gid_resolve = gid_wal.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let conn = db_resolve
+            .connect()
+            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
 
         let resolved = if let Some(ref eu) = entity_uuid {
             Some(assert::resolve_entity_by_uuid(&conn, &group_id, eu)?)
@@ -3642,7 +3651,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
         };
 
-        let (uuid, created) = match resolved {
+        match resolved {
             Some(existing) => {
                 // Resolution (by uuid, or by name forwarded through a Merged tombstone) can
                 // land `existing` on an entity whose current name differs from the
@@ -3668,9 +3677,63 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     )));
                 }
                 conn.update_entity_core(&existing, &name, &labels, &summary, &attributes)?;
-                (existing.uuid, false)
+                let seq = wal_exec::wal_flush_ungrouped(
+                    &state_resolve,
+                    &gid_resolve,
+                    conn.drain_mutations(),
+                );
+                wal_exec::advance_wal_position(&conn, &gid_resolve, seq, &state_resolve);
+                Ok::<_, Error>(EntityAssertOutcome::Updated {
+                    uuid: existing.uuid,
+                })
             }
-            None => {
+            // Nothing was mutated on this branch, so there is nothing to flush — the embedder
+            // (async) runs next, then a second blocking section performs the insert + flush.
+            None => Ok(EntityAssertOutcome::ToCreate {
+                name,
+                group_id,
+                labels,
+                summary,
+                attributes,
+            }),
+        }
+    })
+    .await??;
+
+    let (entity_uuid_out, created, name_embed_err, summary_embed_err) = match outcome {
+        EntityAssertOutcome::Updated { uuid } => (uuid, false, None, None),
+        EntityAssertOutcome::ToCreate {
+            name,
+            group_id,
+            labels,
+            summary,
+            attributes,
+        } => {
+            let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
+                Ok(v) => (v, None),
+                // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
+                // variable-length LIST) — a literal zero-length vector fails to bind with a
+                // Conversion exception ("Unsupported casting LIST with incorrect list entry to
+                // ARRAY"). A same-dimension zero vector is the only physically valid stand-in
+                // for "no embedding" this schema can store on create.
+                Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+            };
+
+            // `summary_embedding` (issue #470), mirroring `name_embedding`'s embed-with-fallback
+            // shape exactly. Per ADR-0314, an empty `summary` is a legitimate, common state, not
+            // an error: it's never sent to the embedder, and gets the same zero-vector sentinel
+            // a genuine embedder failure would produce.
+            let (summary_embedding, summary_embed_err) = if summary.trim().is_empty() {
+                (vec![0.0f32; state.embedder.dim()], None)
+            } else {
+                match state.embedder.embed(&summary).await {
+                    Ok(v) => (v, None),
+                    Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+                }
+            };
+
+            let uuid = tokio::task::spawn_blocking(move || {
+                let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
                 let ts = chrono::Utc::now().to_rfc3339();
                 let row = EntityRow {
                     uuid: Uuid::new_v4().to_string(),
@@ -3686,31 +3749,28 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     summary_embedding,
                 };
                 conn.insert_entity(&row)?;
-                (row.uuid, true)
-            }
-        };
-
-        let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
-        Ok::<_, Error>((uuid, created))
-    })
-    .await??;
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+                wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
+                Ok::<_, Error>(row.uuid)
+            })
+            .await??;
+            (uuid, true, name_embed_err, summary_embed_err)
+        }
+    };
     drop(_guard);
 
+    // The embedder is only ever called on the create branch above, so an embed error can only
+    // ever coincide with `created == true` — there is no "left unchanged" case to report.
     let mut warnings: Vec<String> = Vec::new();
     if let Some(e) = name_embed_err {
-        warnings.push(if created {
-            format!("embedder unavailable; stored a zero-vector name_embedding: {e}")
-        } else {
-            format!("embedder unavailable; existing name_embedding left unchanged: {e}")
-        });
+        warnings.push(format!(
+            "embedder unavailable; stored a zero-vector name_embedding: {e}"
+        ));
     }
     if let Some(e) = summary_embed_err {
-        warnings.push(if created {
-            format!("embedder unavailable; stored a zero-vector summary_embedding: {e}")
-        } else {
-            format!("embedder unavailable; existing summary_embedding left unchanged: {e}")
-        });
+        warnings.push(format!(
+            "embedder unavailable; stored a zero-vector summary_embedding: {e}"
+        ));
     }
     let embedding_warning = (!warnings.is_empty()).then(|| warnings.join("; "));
 
@@ -3729,7 +3789,9 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
 /// `find_active_relates_to_uuid` (FR-016/FR-017): `predicate` is bound to `RelatesToEdge.name`,
 /// the same field `has_directed_edge`/`knowledge_add_cross_group_edge` already treat as an
 /// edge's identity label, not a free-text description. `valid_at`, when supplied, is validated
-/// and normalized before any write (FR-022).
+/// and normalized before any write (FR-022). Existence is resolved *before* any embedding is
+/// computed (issue #444): the embedder is only ever called on the branch that creates a new
+/// edge, since `update_relates_to_core` never persists an embedding — see its doc comment.
 async fn handle_assert_relationship(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -3766,23 +3828,44 @@ async fn handle_assert_relationship(
         None => None,
     };
 
-    let (fact_embedding, embed_err) = match state.embedder.embed(&fact).await {
-        Ok(v) => (v, None),
-        // See the matching comment in handle_assert_entity: RelatesToNode_.fact_embedding
-        // is a fixed-size FLOAT[N] column, so a same-dimension zero vector — not a
-        // literal empty Vec — is the only physically valid "no embedding" stand-in on create;
-        // an update leaves the existing stored embedding untouched (see
-        // `update_relates_to_core`), so the warning text is finalized below once we know
-        // which branch ran.
-        Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
-    };
+    /// Outcome of the existence-resolution block: either an active matching edge already
+    /// existed and was updated in place (no embedding ever needed), or it must be created — in
+    /// which case the fields needed to build the new edge are carried forward so the embedder
+    /// is called exactly once, only on this branch (issue #444).
+    enum EdgeAssertOutcome {
+        Updated {
+            uuid: String,
+        },
+        ToCreate {
+            source_uuid: String,
+            target_uuid: String,
+            predicate: String,
+            group_id: String,
+            fact: String,
+            valid_at: Option<String>,
+            relation_type: Option<String>,
+            attributes: String,
+        },
+    }
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let gid_wal = group_id.clone();
+    // See the matching comment in `handle_assert_entity`: held across both `spawn_blocking`
+    // sections and the create branch's `state.embedder.embed(...).await`, which is required to
+    // keep concurrent creates of the same not-yet-existing edge from both resolving "not found"
+    // and both inserting. Same known tradeoff (serializes unrelated writes for the duration of
+    // an embedder round-trip on create); a narrower critical section is a possible follow-up,
+    // not folded into this reordering.
     let _guard = state.write_lock.write().await;
-    let (edge_uuid, created) = tokio::task::spawn_blocking(move || {
-        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+
+    let db_resolve = Arc::clone(&db);
+    let state_resolve = Arc::clone(&state_c);
+    let gid_resolve = gid_wal.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let conn = db_resolve
+            .connect()
+            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
 
         let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
             match assert::resolve_entity_by_name(&conn, &group_id, n)? {
@@ -3801,7 +3884,7 @@ async fn handle_assert_relationship(
         let existing_uuid =
             conn.find_active_relates_to_uuid(&source.uuid, &target.uuid, &predicate, &group_id)?;
 
-        let (uuid, created) = match existing_uuid {
+        match existing_uuid {
             Some(uuid) => {
                 conn.update_relates_to_core(
                     &uuid,
@@ -3810,15 +3893,58 @@ async fn handle_assert_relationship(
                     relation_type.as_deref(),
                     &attributes,
                 )?;
-                (uuid, false)
+                let seq = wal_exec::wal_flush_ungrouped(
+                    &state_resolve,
+                    &gid_resolve,
+                    conn.drain_mutations(),
+                );
+                wal_exec::advance_wal_position(&conn, &gid_resolve, seq, &state_resolve);
+                Ok::<_, Error>(EdgeAssertOutcome::Updated { uuid })
             }
-            None => {
+            // Nothing was mutated on this branch, so there is nothing to flush — the embedder
+            // (async) runs next, then a second blocking section performs the insert + flush.
+            None => Ok(EdgeAssertOutcome::ToCreate {
+                source_uuid: source.uuid,
+                target_uuid: target.uuid,
+                predicate,
+                group_id,
+                fact,
+                valid_at,
+                relation_type,
+                attributes,
+            }),
+        }
+    })
+    .await??;
+
+    let (edge_uuid, created, embed_err) = match outcome {
+        EdgeAssertOutcome::Updated { uuid } => (uuid, false, None),
+        EdgeAssertOutcome::ToCreate {
+            source_uuid,
+            target_uuid,
+            predicate,
+            group_id,
+            fact,
+            valid_at,
+            relation_type,
+            attributes,
+        } => {
+            let (fact_embedding, embed_err) = match state.embedder.embed(&fact).await {
+                Ok(v) => (v, None),
+                // RelatesToNode_.fact_embedding is a fixed-size FLOAT[N] column, so a
+                // same-dimension zero vector — not a literal empty Vec — is the only physically
+                // valid "no embedding" stand-in on create.
+                Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+            };
+
+            let uuid = tokio::task::spawn_blocking(move || {
+                let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
                 let ts = chrono::Utc::now().to_rfc3339();
                 let edge = RelatesToEdge {
                     uuid: Uuid::new_v4().to_string(),
                     name: predicate,
-                    source_node_uuid: source.uuid,
-                    target_node_uuid: target.uuid,
+                    source_node_uuid: source_uuid,
+                    target_node_uuid: target_uuid,
                     group_id,
                     fact,
                     fact_embedding,
@@ -3831,24 +3957,20 @@ async fn handle_assert_relationship(
                     source_descriptions: vec![],
                 };
                 conn.insert_relates_to_edge(&edge)?;
-                (edge.uuid, true)
-            }
-        };
-
-        let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
-        Ok::<_, Error>((uuid, created))
-    })
-    .await??;
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_wal, conn.drain_mutations());
+                wal_exec::advance_wal_position(&conn, &gid_wal, seq, &state_c);
+                Ok::<_, Error>(edge.uuid)
+            })
+            .await??;
+            (uuid, true, embed_err)
+        }
+    };
     drop(_guard);
 
-    let embedding_warning = embed_err.map(|e| {
-        if created {
-            format!("embedder unavailable; stored a zero-vector fact_embedding: {e}")
-        } else {
-            format!("embedder unavailable; existing fact_embedding left unchanged: {e}")
-        }
-    });
+    // The embedder is only ever called on the create branch above, so an embed error can only
+    // ever coincide with `created == true` — there is no "left unchanged" case to report.
+    let embedding_warning = embed_err
+        .map(|e| format!("embedder unavailable; stored a zero-vector fact_embedding: {e}"));
 
     Ok(json!({
         "edge_uuid": edge_uuid,
