@@ -365,11 +365,16 @@ const EMBEDDER_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
 ///
 /// `allow_embedder_degrade` distinguishes the two launch modes for issue #499's FR-002/FR-003:
 /// `false` (socket-service, `CliMode::Socket`) preserves today's fail-fast behavior byte-for-byte
-/// — the very first transport-resolution-or-probe failure returns `Err` immediately, zero
-/// retries (FR-001). `true` (standalone `--mcp-stdio`, `CliMode::Mcp { connect: None, .. }`)
-/// retries a `Retryable` outcome with bounded backoff (`EMBEDDER_RETRY_CEILING`), and if the
-/// retry window is exhausted, starts in degraded mode without ever opening the database — see the
-/// early return below — rather than exiting.
+/// for the classified-failure case — the very first transport-resolution-or-probe failure returns
+/// `Err` immediately, zero retries (FR-001). It is *not* fully unchanged, though: the per-attempt
+/// `tokio::time::timeout` below (bounding a connection that stalls after being accepted, since
+/// neither transport client configures a request timeout of its own) applies uniformly to both
+/// modes, so socket mode's single attempt is now also bounded by `EMBEDDER_RETRY_CEILING` — a
+/// previously-unbounded hang on a stalled connection becomes a bounded failure instead. `true`
+/// (standalone `--mcp-stdio`, `CliMode::Mcp { connect: None, .. }`) retries a `Retryable` outcome
+/// with bounded backoff (`EMBEDDER_RETRY_CEILING`), and if the retry window is exhausted, starts
+/// in degraded mode without ever opening the database — see the early return below — rather than
+/// exiting.
 ///
 /// Precondition (#437): must only be called after `migration::migrate_workspace` has run for
 /// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call

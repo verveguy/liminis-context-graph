@@ -67,6 +67,32 @@ fn spawn_stub_embedder_after_delay(delay: Duration) -> u16 {
     port
 }
 
+/// Spawns a stub embedder that accepts every connection but never writes a response — a stalled
+/// connection, as opposed to the fast "connection refused" every other stub in this file
+/// produces. This is the exact failure shape the per-attempt `tokio::time::timeout` around
+/// `resolve_and_probe_embedder` (`main.rs`) exists to bound: neither transport client configures
+/// its own request timeout, so without that wrapper a single stalled attempt could hang
+/// indefinitely rather than failing within `EMBEDDER_RETRY_CEILING`.
+fn spawn_stub_embedder_that_hangs() -> u16 {
+    use std::io::Read;
+
+    let port = reserve_unused_port();
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { break };
+            std::thread::spawn(move || {
+                // Read the request (if any arrives) but never write a response — the connection
+                // stays open and the client hangs waiting for one.
+                let mut buf = [0u8; 65536];
+                let _ = Read::read(&mut s, &mut buf);
+                std::thread::sleep(Duration::from_secs(60));
+            });
+        }
+    });
+    port
+}
+
 /// Builds a `Command` pointed at `embedder_url`, in a fresh temp workspace, in either standalone
 /// `--mcp-stdio` mode or default socket-service mode. Defensively `env_remove`s the key/dim env
 /// vars (mirrors `embedder_auth.rs`'s `base_cmd`) so a developer's shell exporting one doesn't
@@ -199,6 +225,44 @@ fn socket_mode_still_fails_fast_on_unreachable_embedder() {
         stderr.contains("embedder unreachable at startup"),
         "expected the unchanged FR-011 message, got stderr: {stderr}"
     );
+}
+
+/// Regression coverage for the per-attempt `tokio::time::timeout` fix (review finding on
+/// #499/PR #514): an embedder that accepts a connection but never responds must not block a
+/// single retry attempt past the advertised retry ceiling. Before that fix, this test would hang
+/// past `client.initialize()`'s own 15s timeout, since neither transport client configures a
+/// request timeout of its own.
+#[test]
+fn mcp_stdio_degrades_when_embedder_accepts_but_never_responds() {
+    let dir = TempDir::new().unwrap();
+    let port = spawn_stub_embedder_that_hangs();
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+
+    let cmd = base_cmd(&dir, &url, true);
+    let mut client = McpClient::spawn(cmd);
+    let start = std::time::Instant::now();
+    client.initialize();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "a stalled (accepted-but-unresponsive) embedder connection must not block startup past \
+         the retry ceiling — took {elapsed:?}"
+    );
+
+    let status = client.call_tool("knowledge_status", json!({}));
+    assert!(
+        status["result"]["isError"].as_bool() != Some(true),
+        "knowledge_status itself should succeed even while degraded: {status:?}"
+    );
+    let content = &status["result"]["structuredContent"];
+    assert_eq!(content["degraded"], json!(true), "{status:?}");
+    assert_eq!(
+        content["reason"],
+        json!("embedder_unreachable_at_startup"),
+        "{status:?}"
+    );
+
+    client.shutdown();
 }
 
 /// FR-005: `knowledge_recover` is rejected outright while degraded for this specific reason —
