@@ -109,6 +109,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0451](0451-per-group-ontology-drift-cache-and-clear-scope.md) | Per-Group Ontology Drift — Cache Placement and Clear Scope | 2026-08-23 |
 | [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
+| [0497](0497-embedder-http-bearer-auth.md) | Bearer-Token Authentication for the Embedder HTTP Transport | 2026-08-25 |
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
 
 ## Historical numbering

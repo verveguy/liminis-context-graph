@@ -30,12 +30,10 @@ enum EmbedTransport {
     Http {
         client: Client,
         url: String,
+        api_key: Option<String>,
     },
     #[cfg(unix)]
-    Uds {
-        path: String,
-        pool: UdsPool,
-    },
+    Uds { path: String, pool: UdsPool },
 }
 
 // ── UDS connection pool ───────────────────────────────────────────────────────
@@ -223,10 +221,21 @@ impl OaiEmbedder {
             transport: EmbedTransport::Http {
                 client: Client::new(),
                 url: url.into(),
+                api_key: None,
             },
             model: model.into(),
             dim,
         }
+    }
+
+    /// Attaches a Bearer-token API key to be sent as `Authorization: Bearer <key>` on every
+    /// HTTP request. A no-op on the UDS transport (FR-005) — UDS is a local socket and never
+    /// accepts a key regardless of this call, since `new_uds` structurally has no key parameter.
+    pub fn with_api_key(mut self, key: Option<String>) -> Self {
+        if let EmbedTransport::Http { api_key, .. } = &mut self.transport {
+            *api_key = key;
+        }
+        self
     }
 
     /// Constructs a UDS-transport embedder pointing at the given socket path.
@@ -247,6 +256,7 @@ impl OaiEmbedder {
     /// - `LCG_EMBEDDING_URL` (default `http://127.0.0.1:8765/v1/embeddings`)
     /// - `LCG_EMBEDDING_MODEL` (default `bge-base-en-v1.5`)
     /// - `LCG_EMBEDDING_DIM` (default `768`)
+    /// - `LCG_EMBEDDING_API_KEY` / `GRAPHITI_EMBEDDING_API_KEY` / `OPENAI_API_KEY` (optional)
     pub fn from_env() -> Self {
         let url = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8765/v1/embeddings".to_string());
@@ -256,13 +266,16 @@ impl OaiEmbedder {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
-        Self::new_http(url, model, dim)
+        let api_key = resolve_embedding_api_key(&url);
+        Self::new_http(url, model, dim).with_api_key(api_key)
     }
 
-    /// Returns `("uds"|"http", endpoint_string)` for the startup log line.
+    /// Returns `("uds"|"http", endpoint_string)` for the startup log line. The HTTP endpoint has
+    /// any Basic-auth-style userinfo (`user:pass@host`) redacted (FR-007) — never the key itself,
+    /// which is never part of the URL for this transport.
     pub fn transport_info(&self) -> (&'static str, String) {
         match &self.transport {
-            EmbedTransport::Http { url, .. } => ("http", url.clone()),
+            EmbedTransport::Http { url, .. } => ("http", redact_url_userinfo(url).0),
             #[cfg(unix)]
             EmbedTransport::Uds { path, .. } => ("uds", path.clone()),
         }
@@ -293,7 +306,14 @@ impl OaiEmbedder {
 
     async fn do_embed_raw(&self, text: &str) -> Result<OaiEmbedResponse, Error> {
         match &self.transport {
-            EmbedTransport::Http { client, url } => self.do_embed_http_raw(client, url, text).await,
+            EmbedTransport::Http {
+                client,
+                url,
+                api_key,
+            } => {
+                self.do_embed_http_raw(client, url, api_key.as_deref(), text)
+                    .await
+            }
             #[cfg(unix)]
             EmbedTransport::Uds { path, pool } => self.do_embed_uds_raw(path, pool, text).await,
         }
@@ -303,20 +323,18 @@ impl OaiEmbedder {
         &self,
         client: &Client,
         url: &str,
+        api_key: Option<&str>,
         text: &str,
     ) -> Result<OaiEmbedResponse, Error> {
         let body = OaiEmbedRequest {
             input: text,
             model: &self.model,
         };
-        let resp: OaiEmbedResponse = client
-            .post(url)
-            .json(&body)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let mut req = client.post(url).json(&body);
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp: OaiEmbedResponse = req.send().await?.error_for_status()?.json().await?;
         Ok(resp)
     }
 
@@ -401,6 +419,99 @@ pub fn is_transport_error(e: &Error) -> bool {
         }
         _ => false,
     }
+}
+
+/// Returns `true` if the error is an HTTP 401/403 authentication failure.
+///
+/// Used in `main.rs` to distinguish "credential rejected" (always fatal at startup, FR-008,
+/// never bypassable by `LCG_EMBEDDING_DIM`) from other non-transport probe failures (unexpected
+/// response shape, which *can* be bypassed by `LCG_EMBEDDING_DIM`).
+pub fn is_auth_error(e: &Error) -> bool {
+    match e {
+        Error::Http(re) => matches!(
+            re.status(),
+            Some(reqwest::StatusCode::UNAUTHORIZED) | Some(reqwest::StatusCode::FORBIDDEN)
+        ),
+        _ => false,
+    }
+}
+
+/// Resolves the embedder API key via a three-tier lookup, in order:
+/// `LCG_EMBEDDING_API_KEY` → `GRAPHITI_EMBEDDING_API_KEY` (deprecated alias, warns on use) →
+/// `OPENAI_API_KEY` (convenience fallback, no *deprecation* warning — it isn't a legacy spelling
+/// of an LCG-specific variable — but does log a one-line notice, since this tier sends whatever
+/// key is exported for OpenAI tooling generally to *whatever* `--embedder-http`/
+/// `LCG_EMBEDDING_URL` endpoint is configured, not only to OpenAI's own API; a silent send of a
+/// possibly-unrelated credential to an operator-chosen endpoint is worth surfacing even though
+/// it isn't wrong per FR-002/Acceptance Scenario 2). An empty string at any tier is treated as
+/// absent for that tier (FR-002).
+///
+/// `target_url` is used only for this notice's wording (naming the endpoint the key will be
+/// sent to); it does not gate whether the tier applies — that would contradict FR-002, which
+/// requires the fallback to work against any configured HTTP endpoint, not only OpenAI's.
+///
+/// Deliberately bespoke rather than composed from `lcg_env_var`: that helper is 2-tier, treats
+/// `""` as a valid value, and has no way to customize its warning text for a third tier.
+pub fn resolve_embedding_api_key(target_url: &str) -> Option<String> {
+    let lcg = std::env::var("LCG_EMBEDDING_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(key) = lcg {
+        return Some(key);
+    }
+
+    let graphiti = std::env::var("GRAPHITI_EMBEDDING_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if let Some(key) = graphiti {
+        eprintln!(
+            "[liminis-context-graph] DEPRECATED: env var GRAPHITI_EMBEDDING_API_KEY is \
+             deprecated; rename to LCG_EMBEDDING_API_KEY. Support will be removed in Phase B \
+             (see issue #59)."
+        );
+        return Some(key);
+    }
+
+    let openai = std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if openai.is_some() {
+        let (redacted_url, _) = redact_url_userinfo(target_url);
+        eprintln!(
+            "[liminis-context-graph] Using OPENAI_API_KEY as the embedder credential; it will \
+             be sent as a Bearer token to {redacted_url}, which may not be OpenAI's own API. \
+             Set LCG_EMBEDDING_API_KEY instead if this key should not go to that endpoint."
+        );
+    }
+    openai
+}
+
+/// Redacts Basic-auth-style userinfo (`user:pass@host`) from a URL before it is echoed in a log
+/// line or error message (FR-007). Returns `(redacted_url, Some(original_userinfo_substring))`
+/// when userinfo was present and removed, or `(url unchanged, None)` otherwise — the second
+/// element lets a caller additionally scrub the same substring out of other text (e.g. a wrapped
+/// `reqwest::Error`'s `Display` output) that isn't itself parsed as a URL.
+///
+/// Scope is deliberately narrow: only the standard `user:pass@host` userinfo component. Ad hoc
+/// "API key in query string" conventions are out of scope (see spec Assumptions).
+pub fn redact_url_userinfo(url: &str) -> (String, Option<String>) {
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return (url.to_string(), None);
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return (url.to_string(), None);
+    }
+
+    // Capture the original "user:pass@" (or "user@") substring so callers can scrub it out of
+    // unrelated text too, e.g. an error message that independently embeds the raw URL.
+    let userinfo = match parsed.password() {
+        Some(pass) => format!("{}:{}@", parsed.username(), pass),
+        None => format!("{}@", parsed.username()),
+    };
+
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    (parsed.to_string(), Some(userinfo))
 }
 
 fn extract_embedding(resp: OaiEmbedResponse) -> Result<Vec<f32>, Error> {
@@ -594,5 +705,143 @@ mod tests {
     fn is_transport_error_rejects_other_ipc_errors() {
         let e = Error::Ipc("UDS embedder returned status 500".to_string());
         assert!(!is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_auth_error_rejects_ipc_errors() {
+        // is_auth_error only recognizes Error::Http with a 401/403 status; it must never
+        // misclassify a UDS-side Error::Ipc as an auth failure.
+        let e = Error::Ipc("UDS embedder returned status 401".to_string());
+        assert!(!is_auth_error(&e));
+    }
+
+    #[test]
+    fn redact_url_userinfo_leaves_plain_url_unchanged() {
+        let (redacted, scrub) = redact_url_userinfo("https://api.openai.com/v1/embeddings");
+        assert_eq!(redacted, "https://api.openai.com/v1/embeddings");
+        assert_eq!(scrub, None);
+    }
+
+    #[test]
+    fn redact_url_userinfo_strips_user_and_pass() {
+        let (redacted, scrub) =
+            redact_url_userinfo("https://alice:s3cret@example.com/v1/embeddings");
+        assert!(
+            !redacted.contains("s3cret"),
+            "redacted URL leaked password: {redacted}"
+        );
+        assert!(
+            !redacted.contains("alice"),
+            "redacted URL leaked username: {redacted}"
+        );
+        assert_eq!(scrub, Some("alice:s3cret@".to_string()));
+    }
+
+    #[test]
+    fn redact_url_userinfo_passes_through_unparseable_input() {
+        let (redacted, scrub) = redact_url_userinfo("not a url");
+        assert_eq!(redacted, "not a url");
+        assert_eq!(scrub, None);
+    }
+
+    // ENV_LOCK-equivalent: these three tests each use a distinct env var namespace and run under
+    // the crate's default single-threaded-per-module test isolation is NOT guaranteed by cargo,
+    // so each test saves/restores the exact three vars it touches to avoid cross-test races.
+    fn with_key_env<F: FnOnce()>(
+        lcg: Option<&str>,
+        graphiti: Option<&str>,
+        openai: Option<&str>,
+        f: F,
+    ) {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        for (name, val) in [
+            ("LCG_EMBEDDING_API_KEY", lcg),
+            ("GRAPHITI_EMBEDDING_API_KEY", graphiti),
+            ("OPENAI_API_KEY", openai),
+        ] {
+            match val {
+                Some(v) => std::env::set_var(name, v),
+                None => std::env::remove_var(name),
+            }
+        }
+        f();
+        for name in [
+            "LCG_EMBEDDING_API_KEY",
+            "GRAPHITI_EMBEDDING_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    const TEST_URL: &str = "http://127.0.0.1:9999/v1/embeddings";
+
+    #[test]
+    fn resolve_embedding_api_key_none_set_returns_none() {
+        with_key_env(None, None, None, || {
+            assert_eq!(resolve_embedding_api_key(TEST_URL), None);
+        });
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_lcg_wins_over_all() {
+        with_key_env(
+            Some("lcg-key"),
+            Some("graphiti-key"),
+            Some("openai-key"),
+            || {
+                assert_eq!(
+                    resolve_embedding_api_key(TEST_URL),
+                    Some("lcg-key".to_string())
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_falls_back_to_graphiti() {
+        with_key_env(None, Some("graphiti-key"), Some("openai-key"), || {
+            assert_eq!(
+                resolve_embedding_api_key(TEST_URL),
+                Some("graphiti-key".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_falls_back_to_openai() {
+        with_key_env(None, None, Some("openai-key"), || {
+            assert_eq!(
+                resolve_embedding_api_key(TEST_URL),
+                Some("openai-key".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_falls_back_to_openai_against_non_openai_host() {
+        // FR-002/Acceptance Scenario 2 requires the OPENAI_API_KEY fallback tier to work against
+        // *any* configured HTTP embedder endpoint, not only OpenAI's own API — target_url only
+        // affects the informational notice's wording, never whether the tier applies.
+        with_key_env(None, None, Some("openai-key"), || {
+            assert_eq!(
+                resolve_embedding_api_key("http://127.0.0.1:8080/v1/embeddings"),
+                Some("openai-key".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_empty_string_treated_as_absent_at_every_tier() {
+        with_key_env(Some(""), Some(""), Some("openai-key"), || {
+            assert_eq!(
+                resolve_embedding_api_key(TEST_URL),
+                Some("openai-key".to_string())
+            );
+        });
+        with_key_env(Some(""), Some(""), Some(""), || {
+            assert_eq!(resolve_embedding_api_key(TEST_URL), None);
+        });
     }
 }

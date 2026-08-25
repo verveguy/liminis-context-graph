@@ -15,7 +15,10 @@ use lcg_core::{
     app_state::AppState,
     cassette::{CassetteWriter, RecordingExtractor, ReplayingExtractor},
     db::Db,
-    embedder::{is_transport_error, Embedder, OaiEmbedder},
+    embedder::{
+        is_auth_error, is_transport_error, redact_url_userinfo, resolve_embedding_api_key,
+        Embedder, OaiEmbedder,
+    },
     env::lcg_env_var,
     error::Error as CoreError,
     extraction_failures::{
@@ -248,12 +251,25 @@ async fn bootstrap_app_state(
         }
     };
 
+    // Resolved once (HTTP only — FR-005: UDS never performs key lookup or credential
+    // attachment, so resolution is skipped entirely for that transport, which also avoids
+    // firing GRAPHITI_EMBEDDING_API_KEY's deprecation notice for a variable that would have no
+    // effect on a UDS-configured setup) and applied identically to both the probe and final
+    // embedder constructions below (issue #497) — a partial application here would authenticate
+    // one but not the other, surfacing as "probe succeeds, every real embed call 401s."
+    let embedding_api_key = match &resolved {
+        ResolvedTransport::Http(url) => resolve_embedding_api_key(url),
+        #[cfg(unix)]
+        ResolvedTransport::Uds(_) => None,
+    };
+
     // ── Build probe embedder, then final embedder with discovered dim ─────────
     // The probe runs before DB open so that a misconfigured embedder fails fast
     // at startup rather than on the first embed request (FR-010/FR-011).
     let probe_embedder = match &resolved {
         ResolvedTransport::Http(url) => {
             OaiEmbedder::new_http(url.clone(), embedder_model.clone(), 1)
+                .with_api_key(embedding_api_key.clone())
         }
         #[cfg(unix)]
         ResolvedTransport::Uds(path) => {
@@ -262,31 +278,60 @@ async fn bootstrap_app_state(
     };
 
     let (transport_label, endpoint) = probe_embedder.transport_info();
+    // Redaction substring for the raw configured URL (FR-007) — transport_info() already
+    // redacts `endpoint` above, but a wrapped reqwest::Error's Display can independently
+    // echo the raw URL, so error-message sites below scrub the same substring separately.
+    let url_scrub = if let ResolvedTransport::Http(url) = &resolved {
+        redact_url_userinfo(url).1
+    } else {
+        None
+    };
+    let scrub_url = |msg: String| -> String {
+        match &url_scrub {
+            Some(userinfo) => msg.replace(userinfo.as_str(), ""),
+            None => msg,
+        }
+    };
 
     let (embedding_dim, embedding_model_probed) = match probe_embedder.probe().await {
         Ok(result) => result,
         Err(e) if is_transport_error(&e) => {
             // FR-011: transport/connectivity failures are always fatal at startup.
             // LCG_EMBEDDING_DIM cannot override an unreachable embedder.
-            return Err(format!(
+            return Err(scrub_url(format!(
                 "embedder unreachable at startup: {e}. \
                  Ensure the embedder sidecar is running before starting liminis-context-graph."
-            )
+            ))
+            .into());
+        }
+        Err(e) if is_auth_error(&e) => {
+            // FR-008: an authentication failure (401/403) is always fatal at startup and is
+            // never bypassable via LCG_EMBEDDING_DIM — a dimension override cannot paper over
+            // a rejected credential.
+            return Err(scrub_url(format!(
+                "embedder authentication failed at startup: {e}. \
+                 Check LCG_EMBEDDING_API_KEY (or GRAPHITI_EMBEDDING_API_KEY / OPENAI_API_KEY) \
+                 against the configured embedder endpoint's expected credential."
+            ))
             .into());
         }
         Err(e) => {
-            // Non-transport probe failure (e.g., unexpected response shape).
+            // Non-transport, non-auth probe failure (e.g., unexpected response shape).
             // LCG_EMBEDDING_DIM can override this per FR-008.
             if let Some(dim) = embedding_dim_override {
                 eprintln!(
-                    "liminis-context-graph: embedder probe failed ({e}), \
-                     using LCG_EMBEDDING_DIM={dim} override"
+                    "{}",
+                    scrub_url(format!(
+                        "liminis-context-graph: embedder probe failed ({e}), \
+                         using LCG_EMBEDDING_DIM={dim} override"
+                    ))
                 );
                 (dim, embedder_model.clone())
             } else {
-                return Err(
-                    format!("embedder probe failed and LCG_EMBEDDING_DIM is not set: {e}").into(),
-                );
+                return Err(scrub_url(format!(
+                    "embedder probe failed and LCG_EMBEDDING_DIM is not set: {e}"
+                ))
+                .into());
             }
         }
     };
@@ -295,11 +340,10 @@ async fn bootstrap_app_state(
 
     // Build the final embedder with the correct probed dim
     let embedder: Arc<dyn Embedder> = match &resolved {
-        ResolvedTransport::Http(url) => Arc::new(OaiEmbedder::new_http(
-            url.clone(),
-            embedding_model_probed.clone(),
-            embedding_dim,
-        )),
+        ResolvedTransport::Http(url) => Arc::new(
+            OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)
+                .with_api_key(embedding_api_key.clone()),
+        ),
         #[cfg(unix)]
         ResolvedTransport::Uds(path) => Arc::new(OaiEmbedder::new_uds(
             path.clone(),

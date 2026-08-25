@@ -240,7 +240,9 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
-| `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe) |
+| `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe). Does **not** override an authentication failure (HTTP 401/403) — see [Embedder sidecar](#embedder-sidecar) below. |
+| `LCG_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP embedder transport (`--embedder-http`/`LCG_EMBEDDING_URL`). Falls back to `GRAPHITI_EMBEDDING_API_KEY`, then to `OPENAI_API_KEY`. Unset (or empty) sends no `Authorization` header, unchanged from prior versions. Never applies to the UDS transport (`--embedder-uds`). |
+| `OPENAI_API_KEY` | No | Convenience fallback for `LCG_EMBEDDING_API_KEY` (see above) — reuses an already-exported OpenAI key. Not a deprecated alias, so using it logs no *deprecation* warning — but since it sends whatever key is exported for OpenAI tooling generally to whatever `--embedder-http`/`LCG_EMBEDDING_URL` endpoint is configured (not necessarily OpenAI's own API), using this tier does log a one-line informational notice naming the endpoint the key will be sent to. |
 | `LCG_EXTRACTION_LLM` | No | Anthropic model for entity extraction, optional `primary:fallback` format. Only consulted on the Anthropic path (see `ANTHROPIC_API_KEY` below); ignored when a local extraction endpoint is selected. |
 | `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed and `ANTHROPIC_API_KEY` is unset. If this var is also unset in that situation, no extraction provider is configured: the binary still starts, but every extraction-dependent call (`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`) fails with an error identifying the missing configuration — extraction has no default-socket auto-detection (unlike the embedder), so a running sidecar alone is not enough. |
 | `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
@@ -265,14 +267,16 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LIMINIS_DEDUP_HYBRID_THRESHOLD` | No | Entity count per `group_id` above which dedup switches from brute-force cosine to the hybrid FTS + vector path. |
 | `LIMINIS_LLM_COST_TABLE_PATH` | No | Path to a JSON model-pricing table used to populate `estimated_cost_usd` in `token_usage` telemetry. See [Telemetry](telemetry.md). |
 
-That's 28 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
+That's 30 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
 
 **Deprecated `GRAPHITI_*` aliases.** Every `LCG_*` variable above that predates the rename also
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
 `GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
-`GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`, `GRAPHITI_DEDUP_ADAPTER_URL`, and
-`GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is deprecated; rename to <new>` at
-startup. They are honoured for now; prefer the `LCG_*` names.
+`GRAPHITI_EMBEDDING_API_KEY`, `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`,
+`GRAPHITI_DEDUP_ADAPTER_URL`, and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
+deprecated; rename to <new>` at startup. They are honoured for now; prefer the `LCG_*` names.
+`OPENAI_API_KEY` is not in this list — it's a convenience fallback for `LCG_EMBEDDING_API_KEY`,
+not a legacy spelling of an LCG-specific variable, so using it triggers no deprecation warning.
 
 ## Embedder sidecar
 
@@ -317,18 +321,42 @@ start the sidecar first, then start the binary. Extraction does **not** auto-det
 backend is not recommended for extraction quality, so using it there requires the explicit
 `--extractor-uds /tmp/liminis-inference.sock` flag rather than happening by default.
 
-### HTTP transport (CI / Linux / custom embedders)
+### HTTP transport (CI / Linux / custom embedders / hosted providers)
 
-For environments without the Swift sidecar, pass `--embedder-http` pointing at any
-OpenAI-compatible embedding endpoint (local or remote):
+For environments without the Swift sidecar, pass `--embedder-http` pointing at an endpoint
+speaking the same `{input, model}` request / `{data: [{embedding}]}` response wire shape
+`OaiEmbedder` sends and expects. OpenAI's own `/v1/embeddings` is the concrete, verified case:
 
 ```bash
-liminis-context-graph --embedder-http http://127.0.0.1:8765/v1/embeddings
+liminis-context-graph --embedder-http https://api.openai.com/v1/embeddings
 ```
+
+A local unauthenticated server (Ollama, llama.cpp, LM Studio, text-embeddings-inference,
+Infinity, vLLM) works exactly as before — set no key and none is sent. This does **not** make
+every self-described "OpenAI-compatible" provider a drop-in target: only Bearer-token auth
+against this specific wire shape is supported, not divergent request/response formats, and no
+other third-party provider's compatibility is verified here.
 
 See [ADR 0006](adr/0006-embedder-http-contract.md) and
 [ADR 0016](adr/0016-oai-embedding-contract-uds-transport.md) for the wire contract
 specification and transport decision record.
+
+**Authenticating against a hosted endpoint.** Set `LCG_EMBEDDING_API_KEY` (or reuse an
+already-exported `OPENAI_API_KEY`) and the binary sends `Authorization: Bearer <key>` on every
+HTTP embedder request — both the startup probe and steady-state `embed()` calls:
+
+```bash
+export LCG_EMBEDDING_API_KEY=sk-...
+liminis-context-graph --embedder-http https://api.openai.com/v1/embeddings
+```
+
+If the endpoint rejects the credential (HTTP 401/403), startup fails with a message identifying
+it as an authentication problem and naming the relevant env vars — this is always fatal and,
+unlike a generic probe failure, is **not** bypassable via `LCG_EMBEDDING_DIM`: a dimension
+override cannot fix a rejected credential. The key itself never appears in the startup log line,
+any other log output, or telemetry; if the configured URL embeds Basic-auth-style userinfo
+(`user:pass@host`), that component is redacted before being echoed anywhere. See
+[ADR 0497](adr/0497-embedder-http-bearer-auth.md).
 
 ## Extractor: local or hosted
 
@@ -3348,6 +3376,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0451](0451-per-group-ontology-drift-cache-and-clear-scope.md) | Per-Group Ontology Drift — Cache Placement and Clear Scope | 2026-08-23 |
 | [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
+| [0497](0497-embedder-http-bearer-auth.md) | Bearer-Token Authentication for the Embedder HTTP Transport | 2026-08-25 |
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
 
 ## Historical numbering
