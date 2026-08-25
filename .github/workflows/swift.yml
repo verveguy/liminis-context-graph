@@ -30,9 +30,22 @@ name: Swift sidecar CI
 # Contributors should still run `swift test` locally inside
 # `native/local-inference/` on a macOS 26 dev machine before pushing; this
 # job is now a real, enforced backstop for that, not a replacement.
+#
+# `push` is scoped to `main`/`maint/**` plus release tags (not left
+# unscoped) for the same reason `ci.yml`'s header documents: an unscoped
+# `push` alongside `pull_request` over the same paths fires two concurrent
+# runs on every push to an open PR branch — one via `push`, one via
+# `pull_request` — doubling usage of the `macos-26` runner class and
+# producing duplicate status checks. Release tags need their own explicit
+# entry here (FR-002/SC-002) since a `branches:` filter alone excludes tag
+# refs entirely. The concurrency group below additionally cancels a
+# still-running check when a newer commit lands on the same ref.
 
 on:
   push:
+    branches: [main, 'maint/**']
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
     paths:
       - 'native/local-inference/**'
       - '.github/workflows/swift.yml'
@@ -40,6 +53,10 @@ on:
     paths:
       - 'native/local-inference/**'
       - '.github/workflows/swift.yml'
+
+concurrency:
+  group: swift-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   swift-test:
