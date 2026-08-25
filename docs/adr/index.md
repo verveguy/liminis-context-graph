@@ -112,6 +112,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
 | [0497](0497-embedder-http-bearer-auth.md) | Bearer-Token Authentication for the Embedder HTTP Transport | 2026-08-25 |
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
+| [0503](0503-swift-sidecar-source-of-truth.md) | `liminis-context-graph` Is the Sole Source of Truth for the Swift Sidecar | 2026-08-25 |
 
 ## Historical numbering
 
