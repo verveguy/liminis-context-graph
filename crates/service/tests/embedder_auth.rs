@@ -148,6 +148,56 @@ fn startup_succeeds_via_openai_api_key_fallback() {
     client.shutdown();
 }
 
+/// Review finding (issue #497 PR #506): unlike `LCG_EMBEDDING_API_KEY`/`GRAPHITI_EMBEDDING_API_KEY`,
+/// the `OPENAI_API_KEY` fallback tier sends whatever key is exported for OpenAI tooling
+/// generally to *whatever* endpoint is configured — not necessarily OpenAI's own API. That's
+/// intentional per FR-002/Acceptance Scenario 2 (this test's sibling above proves it still
+/// works against a non-OpenAI stub), but it must not be silent: this asserts the informational
+/// notice appears, naming the endpoint, while the key value itself still never leaks.
+#[test]
+fn openai_api_key_fallback_logs_informational_notice_without_leaking_key() {
+    let dir = TempDir::new().unwrap();
+    const KEY: &str = "openai-notice-key-12345";
+    let (port, _captured) = spawn_stub_auth_embedder(Some(KEY));
+    let url = format!("http://127.0.0.1:{port}/v1/embeddings");
+
+    let mut cmd = base_cmd(&dir, &url);
+    cmd.env("OPENAI_API_KEY", KEY);
+    let mut client = McpClient::spawn_capturing_stderr(cmd);
+    client.initialize();
+
+    let status = client.call_tool("knowledge_status", json!({}));
+    assert!(
+        status["result"]["isError"].as_bool() != Some(true),
+        "startup should have succeeded: {status:?}"
+    );
+
+    let rc = unsafe { libc::kill(client.pid() as libc::pid_t, libc::SIGTERM) };
+    assert_eq!(
+        rc,
+        0,
+        "libc::kill failed: {}",
+        std::io::Error::last_os_error()
+    );
+    client.wait_for_exit(Duration::from_secs(10));
+    let stderr = client.collect_stderr().join("");
+
+    assert!(
+        stderr.contains("Using OPENAI_API_KEY as the embedder credential"),
+        "expected an informational (non-deprecation) notice when the OPENAI_API_KEY fallback \
+         tier is used, got stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("DEPRECATED"),
+        "OPENAI_API_KEY is a convenience fallback, not a deprecated alias (FR-003) — it must \
+         not trigger the GRAPHITI_*-style deprecation warning: {stderr}"
+    );
+    assert!(
+        !stderr.contains(KEY),
+        "the informational notice must name the endpoint, never the key value itself: {stderr}"
+    );
+}
+
 /// FR-008 / Acceptance Scenario 1 (User Story 4): the endpoint requires a key, none is
 /// configured, so the probe gets a 401 — startup must fail with a distinguishable, actionable
 /// message rather than a generic/raw error dump.

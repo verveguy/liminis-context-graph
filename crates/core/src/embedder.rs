@@ -266,7 +266,8 @@ impl OaiEmbedder {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
-        Self::new_http(url, model, dim).with_api_key(resolve_embedding_api_key())
+        let api_key = resolve_embedding_api_key(&url);
+        Self::new_http(url, model, dim).with_api_key(api_key)
     }
 
     /// Returns `("uds"|"http", endpoint_string)` for the startup log line. The HTTP endpoint has
@@ -437,13 +438,21 @@ pub fn is_auth_error(e: &Error) -> bool {
 
 /// Resolves the embedder API key via a three-tier lookup, in order:
 /// `LCG_EMBEDDING_API_KEY` → `GRAPHITI_EMBEDDING_API_KEY` (deprecated alias, warns on use) →
-/// `OPENAI_API_KEY` (convenience fallback, no deprecation warning — it isn't a legacy spelling
-/// of an LCG-specific variable). An empty string at any tier is treated as absent for that tier
-/// (FR-002).
+/// `OPENAI_API_KEY` (convenience fallback, no *deprecation* warning — it isn't a legacy spelling
+/// of an LCG-specific variable — but does log a one-line notice, since this tier sends whatever
+/// key is exported for OpenAI tooling generally to *whatever* `--embedder-http`/
+/// `LCG_EMBEDDING_URL` endpoint is configured, not only to OpenAI's own API; a silent send of a
+/// possibly-unrelated credential to an operator-chosen endpoint is worth surfacing even though
+/// it isn't wrong per FR-002/Acceptance Scenario 2). An empty string at any tier is treated as
+/// absent for that tier (FR-002).
+///
+/// `target_url` is used only for this notice's wording (naming the endpoint the key will be
+/// sent to); it does not gate whether the tier applies — that would contradict FR-002, which
+/// requires the fallback to work against any configured HTTP endpoint, not only OpenAI's.
 ///
 /// Deliberately bespoke rather than composed from `lcg_env_var`: that helper is 2-tier, treats
-/// `""` as a valid value, and has no way to skip its deprecation warning for a third tier.
-pub fn resolve_embedding_api_key() -> Option<String> {
+/// `""` as a valid value, and has no way to customize its warning text for a third tier.
+pub fn resolve_embedding_api_key(target_url: &str) -> Option<String> {
     let lcg = std::env::var("LCG_EMBEDDING_API_KEY")
         .ok()
         .filter(|s| !s.is_empty());
@@ -463,9 +472,18 @@ pub fn resolve_embedding_api_key() -> Option<String> {
         return Some(key);
     }
 
-    std::env::var("OPENAI_API_KEY")
+    let openai = std::env::var("OPENAI_API_KEY")
         .ok()
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty());
+    if openai.is_some() {
+        let (redacted_url, _) = redact_url_userinfo(target_url);
+        eprintln!(
+            "[liminis-context-graph] Using OPENAI_API_KEY as the embedder credential; it will \
+             be sent as a Bearer token to {redacted_url}, which may not be OpenAI's own API. \
+             Set LCG_EMBEDDING_API_KEY instead if this key should not go to that endpoint."
+        );
+    }
+    openai
 }
 
 /// Redacts Basic-auth-style userinfo (`user:pass@host`) from a URL before it is echoed in a log
@@ -757,10 +775,12 @@ mod tests {
         }
     }
 
+    const TEST_URL: &str = "http://127.0.0.1:9999/v1/embeddings";
+
     #[test]
     fn resolve_embedding_api_key_none_set_returns_none() {
         with_key_env(None, None, None, || {
-            assert_eq!(resolve_embedding_api_key(), None);
+            assert_eq!(resolve_embedding_api_key(TEST_URL), None);
         });
     }
 
@@ -771,7 +791,10 @@ mod tests {
             Some("graphiti-key"),
             Some("openai-key"),
             || {
-                assert_eq!(resolve_embedding_api_key(), Some("lcg-key".to_string()));
+                assert_eq!(
+                    resolve_embedding_api_key(TEST_URL),
+                    Some("lcg-key".to_string())
+                );
             },
         );
     }
@@ -780,7 +803,7 @@ mod tests {
     fn resolve_embedding_api_key_falls_back_to_graphiti() {
         with_key_env(None, Some("graphiti-key"), Some("openai-key"), || {
             assert_eq!(
-                resolve_embedding_api_key(),
+                resolve_embedding_api_key(TEST_URL),
                 Some("graphiti-key".to_string())
             );
         });
@@ -789,17 +812,36 @@ mod tests {
     #[test]
     fn resolve_embedding_api_key_falls_back_to_openai() {
         with_key_env(None, None, Some("openai-key"), || {
-            assert_eq!(resolve_embedding_api_key(), Some("openai-key".to_string()));
+            assert_eq!(
+                resolve_embedding_api_key(TEST_URL),
+                Some("openai-key".to_string())
+            );
+        });
+    }
+
+    #[test]
+    fn resolve_embedding_api_key_falls_back_to_openai_against_non_openai_host() {
+        // FR-002/Acceptance Scenario 2 requires the OPENAI_API_KEY fallback tier to work against
+        // *any* configured HTTP embedder endpoint, not only OpenAI's own API — target_url only
+        // affects the informational notice's wording, never whether the tier applies.
+        with_key_env(None, None, Some("openai-key"), || {
+            assert_eq!(
+                resolve_embedding_api_key("http://127.0.0.1:8080/v1/embeddings"),
+                Some("openai-key".to_string())
+            );
         });
     }
 
     #[test]
     fn resolve_embedding_api_key_empty_string_treated_as_absent_at_every_tier() {
         with_key_env(Some(""), Some(""), Some("openai-key"), || {
-            assert_eq!(resolve_embedding_api_key(), Some("openai-key".to_string()));
+            assert_eq!(
+                resolve_embedding_api_key(TEST_URL),
+                Some("openai-key".to_string())
+            );
         });
         with_key_env(Some(""), Some(""), Some(""), || {
-            assert_eq!(resolve_embedding_api_key(), None);
+            assert_eq!(resolve_embedding_api_key(TEST_URL), None);
         });
     }
 }

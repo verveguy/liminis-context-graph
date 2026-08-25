@@ -27,11 +27,22 @@ header.
 
 `resolve_embedding_api_key()` checks, in order: `LCG_EMBEDDING_API_KEY` → deprecated alias
 `GRAPHITI_EMBEDDING_API_KEY` (emits the standard `DEPRECATED: env var ...` warning on use) →
-`OPENAI_API_KEY` (a plain, undecorated fallback — **no** deprecation warning, since it isn't a
-legacy spelling of an LCG-specific variable, it's a distinct, widely-recognized standard name
-being read as a convenience default). An empty string at any tier is treated as absent for that
-tier, so `LCG_EMBEDDING_API_KEY=""` falls through to the next tier rather than sending a
-syntactically-present-but-empty Bearer token.
+`OPENAI_API_KEY` (**no** deprecation warning, since it isn't a legacy spelling of an LCG-specific
+variable, it's a distinct, widely-recognized standard name being read as a convenience default).
+An empty string at any tier is treated as absent for that tier, so `LCG_EMBEDDING_API_KEY=""`
+falls through to the next tier rather than sending a syntactically-present-but-empty Bearer token.
+
+The `OPENAI_API_KEY` tier is not gated on the target endpoint being OpenAI's own API — per FR-002
+and Acceptance Scenario 2, it must resolve and be used against *any* configured
+`--embedder-http`/`LCG_EMBEDDING_URL` endpoint, since that's the whole point of the convenience
+tier (a key exported for other OpenAI tooling reused against a self-hosted or third-party
+"OpenAI-compatible" server). That is deliberately a wider blast radius than
+`ANTHROPIC_API_KEY`, which only ever talks to a fixed Anthropic endpoint — this key can be sent
+to an operator-chosen URL. To keep that non-silent, this tier logs a one-line informational
+notice (distinct from the `GRAPHITI_*` deprecation warning — it doesn't ask the operator to
+rename anything) naming the redacted endpoint the key is about to be sent to, so an operator who
+has `OPENAI_API_KEY` exported for unrelated purposes gets a visible signal rather than a silent
+credential reuse.
 
 This is bespoke logic, not a change to the existing `lcg_env_var(new, old)` two-tier helper:
 `lcg_env_var` is used at ~15 other call sites, treats `""` as a valid value, and has no way to

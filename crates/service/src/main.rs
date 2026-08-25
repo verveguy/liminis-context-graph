@@ -189,11 +189,6 @@ async fn bootstrap_app_state(
             .ok()
             .and_then(|s| s.parse().ok());
 
-    // Resolved once and applied identically to both the probe and final embedder
-    // constructions below (issue #497) — a partial application here would authenticate
-    // one but not the other, surfacing as "probe succeeds, every real embed call 401s."
-    let embedding_api_key = resolve_embedding_api_key();
-
     enum ResolvedTransport {
         Http(String),
         #[cfg(unix)]
@@ -254,6 +249,18 @@ async fn bootstrap_app_state(
                 ResolvedTransport::Http("http://127.0.0.1:8765/v1/embeddings".to_string())
             }
         }
+    };
+
+    // Resolved once (HTTP only — FR-005: UDS never performs key lookup or credential
+    // attachment, so resolution is skipped entirely for that transport, which also avoids
+    // firing GRAPHITI_EMBEDDING_API_KEY's deprecation notice for a variable that would have no
+    // effect on a UDS-configured setup) and applied identically to both the probe and final
+    // embedder constructions below (issue #497) — a partial application here would authenticate
+    // one but not the other, surfacing as "probe succeeds, every real embed call 401s."
+    let embedding_api_key = match &resolved {
+        ResolvedTransport::Http(url) => resolve_embedding_api_key(url),
+        #[cfg(unix)]
+        ResolvedTransport::Uds(_) => None,
     };
 
     // ── Build probe embedder, then final embedder with discovered dim ─────────
