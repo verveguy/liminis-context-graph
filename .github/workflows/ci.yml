@@ -348,6 +348,22 @@ jobs:
       - name: cargo test --release (restored build; captured for recompile-regression check)
         run: cargo test --release 2>&1 | tee /tmp/build.log
 
+      # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
+      # processes. crates/service/tests/ spawns the built binary as a subprocess in many
+      # integration tests (socket mode, MCP-stdio standalone/attached mode, migration,
+      # eager-index-build); before #500's fix, a test panic/failure between spawn and its own
+      # cleanup — or a signal swallowed during the binary's own startup race window — could leave
+      # the process running past the end of the suite. `pgrep -af` matches the trailing space to
+      # avoid matching unrelated binaries (e.g. `liminis-context-graph-something`) and prints the
+      # PID + full command line of any survivor for debugging.
+      - name: Check for leaked liminis-context-graph processes (issue #500 regression guard)
+        run: |
+          if pgrep -af "liminis-context-graph "; then
+            echo "ERROR: liminis-context-graph process(es) above are still running after the test suite finished — see issue #500"
+            exit 1
+          fi
+          echo "OK: no leaked liminis-context-graph processes found"
+
       # #341/FR-006: generalized regression guard for Story 4. Previously this only
       # checked for "Compiling lbug " specifically (the original FR-008, from when this
       # job did its own `cargo build --release`). Now that `test` never builds anything

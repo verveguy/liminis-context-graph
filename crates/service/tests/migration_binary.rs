@@ -8,6 +8,10 @@
 // 3. The correct post-migration file layout under .lcg/
 
 #[cfg(unix)]
+#[path = "common/mod.rs"]
+mod common;
+
+#[cfg(unix)]
 mod migration_binary_tests {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
@@ -17,6 +21,8 @@ mod migration_binary_tests {
 
     use lcg_core::db::Db;
     use tempfile::TempDir;
+
+    use super::common::ChildGuard;
 
     fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
@@ -202,21 +208,21 @@ mod migration_binary_tests {
         let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
         let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
-        let mut child = Command::new(binary)
-            .current_dir(workspace)
+        let mut cmd = Command::new(binary);
+        cmd.current_dir(workspace)
             .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
             .args(["--embedder-http", &embedder_url])
             // With no ANTHROPIC_API_KEY, no sidecar socket, and no LCG_EXTRACTION_URL in the
             // CI environment, startup would otherwise fail fast per FR-011. This test never
             // exercises extraction, so the URL need not be reachable.
-            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-            .spawn()
-            .expect("failed to spawn liminis-context-graph");
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+        // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+        // or fails an assertion before reaching its own explicit SIGTERM/wait sequence (#500).
+        let mut child = ChildGuard::spawn(cmd);
 
         let ready = wait_for_socket(&socket_path, Duration::from_secs(30));
         if !ready {
-            child.kill().ok();
             panic!("service did not become ready within 30s — migration may have failed");
         }
 
@@ -345,14 +351,8 @@ mod migration_binary_tests {
 
         // ── Clean shutdown ────────────────────────────────────────────────────
         send_sigterm(child.id());
-        let status = wait_for_exit(&mut child, Duration::from_secs(10));
-        let status = match status {
-            Some(s) => s,
-            None => {
-                child.kill().ok();
-                panic!("service did not exit within 10s after SIGTERM");
-            }
-        };
+        let status = wait_for_exit(&mut child, Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("service did not exit within 10s after SIGTERM"));
         assert_eq!(
             status.code(),
             Some(0),
@@ -386,19 +386,19 @@ mod migration_binary_tests {
         let embedder_url = format!("http://127.0.0.1:{embedder_port}/v1/embeddings");
 
         let binary = env!("CARGO_BIN_EXE_liminis-context-graph");
-        let mut child = Command::new(binary)
-            .current_dir(workspace)
+        let mut cmd = Command::new(binary);
+        cmd.current_dir(workspace)
             .env("LCG_SOCKET_PATH", socket_path.to_str().unwrap())
             .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
             .env("LCG_WAL_DIR", custom_wal_root.to_str().unwrap())
             .args(["--embedder-http", &embedder_url])
-            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"])
-            .spawn()
-            .expect("failed to spawn liminis-context-graph");
+            .args(["--extractor-http", "http://127.0.0.1:1/v1/chat/completions"]);
+        // ChildGuard ensures the spawned process is killed and reaped even if this test panics
+        // or fails an assertion before reaching its own explicit SIGTERM/wait sequence (#500).
+        let mut child = ChildGuard::spawn(cmd);
 
         let ready = wait_for_socket(&socket_path, Duration::from_secs(30));
         if !ready {
-            child.kill().ok();
             panic!("service did not become ready within 30s — migration may have failed");
         }
 
@@ -473,14 +473,8 @@ mod migration_binary_tests {
 
         // ── Clean shutdown ────────────────────────────────────────────────────
         send_sigterm(child.id());
-        let status = wait_for_exit(&mut child, Duration::from_secs(10));
-        let status = match status {
-            Some(s) => s,
-            None => {
-                child.kill().ok();
-                panic!("service did not exit within 10s after SIGTERM");
-            }
-        };
+        let status = wait_for_exit(&mut child, Duration::from_secs(10))
+            .unwrap_or_else(|| panic!("service did not exit within 10s after SIGTERM"));
         assert_eq!(
             status.code(),
             Some(0),

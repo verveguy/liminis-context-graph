@@ -733,39 +733,96 @@ async fn bootstrap_app_state(
     Ok(state)
 }
 
-/// Runs the Unix-socket JSON-RPC service (the pre-existing, default behavior). `listener` is
-/// already bound by the caller — binding happens before DB open so `health_check`/recovery IPC
-/// work even in degraded mode (ADR-0009).
-async fn run_socket_service(
+/// Races `bootstrap_app_state` against the shared shutdown signal (FR-005/ADR-0500): without
+/// this, a SIGTERM/SIGINT arriving while blocked on an unreachable embedder/extractor probe (or
+/// any other unbounded step inside `bootstrap_app_state`) would only be *recorded* by
+/// `shutdown_ct` — installed at the very top of `async_main`, before this call — but not acted
+/// on until that probe itself resolves, which is exactly the condition issue #500's leaked
+/// processes reproduced. Returns `Ok(None)` if the shutdown signal wins the race.
+///
+/// Dropping the losing `bootstrap_app_state` future here is safe: any `Db`/`Arc<Db>` it had
+/// opened locally at that point is released through the normal Drop path (the same
+/// WAL-checkpoint-on-drop guarantee ADR-0017 already relies on for the equivalent `drop(state)`
+/// calls in `run_socket_service`/`run_mcp_standalone`'s own shutdown tails), and its startup
+/// self-recovery branch's `spawn_blocking` task, if already running, is not aborted by this — it
+/// keeps running detached, bounded by `main()`'s own `runtime.shutdown_timeout`, exactly as it
+/// already is for a normal shutdown.
+async fn bootstrap_or_exit_on_signal(
+    shutdown_ct: &CancellationToken,
     telemetry_sink: Arc<dyn TelemetrySink>,
-    sink_drain_handle: tokio::task::JoinHandle<()>,
-    state: Arc<AppState>,
-    listener: UnixListener,
-    shutdown_timeout_ms: u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // ── Signal handler setup (R1: installed BEFORE the accept loop) ───────────
-    // SIGTERM: captured via tokio's unix signal infrastructure. The OS-level handler
-    // is registered synchronously when signal() is called — the async task just drains it.
-    let shutdown_notify = Arc::new(Notify::new());
+    pre_migration_degraded: Option<String>,
+    db_path: String,
+    embedder_flag: Option<EmbedderFlag>,
+    extractor_flag: Option<ExtractorFlag>,
+) -> Result<Option<Arc<AppState>>, Box<dyn std::error::Error>> {
+    tokio::select! {
+        biased;
+        _ = shutdown_ct.cancelled() => Ok(None),
+        result = bootstrap_app_state(
+            telemetry_sink,
+            pre_migration_degraded,
+            db_path,
+            embedder_flag,
+            extractor_flag,
+        ) => result.map(Some),
+    }
+}
 
+/// Installs the process's one real SIGTERM/SIGINT handling, at the very top of `async_main` —
+/// before `migrate_workspace`/`bootstrap_app_state` run. See ADR-0500: previously each of
+/// `run_socket_service`/`run_mcp_standalone` registered its own handler, and `run_mcp_attached`
+/// registered none at all — so a signal received any time before whichever of those functions
+/// was eventually reached had nothing to observe it but `sigterm_diag`'s diagnostic,
+/// sender-PID-only handler (installed in `main()`, before the tokio runtime even exists). Once a
+/// handler is registered for a signal, the OS does not requeue or redeliver it later — so that
+/// window silently and permanently swallowed the signal, leaking the process (issue #500). Every
+/// caller now shares this one `shutdown_ct`, cancelled at most once, instead of each registering
+/// its own.
+fn install_shutdown_signal_handlers(shutdown_ct: CancellationToken) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         let mut sigterm_stream = signal(SignalKind::terminate())?;
-        let notify = Arc::clone(&shutdown_notify);
+        let ct = shutdown_ct.clone();
         tokio::spawn(async move {
             sigterm_stream.recv().await;
             eprintln!(
                 "liminis-context-graph: received SIGTERM, shutting down (sender pid={})",
                 sigterm_diag::sender_pid_display()
             );
-            notify.notify_one();
+            ct.cancel();
         });
     }
     {
-        let notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             eprintln!("liminis-context-graph: received SIGINT, shutting down");
+            shutdown_ct.cancel();
+        });
+    }
+    Ok(())
+}
+
+/// Runs the Unix-socket JSON-RPC service (the pre-existing, default behavior). `listener` is
+/// already bound by the caller — binding happens before DB open so `health_check`/recovery IPC
+/// work even in degraded mode (ADR-0009). `shutdown_ct` is the one shared signal source
+/// installed at the top of `async_main` (see `install_shutdown_signal_handlers`) — this function
+/// no longer registers its own handler.
+async fn run_socket_service(
+    telemetry_sink: Arc<dyn TelemetrySink>,
+    sink_drain_handle: tokio::task::JoinHandle<()>,
+    state: Arc<AppState>,
+    listener: UnixListener,
+    shutdown_timeout_ms: u64,
+    shutdown_ct: CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // `shutdown_notify` is also notified directly by `handle_connection` on a
+    // knowledge_close-initiated shutdown (R3) — forward the shared shutdown signal into it
+    // rather than replacing it, so both triggers feed the same accept-loop break below.
+    let shutdown_notify = Arc::new(Notify::new());
+    {
+        let notify = Arc::clone(&shutdown_notify);
+        tokio::spawn(async move {
+            shutdown_ct.cancelled().await;
             notify.notify_one();
         });
     }
@@ -881,13 +938,16 @@ async fn run_mcp_standalone(
     state: Arc<AppState>,
     scopes: Vec<mcp::scope::Scope>,
     allow_remote_close: bool,
+    shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("liminis-context-graph: MCP-over-stdio (standalone), scope={scopes:?}");
 
-    // Cancelled after a successful knowledge_close call so the serve loop unwinds and this
-    // function can run the same cancel/drain/drop sequence the socket service's tail uses
-    // (R2/R4/R5/R6), rather than std::process::exit.
-    let shutdown_ct = CancellationToken::new();
+    // `shutdown_ct` is the one shared signal source installed at the top of `async_main` (see
+    // `install_shutdown_signal_handlers`) — also cancelled after a successful knowledge_close
+    // call, so the serve loop unwinds either way and this function runs the same
+    // cancel/drain/drop sequence the socket service's tail uses (R2/R4/R5/R6), rather than
+    // std::process::exit. `stdin` EOF is handled structurally — rmcp's serve loop treats it as
+    // QuitReason::Closed on its own.
     let backend = mcp::backend::StandaloneBackend::new(Arc::clone(&state));
     let server = mcp::server::LcgMcpServer::new(
         backend,
@@ -895,32 +955,6 @@ async fn run_mcp_standalone(
         allow_remote_close,
         Some(shutdown_ct.clone()),
     );
-
-    // SIGTERM/SIGINT parity with run_socket_service's signal handling (R1): without this, an
-    // external kill/supervisor stop would hit the default disposition and skip the WAL
-    // checkpoint below entirely, risking corruption on the next open. `stdin` EOF is already
-    // handled structurally — rmcp's serve loop treats it as QuitReason::Closed on its own.
-    #[cfg(unix)]
-    {
-        let mut sigterm_stream = signal(SignalKind::terminate())?;
-        let ct = shutdown_ct.clone();
-        tokio::spawn(async move {
-            sigterm_stream.recv().await;
-            eprintln!(
-                "liminis-context-graph: received SIGTERM, shutting down (sender pid={})",
-                sigterm_diag::sender_pid_display()
-            );
-            ct.cancel();
-        });
-    }
-    {
-        let ct = shutdown_ct.clone();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            eprintln!("liminis-context-graph: received SIGINT, shutting down");
-            ct.cancel();
-        });
-    }
 
     let running = server
         .serve_with_ct(rmcp::transport::stdio(), shutdown_ct)
@@ -983,6 +1017,7 @@ async fn run_mcp_attached(
     socket_path: String,
     scopes: Vec<mcp::scope::Scope>,
     allow_remote_close: bool,
+    shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "liminis-context-graph: MCP-over-stdio (attached to {socket_path}), scope={scopes:?}"
@@ -990,7 +1025,15 @@ async fn run_mcp_attached(
     let backend = mcp::attached::AttachedBackend::connect(&socket_path).await?;
     let server = mcp::server::LcgMcpServer::new(backend, scopes, allow_remote_close, None);
 
-    let running = server.serve(rmcp::transport::stdio()).await?;
+    // `shutdown_ct` is the one shared signal source installed at the top of `async_main` (see
+    // `install_shutdown_signal_handlers`). Previously this mode registered no signal handling at
+    // all — the same architectural gap `run_socket_service`/`run_mcp_standalone` had, in a more
+    // severe form (SIGTERM/SIGINT were never honored, not just during a startup window). Attached
+    // mode holds no DB/WAL state of its own to checkpoint, so `serve_with_ct` closing the serve
+    // loop on cancellation is sufficient — there is no cancel/drain/drop tail to run afterward.
+    let running = server
+        .serve_with_ct(rmcp::transport::stdio(), shutdown_ct)
+        .await?;
     running.waiting().await?;
     Ok(())
 }
@@ -1008,6 +1051,14 @@ async fn async_main(
     let (stderr_sink, sink_drain_handle) = sink::StderrSink::start();
     let telemetry_sink: Arc<dyn lcg_core::TelemetrySink> = stderr_sink;
 
+    // Installed first, before any workspace/migration/bootstrap work below — see ADR-0500 and
+    // `install_shutdown_signal_handlers`'s doc comment for why this ordering is load-bearing
+    // (issue #500): everything from here to `run_socket_service`/`run_mcp_standalone`/
+    // `run_mcp_attached` shares this one `shutdown_ct` instead of each registering its own
+    // handler later.
+    let shutdown_ct = CancellationToken::new();
+    install_shutdown_signal_handlers(shutdown_ct.clone())?;
+
     // Attached MCP mode never touches the workspace filesystem or migration state: it only
     // forwards calls over the given socket to a service that already owns the DB (FR-006).
     // Matches against `&cli_mode` (not by value) so Socket/standalone-Mcp can still move
@@ -1023,7 +1074,7 @@ async fn async_main(
         let scopes = scopes.clone();
         let allow_remote_close = *allow_remote_close;
         drop(sink_drain_handle); // attached mode emits no telemetry events; nothing to drain
-        return run_mcp_attached(socket_path, scopes, allow_remote_close).await;
+        return run_mcp_attached(socket_path, scopes, allow_remote_close, shutdown_ct).await;
     }
 
     // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
@@ -1117,14 +1168,23 @@ async fn async_main(
             let listener = UnixListener::bind(&socket_path)?;
             eprintln!("liminis-context-graph: listening on {socket_path}");
 
-            let state = bootstrap_app_state(
+            let Some(state) = bootstrap_or_exit_on_signal(
+                &shutdown_ct,
                 Arc::clone(&telemetry_sink),
                 pre_migration_degraded,
                 db_path,
                 embedder,
                 extractor,
             )
-            .await?;
+            .await?
+            else {
+                eprintln!(
+                    "liminis-context-graph: shutdown signal received during startup, exiting"
+                );
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Ok(());
+            };
 
             run_socket_service(
                 telemetry_sink,
@@ -1132,6 +1192,7 @@ async fn async_main(
                 state,
                 listener,
                 shutdown_timeout_ms,
+                shutdown_ct,
             )
             .await
         }
@@ -1142,14 +1203,23 @@ async fn async_main(
             scopes,
             allow_remote_close,
         } => {
-            let state = bootstrap_app_state(
+            let Some(state) = bootstrap_or_exit_on_signal(
+                &shutdown_ct,
                 Arc::clone(&telemetry_sink),
                 pre_migration_degraded,
                 db_path,
                 embedder,
                 extractor,
             )
-            .await?;
+            .await?
+            else {
+                eprintln!(
+                    "liminis-context-graph: shutdown signal received during startup, exiting"
+                );
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Ok(());
+            };
 
             run_mcp_standalone(
                 telemetry_sink,
@@ -1157,6 +1227,7 @@ async fn async_main(
                 state,
                 scopes,
                 allow_remote_close,
+                shutdown_ct,
             )
             .await
         }
