@@ -17,7 +17,7 @@ use lcg_core::{
     db::Db,
     embedder::{
         is_auth_error, is_transport_error, redact_url_userinfo, resolve_embedding_api_key,
-        Embedder, OaiEmbedder,
+        Embedder, OaiEmbedder, UnconfiguredEmbedder, EMBEDDER_UNREACHABLE_DEGRADED_REASON,
     },
     env::lcg_env_var,
     error::Error as CoreError,
@@ -151,66 +151,64 @@ fn recording_sink(
     ])))
 }
 
-/// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
-/// ADR-0009), and builds `AppState`. Shared by the socket service and standalone MCP mode
-/// (`--mcp-stdio` without `--connect`) so both reuse byte-for-byte the same bootstrap path —
-/// attached MCP mode (`--mcp-stdio --connect <path>`) never calls this at all, since it forwards
-/// every call to an already-running service instead of opening the DB itself (FR-006).
-///
-/// Precondition (#437): must only be called after `migration::migrate_workspace` has run for
-/// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call
-/// below needs the configured WAL root (`startup_wal_root`) to already contain any legacy
-/// content for a `.graphiti`-era workspace, or it silently no-ops and legacy WAL content is left
-/// loose and invisible. As of #442, `async_main` resolves that same WAL root and passes it to
-/// `migrate_workspace`, so the two migrations always agree on one destination regardless of any
-/// `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR` override.
-async fn bootstrap_app_state(
-    telemetry_sink: Arc<dyn TelemetrySink>,
-    pre_migration_degraded: Option<String>,
-    db_path: String,
-    embedder_flag: Option<EmbedderFlag>,
-    extractor_flag: Option<ExtractorFlag>,
-) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
-    let (cli_uds, cli_http) = match embedder_flag {
-        Some(EmbedderFlag::Uds(p)) => (Some(p), None),
-        Some(EmbedderFlag::Http(u)) => (None, Some(u)),
-        None => (None, None),
-    };
+/// A resolved embedder transport, ready to probe or to build the final embedder against once a
+/// dimension is known. Shared between `resolve_and_probe_embedder` and `bootstrap_app_state`'s
+/// post-probe embedder construction.
+enum ResolvedTransport {
+    Http(String),
+    #[cfg(unix)]
+    Uds(String),
+}
 
-    // ── Transport resolution (FR-003/FR-004/FR-007) ───────────────────────────────
-    // Priority: CLI flag > default UDS path (if socket exists) > LCG_EMBEDDING_URL env > error
+/// Outcome of one attempt to resolve the embedder transport and probe it. Three-way rather than a
+/// plain `Result` so callers (the bounded retry loop in `bootstrap_app_state`, issue #499 FR-002)
+/// can distinguish "will never work" (`Fatal`, e.g. a malformed `--embedder-http` URL or a
+/// rejected credential — never retried, in either launch mode) from "not reachable yet"
+/// (`Retryable`, e.g. a UDS socket file that doesn't exist yet or a transport-classified probe
+/// failure — retried only in standalone `--mcp-stdio` mode per FR-002/FR-004).
+enum ProbeOutcome {
+    Ready {
+        resolved: ResolvedTransport,
+        embedding_dim: usize,
+        embedding_model_probed: String,
+        embedding_api_key: Option<String>,
+    },
+    Fatal(String),
+    Retryable(String),
+}
+
+/// Resolves the embedder transport (CLI flag > default UDS path > `LCG_EMBEDDING_URL` env >
+/// error, FR-003/FR-004/FR-007) and runs the startup probe once. Re-checks transport resolution
+/// (UDS socket existence, `LCG_EMBEDDING_URL`) on every call rather than caching it from a first
+/// attempt: the socket file itself may not exist until the sidecar finishes binding, which is
+/// plausibly the *more* common shape of the sidecar/lcg simultaneous-launch race (issue #499) than
+/// an already-existing-but-not-yet-accepting socket — so the retry loop in `bootstrap_app_state`
+/// must re-run this whole sequence, not just re-probe an already-resolved transport.
+async fn resolve_and_probe_embedder(
+    cli_uds: Option<&str>,
+    cli_http: Option<&str>,
+    embedder_model: &str,
+    embedding_dim_override: Option<usize>,
+) -> ProbeOutcome {
     const DEFAULT_UDS_PATH: &str = "/tmp/liminis-inference.sock";
-    let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
-        .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
-
-    // Dim override — used as fallback if probe fails (FR-008)
-    let embedding_dim_override: Option<usize> =
-        lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
-            .ok()
-            .and_then(|s| s.parse().ok());
-
-    enum ResolvedTransport {
-        Http(String),
-        #[cfg(unix)]
-        Uds(String),
-    }
 
     let resolved = if let Some(uds_path) = cli_uds {
         // FR-010: validate socket exists at startup
         #[cfg(unix)]
         {
-            if !std::path::Path::new(&uds_path).exists() {
-                return Err(format!(
+            if !std::path::Path::new(uds_path).exists() {
+                return ProbeOutcome::Retryable(format!(
                     "UDS socket not found at {uds_path}. \
                      Ensure the liminis-inference sidecar is running."
-                )
-                .into());
+                ));
             }
-            ResolvedTransport::Uds(uds_path)
+            ResolvedTransport::Uds(uds_path.to_string())
         }
         #[cfg(not(unix))]
         {
-            return Err("--embedder-uds is only supported on Unix platforms".into());
+            return ProbeOutcome::Fatal(
+                "--embedder-uds is only supported on Unix platforms".to_string(),
+            );
         }
     } else if let Some(http_url) = cli_http {
         // FR-011: validate URL format — must have a scheme and a non-empty host.
@@ -218,13 +216,12 @@ async fn bootstrap_app_state(
             .strip_prefix("https://")
             .or_else(|| http_url.strip_prefix("http://"));
         if host_part.map(|h| h.is_empty()).unwrap_or(true) {
-            return Err(format!(
+            return ProbeOutcome::Fatal(format!(
                 "Invalid --embedder-http URL: {http_url:?}. \
                  Must start with http:// or https:// and include a host."
-            )
-            .into());
+            ));
         }
-        ResolvedTransport::Http(http_url)
+        ResolvedTransport::Http(http_url.to_string())
     } else {
         // No CLI flag — apply default resolution order
         #[cfg(unix)]
@@ -233,12 +230,11 @@ async fn bootstrap_app_state(
         } else if let Ok(url) = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL") {
             ResolvedTransport::Http(url)
         } else {
-            return Err(format!(
+            return ProbeOutcome::Retryable(format!(
                 "No embedder configured: default UDS socket {DEFAULT_UDS_PATH} not found and \
                  LCG_EMBEDDING_URL is not set. Pass --embedder-uds or --embedder-http, or \
                  start the liminis-inference sidecar."
-            )
-            .into());
+            ));
         }
         #[cfg(not(unix))]
         {
@@ -255,25 +251,25 @@ async fn bootstrap_app_state(
     // attachment, so resolution is skipped entirely for that transport, which also avoids
     // firing GRAPHITI_EMBEDDING_API_KEY's deprecation notice for a variable that would have no
     // effect on a UDS-configured setup) and applied identically to both the probe and final
-    // embedder constructions below (issue #497) — a partial application here would authenticate
-    // one but not the other, surfacing as "probe succeeds, every real embed call 401s."
+    // embedder constructions (issue #497) — a partial application would authenticate one but
+    // not the other, surfacing as "probe succeeds, every real embed call 401s."
     let embedding_api_key = match &resolved {
         ResolvedTransport::Http(url) => resolve_embedding_api_key(url),
         #[cfg(unix)]
         ResolvedTransport::Uds(_) => None,
     };
 
-    // ── Build probe embedder, then final embedder with discovered dim ─────────
-    // The probe runs before DB open so that a misconfigured embedder fails fast
-    // at startup rather than on the first embed request (FR-010/FR-011).
+    // ── Probe (before DB open) so a misconfigured embedder fails fast at startup rather than
+    // on the first embed request (FR-010/FR-011) — or, in standalone --mcp-stdio mode, so the
+    // caller's retry loop can distinguish "not up yet" from "never will be" (issue #499).
     let probe_embedder = match &resolved {
         ResolvedTransport::Http(url) => {
-            OaiEmbedder::new_http(url.clone(), embedder_model.clone(), 1)
+            OaiEmbedder::new_http(url.clone(), embedder_model.to_string(), 1)
                 .with_api_key(embedding_api_key.clone())
         }
         #[cfg(unix)]
         ResolvedTransport::Uds(path) => {
-            OaiEmbedder::new_uds(path.clone(), embedder_model.clone(), 1)
+            OaiEmbedder::new_uds(path.clone(), embedder_model.to_string(), 1)
         }
     };
 
@@ -293,30 +289,41 @@ async fn bootstrap_app_state(
         }
     };
 
-    let (embedding_dim, embedding_model_probed) = match probe_embedder.probe().await {
-        Ok(result) => result,
+    match probe_embedder.probe().await {
+        Ok((embedding_dim, embedding_model_probed)) => {
+            eprintln!(
+                "embedder: transport={transport_label}, endpoint={endpoint}, dim={embedding_dim}"
+            );
+            ProbeOutcome::Ready {
+                resolved,
+                embedding_dim,
+                embedding_model_probed,
+                embedding_api_key,
+            }
+        }
         Err(e) if is_transport_error(&e) => {
-            // FR-011: transport/connectivity failures are always fatal at startup.
-            // LCG_EMBEDDING_DIM cannot override an unreachable embedder.
-            return Err(scrub_url(format!(
+            // FR-011/#499 FR-002: a transport/connectivity failure is always fatal on the
+            // socket-service path (FR-001); on standalone --mcp-stdio it's retried with bounded
+            // backoff before the caller decides to degrade instead. LCG_EMBEDDING_DIM cannot
+            // override an unreachable embedder either way.
+            ProbeOutcome::Retryable(scrub_url(format!(
                 "embedder unreachable at startup: {e}. \
                  Ensure the embedder sidecar is running before starting liminis-context-graph."
-            ))
-            .into());
+            )))
         }
         Err(e) if is_auth_error(&e) => {
             // FR-008: an authentication failure (401/403) is always fatal at startup and is
             // never bypassable via LCG_EMBEDDING_DIM — a dimension override cannot paper over
-            // a rejected credential.
-            return Err(scrub_url(format!(
+            // a rejected credential. Not retried in either launch mode (issue #499).
+            ProbeOutcome::Fatal(scrub_url(format!(
                 "embedder authentication failed at startup: {e}. \
                  Check LCG_EMBEDDING_API_KEY (or GRAPHITI_EMBEDDING_API_KEY / OPENAI_API_KEY) \
                  against the configured embedder endpoint's expected credential."
-            ))
-            .into());
+            )))
         }
         Err(e) => {
-            // Non-transport, non-auth probe failure (e.g., unexpected response shape).
+            // Non-transport, non-auth probe failure (e.g., unexpected response shape). Not
+            // retried (issue #499 scope is limited to transport-classified failures).
             // LCG_EMBEDDING_DIM can override this per FR-008.
             if let Some(dim) = embedding_dim_override {
                 eprintln!(
@@ -326,17 +333,150 @@ async fn bootstrap_app_state(
                          using LCG_EMBEDDING_DIM={dim} override"
                     ))
                 );
-                (dim, embedder_model.clone())
+                ProbeOutcome::Ready {
+                    resolved,
+                    embedding_dim: dim,
+                    embedding_model_probed: embedder_model.to_string(),
+                    embedding_api_key,
+                }
             } else {
-                return Err(scrub_url(format!(
+                ProbeOutcome::Fatal(scrub_url(format!(
                     "embedder probe failed and LCG_EMBEDDING_DIM is not set: {e}"
-                ))
-                .into());
+                )))
+            }
+        }
+    }
+}
+
+/// Bounded retry ceiling for the embedder probe in standalone `--mcp-stdio` mode (issue #499
+/// FR-002/SC-003): long enough to absorb typical sidecar process-spawn + socket-bind timing
+/// (sub-second to low-single-digit seconds), short enough to stay well under typical MCP client
+/// initialize timeouts (commonly 10s+). Not applied on the socket-service path at all (FR-001) —
+/// see `bootstrap_app_state`'s `allow_embedder_degrade` parameter.
+const EMBEDDER_RETRY_CEILING: Duration = Duration::from_secs(5);
+const EMBEDDER_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const EMBEDDER_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
+/// ADR-0009), and builds `AppState`. Shared by the socket service and standalone MCP mode
+/// (`--mcp-stdio` without `--connect`) so both reuse byte-for-byte the same bootstrap path —
+/// attached MCP mode (`--mcp-stdio --connect <path>`) never calls this at all, since it forwards
+/// every call to an already-running service instead of opening the DB itself (FR-006).
+///
+/// `allow_embedder_degrade` distinguishes the two launch modes for issue #499's FR-002/FR-003:
+/// `false` (socket-service, `CliMode::Socket`) preserves today's fail-fast behavior byte-for-byte
+/// — the very first transport-resolution-or-probe failure returns `Err` immediately, zero
+/// retries (FR-001). `true` (standalone `--mcp-stdio`, `CliMode::Mcp { connect: None, .. }`)
+/// retries a `Retryable` outcome with bounded backoff (`EMBEDDER_RETRY_CEILING`), and if the
+/// retry window is exhausted, starts in degraded mode without ever opening the database — see the
+/// early return below — rather than exiting.
+///
+/// Precondition (#437): must only be called after `migration::migrate_workspace` has run for
+/// the current workspace (see `async_main`) — this function's `migrate_wal_root_if_needed` call
+/// below needs the configured WAL root (`startup_wal_root`) to already contain any legacy
+/// content for a `.graphiti`-era workspace, or it silently no-ops and legacy WAL content is left
+/// loose and invisible. As of #442, `async_main` resolves that same WAL root and passes it to
+/// `migrate_workspace`, so the two migrations always agree on one destination regardless of any
+/// `LCG_WAL_DIR`/`GRAPHITI_WAL_DIR` override.
+async fn bootstrap_app_state(
+    telemetry_sink: Arc<dyn TelemetrySink>,
+    pre_migration_degraded: Option<String>,
+    db_path: String,
+    embedder_flag: Option<EmbedderFlag>,
+    extractor_flag: Option<ExtractorFlag>,
+    allow_embedder_degrade: bool,
+) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+    let (cli_uds, cli_http) = match embedder_flag {
+        Some(EmbedderFlag::Uds(p)) => (Some(p), None),
+        Some(EmbedderFlag::Http(u)) => (None, Some(u)),
+        None => (None, None),
+    };
+
+    let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
+        .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
+
+    // Dim override — used as fallback if probe fails (FR-008)
+    let embedding_dim_override: Option<usize> =
+        lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
+            .ok()
+            .and_then(|s| s.parse().ok());
+
+    // ── Transport resolution + probe, with bounded retry in standalone --mcp-stdio mode
+    // (issue #499 FR-002/FR-004) ────────────────────────────────────────────────────────
+    // Socket mode (`allow_embedder_degrade == false`) hits `Retryable`'s `return Err(..)` arm on
+    // the very first iteration, exactly as the pre-#499 single-shot code did (FR-001/SC-002) — the
+    // loop only actually iterates more than once when standalone `--mcp-stdio` is retrying.
+    let retry_deadline = std::time::Instant::now() + EMBEDDER_RETRY_CEILING;
+    let mut backoff = EMBEDDER_RETRY_INITIAL_BACKOFF;
+    let (resolved, embedding_dim, embedding_model_probed, embedding_api_key) = loop {
+        match resolve_and_probe_embedder(
+            cli_uds.as_deref(),
+            cli_http.as_deref(),
+            &embedder_model,
+            embedding_dim_override,
+        )
+        .await
+        {
+            ProbeOutcome::Ready {
+                resolved,
+                embedding_dim,
+                embedding_model_probed,
+                embedding_api_key,
+            } => {
+                break (
+                    resolved,
+                    embedding_dim,
+                    embedding_model_probed,
+                    embedding_api_key,
+                )
+            }
+            ProbeOutcome::Fatal(msg) => return Err(msg.into()),
+            ProbeOutcome::Retryable(msg) => {
+                if !allow_embedder_degrade {
+                    return Err(msg.into());
+                }
+                let now = std::time::Instant::now();
+                if now >= retry_deadline {
+                    // FR-003: retry window exhausted in standalone --mcp-stdio mode — start
+                    // degraded rather than exit. Never opens the DB (Costing finding 3: the
+                    // embedding dimension is never known here), so this returns directly rather
+                    // than falling through to the DB-open logic below.
+                    eprintln!(
+                        "liminis-context-graph: embedder still unreachable after {:.1}s of \
+                         retries ({msg}) — starting in degraded mode (standalone --mcp-stdio); \
+                         see knowledge_status for degraded_reason={EMBEDDER_UNREACHABLE_DEGRADED_REASON:?}",
+                        EMBEDDER_RETRY_CEILING.as_secs_f64()
+                    );
+                    telemetry_sink.emit(TelemetryEvent::ServiceState {
+                        ts_ms: now_ms(),
+                        state: "degraded".to_string(),
+                        reason: Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()),
+                        detail: Some(serde_json::Value::String(msg)),
+                    });
+                    // migration_failed (if any) takes precedence, matching the DB-open degraded
+                    // branch below's own precedence rule.
+                    let degraded_reason = pre_migration_degraded
+                        .or_else(|| Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()));
+                    let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
+                    let state = Arc::new(AppState::from_env(
+                        telemetry_sink,
+                        None,
+                        degraded_reason,
+                        db_path,
+                        Arc::new(UnconfiguredEmbedder),
+                        String::new(),
+                        Arc::new(UnconfiguredExtractor),
+                        embedding_cache,
+                    ));
+                    state.indices_built.store(false, Ordering::Release);
+                    return Ok(state);
+                }
+                tokio::time::sleep(backoff.min(retry_deadline.saturating_duration_since(now)))
+                    .await;
+                backoff = (backoff * 2).min(EMBEDDER_RETRY_MAX_BACKOFF);
             }
         }
     };
-
-    eprintln!("embedder: transport={transport_label}, endpoint={endpoint}, dim={embedding_dim}");
 
     // Build the final embedder with the correct probed dim
     let embedder: Arc<dyn Embedder> = match &resolved {
@@ -794,6 +934,7 @@ async fn bootstrap_or_exit_on_signal(
     db_path: String,
     embedder_flag: Option<EmbedderFlag>,
     extractor_flag: Option<ExtractorFlag>,
+    allow_embedder_degrade: bool,
 ) -> Result<Option<Arc<AppState>>, Box<dyn std::error::Error>> {
     tokio::select! {
         biased;
@@ -804,6 +945,7 @@ async fn bootstrap_or_exit_on_signal(
             db_path,
             embedder_flag,
             extractor_flag,
+            allow_embedder_degrade,
         ) => result.map(Some),
     }
 }
@@ -1208,6 +1350,8 @@ async fn async_main(
             let listener = UnixListener::bind(&socket_path)?;
             eprintln!("liminis-context-graph: listening on {socket_path}");
 
+            // FR-001/SC-002: socket-service (hand-started) mode keeps today's fail-fast
+            // behavior unchanged — an unreachable embedder is never retried or degraded here.
             let Some(state) = bootstrap_or_exit_on_signal(
                 &shutdown_ct,
                 Arc::clone(&telemetry_sink),
@@ -1215,6 +1359,7 @@ async fn async_main(
                 db_path,
                 embedder,
                 extractor,
+                false,
             )
             .await?
             else {
@@ -1243,6 +1388,9 @@ async fn async_main(
             scopes,
             allow_remote_close,
         } => {
+            // FR-002/FR-003: standalone --mcp-stdio mode retries an unreachable embedder with
+            // bounded backoff and, if the window is exhausted, starts in degraded mode instead
+            // of exiting (issue #499) — nobody is watching this process's stderr.
             let Some(state) = bootstrap_or_exit_on_signal(
                 &shutdown_ct,
                 Arc::clone(&telemetry_sink),
@@ -1250,6 +1398,7 @@ async fn async_main(
                 db_path,
                 embedder,
                 extractor,
+                true,
             )
             .await?
             else {
