@@ -425,7 +425,7 @@ pub fn run_full_recovery_sequence(
         fallback_reason: fallback_reason.clone(),
     });
 
-    // ── Step 4: rebuild FTS + HNSW indexes, and the in-process name index ────
+    // ── Step 4: rebuild FTS + HNSW indexes, and backfill Entity.lookup_key ────
     {
         let conn = db.connect()?;
         // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding, so
@@ -435,10 +435,12 @@ pub fn run_full_recovery_sequence(
         if let Err(e) = schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim) {
             eprintln!("liminis-context-graph: run_full_recovery_sequence: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
         }
+        // WAL replay above bypassed insert_entity/update_entity_created_at — every replayed
+        // row's lookup_key is NULL — so backfill it before build_indices_and_constraints below
+        // ever builds entity_lookup_key_idx over the column (issue #221 FR-006). Persists the
+        // outcome to SchemaState too, not just the in-process flag.
+        schema::backfill_entity_lookup_keys_and_record_status(&conn);
         conn.build_indices_and_constraints()?;
-        // WAL replay above bypassed insert_entity/update_entity_created_at (issue #219) —
-        // a full rebuild is the only way the name index observes the replayed data.
-        conn.rebuild_name_index()?;
         // Persist the applied-WAL-seq position(s) (issue #353) — a deliberate extension beyond
         // FR-004's literal text (which names knowledge_rebuild_from_wal), since this autonomous
         // WAL-corruption self-heal produces an equally-precise ReplayStats via the same replay

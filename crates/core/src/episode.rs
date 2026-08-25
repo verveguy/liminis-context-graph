@@ -751,11 +751,11 @@ pub async fn add_episode(
             .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
             .collect();
 
-        // Per-batch memo of scan-fallback resolutions. Self-healing `NameIndex` on a scan
-        // *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only bounds the cost of a
+        // Per-batch memo of scan-fallback resolutions. Self-healing the row's `lookup_key` on a
+        // scan *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only bounds the cost of a
         // name that exists; a name that doesn't (a hallucinated or otherwise never-persisted
-        // extraction) has nothing to insert into `NameIndex`, so without this memo every edge
-        // referencing that same missing name in this batch would re-run its own full scan.
+        // extraction) has nothing to self-heal, so without this memo every edge referencing
+        // that same missing name in this batch would re-run its own full scan.
         // This closure caches both outcomes locally, for this Phase C pass only, so a batch
         // pays at most one scan per unique unresolved name regardless of whether it resolves
         // (FR-002).
@@ -790,12 +790,12 @@ pub async fn add_episode(
             // batch, or salvage-rewritten pre-lock above to a name this batch doesn't itself
             // contain) (FR-002, FR-003).
             //
-            // Endpoint-authority resolution (issue #283): a `NameIndex` miss here must not be
-            // trusted as "doesn't exist" — see `get_entity_by_name_ci_with_scan_fallback`'s doc
-            // comment. `resolve_via_scan` above bounds this loop to at most one scan per unique
-            // unresolved name in the batch, for both hits (also self-healed into `NameIndex` for
-            // future requests) and misses (memoized only for this pass, since there's nothing to
-            // persist for a name that doesn't exist).
+            // Endpoint-authority resolution (issue #283/#221): a `lookup_key` miss here must not
+            // be trusted as "doesn't exist" — see `get_entity_by_name_ci_with_scan_fallback`'s
+            // doc comment. `resolve_via_scan` above bounds this loop to at most one scan per
+            // unique unresolved name in the batch, for both hits (also self-healed via a
+            // `lookup_key` write for future requests) and misses (memoized only for this pass,
+            // since there's nothing to persist for a name that doesn't exist).
             let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
                 Some(u) => Some(u.clone()),
                 None => resolve_via_scan(&edge.source_name)?,

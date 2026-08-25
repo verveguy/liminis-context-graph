@@ -45,6 +45,9 @@ fn open_db(dir: &TempDir) -> Db {
         let conn = db.connect().unwrap();
         conn.init_schema(DIM).unwrap();
         conn.create_vector_indexes().unwrap();
+        // Build the ART index so lookup-key coherence assertions in this file (issue #221)
+        // exercise the indexed access path, not an unindexed property scan.
+        conn.create_entity_lookup_key_index().unwrap();
     }
     db
 }
@@ -890,32 +893,31 @@ async fn purge_excludes_unbound_impact_when_owning_group_is_itself_purged() {
     );
 }
 
-// ── NameIndex staleness: a purged entity's name must no longer resolve ──────────────────────
+// ── lookup_key staleness: a purged entity's name must no longer resolve (issue #221) ────────
 
 #[test]
-fn purged_entity_name_no_longer_resolves_via_name_index() {
+fn purged_entity_name_no_longer_resolves_via_lookup_key() {
     let dir = TempDir::new().unwrap();
     let db = open_db(&dir);
     let conn = db.connect().unwrap();
 
-    let alice = make_entity("NameIndexed Alice", GROUP_A, TS);
+    let alice = make_entity("Indexed Alice", GROUP_A, TS);
     conn.insert_entity(&alice).unwrap();
-    conn.rebuild_name_index().unwrap();
     assert!(
-        conn.get_entity_by_name_ci("NameIndexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
             .unwrap()
             .is_some(),
-        "name index should resolve the entity before purge"
+        "lookup_key should resolve the entity before purge"
     );
 
     let (counts, _) = group_purge::purge_groups(&conn, &[GROUP_A], TS, false).unwrap();
     assert_eq!(counts.groups[0].entities, 1);
 
     assert!(
-        conn.get_entity_by_name_ci("NameIndexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
             .unwrap()
             .is_none(),
-        "name index must not resolve a purged entity's name"
+        "lookup_key must not resolve a purged entity's name"
     );
 }
 

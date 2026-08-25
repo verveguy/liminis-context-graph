@@ -120,6 +120,22 @@ pub fn is_already_exists_error(err: &Error) -> bool {
     s.contains("Binder exception:") && s.contains("already exists in table")
 }
 
+/// True if `err` is lbug's "already exists in catalog" binder exception for the specific named
+/// catalog entry `name` (issue #221). Unlike [`is_already_exists_error`] ("already exists in
+/// *table*" — the HNSW/FTS index-conflict wording), `CREATE ART INDEX`'s conflict message is
+/// `"<name> already exists in catalog"` — textually indistinguishable in general from a
+/// duplicate *node table* creation (e.g. `"Entity already exists in catalog"`, deliberately
+/// excluded by `is_already_exists_error`; see `node_table_already_exists_is_not_an_index_
+/// already_exists`). Broadening `is_already_exists_error` to match "in catalog" generally would
+/// silently swallow that genuine table-conflict failure too, so this instead only classifies as
+/// already-exists when the identifier named in the message matches `name` exactly — safe
+/// because `CREATE ART INDEX`'s explicit, non-default index name (FR-002) can never collide with
+/// a node/rel table name.
+pub fn is_named_catalog_entry_already_exists_error(err: &Error, name: &str) -> bool {
+    let s = err.to_string();
+    s.contains("Binder exception:") && s.contains(&format!("{name} already exists in catalog"))
+}
+
 /// True if `err` is lbug's "table does not exist" binder exception, raised when a query
 /// references a node/rel label that isn't present in the schema (e.g. `Entity` renamed or
 /// dropped out from under an otherwise-open database). Used by `handle_knowledge_status`
@@ -239,6 +255,39 @@ mod is_missing_table_error_tests {
                     .to_string(),
             );
             assert!(!is_already_exists_error(&err));
+        }
+
+        #[test]
+        fn create_art_index_already_exists_uses_catalog_wording_not_table_wording() {
+            // Empirically confirmed (issue #221): unlike CREATE_VECTOR_INDEX/CREATE_FTS_INDEX's
+            // "already exists in table" wording, a repeat CREATE ART INDEX reports "already
+            // exists in catalog" — the general `is_already_exists_error` classifier (scoped to
+            // "in table" specifically) does not, and must not, match it.
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: entity_lookup_key_idx already \
+                 exists in catalog."
+                    .to_string(),
+            );
+            assert!(!is_already_exists_error(&err));
+            assert!(is_named_catalog_entry_already_exists_error(
+                &err,
+                "entity_lookup_key_idx"
+            ));
+        }
+
+        #[test]
+        fn named_catalog_entry_check_does_not_match_a_different_entry() {
+            // Guards the safety property is_named_catalog_entry_already_exists_error exists
+            // for: a duplicate *table* creation must never be misclassified as the ART index
+            // already existing, even though both use "already exists in catalog" wording.
+            let err = Error::QueryFailed(
+                "Query execution failed: Binder exception: Entity already exists in catalog."
+                    .to_string(),
+            );
+            assert!(!is_named_catalog_entry_already_exists_error(
+                &err,
+                "entity_lookup_key_idx"
+            ));
         }
     }
 }

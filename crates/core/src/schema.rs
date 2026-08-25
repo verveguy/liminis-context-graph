@@ -19,6 +19,12 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // summary vector, only `name_embedding`. Without it, meaning-based retrieval against an
     // entity's `summary` was lexical-only (FTS) — a paraphrase sharing no vocabulary with the
     // summary couldn't be found by vector similarity. See ADR-0470 (issue #470).
+    // `lookup_key` (issue #221, ADR-0221) is a deliberate divergence from graphiti's
+    // kuzu_driver.py schema-parity rule, like `summary_embedding` above: it materializes
+    // `group_id + '\x1f' + lower(name)` (computed host-side, see `db::compute_lookup_key`)
+    // so `get_entity_by_name_ci` can be answered by an ART-indexed equality lookup instead of
+    // an in-process accelerator (ADR-0038's `NameIndex`, which this column and its index
+    // replace) or an unindexed `lower(e.name) = $x` scan.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -29,7 +35,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          name_embedding FLOAT[{dim}], \
          summary STRING, \
          attributes STRING, \
-         summary_embedding FLOAT[{dim}]\
+         summary_embedding FLOAT[{dim}], \
+         lookup_key STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -301,6 +308,22 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
             eprintln!("liminis-context-graph: schema migrate: zero-fill Entity.summary_embedding: {e} (non-fatal)");
         }
     }
+    // Entity gained `lookup_key` (issue #221) to serve `get_entity_by_name_ci` from a
+    // database-native ART index instead of ADR-0038's in-process `NameIndex`. Probe first: a
+    // fresh DB already has the column from `create_node_tables`, so the ALTER only runs
+    // against pre-existing workspaces. Backfill immediately after, in the same one-shot
+    // migration step (FR-005) — `Db::build_indices_and_constraints`'s later
+    // `create_entity_lookup_key_index` call builds the ART index over whatever the column
+    // holds at that point, so every existing row must have a correct key before that runs.
+    //
+    // Whether that backfill *succeeded* is persisted in `SchemaState` (below), not just the
+    // in-process `LookupKeyStatus` flag: a failed backfill after a successful `ALTER` leaves
+    // the column present, so on the next open this probe would otherwise succeed and skip the
+    // `if` block entirely — silently never retrying, while `lookup_key_migrated()` resets to
+    // its `true` default and `knowledge_status` reports healthy. See `ensure_lookup_key_backfill`
+    // below for how the persisted marker closes that gap without reintroducing an O(N) `Entity`
+    // scan on the clean (already-migrated) startup path.
+    ensure_lookup_key_backfill(conn);
 }
 
 /// Zero-fills any `Entity` row whose `summary_embedding` is `NULL` (issue #470). Idempotent — a
@@ -322,6 +345,216 @@ pub fn zero_fill_null_entity_summary_embeddings(conn: &Conn<'_>, dim: usize) -> 
         "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
         serde_json::json!({ "zero": vec![0.0f32; dim] }),
     )
+}
+
+/// Backfills `lookup_key` for every `Entity` row where it's `NULL` (issue #221 FR-005/FR-006).
+/// Idempotent — a no-op when no row is `NULL`. Computes each row's key in Rust via
+/// `db::compute_lookup_key` (never Cypher `lower()`, for the Unicode-consistency reason
+/// documented there) and writes it back one row at a time, rather than a single bulk
+/// Cypher `SET` — a deliberate, acknowledged-slower trade for guaranteed key consistency
+/// with every other writer.
+///
+/// Called from two places, mirroring `zero_fill_null_entity_summary_embeddings`'s dual-call-site
+/// shape: `migrate`'s one-shot ALTER-triggered backfill (existing rows at migration time), and
+/// every WAL-rebuild/recovery site (`Db::open_or_rebuild`, `handle_rebuild_from_wal`, the
+/// `knowledge_recover*` family) — because `WalReplayer::replay` executes raw recorded Cypher
+/// verbatim, a replayed `Entity` CREATE never sets `lookup_key` (`dump.rs`'s `ENTITY_CYPHER`
+/// template is deliberately left unchanged, per ADR-0221 — this backfill is the only
+/// self-sufficiency mechanism a dump→replay round trip needs). Must run before the caller's own
+/// `build_indices_and_constraints`/`create_entity_lookup_key_index` ever builds the ART index
+/// over the column, so the index is never built while rows are still `NULL`.
+pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
+    let rows = conn.query_params(
+        "MATCH (n:Entity) WHERE n.lookup_key IS NULL RETURN n.uuid, n.name, n.group_id",
+        serde_json::json!({}),
+    )?;
+    for row in rows {
+        let uuid = crate::db::value_as_string(&row[0]);
+        let name = crate::db::value_as_string(&row[1]);
+        let group_id = crate::db::value_as_string(&row[2]);
+        let key = crate::db::compute_lookup_key(&group_id, &name);
+        conn.exec_params(
+            "MATCH (n:Entity {uuid: $uuid}) SET n.lookup_key = $key",
+            serde_json::json!({ "uuid": uuid, "key": key }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Key under which the `lookup_key` backfill's completion state is persisted in `SchemaState`
+/// (see `ensure_lookup_key_backfill`).
+const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_lookup_key_backfill";
+
+/// A minimal, generic migration-state marker table: one row per named migration step, keyed by
+/// a stable string identifier. Introduced by issue #221 to close a gap the PR's own human review
+/// caught — see `ensure_lookup_key_backfill`'s doc comment for the failure mode this exists to
+/// prevent. `CREATE NODE TABLE IF NOT EXISTS` is a catalog check, not a scan, so calling this
+/// unconditionally on every `migrate()` run is cheap regardless of database size or age.
+fn ensure_schema_state_table(conn: &Conn<'_>) -> Result<(), Error> {
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS SchemaState (key STRING PRIMARY KEY, status STRING)",
+    )?;
+    Ok(())
+}
+
+/// Point lookup (by `SchemaState`'s primary key) for a migration step's persisted status.
+/// `Ok(None)` means no marker has ever been written for this key — a genuinely fresh table
+/// (nothing has run yet) or a pre-existing database migrated before this marker table existed.
+fn schema_state_status(conn: &Conn<'_>, key: &str) -> Result<Option<String>, Error> {
+    let rows = conn.query_params(
+        "MATCH (s:SchemaState {key: $key}) RETURN s.status",
+        serde_json::json!({ "key": key }),
+    )?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .map(|row| crate::db::value_as_string(&row[0])))
+}
+
+fn set_schema_state_status(conn: &Conn<'_>, key: &str, status: &str) -> Result<(), Error> {
+    conn.exec_params(
+        "MERGE (s:SchemaState {key: $key}) SET s.status = $status",
+        serde_json::json!({ "key": key, "status": status }),
+    )
+}
+
+/// Runs `backfill_entity_lookup_keys` and persists its outcome to `SchemaState`, plus the
+/// in-process `LookupKeyStatus` flag (`knowledge_status`'s `name_index_trusted`, FR-012).
+fn run_lookup_key_backfill_and_record_status(conn: &Conn<'_>) {
+    match backfill_entity_lookup_keys(conn) {
+        Ok(()) => {
+            if let Err(e) = set_schema_state_status(conn, LOOKUP_KEY_BACKFILL_STATE_KEY, "complete")
+            {
+                eprintln!(
+                    "liminis-context-graph: schema migrate: record lookup_key backfill success in SchemaState (non-fatal): {e}"
+                );
+                // The backfill itself succeeded, but we couldn't persist that fact — treat
+                // this conservatively as untrusted rather than silently reporting healthy.
+                conn.mark_lookup_key_migration_failed();
+            } else {
+                // Reset the in-process flag on a successful (re)backfill — otherwise a `Db`
+                // that failed once and was then successfully retried within the same process
+                // lifetime would report `name_index_trusted: false` forever, even though
+                // `SchemaState` and the data itself are now both correct.
+                conn.mark_lookup_key_migration_succeeded();
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: schema migrate: backfill Entity.lookup_key (non-fatal): {e}"
+            );
+            conn.mark_lookup_key_migration_failed();
+            if let Err(e2) = set_schema_state_status(conn, LOOKUP_KEY_BACKFILL_STATE_KEY, "failed")
+            {
+                eprintln!(
+                    "liminis-context-graph: schema migrate: record lookup_key backfill failure in SchemaState (non-fatal): {e2}"
+                );
+            }
+        }
+    }
+}
+
+/// Runs `backfill_entity_lookup_keys` and persists the outcome to both `SchemaState` and the
+/// in-process `LookupKeyStatus` flag — the entry point for every `lookup_key` backfill call site
+/// outside `migrate()` itself: the WAL-rebuild and recovery paths (`Db::open_or_rebuild`,
+/// `handle_rebuild_from_wal`, the `knowledge_recover*` family).
+///
+/// Before this function existed, those call sites called `backfill_entity_lookup_keys` directly
+/// and, on failure, only flipped the in-process `LookupKeyStatus` flag — never persisting
+/// `SchemaState`. That reopened the exact gap `ensure_lookup_key_backfill` was built to close
+/// (see its doc comment below), via a different trigger: `migrate()` runs once against an empty
+/// `Entity` table and marks `SchemaState` `"complete"`; WAL replay then creates rows with a NULL
+/// `lookup_key` via raw Cypher, and if *this* backfill then failed, only the in-process flag
+/// noticed. `SchemaState` still said `"complete"`, so the next restart's `migrate()` probe took
+/// the O(1) skip path and never retried, leaving NULL-keyed rows invisible to the three
+/// no-scan-fallback FR-011 call sites (PR #483 review).
+///
+/// `ensure_schema_state_table` is called here too, even though every current call site runs
+/// after `init_schema`/`migrate` has already created the table once: `CREATE NODE TABLE IF NOT
+/// EXISTS` is a cheap catalog check, not a scan, and calling it removes the ordering assumption
+/// entirely rather than relying on every future call site getting it right.
+pub(crate) fn backfill_entity_lookup_keys_and_record_status(conn: &Conn<'_>) {
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: lookup_key backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    run_lookup_key_backfill_and_record_status(conn);
+}
+
+/// Ensures `Entity.lookup_key` is fully backfilled, retrying a previously-failed attempt
+/// without reintroducing an O(N) `Entity` scan on every clean startup (issue #221, human
+/// review on PR #483).
+///
+/// The gap this closes: `migrate`'s original design only ran `ALTER TABLE Entity ADD
+/// lookup_key` (and the backfill after it) when the column was *absent*. If `ALTER` succeeded
+/// but the backfill then failed, the column already existed on the next open — the probe would
+/// succeed, the whole step would be skipped, and the backfill would never retry. Worse,
+/// `LookupKeyStatus::migrated` is an in-process `AtomicBool` that resets to its `true` default
+/// on every fresh `Db`, so a restart after a failed backfill would make `knowledge_status`
+/// report `name_index_trusted: true` even though rows were still missing `lookup_key` — a real
+/// dedup-corruption path for the three FR-011 call sites, not just degraded observability.
+///
+/// The fix persists the backfill's completion state in `SchemaState` (a point-lookup by primary
+/// key, not a scan) instead of re-deriving it from column presence:
+/// - Column absent (pre-#221 database): run the `ALTER`, then the backfill, then record the
+///   outcome. This is the same one-shot, table-scanning cost the original design always paid.
+/// - Column present, marker says `"complete"`: nothing to do — an O(1) point lookup confirms
+///   there is nothing left to backfill, exactly the fast path this issue exists to provide.
+/// - Column present, marker says `"failed"`: retry the backfill (bounded to `WHERE lookup_key
+///   IS NULL`, per `backfill_entity_lookup_keys`) rather than trusting a stale "healthy" signal
+///   forever.
+/// - Column present, no marker at all: either a genuinely fresh database (its `Entity` table is
+///   empty, so the backfill's `WHERE lookup_key IS NULL` scan costs nothing) or a database
+///   migrated by a pre-marker build of this feature. Either way this runs the backfill once —
+///   for the fresh-DB case it's free; for the pre-marker case it's a one-time cost paid on the
+///   first startup after upgrading to this fix, never again once the marker is written.
+fn ensure_lookup_key_backfill(conn: &Conn<'_>) {
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: schema migrate: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+
+    let lookup_key_column_absent = conn
+        .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.lookup_key LIMIT 0")
+        .is_err();
+
+    if lookup_key_column_absent {
+        if let Err(e) = conn.raw_query("ALTER TABLE Entity ADD lookup_key STRING") {
+            eprintln!(
+                "liminis-context-graph: schema migrate: ALTER TABLE Entity ADD lookup_key STRING (non-fatal): {e}"
+            );
+            conn.mark_lookup_key_migration_failed();
+            if let Err(e2) = set_schema_state_status(conn, LOOKUP_KEY_BACKFILL_STATE_KEY, "failed")
+            {
+                eprintln!(
+                    "liminis-context-graph: schema migrate: record lookup_key ALTER failure in SchemaState (non-fatal): {e2}"
+                );
+            }
+            return;
+        }
+        run_lookup_key_backfill_and_record_status(conn);
+        return;
+    }
+
+    match schema_state_status(conn, LOOKUP_KEY_BACKFILL_STATE_KEY) {
+        Ok(Some(status)) if status == "complete" => {
+            // Persisted truth: the backfill already ran successfully. O(1) point lookup, no
+            // scan — this is the steady-state path every clean startup takes.
+        }
+        Ok(_) => {
+            // Either a persisted "failed" marker (retry) or no marker at all (a fresh DB with
+            // nothing to backfill, or a pre-marker database paying its one-time cost).
+            run_lookup_key_backfill_and_record_status(conn);
+        }
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: schema migrate: read SchemaState for lookup_key backfill (non-fatal): {e}"
+            );
+            conn.mark_lookup_key_migration_failed();
+        }
+    }
 }
 
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other

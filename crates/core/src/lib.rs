@@ -22,7 +22,6 @@ pub mod handlers;
 pub mod ipc;
 pub(crate) mod legacy_wal;
 pub mod llm_router;
-pub(crate) mod name_index;
 pub mod ontology;
 pub mod ontology_sidecar;
 pub mod pointer;

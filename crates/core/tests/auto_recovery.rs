@@ -240,11 +240,21 @@ async fn test_run_full_recovery_sequence_torn_wal() {
         "Should have derived cursor via uuid match"
     );
 
-    // Confirm lbug WAL was renamed aside
-    assert!(
-        !std::path::Path::new(&format!("{}.wal", db_path)).exists(),
-        "Corrupt lbug WAL should be renamed after recovery"
-    );
+    // Confirm the corrupt lbug WAL was renamed aside, not merely overwritten in place. Checks
+    // for the absence of the corruption marker at the original `.wal` path rather than the
+    // path's absence outright (issue #221): `build_indices_and_constraints`'s new `CREATE ART
+    // INDEX` step legitimately writes its own `CREATE_INDEX_RECORD` into lbug's internal WAL
+    // (see ADR-0221's migration-duration note), so a fresh, valid `.wal` file can exist again by
+    // the time recovery finishes — that's expected, not a sign the corrupt one survived.
+    let wal_path = format!("{}.wal", db_path);
+    if let Ok(contents) = std::fs::read(&wal_path) {
+        assert!(
+            !contents
+                .windows(b"CORRUPT_WAL_TAIL_NOT_VALID_LBUG_WAL".len())
+                .any(|w| w == b"CORRUPT_WAL_TAIL_NOT_VALID_LBUG_WAL"),
+            "the corrupt WAL content must not survive at the original .wal path after recovery"
+        );
+    }
 }
 
 // ── FR-012 (b): knowledge_recover_full IPC on degraded engine ────────────────
