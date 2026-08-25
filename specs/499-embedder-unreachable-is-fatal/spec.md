@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-499`
 **Created**: 2026-08-25
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "design: embedder-unreachable is fatal at startup (FR-011) — reconsider for MCP-launched mode"
 
 ## Background
@@ -45,20 +45,21 @@ Observed directly while smoke-testing the v0.13.4 release artifact: with no embe
 running the process exits before binding, and `LCG_EMBEDDING_DIM` does not rescue it —
 as the comment says it will not.
 
-This is a **design question, not a bug report**: the current behaviour is deliberate
-and documented; the question is whether it is still right once an MCP client is the
-thing launching the process. This round of work sharpens and costs the four candidate
-answers against the actual codebase, and makes a recommendation. **No behavior
-changes in this stage** — FR-011 is untouched. The maintainer picks a direction before
-Research begins.
+This started as a **design question, not a bug report**: the current behaviour is
+deliberate and documented, and the question was whether it is still right once an MCP
+client is the thing launching the process. The Specify stage sharpened and costed four
+candidate answers against the actual codebase (below); the maintainer has since
+**confirmed a decision** — see "Decision" below. This spec now describes what the
+Research/Plan/Implement stages should build, not an open menu.
 
-## Options under consideration
+## Options considered
 
-1. **Leave it.** Fail fast is defensible and the message is good. Push the fix into
-   documentation (#498) and accept that a first run without an embedder is a hard
-   stop. *Cost: zero.* Does not address the MCP-launched failure mode at all.
+1. **Not chosen.** Leave it. Fail fast is defensible and the message is good. Push the
+   fix into documentation (#498) and accept that a first run without an embedder is a
+   hard stop. *Cost: zero.* Does not address the MCP-launched failure mode at all.
 
-2. **Start degraded, unconditionally.** Bind the socket (or stdio), serve read-only
+2. **Not chosen (full scope deferred — see Decision and Out of Scope).** Start
+   degraded, unconditionally, serving read-only
    and non-embedding operations, and report the embedder as unavailable through
    `knowledge_status`. *Cost: materially higher than the original issue text assumed
    — see "Costing findings" below.* The blocking structural fact: `Db::open` immediately
@@ -74,23 +75,23 @@ Research begins.
    schema) or not opening the DB at all — in which case "read-only operations" isn't
    actually deliverable, only diagnosability is.
 
-3. **Retry with backoff before giving up**, covering the common race where the client
+3. **Chosen.** Retry with backoff before giving up, covering the common race where the client
    launches lcg and the sidecar simultaneously. *Cost: low.* This only delays the
    existing fatal probe by a bounded amount; it does not touch schema, `AppState`, or
    any of the ~15 `.embed()` call sites in `crates/core/src/handlers.rs`. It directly
    targets a plausible, common failure shape: an MCP client starting the sidecar and
    the server as sibling processes with no ordering guarantee.
 
-4. **Degrade only when MCP-launched**, keeping fail-fast for a hand-started service.
-   The original issue text said this "requires the process to know how it was
-   started, which is a new concept." **That is incorrect as of this codebase's
-   current state** — see "Costing findings" item 4 below: the caller already knows,
-   at the exact call site that invokes the shared bootstrap function, which launch
-   mode it's in. Passing that through is a one-parameter change, not new
+4. **Chosen, narrowed.** Degrade only when MCP-launched, keeping fail-fast for a
+   hand-started service. The original issue text said this "requires the process to
+   know how it was started, which is a new concept." **That is incorrect as of this
+   codebase's current state** — see "Costing findings" item 4 below: the caller
+   already knows, at the exact call site that invokes the shared bootstrap function,
+   which launch mode it's in. Passing that through is a one-parameter change, not new
    configuration. Cost otherwise inherits option 2's dimension problem *unless*
    "degraded" is scoped down to "the process starts and names the problem" rather
-   than "read-only queries still work" — see the Recommendation below for a cheap
-   version of this option that sidesteps the dimension problem entirely.
+   than "read-only queries still work" — which is exactly the narrowing the Decision
+   below adopts, sidestepping the dimension problem entirely.
 
 ## Costing findings
 
@@ -154,50 +155,56 @@ strategies (`handlers.rs:4367`, `drop_lbug_wal` / `rebuild_from_workspace_wal` /
 `restore_from_backup`), so a wrong guessed dimension wouldn't just affect the initial
 open — it would propagate into every recovery path too.
 
-**(4) Is "how was I launched?" knowable without new configuration?** Yes. `main.rs`'s
-`async_main` already matches on a `CliMode` enum with `Socket` and `Mcp` variants
-*before* calling the shared `bootstrap_app_state` — the two call sites
-(`main.rs:1120` for `CliMode::Socket`, `main.rs:1145` for `CliMode::Mcp { connect:
-None, .. }`) are already in separate match arms. Threading that distinction into
-`bootstrap_app_state` as a parameter is a small, local, one-function-signature change,
-not a new concept or new configuration surface. The original issue's stated cost for
-option 4 does not hold.
+**(4) Is "how was I launched?" knowable without new configuration?** Yes. The
+`--mcp-stdio` flag is parsed in `crates/service/src/cli.rs` (the `mcp_stdio` flag at
+`cli.rs:101`, branched into `CliMode::Socket` vs. `CliMode::Mcp` at `cli.rs:194`), and
+`main.rs`'s `async_main` matches on that `CliMode` enum *before* calling the shared
+`bootstrap_app_state` — the two call sites (`main.rs:1120` for `CliMode::Socket`,
+`main.rs:1145` for `CliMode::Mcp { connect: None, .. }`) are already in separate match
+arms. Threading that distinction into `bootstrap_app_state` as a parameter is a small,
+local, one-function-signature change, not a new concept or new configuration surface.
+The original issue's stated cost for option 4 does not hold.
 
-## Recommendation
+## Decision (confirmed by the maintainer, 2026-08-25)
 
 Given the above, options 2 and 4 as originally described ("bind the socket, serve
 read-only and non-embedding operations") are both more expensive and riskier than the
 issue assumed, because of the DB-dimension coupling in finding (3) — not because of
-process-identity plumbing, which finding (4) shows is cheap.
+process-identity plumbing, which finding (4) shows is cheap. The maintainer confirmed
+this inverted their own initial preference for option 2, and adopted the Specify
+stage's recommended **combination** of option 3 and a narrowed option 4:
 
-The cheapest path that still solves the actual reported problem — a diagnosis nobody
-reads (SC-001-shaped) — is a **combination**:
+1. **Bounded retry with backoff** before the embedder probe gives up, targeting the
+   sidecar/lcg simultaneous-launch race. The retry bound (attempt count, backoff
+   shape, total ceiling) is a **Plan-stage decision**, not fixed here — Plan MUST
+   choose and explicitly document a ceiling short enough that an MCP client does not
+   time out waiting for the server to come up.
+2. **When `--mcp-stdio` (standalone) is the launch mode and that retry is exhausted**:
+   do not open the database at all. Reuse the *existing* "DB never opened" degraded
+   branch verbatim — the same `degraded` / `degraded_reason` / `connected: false` /
+   `queryable: false` shape `knowledge_status` already returns for WAL corruption
+   today — with a new `degraded_reason` value for "embedder unreachable at startup."
+   Gate this on `cli_mode`, **never** on message content. This needs no new
+   `AppState`/`Embedder` plumbing and doesn't touch any of the ~15 `.embed()` call
+   sites, because none of that code runs while the DB never opened. It delivers
+   diagnosability (a client can call `knowledge_status` and learn what's wrong) but
+   **not** read-only graph queries — those still require the DB to be open, which
+   still requires a committed dimension (see Out of Scope).
+3. **The socket-service (hand-started) path keeps today's fail-fast behavior
+   unchanged** — no new gating logic beyond the `cli_mode` check already required for
+   point 2, satisfying FR-001.
+4. **Read-only-while-embedder-degraded is explicitly out of scope**, deferred to a
+   separate follow-on (see Out of Scope) — not because it's undesirable, but because
+   it requires resolving the dimension-commitment problem across both initial schema
+   creation and all three `knowledge_recover` strategies, which is a materially larger
+   and riskier change than points 1–3.
 
-- **Option 3** (bounded retry before giving up): directly targets the sidecar/server
-  startup race, costs nothing structurally, and reduces false fatal failures for the
-  most common MCP-launch case without touching schema or `AppState`.
-- **A narrowed version of option 4**: when `--mcp-stdio` (standalone) is the launch
-  mode and the retry above is exhausted, do not open the database at all — reuse the
-  *existing* "DB never opened" degraded branch verbatim (same `degraded` /
-  `degraded_reason` / `connected: false` / `queryable: false` shape `knowledge_status`
-  already returns for WAL corruption today) with a new `degraded_reason` value for
-  "embedder unreachable at startup," gated on `cli_mode` rather than on message
-  content. This needs no new `AppState`/`Embedder` plumbing and doesn't touch any of
-  the ~15 `.embed()` call sites, because none of that code runs while the DB never
-  opened. It delivers diagnosability (a client can call `knowledge_status` and learn
-  what's wrong) but **not** read-only graph queries — those still require the DB to be
-  open, which still requires a committed dimension.
-- The socket-service path (hand-started) keeps today's fail-fast behavior unchanged,
-  satisfying FR-001 below without any new gating logic beyond the `cli_mode` check
-  already required for the point above.
-
-True "read-only-while-embedder-degraded" service (the full ambition of option 2) is a
-materially larger, separate follow-on that Research/Plan should scope on its own if
-wanted, since it requires resolving the dimension-commitment problem across both
-initial schema creation and all three recovery strategies.
-
-This is a recommendation, not a decision — **the maintainer picks the direction**
-(see Open Questions) before this moves to Research.
+**Scope guard for Research/Plan/Implement**: if delivering point 2 turns out to
+require touching `AppState.embedder`'s `Arc<dyn Embedder>` non-optionality, or any of
+the ~15 `.embed()` call sites in `handlers.rs`, **stop and say so rather than
+proceeding**. That would mean the "cheap" version of this option has been
+misidentified, and the design needs revisiting — not silently expanding into the
+read-only-while-degraded scope this issue explicitly defers.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -216,64 +223,79 @@ v0.13.4 release artifact, and it is the primary friction point blocking first-ru
 success for MCP-launched usage.
 
 **Independent Test**: Launch the server via `--mcp-stdio` with no embedder reachable;
-confirm the cause is discoverable from within the MCP session (not only from stderr),
-per whichever option is selected.
+confirm the cause is discoverable from within the MCP session (not only from stderr).
 
 **Acceptance Scenarios**:
 
 1. **Given** no embedder is reachable at the configured transport, **When** the server
-   is launched via `--mcp-stdio` and the sidecar does not become reachable within the
-   selected retry window (if any), **Then** the process does not exit silently from
-   the client's point of view — the MCP session starts and `knowledge_status` (or an
-   equivalent) reports that the embedder is unavailable and why.
-2. **Given** the embedder becomes reachable shortly after the server starts (the
-   race case), **When** retry (if selected) succeeds within its window, **Then** the
-   server starts normally with no degraded state at all.
+   is launched via `--mcp-stdio` and the embedder does not become reachable within the
+   Plan-stage-defined retry window, **Then** the process does not exit — it starts in
+   a degraded state (DB never opened) and `knowledge_status` reports `degraded: true`
+   with a `degraded_reason` naming the embedder as unreachable at startup.
+2. **Given** the embedder becomes reachable during the retry window (the race case),
+   **When** a retry attempt succeeds, **Then** the server starts normally with no
+   degraded state at all.
 3. **Given** a hand-started socket-service process with the same misconfiguration,
-   **When** it starts, **Then** it retains today's fail-fast behavior (FR-001) unless
-   the maintainer's chosen option explicitly says otherwise.
+   **When** it starts, **Then** it retains today's fail-fast behavior unchanged
+   (FR-001) — the retry/degrade behavior in scenarios 1–2 applies only to standalone
+   `--mcp-stdio` mode.
 
 ---
 
 ### Edge Cases
 
-- Embedder becomes reachable partway through a retry/backoff window.
+- Embedder becomes reachable partway through the retry/backoff window (handled by
+  Acceptance Scenario 2 — server starts normally, no degraded state).
 - Embedder was reachable at startup but becomes unreachable mid-session (out of scope
   — see Assumptions).
 - `LCG_EMBEDDING_DIM` is set: today it already overrides *non-transport* probe
-  failures; whether it should also participate in the chosen option's transport-error
-  handling needs to be decided alongside the option itself.
-- A degraded MCP-mode server (if that option is chosen) receiving a
-  `knowledge_recover` call before the embedder is ever reachable — none of today's
-  three recovery strategies can run without a committed embedding dimension.
+  failures; whether it should also short-circuit the retry/degrade path for a
+  transport failure is a Plan-stage detail to resolve, not decided here.
+- A degraded MCP-mode server receiving a `knowledge_recover` call before the embedder
+  is ever reachable: since the DB never opened, this is the same "no DB to recover"
+  shape `knowledge_recover` already has to handle for other degraded-startup causes —
+  none of today's three recovery strategies can run without a committed embedding
+  dimension, and that remains true here. No new recovery strategy is introduced by
+  this issue.
 
 ## Requirements *(mandatory)*
 
 ### Functional Requirements
 
 - **FR-001**: The system MUST NOT regress the existing fail-fast startup behavior for
-  a hand-started socket-service process unless the maintainer's selected option
-  explicitly changes it for that path too.
-- **FR-002**: Whatever behavior is selected for `--mcp-stdio` mode MUST make the cause
-  of an embedder-unreachable condition discoverable by the MCP client or its user
-  through the running session (e.g., via `knowledge_status` or a per-call error),
-  since stderr is not visible to that audience.
-- **FR-003**: The launch-mode distinction used to gate any MCP-specific behavior MUST
-  use the existing `CliMode::Socket` / `CliMode::Mcp` split already resolved in
-  `async_main` (see Costing finding 4) — no new configuration surface for "how was I
-  launched."
-- **FR-004** *(pending maintainer decision)*: The exact startup/retry/degraded
-  behavior for `--mcp-stdio` mode — to be filled in once an option is selected.
+  a hand-started socket-service process (`CliMode::Socket`) — a transport-unreachable
+  embedder MUST remain immediately fatal on that path, exactly as it is today.
+- **FR-002**: In standalone `--mcp-stdio` mode (`CliMode::Mcp { connect: None, .. }`),
+  when the embedder probe reports a transport error, the system MUST retry with
+  bounded backoff before giving up. The number of attempts, backoff shape, and total
+  ceiling are a Plan-stage decision; the ceiling MUST be short enough that an MCP
+  client launching the process does not time out waiting for it to come up, and MUST
+  be stated explicitly in the plan.
+- **FR-003**: If the retry in FR-002 is exhausted without the embedder becoming
+  reachable, the system MUST NOT exit. It MUST start without opening the database,
+  reusing the existing "DB never opened" degraded-startup path verbatim (the same
+  `degraded` / `connected: false` / `queryable: false` shape `knowledge_status`
+  already returns for other startup failures such as WAL corruption), with a new
+  `degraded_reason` value that identifies the embedder as unreachable at startup.
+- **FR-004**: The gate for FR-002/FR-003 MUST be the launch mode (`CliMode::Socket` vs
+  `CliMode::Mcp` with `connect: None`, already resolved in `async_main` per Costing
+  finding 4) — never message-content sniffing on the underlying transport error, and
+  no new configuration surface for "how was I launched."
+- **FR-005**: This issue MUST NOT make embedding-dependent operations available while
+  degraded under FR-003 — the DB is not open, so no handler that depends on
+  `AppState.db` or `AppState.embedder` can run. Delivering read-only or
+  non-embedding operations while embedder-degraded is out of scope (see Out of
+  Scope); implementing it is **not** a valid way to satisfy FR-002/FR-003.
 
 ### Key Entities
 
 - **AppState.degraded_reason**: Existing `Option<String>` on `AppState`
   (`crates/core/src/app_state.rs:58`) describing why the *database* failed to open;
-  currently unrelated to embedder reachability, but reusable per the Recommendation
-  above by adding a new reason string rather than a new field.
+  currently unrelated to embedder reachability, but reusable per the Decision above
+  by adding a new reason string rather than a new field.
 - **AppState.embedder**: `Arc<dyn Embedder>` (`crates/core/src/app_state.rs:59`) —
-  mandatory, not optional. Any option that keeps the DB open while the embedder is
-  degraded would need to change this.
+  mandatory, not optional. Per the Decision's scope guard, this issue MUST NOT need to
+  change this; if it turns out to, stop and flag it (see Out of Scope).
 - **Embedder probe**: The startup check in `bootstrap_app_state`
   (`crates/service/src/main.rs`) that resolves transport and calls
   `probe_embedder.probe()` before schema init / DB open.
@@ -283,15 +305,16 @@ per whichever option is selected.
 ### Measurable Outcomes
 
 - **SC-001**: A user who launches the server via an MCP client with no embedder
-  running can determine, without reading process stderr, that the embedder is the
-  problem.
+  running, and for whom the embedder never becomes reachable within the retry window,
+  can determine — via `knowledge_status`, without reading process stderr — that the
+  embedder is the problem.
 - **SC-002**: A hand-started socket-service process with the same misconfiguration
-  continues to fail exactly as it does today (message and exit behavior unchanged),
-  unless the maintainer explicitly decides otherwise.
-- **SC-003** *(pending maintainer decision)*: Concrete, technology-agnostic success
-  measure for the selected option — e.g. "the retry window is bounded to N seconds and
-  documented" for option 3, or "the server binds and answers `knowledge_status` within
-  N seconds even with no embedder reachable" for a degraded-start option.
+  continues to fail exactly as it does today: same message, same immediate exit.
+- **SC-003**: The retry window is bounded to an explicit, documented ceiling (set in
+  the Plan stage) short enough that an MCP client does not time out waiting for the
+  server to start.
+- **SC-004**: A race where the embedder becomes reachable during the retry window
+  results in a normal, non-degraded startup — the retry is not merely cosmetic.
 
 ## Assumptions
 
@@ -301,9 +324,10 @@ per whichever option is selected.
 - The MCP-stdio launch mode (`--mcp-stdio` without `--connect`) is treated as a
   reliable signal of "no one is watching stderr"; a hand-started process that happens
   to redirect its own stderr away is out of scope for special-casing.
-- "Start degraded" (if selected) does not imply solving the embedding-dimension
-  problem identified in Costing finding 3 unless the maintainer explicitly picks the
-  full option 2/4 scope over the narrowed recommendation.
+- "Start degraded" here means the process starts and names the problem, not that
+  read-only or non-embedding operations become available — per the Decision above,
+  the embedding-dimension problem identified in Costing finding 3 is deliberately not
+  solved by this issue.
 
 ## Out of Scope
 
@@ -312,13 +336,24 @@ per whichever option is selected.
 - Detecting or recovering from an embedder that was reachable at startup but becomes
   unreachable later.
 - Standardizing the per-call embedding-error shape across all handlers listed in
-  Costing finding 2 — worth doing, but a separate, option-independent cleanup that
-  Research can scope if the maintainer wants it bundled in.
+  Costing finding 2 — worth doing, but a separate, option-independent cleanup not
+  bundled into this issue.
+- **Read-only-while-embedder-degraded service** (the full ambition of option 2/4):
+  serving graph queries or non-embedding operations while the database is open but the
+  embedder is not. This requires resolving the dimension-commitment problem in
+  Costing finding 3 across both initial schema creation and all three
+  `knowledge_recover` strategies — a materially larger, separate follow-on. Per the
+  Decision's scope guard: if Research/Plan/Implement finds that satisfying FR-002/
+  FR-003 actually requires this (e.g. touching `AppState.embedder`'s non-optionality
+  or any `.embed()` call site), stop and flag it rather than expanding into this
+  scope.
 
 ## Source References
 
 - `crates/service/src/main.rs` (`bootstrap_app_state`, embedder probe, DB open/schema
   init, `CliMode` dispatch, FR-010/FR-011)
+- `crates/service/src/cli.rs` (`--mcp-stdio` flag parsing and `CliMode::Socket` /
+  `CliMode::Mcp` branch point)
 - `crates/core/src/app_state.rs` (`degraded_reason`, `embedder`)
 - `crates/core/src/handlers.rs` (`handle_knowledge_status`, `handle_assert_entity`,
   `handle_create_cross_group_edge`, `handle_find_entities`, `handle_find_relationships`,
