@@ -512,6 +512,48 @@ async fn spawn_stub_http_server_capturing_headers(
     (addr, handle, captured)
 }
 
+/// Combines `spawn_stub_http_server_capturing_headers`'s header capture with
+/// `spawn_stub_http_batch_echo_server`'s input-length-aware response, so a test can assert the
+/// `Authorization` header on a *batched* (array-`input`) request — a combination new to #445,
+/// since bearer-auth (#497) and batching didn't coexist until this rebase joined them, and
+/// nothing on either side of that merge could have exercised it.
+async fn spawn_stub_http_batch_server_capturing_headers(
+    dim: usize,
+) -> (
+    SocketAddr,
+    JoinHandle<()>,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+    let captured_task = captured.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let captured = captured_task.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let (headers, request_body) = read_http_request_with_headers(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                captured.lock().unwrap().push(headers);
+                let n = input_len_from_request(&request_body);
+                let body = oai_batch_response_json_shuffled(dim, n);
+                write_http_response(&mut write_half, &body).await;
+            });
+        }
+    });
+
+    (addr, handle, captured)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -742,6 +784,45 @@ async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
     // Succeeding at all confirms the UDS path is untouched: OaiEmbedder::new_uds never
     // accepts a key parameter, so LCG_EMBEDDING_API_KEY being set in the environment has
     // no code path by which it could reach this request.
+}
+
+/// FR-001/FR-003 × #445: the batch path (array-valued `input`) carries the same
+/// `Authorization: Bearer <key>` header as the single-text path — auth is applied once, at the
+/// shared `do_embed_raw`/`do_embed_http_raw` layer, so it covers `embed_batch`'s array requests
+/// automatically. This combination didn't exist on either side of the #497/#445 merge, so
+/// nothing exercised it before; a careless conflict resolution that dropped the `api_key`
+/// parameter from `do_embed_http_raw` (reverting to the pre-#497 signature) would compile fine
+/// and only fail here.
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"` — this
+// test calls `embed_batch` with a non-empty slice, so it reads `LCG_EMBED_BATCH_SIZE` and must
+// take the same guard as every other test that does.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_embed_batch_sends_bearer_header_when_key_configured() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dim = 4;
+    let (addr, _server, captured) = spawn_stub_http_batch_server_capturing_headers(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder =
+        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+
+    let texts = ["one", "two", "three"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+    assert_eq!(results.len(), texts.len());
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1, "expected one batched request");
+    let auth = requests[0]
+        .iter()
+        .find(|h| h.to_lowercase().starts_with("authorization:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no Authorization header in batch request headers: {:?}",
+                requests[0]
+            )
+        });
+    assert_eq!(auth, "authorization: Bearer sekret-key");
 }
 
 // ── Batch API tests (#445) ──────────────────────────────────────────────────
