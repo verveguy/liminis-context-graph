@@ -535,3 +535,7 @@ To attach to an already-running socket service instead of opening the DB directl
 ```
 
 See [ADR 0035](adr/0035-mcp-stdio-transport.md) for the transport's internal architecture.
+
+To point the embedder used by an MCP-launched instance at a different backend (a local
+OpenAI-compatible server, a hosted provider with an API key, or a non-default sidecar socket),
+see [MCP client config recipes](configuration.md#mcp-client-config-recipes) in Configuration.

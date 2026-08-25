@@ -90,7 +90,9 @@ Or skip the socket entirely and run the graph as a native [MCP](https://modelcon
 
 The client then sees the `knowledge_*` tools directly — no socket client to write. See
 [MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport) for scopes, attached
-mode, and the full flag reference.
+mode, and the full flag reference. To point the embedder at Ollama, a hosted provider, or a
+non-default sidecar socket instead of the default, see
+[MCP client config recipes](configuration.md#mcp-client-config-recipes).
 
 ## Build from source
 
