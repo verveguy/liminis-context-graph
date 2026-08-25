@@ -12,6 +12,7 @@ use crate::{
     assert, backfill, backfill_summary_embeddings, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::{self, Db},
+    embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
     group_purge,
@@ -335,10 +336,20 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             .unwrap_or_else(|| "unknown".to_string());
         // Only advertise rebuild_from_workspace_wal when a WAL root is actually configured;
         // otherwise clients would offer an option that always fails immediately.
-        let mut recovery_available = vec!["drop_lbug_wal"];
-        if state.wal_root.is_some() {
-            recovery_available.push("rebuild_from_workspace_wal");
-        }
+        //
+        // #499: no strategy is offered when the reason is "embedder unreachable at startup" —
+        // every knowledge_recover strategy needs a committed embedding dimension, which was
+        // never probed in this state (see handle_knowledge_recover's own guard). The only path
+        // out is restarting the process once the embedder is reachable.
+        let recovery_available: Vec<&str> = if reason == EMBEDDER_UNREACHABLE_DEGRADED_REASON {
+            vec![]
+        } else {
+            let mut v = vec!["drop_lbug_wal"];
+            if state.wal_root.is_some() {
+                v.push("rebuild_from_workspace_wal");
+            }
+            v
+        };
         return Ok(json!({
             "running": true,
             "degraded": true,
@@ -4445,6 +4456,20 @@ struct RecoverOutcome {
     restart_required: bool,
 }
 
+/// True when `state.degraded_reason` is specifically `EMBEDDER_UNREACHABLE_DEGRADED_REASON`
+/// (issue #499) — the case where no `knowledge_recover` strategy can run because no embedding
+/// dimension was ever established. Both recovery handlers guard on this before reading
+/// `state.embedder.dim()`.
+fn is_embedder_unreachable_degraded(state: &AppState) -> bool {
+    state
+        .degraded_reason
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .as_deref()
+        == Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON)
+}
+
 async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let strategy = req.params["strategy"].as_str().unwrap_or("").to_string();
     if strategy.is_empty() {
@@ -4456,6 +4481,20 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
         .write_lock
         .try_write()
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
+
+    // #499: no strategy can run while degraded because the embedder was unreachable at
+    // startup — every strategy below reads state.embedder.dim() to (re)commit an embedding
+    // dimension, and none was ever probed in this state. rebuild_from_workspace_wal in
+    // particular has no "must already have valid data" precondition, so letting it run here
+    // would silently commit a fabricated placeholder dimension over a possibly-good workspace.
+    // The only way out is restarting the process once the embedder is reachable.
+    if is_embedder_unreachable_degraded(&state) {
+        return Err(Error::Ipc(
+            "recovery is unavailable: the embedder was unreachable at startup, so no embedding \
+             dimension was ever established. Start the embedder and restart the process."
+                .to_string(),
+        ));
+    }
 
     let db_path = state.db_path.clone();
     // "rebuild_from_workspace_wal" wipes and replays the *entire* embedded DB (every group's
@@ -4577,6 +4616,17 @@ async fn handle_knowledge_recover_full(
         .write_lock
         .try_write()
         .map_err(|_| Error::Ipc("Recovery already in progress".to_string()))?;
+
+    // #499: see the identical guard in handle_knowledge_recover — no embedding dimension was
+    // ever established while the embedder was unreachable at startup, so this sequence (which
+    // also reads state.embedder.dim() to rebuild schema) cannot safely run either.
+    if is_embedder_unreachable_degraded(&state) {
+        return Err(Error::Ipc(
+            "recovery is unavailable: the embedder was unreachable at startup, so no embedding \
+             dimension was ever established. Start the embedder and restart the process."
+                .to_string(),
+        ));
+    }
 
     let db_path = state.db_path.clone();
     // The default group's own WAL directory is run_full_recovery_sequence's target for its
