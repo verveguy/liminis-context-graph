@@ -55,6 +55,26 @@ CI runs additional checks beyond this local gate (the release build/test, the R-
 eval-script guards, an ML-dependency check); a failure in any of them blocks merge. See
 [`CLAUDE.md`](CLAUDE.md) for the detailed rationale and CI configuration notes.
 
+### Checking for leaked test processes
+
+Several integration tests under `crates/service/tests/` spawn the built `liminis-context-graph`
+binary as a subprocess (socket mode, MCP-stdio standalone/attached mode, migration, eager
+index-build). Every spawn site is expected to guard against leaking that process — see
+`ChildGuard` in `crates/service/tests/common/mod.rs` — but if you're touching one of those spawn
+sites, or a test run behaved oddly (e.g. a later run picks up a stale workspace socket), check
+for survivors after the suite finishes:
+
+```bash
+pgrep -af "liminis-context-graph "
+```
+
+A clean run prints nothing. Any line printed is a process that outlived the test run — a leak
+regression, per [issue #500](https://github.com/verveguy/liminis-context-graph/issues/500). The
+tell for an orphan specifically (as opposed to some other still-running instance) is `ppid=1`
+(reparented to `launchd`/`init` after its original parent exited); check with
+`ps -o pid,ppid,etime,command -p <pid>`. CI runs this same check automatically as a step in the
+`test` job, immediately after `cargo test --release`.
+
 ## No CLA, no DCO
 
 No contributor license agreement and no Developer Certificate of Origin sign-off are required. Contributions are accepted under the project's [MIT license](LICENSE) by the inbound=outbound convention: by submitting a PR you agree your contribution is licensed under MIT.
