@@ -55,8 +55,10 @@ jobs:
 
       - name: Package binary
         id: package
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
+          VERSION="$VERSION_INPUT"
           if [ -z "$VERSION" ]; then
             VERSION="${{ github.run_number }}"
           fi
