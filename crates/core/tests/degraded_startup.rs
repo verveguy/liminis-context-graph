@@ -734,6 +734,35 @@ async fn test_knowledge_recover_rejected_when_embedder_unreachable_degraded() {
     }
 }
 
+/// #499 review follow-up: `knowledge_recover_full` carries the identical
+/// `is_embedder_unreachable_degraded` guard as `knowledge_recover` (both read
+/// `state.embedder.dim()` internally), but only `knowledge_recover` had a dedicated test
+/// exercising it. Covers the other call site so a future edit to only one of the two guard
+/// sites doesn't go uncaught.
+#[tokio::test]
+async fn test_knowledge_recover_full_rejected_when_embedder_unreachable_degraded() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+
+    let state = make_degraded_state_with_capture(
+        lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+        db_path,
+        Arc::clone(&sink),
+    );
+
+    let resp = dispatch_val(1, "knowledge_recover_full", json!({}), Arc::clone(&state)).await;
+
+    assert!(
+        resp.get("error").is_some(),
+        "knowledge_recover_full should be rejected while embedder-unreachable degraded: {resp}"
+    );
+    assert!(
+        state.db.load_full().is_none(),
+        "DB must remain unopened after a rejected knowledge_recover_full call"
+    );
+}
+
 /// Tests that knowledge_recover without a strategy returns an error.
 #[tokio::test]
 async fn test_recovery_missing_strategy() {

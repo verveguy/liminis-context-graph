@@ -54,11 +54,23 @@ sequence was extracted into `resolve_and_probe_embedder`, returning a three-way 
   case, or a transport-classified probe failure (`is_transport_error`).
 
 With `allow_embedder_degrade == false` (socket mode), a `Retryable` outcome returns `Err`
-immediately on the first attempt — zero retries, byte-for-byte the pre-#499 behavior (FR-001,
-verified by `socket_mode_still_fails_fast_on_unreachable_embedder`). With `allow_embedder_degrade
-== true` (standalone `--mcp-stdio`), a `Retryable` outcome is retried with exponential backoff
-(250ms initial, doubling, capped at 1s per sleep) until 5 seconds of wall-clock time have elapsed
-since the first attempt.
+immediately on the first attempt — zero retries, and for the tested fast-refusal case (connection
+actively refused, socket file absent), byte-for-byte the pre-#499 behavior (FR-001, verified by
+`socket_mode_still_fails_fast_on_unreachable_embedder`). With `allow_embedder_degrade == true`
+(standalone `--mcp-stdio`), a `Retryable` outcome is retried with exponential backoff (250ms
+initial, doubling, capped at 1s per sleep) until 5 seconds of wall-clock time have elapsed since
+the first attempt.
+
+**Each attempt is itself bounded to the time remaining in the window.** Neither transport's client
+has a request timeout configured — HTTP uses a bare `reqwest::Client::new()`, and the UDS path has
+no analogous cap on `send_request` — so a connection that stalls after being accepted (rather than
+refusing outright) could otherwise block a single attempt indefinitely, defeating the ceiling this
+section just described. `bootstrap_app_state` wraps each call to `resolve_and_probe_embedder` in
+`tokio::time::timeout`, bounded by `retry_deadline - now`, and treats an elapsed timeout as another
+`Retryable` outcome. This is applied uniformly rather than only in standalone `--mcp-stdio` mode:
+on the socket-service path the only effect is turning a previously-unbounded hang (on a stalling,
+never-refusing connection) into a bounded 5-second failure — the fast-refusal case FR-001 actually
+guards stays untouched, since it already returns well inside that budget.
 
 **Why the whole resolve-then-probe sequence is retried, not just the final `.probe()` call.** The
 default-UDS/explicit-`--embedder-uds` existence check runs via `Path::exists()` *before* any probe

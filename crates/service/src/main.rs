@@ -409,14 +409,34 @@ async fn bootstrap_app_state(
     let retry_deadline = std::time::Instant::now() + EMBEDDER_RETRY_CEILING;
     let mut backoff = EMBEDDER_RETRY_INITIAL_BACKOFF;
     let (resolved, embedding_dim, embedding_model_probed, embedding_api_key) = loop {
-        match resolve_and_probe_embedder(
-            cli_uds.as_deref(),
-            cli_http.as_deref(),
-            &embedder_model,
-            embedding_dim_override,
+        // Bound each attempt to the time remaining in the window, not just the inter-attempt
+        // backoff: neither transport's client (reqwest::Client::new() nor the UDS hyper pool)
+        // has a request timeout configured, so a connection that stalls after being accepted —
+        // rather than refusing outright — could otherwise block a single attempt past the
+        // advertised ceiling (review finding on #499/PR #514). Applying this uniformly also
+        // bounds the same failure mode on the socket-service path, where it can only shorten an
+        // unbounded hang, never shorten today's fast-refusal fail-fast case FR-001 covers.
+        let attempt_budget = retry_deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(Duration::from_millis(1));
+        let outcome = match tokio::time::timeout(
+            attempt_budget,
+            resolve_and_probe_embedder(
+                cli_uds.as_deref(),
+                cli_http.as_deref(),
+                &embedder_model,
+                embedding_dim_override,
+            ),
         )
         .await
         {
+            Ok(outcome) => outcome,
+            Err(_) => ProbeOutcome::Retryable(format!(
+                "embedder probe timed out after {:.1}s with no response",
+                attempt_budget.as_secs_f64()
+            )),
+        };
+        match outcome {
             ProbeOutcome::Ready {
                 resolved,
                 embedding_dim,
