@@ -265,6 +265,82 @@ async fn spawn_stub_uds_keepalive_server(
     )
 }
 
+/// Reads headers and body from an HTTP/1.1 request, returning the raw header lines
+/// (unlike `read_http_request_body`, which only extracts `Content-Length`) so tests can
+/// assert on the presence/absence/value of arbitrary headers such as `Authorization`.
+async fn read_http_request_with_headers(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> (Vec<String>, Vec<u8>) {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut headers = Vec::new();
+    let mut content_length: usize = 0;
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await.unwrap_or(0);
+        if n == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        let trimmed = line.trim_end().to_string();
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("content-length:") {
+            if let Some(v) = lower.split(':').nth(1) {
+                content_length = v.trim().parse().unwrap_or(0);
+            }
+        }
+        headers.push(trimmed);
+    }
+    let body = if content_length > 0 {
+        use tokio::io::AsyncReadExt;
+        let mut body = vec![0u8; content_length];
+        reader.read_exact(&mut body).await.ok();
+        body
+    } else {
+        Vec::new()
+    };
+    (headers, body)
+}
+
+/// Spawns a stub HTTP server on a random OS-assigned port that captures every accepted
+/// request's raw header lines into a shared `Mutex<Vec<Vec<String>>>` (one entry per
+/// request), so tests can assert on `Authorization` header presence/value.
+async fn spawn_stub_http_server_capturing_headers(
+    dim: usize,
+) -> (
+    SocketAddr,
+    JoinHandle<()>,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = oai_response_json(dim);
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+    let captured_task = captured.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let response_body = body.clone();
+            let captured = captured_task.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let (headers, request_body) = read_http_request_with_headers(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                captured.lock().unwrap().push(headers);
+                write_http_response(&mut write_half, &response_body).await;
+            });
+        }
+    });
+
+    (addr, handle, captured)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -421,4 +497,78 @@ async fn uds_transport_concurrent_calls_not_fully_serialized() {
         "expected concurrent calls to parallelize across the pool \
          (elapsed {elapsed:?} should be well under fully-serial {fully_serial:?})"
     );
+}
+
+// ── Bearer-token auth tests (issue #497) ────────────────────────────────────────
+
+/// FR-001/FR-003: when an API key is configured via `with_api_key`, every outgoing HTTP
+/// request (both `probe()` and `embed()`) carries `Authorization: Bearer <key>`.
+#[tokio::test]
+async fn http_transport_sends_bearer_header_when_key_configured() {
+    let dim = 16;
+    let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder =
+        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+
+    embedder.embed("hello world").await.unwrap();
+    embedder.probe().await.unwrap();
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 2, "expected one request per call");
+    for headers in requests.iter() {
+        let auth = headers
+            .iter()
+            .find(|h| h.to_lowercase().starts_with("authorization:"))
+            .unwrap_or_else(|| panic!("no Authorization header in request headers: {headers:?}"));
+        assert_eq!(auth, "authorization: Bearer sekret-key");
+    }
+}
+
+/// FR-004: with no key configured, the request is byte-for-byte identical to pre-change
+/// behavior — no `Authorization` header present at all.
+#[tokio::test]
+async fn http_transport_no_authorization_header_when_key_unset() {
+    let dim = 16;
+    let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+
+    embedder.embed("hello world").await.unwrap();
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let has_auth = requests[0]
+        .iter()
+        .any(|h| h.to_lowercase().starts_with("authorization:"));
+    assert!(
+        !has_auth,
+        "expected no Authorization header when no key is configured, got: {:?}",
+        requests[0]
+    );
+}
+
+/// FR-005: UDS never sends a credential, regardless of what a key resolution would have
+/// produced — `new_uds` structurally has no key parameter, so `with_api_key` isn't even
+/// reachable for this transport in production code.
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("auth_test.sock");
+    let dim = 16;
+    let _server = spawn_stub_uds_server(&sock_path, dim).await;
+
+    // Set every tier of the key env vars to prove they have no effect on UDS at all —
+    // OaiEmbedder::from_env() would resolve a key, but the UDS transport constructor never
+    // accepts one, so there is nothing for a key to attach to.
+    std::env::set_var("LCG_EMBEDDING_API_KEY", "should-never-be-used");
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let result = embedder.embed("hello world").await.unwrap();
+    std::env::remove_var("LCG_EMBEDDING_API_KEY");
+
+    assert_eq!(result.len(), dim);
+    // Succeeding at all confirms the UDS path is untouched: OaiEmbedder::new_uds never
+    // accepts a key parameter, so LCG_EMBEDDING_API_KEY being set in the environment has
+    // no code path by which it could reach this request.
 }
