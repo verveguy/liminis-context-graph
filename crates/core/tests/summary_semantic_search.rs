@@ -21,7 +21,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::{CountingEmbedder, Embedder, NameMapEmbedder},
+    embedder::{CountingEmbedder, Embedder, MockEmbedder, NameMapEmbedder},
     extractor::{ConfigurableExtractor, Extractor},
     handlers,
     ipc::IpcRequest,
@@ -405,6 +405,106 @@ async fn empty_summary_entity_skips_embedder_call_for_summary() {
         1,
         "an empty summary must not trigger a second embedder call"
     );
+}
+
+/// Issue #445, FR-009/SC-004: Phase C issues one batch embed call per `WRITE_BATCH_SIZE`
+/// (100) candidates, not one call per candidate. 101 candidates should issue ceil(101/100) = 2
+/// batch calls, and — since Phase C is the only embedding done by a non-dry-run backfill — zero
+/// single-item `embed()` calls.
+#[tokio::test]
+async fn backfill_batches_embed_calls_by_write_chunk() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let counting = Arc::new(CountingEmbedder::new(inner));
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let state = make_state(
+        db.clone(),
+        embedder,
+        Arc::new(ConfigurableExtractor::new(vec![])),
+    );
+
+    const N: usize = 101;
+    {
+        let conn = db.connect().unwrap();
+        for i in 0..N {
+            conn.insert_entity(&EntityRow {
+                uuid: format!("uuid-{i}"),
+                name: format!("entity-{i}"),
+                group_id: GRP.to_string(),
+                labels: vec!["Entity".to_string()],
+                created_at: "2026-01-01 00:00:00".to_string(),
+                name_embedding: vec![0.0; DIM],
+                summary: format!("summary text {i}"),
+                attributes: "{}".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    let backfill_result = dispatch(
+        "knowledge_backfill_summary_embeddings",
+        json!({ "group_id": GRP, "dry_run": false }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(backfill_result["backfilled"], N);
+
+    assert_eq!(
+        counting.batch_call_count(),
+        2,
+        "101 candidates at WRITE_BATCH_SIZE=100 should issue ceil(101/100) = 2 batch embed calls"
+    );
+    assert_eq!(
+        counting.call_count(),
+        0,
+        "backfill's Phase C should exclusively use embed_batch, never single-item embed()"
+    );
+}
+
+/// Acceptance Scenario 3: a `dry_run` invocation never reaches Phase C, so it issues zero batch
+/// embed calls — batching must not change that.
+#[tokio::test]
+async fn backfill_dry_run_issues_zero_batch_calls() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+
+    let inner: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(DIM));
+    let counting = Arc::new(CountingEmbedder::new(inner));
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let state = make_state(
+        db.clone(),
+        embedder,
+        Arc::new(ConfigurableExtractor::new(vec![])),
+    );
+
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "dry-run-uuid".to_string(),
+            name: "dry-run-entity".to_string(),
+            group_id: GRP.to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0; DIM],
+            summary: "a summary that should not be embedded".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let backfill_result = dispatch(
+        "knowledge_backfill_summary_embeddings",
+        json!({ "group_id": GRP, "dry_run": true }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(backfill_result["backfilled"], 1);
+    assert_eq!(counting.batch_call_count(), 0);
+    assert_eq!(counting.call_count(), 0);
 }
 
 /// Edge Cases: a partially-completed backfill (some entities embedded, others not yet) must not

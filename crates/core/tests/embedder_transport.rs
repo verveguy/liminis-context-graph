@@ -1,15 +1,45 @@
-// Integration tests for OaiEmbedder HTTP and UDS transports (FR-012).
+// Integration tests for OaiEmbedder HTTP and UDS transports (FR-012), including issue #445's
+// batch API (FR-001, FR-003, FR-004, FR-005, FR-006).
 //
 // Stubs serve the OpenAI-compatible /v1/embeddings contract. Tests verify that
 // OaiEmbedder::embed() and OaiEmbedder::probe() work against both transports.
 // UDS tests are #[cfg(unix)] and skip cleanly on non-Unix platforms.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use lcg_core::embedder::{Embedder, OaiEmbedder};
 use tokio::task::JoinHandle;
 
 const STUB_MODEL: &str = "stub-model";
+
+// `LCG_EMBED_BATCH_SIZE` is a process-global env var read by `OaiEmbedder::do_embed_batch`'s
+// chunk-size resolution. This test binary is its own process, so mutating it only races against
+// other tests in *this* file — this lock serializes that hazard, mirroring the pattern
+// `ipc_parity.rs` uses for `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` (see #429). A test that overrides
+// the env var takes the write guard for its whole override window; any test relying on the
+// *default* chunk size takes the read guard across its `embed_batch` call, so it never runs
+// concurrently with an override.
+static EMBED_BATCH_SIZE_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+struct EmbedBatchSizeEnvGuard {
+    _lock: std::sync::RwLockWriteGuard<'static, ()>,
+}
+
+impl EmbedBatchSizeEnvGuard {
+    fn set(value: &str) -> Self {
+        let lock = EMBED_BATCH_SIZE_ENV_LOCK.write().unwrap();
+        std::env::set_var("LCG_EMBED_BATCH_SIZE", value);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for EmbedBatchSizeEnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("LCG_EMBED_BATCH_SIZE");
+    }
+}
 
 // ── Stub helpers ─────────────────────────────────────────────────────────────
 
@@ -72,6 +102,111 @@ fn assert_oai_request_body(body: &[u8]) {
     );
 }
 
+/// Builds a batch response body with `count` entries, indexed `0..count`, but emitted into the
+/// `data` array in **reverse** order — so a test asserting the client reorders by `index` rather
+/// than trusting array position can't pass by accident.
+fn oai_batch_response_json_shuffled(dim: usize, count: usize) -> String {
+    let entries: Vec<String> = (0..count)
+        .rev()
+        .map(|i| {
+            // Each entry's values are a deterministic function of its index, so a test can
+            // verify a returned vector landed at the correct position.
+            let embedding: Vec<f64> = (0..dim).map(|d| (i * 1000 + d) as f64).collect();
+            let embedding_json = serde_json::to_string(&embedding).unwrap();
+            format!(r#"{{"object":"embedding","embedding":{embedding_json},"index":{i}}}"#)
+        })
+        .collect();
+    format!(
+        r#"{{"object":"list","data":[{}],"model":"{STUB_MODEL}","usage":{{"prompt_tokens":1,"total_tokens":{count}}}}}"#,
+        entries.join(",")
+    )
+}
+
+/// Parses the request body's `input` field and returns how many texts it carries — 1 for a bare
+/// string, N for an array of N strings.
+fn input_len_from_request(body: &[u8]) -> usize {
+    let json: serde_json::Value =
+        serde_json::from_slice(body).expect("stub: request body should be valid JSON");
+    match json
+        .get("input")
+        .expect("stub: request should have 'input'")
+    {
+        serde_json::Value::String(_) => 1,
+        serde_json::Value::Array(a) => a.len(),
+        other => panic!("stub: unexpected 'input' shape: {other}"),
+    }
+}
+
+/// Spawns a stub HTTP server whose response tracks the request's `input` length (one shuffled,
+/// correctly-indexed entry per input element) rather than a fixed size — used for batch tests.
+/// Also counts requests received, so a test can assert how many sub-requests a chunked batch
+/// call issued.
+async fn spawn_stub_http_batch_echo_server(
+    dim: usize,
+) -> (SocketAddr, JoinHandle<()>, Arc<AtomicUsize>) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_task = request_count.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request_count = request_count_task.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let n = input_len_from_request(&request_body);
+                let body = oai_batch_response_json_shuffled(dim, n);
+                write_http_response(&mut write_half, &body).await;
+            });
+        }
+    });
+
+    (addr, handle, request_count)
+}
+
+/// Spawns a stub HTTP server that always returns a response with `fixed_count` entries,
+/// regardless of the request's actual input length — used to test the client's reaction to a
+/// malformed/mismatched response (FR-005's atomic-failure behavior).
+async fn spawn_stub_http_fixed_count_server(
+    dim: usize,
+    fixed_count: usize,
+) -> (SocketAddr, JoinHandle<()>) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = oai_batch_response_json_shuffled(dim, fixed_count);
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let response_body = body.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                write_http_response(&mut write_half, &response_body).await;
+            });
+        }
+    });
+
+    (addr, handle)
+}
+
 /// Spawns a stub HTTP server on a random OS-assigned port. Returns the bound address.
 async fn spawn_stub_http_server(dim: usize) -> (SocketAddr, JoinHandle<()>) {
     use tokio::io::BufReader;
@@ -124,6 +259,42 @@ async fn spawn_stub_uds_server(path: &std::path::Path, dim: usize) -> JoinHandle
             });
         }
     })
+}
+
+/// UDS counterpart of `spawn_stub_http_batch_echo_server`: response size tracks the request's
+/// `input` length instead of being fixed, entries shuffled and correctly indexed.
+#[cfg(unix)]
+async fn spawn_stub_uds_batch_echo_server(
+    path: &std::path::Path,
+    dim: usize,
+) -> (JoinHandle<()>, Arc<AtomicUsize>) {
+    use tokio::io::BufReader;
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(path).unwrap();
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let request_count_task = request_count.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let request_count = request_count_task.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let n = input_len_from_request(&request_body);
+                let body = oai_batch_response_json_shuffled(dim, n);
+                write_http_response(&mut write_half, &body).await;
+            });
+        }
+    });
+
+    (handle, request_count)
 }
 
 /// Like `write_http_response`, but omits `Connection: close` so the client can
@@ -334,6 +505,48 @@ async fn spawn_stub_http_server_capturing_headers(
                 assert_oai_request_body(&request_body);
                 captured.lock().unwrap().push(headers);
                 write_http_response(&mut write_half, &response_body).await;
+            });
+        }
+    });
+
+    (addr, handle, captured)
+}
+
+/// Combines `spawn_stub_http_server_capturing_headers`'s header capture with
+/// `spawn_stub_http_batch_echo_server`'s input-length-aware response, so a test can assert the
+/// `Authorization` header on a *batched* (array-`input`) request — a combination new to #445,
+/// since bearer-auth (#497) and batching didn't coexist until this rebase joined them, and
+/// nothing on either side of that merge could have exercised it.
+async fn spawn_stub_http_batch_server_capturing_headers(
+    dim: usize,
+) -> (
+    SocketAddr,
+    JoinHandle<()>,
+    std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+    let captured_task = captured.clone();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let captured = captured_task.clone();
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let (headers, request_body) = read_http_request_with_headers(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                captured.lock().unwrap().push(headers);
+                let n = input_len_from_request(&request_body);
+                let body = oai_batch_response_json_shuffled(dim, n);
+                write_http_response(&mut write_half, &body).await;
             });
         }
     });
@@ -571,4 +784,191 @@ async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
     // Succeeding at all confirms the UDS path is untouched: OaiEmbedder::new_uds never
     // accepts a key parameter, so LCG_EMBEDDING_API_KEY being set in the environment has
     // no code path by which it could reach this request.
+}
+
+/// FR-001/FR-003 × #445: the batch path (array-valued `input`) carries the same
+/// `Authorization: Bearer <key>` header as the single-text path — auth is applied once, at the
+/// shared `do_embed_raw`/`do_embed_http_raw` layer, so it covers `embed_batch`'s array requests
+/// automatically. This combination didn't exist on either side of the #497/#445 merge, so
+/// nothing exercised it before; a careless conflict resolution that dropped the `api_key`
+/// parameter from `do_embed_http_raw` (reverting to the pre-#497 signature) would compile fine
+/// and only fail here.
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"` — this
+// test calls `embed_batch` with a non-empty slice, so it reads `LCG_EMBED_BATCH_SIZE` and must
+// take the same guard as every other test that does.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_embed_batch_sends_bearer_header_when_key_configured() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dim = 4;
+    let (addr, _server, captured) = spawn_stub_http_batch_server_capturing_headers(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder =
+        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+
+    let texts = ["one", "two", "three"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+    assert_eq!(results.len(), texts.len());
+
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1, "expected one batched request");
+    let auth = requests[0]
+        .iter()
+        .find(|h| h.to_lowercase().starts_with("authorization:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "no Authorization header in batch request headers: {:?}",
+                requests[0]
+            )
+        });
+    assert_eq!(auth, "authorization: Bearer sekret-key");
+}
+
+// ── Batch API tests (#445) ──────────────────────────────────────────────────
+
+/// Acceptance Scenario 2/3: a batch within the chunk limit issues exactly one request carrying
+/// all texts as an array, and the response is reassembled into request order via the `index`
+/// field even though the stub deliberately returns entries in reverse array order.
+// Holding the std `RwLockReadGuard` across `.await` is intentional, not an oversight — see
+// `EMBED_BATCH_SIZE_ENV_LOCK`'s doc comment and `ipc_parity.rs`'s identical pattern for
+// `CHUNK_ADVISORY_ENV_LOCK` (#429): `flavor = "current_thread"` pins this test to a
+// single-threaded runtime, so the guard is never held across a yield point that could contend
+// with another task on the same runtime — only with `cargo test`'s parallel OS threads, which
+// this guard still correctly serializes against.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_embed_batch_single_request_and_correct_order() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dim = 4;
+    let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+
+    let texts = ["one", "two", "three", "four", "five"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(results.len(), texts.len());
+    for (i, vec) in results.iter().enumerate() {
+        assert_eq!(vec.len(), dim);
+        assert_eq!(
+            vec[0],
+            (i * 1000) as f32,
+            "vector at position {i} misordered"
+        );
+    }
+}
+
+/// FR-004: a batch larger than the chunk limit is transparently split into multiple
+/// sub-requests, and the full, correctly-ordered result is returned as if it were one call.
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockWriteGuard` (inside `EmbedBatchSizeEnvGuard`) across `.await` is safe under
+// `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_embed_batch_chunks_oversized_batch() {
+    let _env_guard = EmbedBatchSizeEnvGuard::set("2");
+    let dim = 4;
+    let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+
+    let texts = ["a", "b", "c", "d", "e"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+
+    assert_eq!(
+        request_count.load(Ordering::SeqCst),
+        3,
+        "5 texts at chunk size 2 should issue ceil(5/2) = 3 sub-requests"
+    );
+    assert_eq!(results.len(), texts.len());
+}
+
+/// Acceptance Scenario 5 / FR-006: an empty batch returns an empty result without issuing any
+/// network call.
+#[tokio::test]
+async fn http_transport_embed_batch_empty_input_issues_no_request() {
+    let dim = 4;
+    let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+
+    let texts: [&str; 0] = [];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+
+    assert!(results.is_empty());
+    assert_eq!(request_count.load(Ordering::SeqCst), 0);
+}
+
+/// FR-005/Acceptance Scenario 4: a response whose entry count doesn't match the request (here,
+/// a server bug returning a fixed count regardless of input) surfaces as a single error, not a
+/// partial or silently-truncated/padded result.
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"` — this test
+// calls `embed_batch` with a non-empty slice, so it reads `LCG_EMBED_BATCH_SIZE` and must take
+// the same guard as every other test that does.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_embed_batch_mismatched_response_errors() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dim = 4;
+    let (addr, _server) = spawn_stub_http_fixed_count_server(dim, 2).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+
+    let texts = ["one", "two", "three"];
+    let err = embedder.embed_batch(&texts).await.unwrap_err();
+    assert!(
+        format!("{err}").contains("shape mismatch"),
+        "expected a shape-mismatch error, got: {err}"
+    );
+}
+
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn uds_transport_embed_batch_roundtrip_and_order() {
+    let _env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("embed_batch_test.sock");
+    let dim = 4;
+    let (_server, request_count) = spawn_stub_uds_batch_echo_server(&sock_path, dim).await;
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+
+    let texts = ["one", "two", "three"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    assert_eq!(results.len(), texts.len());
+    for (i, vec) in results.iter().enumerate() {
+        assert_eq!(
+            vec[0],
+            (i * 1000) as f32,
+            "vector at position {i} misordered"
+        );
+    }
+}
+
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockWriteGuard` (inside `EmbedBatchSizeEnvGuard`) across `.await` is safe under
+// `flavor = "current_thread"`.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn uds_transport_embed_batch_chunks_oversized_batch() {
+    let _env_guard = EmbedBatchSizeEnvGuard::set("2");
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("embed_batch_chunk_test.sock");
+    let dim = 4;
+    let (_server, request_count) = spawn_stub_uds_batch_echo_server(&sock_path, dim).await;
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+
+    let texts = ["a", "b", "c", "d", "e"];
+    let results = embedder.embed_batch(&texts).await.unwrap();
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 3);
+    assert_eq!(results.len(), texts.len());
 }

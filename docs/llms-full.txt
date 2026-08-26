@@ -245,6 +245,7 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe). Does **not** override an authentication failure (HTTP 401/403) — see [Embedder sidecar](#embedder-sidecar) below. |
 | `LCG_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP embedder transport (`--embedder-http`/`LCG_EMBEDDING_URL`). Falls back to `GRAPHITI_EMBEDDING_API_KEY`, then to `OPENAI_API_KEY`. Unset (or empty) sends no `Authorization` header, unchanged from prior versions. Never applies to the UDS transport (`--embedder-uds`). |
 | `OPENAI_API_KEY` | No | Convenience fallback for `LCG_EMBEDDING_API_KEY` (see above) — reuses an already-exported OpenAI key. Not a deprecated alias, so using it logs no *deprecation* warning — but since it sends whatever key is exported for OpenAI tooling generally to whatever `--embedder-http`/`LCG_EMBEDDING_URL` endpoint is configured (not necessarily OpenAI's own API), using this tier does log a one-line informational notice naming the endpoint the key will be sent to. |
+| `LCG_EMBED_BATCH_SIZE` | No | Number of texts per array-valued `/v1/embeddings` request when `OaiEmbedder::embed_batch` chunks a larger batch (default `64`, valid range `1`–`256`). The embedding sidecar's real per-request limit is unmeasured; lower this if a batch call fails due to a request-size limit. See [ADR-0445](adr/0445-embedder-batch-api.md). |
 | `LCG_EXTRACTION_LLM` | No | Anthropic model for entity extraction, optional `primary:fallback` format. Only consulted on the Anthropic path (see `ANTHROPIC_API_KEY` below); ignored when a local extraction endpoint is selected. |
 | `LCG_EXTRACTION_URL` | No | Fallback HTTP URL used when no `--extractor-uds`/`--extractor-http` flag is passed and `ANTHROPIC_API_KEY` is unset. If this var is also unset in that situation, no extraction provider is configured: the binary still starts, but every extraction-dependent call (`knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`) fails with an error identifying the missing configuration — extraction has no default-socket auto-detection (unlike the embedder), so a running sidecar alone is not enough. |
 | `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
@@ -269,7 +270,7 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LIMINIS_DEDUP_HYBRID_THRESHOLD` | No | Entity count per `group_id` above which dedup switches from brute-force cosine to the hybrid FTS + vector path. |
 | `LIMINIS_LLM_COST_TABLE_PATH` | No | Path to a JSON model-pricing table used to populate `estimated_cost_usd` in `token_usage` telemetry. See [Telemetry](telemetry.md). |
 
-That's 30 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
+That's 31 variables as of this page's writing, covering every `env::var`/`lcg_env_var` call site under `crates/*/src`.
 
 **Deprecated `GRAPHITI_*` aliases.** Every `LCG_*` variable above that predates the rename also
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
@@ -3561,6 +3562,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0440](0440-recompute-embeddings-on-wal-replay.md) | Recompute Embeddings on WAL Replay, With a Sync Bridge and a Two-Mechanism Identity Split | 2026-08-19 |
+| [0445](0445-embedder-batch-api.md) | Embedder Batch API — Wire-Level Batching, Index-Ordered Reassembly, Chunk-Size Knob | 2026-08-23 |
 | [0446](0446-per-group-ontology-resolution.md) | Per-Group Ontology Resolution | 2026-08-20 |
 | [0451](0451-per-group-ontology-drift-cache-and-clear-scope.md) | Per-Group Ontology Drift — Cache Placement and Clear Scope | 2026-08-23 |
 | [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
