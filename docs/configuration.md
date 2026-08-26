@@ -132,6 +132,15 @@ start the sidecar first, then start the binary. Extraction does **not** auto-det
 backend is not recommended for extraction quality, so using it there requires the explicit
 `--extractor-uds /tmp/liminis-inference.sock` flag rather than happening by default.
 
+The sidecar's own `LOCAL_INFERENCE_MODE` environment variable (`embeddings` | `completions` |
+`both`, default `both`) selects which of its own two endpoints it serves — see
+[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
+for the full table. Running `LOCAL_INFERENCE_MODE=completions` needs no CoreML model setup at
+all, since it serves only `/v1/chat/completions`. This mode selection is independent of, and does
+**not** change, the extraction-routing behavior above: Foundation-Models-backed completions are
+still not a drop-in substitute for the extraction backend, and nothing should route
+`--extractor-uds` at this sidecar on the assumption that enabling completions mode makes it one.
+
 ### HTTP transport (CI / Linux / custom embedders / hosted providers)
 
 For environments without the Swift sidecar, pass `--embedder-http` pointing at an endpoint
