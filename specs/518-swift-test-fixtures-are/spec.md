@@ -105,13 +105,17 @@ across all 10 suites pass, with 0 issues.
 
 A contributor adds or regenerates a fixture under
 `Tests/LocalInferenceTests/Fixtures/*.mlpackage` and runs `git add` / `git status`. Every
-file belonging to that fixture is trackable; none is silently swallowed by the
-`*.mlpackage` ignore rule the way the three broken fixtures' weight blobs were.
+file belonging to that fixture is trackable; none is silently swallowed by an unanchored
+`*.mlpackage` ignore rule paired with a fragile `!` re-inclusion negation.
 
-**Why this priority**: Without fixing the ignore-pattern trap, the exact same failure mode
-can recur the next time someone regenerates or hand-edits a fixture, since the underlying
-git behavior (an excluded directory cannot be re-included file-by-file) is unrelated to how
-carefully anyone force-adds files.
+**Why this priority**: As the Background section explains, this ignore-pattern trap was
+the originally suspected cause but did not turn out to be what dropped the three broken
+fixtures' content (the actual cause was an empty `weights/` directory git cannot track —
+see Bug 785). The pattern is nonetheless fragile: git's behavior for negating a pattern
+inside an excluded directory is version- and path-dependent, so leaving it unanchored
+still risks the same class of failure recurring for a different fixture in the future.
+Root-anchoring it removes that risk as defense in depth, independent of the fix for the
+actual defect.
 
 **Independent Test**: After the fix, run `git check-ignore -v` (or equivalent) against
 every file physically present under `Tests/LocalInferenceTests/Fixtures/**`; none should
