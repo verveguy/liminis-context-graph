@@ -165,6 +165,13 @@ struct ExtractJSONTests {
         let input = #"{"outer":{"inner":1}}"#
         #expect(extractJSON(from: input) == input)
     }
+
+    @Test func invertedBraceRangePassthroughUnchanged() {
+        // Dangling `}` before the next `{` — no valid JSON span. Must return the
+        // cleaned text rather than constructing an invalid (crashing) Range.
+        let input = "some prose } with a stray closer, then an opener {"
+        #expect(extractJSON(from: input) == input)
+    }
 }
 
 // MARK: - JSON-mode via HTTP handler
