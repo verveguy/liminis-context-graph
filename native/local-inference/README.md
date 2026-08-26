@@ -18,7 +18,40 @@ Both endpoints follow OpenAI's wire shapes. The embeddings contract is documente
 - Xcode command-line tools (`xcode-select --install`)
 - ~500 MB of disk for the BGE-base CoreML model (downloaded on first setup, not committed)
 
+## Selecting a mode
+
+The sidecar serves both `/v1/embeddings` and `/v1/chat/completions` by default. Set
+`LOCAL_INFERENCE_MODE` to run only one:
+
+| `LOCAL_INFERENCE_MODE` | Serves | Setup required |
+|---|---|---|
+| `embeddings` | `/v1/embeddings` only | CoreML model (see "First-time setup" below) |
+| `completions` | `/v1/chat/completions` only | **none** |
+| `both` (default, or unset) | Both endpoints | CoreML model (see "First-time setup" below) |
+
+`completions`-only mode needs no setup step at all: it skips the embedding-model
+presence check, never loads a tokenizer, never compiles a `.mlmodelc`, and never
+requires `LOCAL_INFERENCE_HF_CACHE`. A request to a route disabled by the selected
+mode returns `404` with `error.type: "invalid_request_error"` — distinguishable from
+the `503`/`server_error` a route returns when it's enabled but currently unavailable
+(e.g. a missing embedding model in `embeddings`/`both` mode, or Apple Intelligence
+being off in `completions`/`both` mode).
+
+An invalid `LOCAL_INFERENCE_MODE` value fails fast at startup with a clear error,
+rather than silently falling back to `both`.
+
+**Foundation-Models-backed completions are not a substitute for the extraction
+backend.** `LOCAL_INFERENCE_MODE=completions` only affects this sidecar's own
+routes; it has no bearing on `liminis-context-graph`'s `--extractor-uds` flag, which
+has no default-socket auto-detection by design (see
+[ADR-0041](../../docs/adr/0041-local-openai-compatible-extraction-adapter.md)) —
+this sidecar's Foundation Models backend is not recommended for extraction quality
+(see [Extractor: local or hosted](../../docs/configuration.md#extractor-local-or-hosted)).
+
 ## First-time setup
+
+Required for `embeddings` and `both` modes only — `completions`-only mode needs no
+setup step at all (see "Selecting a mode" above).
 
 The CoreML model file (`bge-base-en-v1.5.mlpackage`, ~400 MB) is not committed to the repo. It is downloaded and converted on first use:
 

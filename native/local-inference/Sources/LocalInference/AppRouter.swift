@@ -9,14 +9,29 @@ import Hummingbird
 ///   - adapter: The LLM inference backend (Foundation Models in production, mock in tests).
 ///   - embeddingActor: The CoreML embedding actor. When nil (tests without the .mlpackage),
 ///     the `/v1/embeddings` route returns 503.
+///   - mode: Which capability set to register routes for. Defaults to `.both`, matching
+///     pre-existing behavior. A capability not included in `mode` gets a 404 stub instead
+///     of its normal handler, distinguishing "disabled by configuration" from "enabled but
+///     currently unavailable" (e.g. the 503s above).
 func buildRouter(
     adapter: some InferenceAdapter,
-    embeddingActor: CoreMLEmbeddingActor? = nil
+    embeddingActor: CoreMLEmbeddingActor? = nil,
+    mode: LocalInferenceMode = .both
 ) -> Router<BasicRequestContext> {
     let router = Router()
 
     router.get("/health") { request, context in
         try await handleHealth(request: request, context: context)
+    }
+
+    guard mode.includesCompletions else {
+        router.post("/v1/chat/completions") { _, _ in
+            makeErrorResponse(
+                status: .notFound,
+                message: "/v1/chat/completions is disabled: LOCAL_INFERENCE_MODE=\(mode.rawValue) does not include completions."
+            )
+        }
+        return registerEmbeddingsRoute(router, embeddingActor: embeddingActor, mode: mode)
     }
 
     router.post("/v1/chat/completions") { request, context in
@@ -31,6 +46,26 @@ func buildRouter(
             fputs("[local-inference] Unhandled chat completion error: \(error)\n", stderr)
             return makeErrorResponse(status: .internalServerError, message: "An internal error occurred")
         }
+    }
+
+    return registerEmbeddingsRoute(router, embeddingActor: embeddingActor, mode: mode)
+}
+
+/// Registers `/v1/embeddings`, either the real handler (mode includes embeddings) or a
+/// 404 stub (mode does not) — factored out so both `buildRouter` early-return paths share it.
+private func registerEmbeddingsRoute(
+    _ router: Router<BasicRequestContext>,
+    embeddingActor: CoreMLEmbeddingActor?,
+    mode: LocalInferenceMode
+) -> Router<BasicRequestContext> {
+    guard mode.includesEmbeddings else {
+        router.post("/v1/embeddings") { _, _ in
+            makeErrorResponse(
+                status: .notFound,
+                message: "/v1/embeddings is disabled: LOCAL_INFERENCE_MODE=\(mode.rawValue) does not include embeddings."
+            )
+        }
+        return router
     }
 
     router.post("/v1/embeddings") { request, context in

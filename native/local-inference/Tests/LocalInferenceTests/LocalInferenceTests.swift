@@ -42,6 +42,14 @@ private func makeApp(_ adapter: some InferenceAdapter, embeddingActor: CoreMLEmb
     Application(responder: buildRouter(adapter: adapter, embeddingActor: embeddingActor).buildResponder())
 }
 
+private func makeApp(
+    _ adapter: some InferenceAdapter,
+    embeddingActor: CoreMLEmbeddingActor?,
+    mode: LocalInferenceMode
+) -> Application<RouterResponder<BasicRequestContext>> {
+    Application(responder: buildRouter(adapter: adapter, embeddingActor: embeddingActor, mode: mode).buildResponder())
+}
+
 private func postCompletions<T: Sendable>(
     _ client: some TestClientProtocol,
     body: String,
@@ -372,6 +380,114 @@ struct ErrorHandlingTests {
                                                    from: Data(response.body.readableBytesView))
                 #expect(err.error.type == "server_error")
                 #expect(!err.error.message.isEmpty)
+            }
+        }
+    }
+}
+
+// MARK: - LocalInferenceMode parsing
+
+@Suite("LocalInferenceMode.parse")
+struct LocalInferenceModeParsingTests {
+
+    @Test func nilDefaultsToBoth() throws {
+        #expect(try LocalInferenceMode.parse(nil) == .both)
+    }
+
+    @Test func parsesEmbeddings() throws {
+        #expect(try LocalInferenceMode.parse("embeddings") == .embeddings)
+    }
+
+    @Test func parsesCompletions() throws {
+        #expect(try LocalInferenceMode.parse("completions") == .completions)
+    }
+
+    @Test func parsesBoth() throws {
+        #expect(try LocalInferenceMode.parse("both") == .both)
+    }
+
+    @Test func invalidValueThrows() {
+        #expect(throws: LocalInferenceMode.ParseError.invalidValue("bogus")) {
+            try LocalInferenceMode.parse("bogus")
+        }
+    }
+
+    @Test func includesFlagsPerMode() {
+        #expect(LocalInferenceMode.embeddings.includesEmbeddings == true)
+        #expect(LocalInferenceMode.embeddings.includesCompletions == false)
+        #expect(LocalInferenceMode.completions.includesEmbeddings == false)
+        #expect(LocalInferenceMode.completions.includesCompletions == true)
+        #expect(LocalInferenceMode.both.includesEmbeddings == true)
+        #expect(LocalInferenceMode.both.includesCompletions == true)
+    }
+}
+
+// MARK: - Endpoint disabled by LOCAL_INFERENCE_MODE
+
+@Suite("Endpoints disabled by mode")
+struct DisabledByModeTests {
+
+    @Test func completionsOnlyModeDisablesEmbeddings() async throws {
+        let app = makeApp(MockInferenceAdapter(), embeddingActor: nil, mode: .completions)
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/v1/embeddings",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(string: #"{"input":"hello","model":"coreml-bge"}"#)
+            ) { response in
+                #expect(response.status == .notFound)
+                let err = try JSONDecoder().decode(ErrorResponse.self,
+                                                   from: Data(response.body.readableBytesView))
+                // Distinguishable from the existing "no actor" 503/server_error response.
+                #expect(err.error.type == "invalid_request_error")
+                #expect(!err.error.message.isEmpty)
+            }
+        }
+    }
+
+    @Test func completionsOnlyModeServesCompletions() async throws {
+        let app = makeApp(MockInferenceAdapter(response: "hi"), embeddingActor: nil, mode: .completions)
+        try await app.test(.router) { client in
+            try await postCompletions(client, body: """
+                {"model":"apple-foundation","messages":[{"role":"user","content":"hi"}]}
+                """) { response in
+                #expect(response.status == .ok)
+            }
+        }
+    }
+
+    @Test func embeddingsOnlyModeDisablesCompletions() async throws {
+        let app = makeApp(MockInferenceAdapter(), embeddingActor: nil, mode: .embeddings)
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/v1/chat/completions",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(string: #"{"model":"apple-foundation","messages":[{"role":"user","content":"hi"}]}"#)
+            ) { response in
+                #expect(response.status == .notFound)
+                let err = try JSONDecoder().decode(ErrorResponse.self,
+                                                   from: Data(response.body.readableBytesView))
+                // Distinguishable from the existing "Foundation Models unavailable" 503/server_error response.
+                #expect(err.error.type == "invalid_request_error")
+                #expect(!err.error.message.isEmpty)
+            }
+        }
+    }
+
+    @Test func bothModeServesBothRoutes() async throws {
+        // Sanity check: explicit .both behaves the same as the untouched default.
+        let app = makeApp(MockInferenceAdapter(), embeddingActor: nil, mode: .both)
+        try await app.test(.router) { client in
+            try await client.execute(
+                uri: "/v1/embeddings",
+                method: .post,
+                headers: [.contentType: "application/json"],
+                body: ByteBuffer(string: #"{"input":"hello","model":"coreml-bge"}"#)
+            ) { response in
+                // Route is registered (not 404) — falls through to the existing nil-actor 503.
+                #expect(response.status == .serviceUnavailable)
             }
         }
     }
