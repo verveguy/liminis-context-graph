@@ -61,6 +61,15 @@ echo "--- Step 2/3: generating stub-bge-base-bad-*.mlpackage (negative-path fixt
 uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-bad-stub-models.py"
 
+# The bad-* stubs have zero learnable parameters by design, but coremltools'
+# mlpackage writer still emits a Manifest.json "weights" item pointing at an
+# empty Data/com.apple.CoreML/weights directory. Git cannot track an empty
+# directory, so without a placeholder the directory silently vanishes on
+# checkout while the manifest still references it — CoreML then fails to
+# open the package (see #518). Drop a placeholder so git preserves it.
+find "$FIXTURES" -type d -path "*-bad-*.mlpackage/Data/com.apple.CoreML/weights" -empty \
+    -exec touch {}/.gitkeep \;
+
 echo ""
 
 # 3. Tokenizer cache via prepare-tokenizer.py (requires network; revision is pinned)
