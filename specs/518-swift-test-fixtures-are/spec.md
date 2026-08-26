@@ -13,14 +13,16 @@ fixtures used by the Swift test suite. An `.mlpackage` is a directory bundle who
 cannot open the package at all if any referenced file is missing.
 
 Three of the five fixtures — `stub-bge-base-bad-dtype.mlpackage`,
-`stub-bge-base-bad-output-name.mlpackage`, and `stub-bge-base-bad-shape.mlpackage` — are
-missing their `Data/com.apple.CoreML/weights/weight.bin` file in git, while the other two
-working fixtures have it. As a result, the three tests in the `CoreMLEmbeddingActor —
-output schema validation` suite (`EmbeddingOutputValidationTests.swift`) that load these
-fixtures fail with an unrelated CoreML resource-loading error (`Item does not exist for
-identifier: ...`) instead of exercising the schema-validation assertion they exist to make.
+`stub-bge-base-bad-output-name.mlpackage`, and `stub-bge-base-bad-shape.mlpackage` — have a
+`Manifest.json` that references a `Data/com.apple.CoreML/weights` item with no backing
+content in git, while the other two working fixtures have real weight blobs there. As a
+result, the three tests in the `CoreMLEmbeddingActor — output schema validation` suite
+(`EmbeddingOutputValidationTests.swift`) that load these fixtures fail with an unrelated
+CoreML resource-loading error (`Item does not exist for identifier: ...`) instead of
+exercising the schema-validation assertion they exist to make.
 
-The root cause is a `.gitignore` trap in `native/local-inference/.gitignore`:
+This was initially suspected to be a `.gitignore` trap in
+`native/local-inference/.gitignore`:
 
 ```
 *.mlpackage
@@ -29,11 +31,23 @@ The root cause is a `.gitignore` trap in `native/local-inference/.gitignore`:
 !Tests/LocalInferenceTests/Fixtures/**
 ```
 
-`*.mlpackage` excludes the fixture *directories* themselves. Git does not descend into an
-excluded directory, so no `!` re-inclusion pattern beneath it can bring files back in. The
-files that _are_ tracked for these three fixtures were evidently force-added
-(`git add -f`) by hand, and the weight blobs were missed for exactly the three fixtures
-nobody has since exercised in CI.
+The theory: `*.mlpackage` excludes the fixture *directories* themselves, and git does not
+descend into an excluded directory, so no `!` re-inclusion pattern beneath it can bring
+files back in. **Research investigated this and found it does not reproduce** with the git
+version in use (2.50.1) — a file added inside an already-tracked or brand-new `.mlpackage`
+directory under `Tests/LocalInferenceTests/Fixtures/` is fully trackable via plain
+`git add`, negation and all. The `.gitignore` pattern is still fragile and worth
+root-anchoring defensively (see FR-002/FR-003), but it is not what dropped the weight
+blobs.
+
+The actual root cause, confirmed by regenerating the fixtures and bisecting the resulting
+`swift test` pass/fail: these three stubs have zero learnable parameters by design, but
+coremltools' `.mlpackage` writer still emits a manifest `weights` item pointing at an
+*empty* `Data/com.apple.CoreML/weights/` directory. Git cannot track an empty directory, so
+the directory silently disappears on checkout while `Manifest.json` still promises it's
+there — the same class of defect as a missing file, but the git mechanism is "git drops
+empty directories," not the `.gitignore` re-inclusion trap. See `Fixtures/README.md`'s
+"Bug 785" retrospective for the full account.
 
 This has been invisible because `.github/workflows/swift.yml` currently runs with
 `if: false` (see #502 — GitHub's `macos-latest` runner image doesn't yet support the
