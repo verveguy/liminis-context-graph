@@ -16,7 +16,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
-    embedder::MockEmbedder,
+    embedder::{Embedder, MockEmbedder},
     episode,
     error::Error,
     extractor::{ExtractOptions, MockExtractor},
@@ -66,6 +66,64 @@ impl Extractor for SlowExtractor {
         let count = edges.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
     }
+}
+
+// ── SlowBatchEmbedder ─────────────────────────────────────────────────────────
+
+/// Test embedder whose `embed_batch` sleeps for 60 s — used to exercise cancellation of the
+/// batch embed sites #445 converted (`episode.rs`'s name+summary/salvage/edge-fact batches),
+/// which each wrap a single `embed_batch` future in the same `tokio::select!` shape the
+/// pre-#445 per-item `embed()` calls used. `embed()` itself returns instantly since it's unused
+/// by MockExtractor's fixed two-entity/one-edge extraction result.
+struct SlowBatchEmbedder;
+
+impl Embedder for SlowBatchEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(async { Ok(vec![0.0f32; 4]) })
+    }
+
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        let n = texts.len();
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(vec![vec![0.0f32; 4]; n])
+        })
+    }
+
+    fn dim(&self) -> usize {
+        4
+    }
+}
+
+fn make_state_with_slow_batch_embedder(db: Arc<Db>, token: CancellationToken) -> Arc<AppState> {
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::new(SlowBatchEmbedder),
+        extractor: Arc::new(MockExtractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink: Arc::new(NoopSink),
+        db_path: "test.db".to_string(),
+        wal_root: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: token,
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -244,5 +302,54 @@ async fn no_cancel_completes_normally() {
         cancelled_chunks.load(Ordering::Relaxed),
         0,
         "cancelled_chunks should be 0 when no cancellation"
+    );
+}
+
+/// Issue #445, Acceptance Scenario 5: cancellation during one of the batch-converted Phase A
+/// embed sites (here, the entity-name/summary batch, the first one reached) is still abortable
+/// and the chunk is still counted as cancelled — the same guarantee `cancel_during_phase_a_...`
+/// above already proves for the outer content-embedding/extraction select, now proven for a
+/// batch `embed_batch` future instead of a single-item `embed()` future.
+#[tokio::test]
+async fn cancel_during_phase_a_batch_embed_returns_cancelled() {
+    let (db, _dir) = make_db(4);
+    let token = CancellationToken::new();
+    let state = make_state_with_slow_batch_embedder(db, token.clone());
+    let cancelled_chunks = Arc::clone(&state.cancelled_chunks);
+
+    let s = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
+        episode::add_episode(
+            s,
+            "ep",
+            "body",
+            "src",
+            "desc",
+            "2026-01-01 00:00:00",
+            "grp",
+            SourceType::Text,
+            None,
+        )
+        .await
+    });
+
+    // Give the task a moment to clear the (fast) extraction step and enter the name/summary
+    // batch's select!, then cancel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    token.cancel();
+
+    let result = tokio::time::timeout(Duration::from_millis(500), handle)
+        .await
+        .expect("add_episode should exit within 500 ms of cancellation")
+        .expect("task should not panic");
+
+    assert!(
+        matches!(result, Err(Error::Cancelled)),
+        "expected Error::Cancelled, got: {result:?}"
+    );
+    assert_eq!(
+        cancelled_chunks.load(Ordering::Relaxed),
+        1,
+        "cancelled_chunks counter should be 1"
     );
 }
