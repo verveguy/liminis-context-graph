@@ -65,17 +65,67 @@ check_exists() {
     fi
 }
 
+# Manifest-referential-integrity check — an .mlpackage's Manifest.json lists every
+# file/directory CoreML needs by identifier; a package with the right files present
+# but a manifest entry pointing at nothing (or an empty directory) is exactly the
+# failure mode that let #518 land undetected: it looks structurally complete but
+# CoreML refuses to open it. This walks Manifest.json's itemInfoEntries and confirms
+# each resolves to real, non-empty (if a directory) content under Data/.
+check_manifest_integrity() {
+    local pkg_dir="$1"
+    local label="$2"
+    local manifest="$pkg_dir/Manifest.json"
+
+    if [ ! -f "$manifest" ]; then
+        echo "ERROR: fixture missing: $manifest ($label)" >&2
+        echo "  Regenerate: bash $HERE/refresh-test-fixtures.sh" >&2
+        FAILED=1
+        return
+    fi
+
+    local problems
+    problems=$(python3 - "$pkg_dir" "$manifest" <<'PYEOF'
+import json
+import os
+import sys
+
+pkg_dir, manifest_path = sys.argv[1], sys.argv[2]
+with open(manifest_path) as f:
+    manifest = json.load(f)
+
+for entry in manifest.get("itemInfoEntries", {}).values():
+    rel_path = entry.get("path", "")
+    name = entry.get("name", rel_path)
+    full_path = os.path.join(pkg_dir, "Data", rel_path)
+    if not os.path.exists(full_path):
+        print(f"{name} -> Data/{rel_path} (missing)")
+    elif os.path.isdir(full_path) and not os.listdir(full_path):
+        print(f"{name} -> Data/{rel_path} (empty directory; git cannot track this — add a placeholder file)")
+PYEOF
+)
+
+    if [ -n "$problems" ]; then
+        echo "ERROR: $label has Manifest.json entries with no backing content:" >&2
+        while IFS= read -r line; do
+            echo "  $line" >&2
+        done <<< "$problems"
+        echo "  Regenerate: bash $HERE/refresh-test-fixtures.sh" >&2
+        FAILED=1
+    fi
+}
+
 # Required tokenizer files (mirrors TOKENIZER_FILES in prepare-tokenizer.py)
 TOKENIZER_DIR="$FIXTURES/tokenizer-cache/models/BAAI/bge-base-en-v1.5"
 for f in tokenizer.json tokenizer_config.json vocab.txt special_tokens_map.json config.json; do
     check_exists "$TOKENIZER_DIR/$f" "tokenizer-cache/$f"
 done
 
-# Each mlpackage must have a Manifest.json (minimal structural integrity check)
+# Each mlpackage must have a Manifest.json, and every item it references must
+# actually resolve to content on disk (not just Manifest.json's own presence).
 for pkg in stub-bge-base.mlpackage stub-bge-base-fp16.mlpackage \
            stub-bge-base-bad-dtype.mlpackage stub-bge-base-bad-shape.mlpackage \
            stub-bge-base-bad-output-name.mlpackage; do
-    check_exists "$FIXTURES/$pkg/Manifest.json" "$pkg/Manifest.json"
+    check_manifest_integrity "$FIXTURES/$pkg" "$pkg"
 done
 
 if [ "$FAILED" -ne 0 ]; then

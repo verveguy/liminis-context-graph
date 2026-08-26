@@ -21,6 +21,9 @@
 # Requirements: uv (https://github.com/astral-sh/uv) must be on PATH.
 #   The tokenizer step requires network access to HuggingFace (revision is pinned).
 #   The stub mlpackage steps are offline (coremltools only).
+#   The stub mlpackage steps pin --python 3.11: coremltools has no prebuilt
+#   wheel with native extensions for newer interpreters on some machines,
+#   which surfaces as "BlobWriter not loaded" if uv resolves a newer default.
 
 set -euo pipefail
 
@@ -43,20 +46,29 @@ echo ""
 # 1. Positive-path stub models (fp32 + fp16) via generate-stub-model.py
 # Version pins are read from requirements.txt (single source of truth).
 echo "--- Step 1/3: generating stub-bge-base.mlpackage (fp32) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-stub-model.py" --precision fp32
 
 echo ""
 echo "--- Step 1b/3: generating stub-bge-base-fp16.mlpackage (fp16) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-stub-model.py" --precision fp16
 
 echo ""
 
 # 2. Negative-path bad-dtype/shape/name stubs via generate-bad-stub-models.py
 echo "--- Step 2/3: generating stub-bge-base-bad-*.mlpackage (negative-path fixtures) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-bad-stub-models.py"
+
+# The bad-* stubs have zero learnable parameters by design, but coremltools'
+# mlpackage writer still emits a Manifest.json "weights" item pointing at an
+# empty Data/com.apple.CoreML/weights directory. Git cannot track an empty
+# directory, so without a placeholder the directory silently vanishes on
+# checkout while the manifest still references it — CoreML then fails to
+# open the package (see #518). Drop a placeholder so git preserves it.
+find "$FIXTURES" -type d -path "*-bad-*.mlpackage/Data/com.apple.CoreML/weights" -empty \
+    -exec touch {}/.gitkeep \;
 
 echo ""
 

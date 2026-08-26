@@ -59,7 +59,10 @@ versions of their generator scripts:
 
 Each sentinel contains the SHA-256 hash of its tracked script. `check-fixture-freshness.sh`
 compares the current script hash against the committed sentinel — if they differ, it exits
-non-zero with a targeted error message. Run it locally or wire it into the
+non-zero with a targeted error message. It also checks each `.mlpackage` fixture's
+`Manifest.json` for referential integrity: every item it references must resolve to real,
+non-empty (if a directory) content on disk, not just exist as a filename (see Bug 785
+below for why script-hash matching alone isn't enough). Run it locally or wire it into the
 `swift.yml` workflow as a pre-test step if you want CI enforcement.
 
 ## Refreshing fixtures
@@ -118,3 +121,31 @@ and the developer is told to run `refresh-test-fixtures.sh` — which includes u
 `generate-stub-model.py` to match the new I/O contract. Because `generate-stub-model.py`
 is also sentinel-tracked, a developer who updates the production script but not the stub
 generator gets a second CI failure pointing at the stub generator.
+
+### Bug 785 (#518) — dangling `weights` manifest entry (bad-dtype/shape/output-name stubs)
+
+**What happened**: The three negative-path stubs were committed with a `Manifest.json`
+that references a `Data/com.apple.CoreML/weights` item, but no `weights/` directory
+existed in git for any of them — `check-fixture-freshness.sh` at the time only checked
+that `Manifest.json` itself existed, not that everything it references does. The three
+tests loading these fixtures failed with a generic CoreML resource-loading error
+(`Item does not exist for identifier: ...`) instead of reaching the schema-validation
+assertion they exist to make. This was invisible because `swift.yml` runs with `if: false`
+(#502), so nothing ran `swift test` in CI while the regression sat on `main`.
+
+**Root cause**: these three stubs have zero learnable parameters by design (see "Stub
+rationale" above), but coremltools' `.mlpackage` writer still emits a manifest `weights`
+item pointing at an empty `weights/` directory. Git cannot track an empty directory, so
+after a checkout the directory — and everything the manifest promised was there — simply
+doesn't exist. This is unrelated to the `.gitignore` re-inclusion trap originally
+suspected (fixed defensively regardless — see the root-anchored `/*.mlpackage` /
+`/*.mlmodelc` patterns); a plain unanchored ignore didn't actually reproduce the failure
+with the git version in use, but the manifest/empty-directory gap did, deterministically,
+every time the three stubs were regenerated.
+
+**How the new system catches it**: `refresh-test-fixtures.sh` now drops a `.gitkeep`
+placeholder into any empty `weights/` directory the bad-* generator produces, so git
+preserves it through a checkout. `check-fixture-freshness.sh`'s `check_manifest_integrity`
+now parses each fixture's `Manifest.json` and fails, naming the fixture and the specific
+unresolved path, if any referenced item is missing or is an empty directory — replacing
+the old check that only confirmed `Manifest.json` itself was present.
