@@ -21,6 +21,9 @@
 # Requirements: uv (https://github.com/astral-sh/uv) must be on PATH.
 #   The tokenizer step requires network access to HuggingFace (revision is pinned).
 #   The stub mlpackage steps are offline (coremltools only).
+#   The stub mlpackage steps pin --python 3.11: coremltools has no prebuilt
+#   wheel with native extensions for newer interpreters on some machines,
+#   which surfaces as "BlobWriter not loaded" if uv resolves a newer default.
 
 set -euo pipefail
 
@@ -43,19 +46,19 @@ echo ""
 # 1. Positive-path stub models (fp32 + fp16) via generate-stub-model.py
 # Version pins are read from requirements.txt (single source of truth).
 echo "--- Step 1/3: generating stub-bge-base.mlpackage (fp32) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-stub-model.py" --precision fp32
 
 echo ""
 echo "--- Step 1b/3: generating stub-bge-base-fp16.mlpackage (fp16) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-stub-model.py" --precision fp16
 
 echo ""
 
 # 2. Negative-path bad-dtype/shape/name stubs via generate-bad-stub-models.py
 echo "--- Step 2/3: generating stub-bge-base-bad-*.mlpackage (negative-path fixtures) ---"
-uv run --no-project --with-requirements "$FIXTURES/requirements.txt" \
+uv run --python 3.11 --no-project --with-requirements "$FIXTURES/requirements.txt" \
     "$FIXTURES/generate-bad-stub-models.py"
 
 echo ""
