@@ -2,9 +2,14 @@
 *.o
 *.d
 
-# Generated model artifacts (large; regenerate via convert-embedding-model.py)
-*.mlpackage
-*.mlmodelc
+# Generated model artifacts (large; regenerate via convert-embedding-model.py).
+# Root-anchored (leading /) so this only matches convert-embedding-model.py's
+# top-level output, never a directory under Tests/LocalInferenceTests/Fixtures/ —
+# git cannot honor a `!` re-inclusion for files inside a directory a prior
+# pattern already excluded, so an unanchored pattern here would silently
+# swallow fixture content despite the negation below (see #518).
+/*.mlpackage
+/*.mlmodelc
 
 # Tokenizer files (downloaded at setup time; not source code)
 tokenizer.json
