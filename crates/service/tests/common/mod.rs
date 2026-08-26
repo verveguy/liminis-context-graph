@@ -65,11 +65,30 @@ pub fn spawn_stub_embedder() -> u16 {
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
-            let mut buf = [0u8; 65536];
-            let n = Read::read(&mut s, &mut buf).unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]);
-            let request_body = request.split("\r\n\r\n").nth(1).unwrap_or("");
-            let texts: Vec<String> = serde_json::from_str::<Value>(request_body)
+            // Read headers line-by-line to find Content-Length, then `read_exact` the body —
+            // rather than one fixed-size `read()` call. Before batching (#445), each request
+            // carried one short string that always fit in a single TCP read; now a chunk of up
+            // to `LCG_EMBED_BATCH_SIZE` (default 64) longer summaries/facts can span multiple
+            // reads, and a short read here would silently truncate the JSON body, surfacing as a
+            // spurious "shape mismatch" error instead of a real signal.
+            let mut reader = BufReader::new(s.try_clone().unwrap());
+            let mut content_length: usize = 0;
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).unwrap_or(0);
+                if n == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some(v) = line.to_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body_buf = vec![0u8; content_length];
+            if reader.read_exact(&mut body_buf).is_err() {
+                body_buf.clear();
+            }
+            let request_body = String::from_utf8_lossy(&body_buf);
+            let texts: Vec<String> = serde_json::from_str::<Value>(&request_body)
                 .ok()
                 .and_then(|v| v.get("input").cloned())
                 .map(|input| match input {
