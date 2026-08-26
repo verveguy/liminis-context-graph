@@ -665,6 +665,104 @@ async fn test_recovery_unknown_strategy() {
     );
 }
 
+// ── issue #499: embedder-unreachable-at-startup degraded mode ─────────────────
+
+/// #499 FR-003: knowledge_status reports the new degraded_reason and an empty
+/// recovery_available list — no strategy can run because no embedding dimension was ever
+/// established (unlike lbug_wal_corrupt, where a checkpoint's dimension is already known).
+#[tokio::test]
+async fn test_knowledge_status_reports_embedder_unreachable_degraded_reason() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+    let state = make_degraded_state_with_capture(
+        lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+        db_path,
+        Arc::clone(&sink),
+    );
+
+    let status_resp = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(status_resp["result"]["degraded"], true);
+    assert_eq!(
+        status_resp["result"]["reason"],
+        lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON
+    );
+    assert_eq!(
+        status_resp["result"]["recovery_available"],
+        json!([]),
+        "no recovery strategy should be advertised while the embedder was never reachable: {status_resp}"
+    );
+}
+
+/// #499: every knowledge_recover strategy is rejected outright when degraded_reason is
+/// EMBEDDER_UNREACHABLE_DEGRADED_REASON — none of the three strategies can safely establish an
+/// embedding dimension in this state, and rebuild_from_workspace_wal in particular has no
+/// "must already have valid data" precondition that would otherwise catch this.
+#[tokio::test]
+async fn test_knowledge_recover_rejected_when_embedder_unreachable_degraded() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+
+    for strategy in [
+        "drop_lbug_wal",
+        "rebuild_from_workspace_wal",
+        "restore_from_backup",
+    ] {
+        let state = make_degraded_state_with_capture(
+            lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+            db_path.clone(),
+            Arc::clone(&sink),
+        );
+
+        let resp = dispatch_val(
+            1,
+            "knowledge_recover",
+            json!({"strategy": strategy}),
+            Arc::clone(&state),
+        )
+        .await;
+
+        assert!(
+            resp.get("error").is_some(),
+            "strategy {strategy} should be rejected while embedder-unreachable degraded: {resp}"
+        );
+        assert!(
+            state.db.load_full().is_none(),
+            "DB must remain unopened after a rejected {strategy} call"
+        );
+    }
+}
+
+/// #499 review follow-up: `knowledge_recover_full` carries the identical
+/// `is_embedder_unreachable_degraded` guard as `knowledge_recover` (both read
+/// `state.embedder.dim()` internally), but only `knowledge_recover` had a dedicated test
+/// exercising it. Covers the other call site so a future edit to only one of the two guard
+/// sites doesn't go uncaught.
+#[tokio::test]
+async fn test_knowledge_recover_full_rejected_when_embedder_unreachable_degraded() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
+    let sink: Arc<CaptureSink> = Arc::new(CaptureSink::new());
+
+    let state = make_degraded_state_with_capture(
+        lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+        db_path,
+        Arc::clone(&sink),
+    );
+
+    let resp = dispatch_val(1, "knowledge_recover_full", json!({}), Arc::clone(&state)).await;
+
+    assert!(
+        resp.get("error").is_some(),
+        "knowledge_recover_full should be rejected while embedder-unreachable degraded: {resp}"
+    );
+    assert!(
+        state.db.load_full().is_none(),
+        "DB must remain unopened after a rejected knowledge_recover_full call"
+    );
+}
+
 /// Tests that knowledge_recover without a strategy returns an error.
 #[tokio::test]
 async fn test_recovery_missing_strategy() {

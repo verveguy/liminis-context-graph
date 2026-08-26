@@ -408,10 +408,24 @@ impl OaiEmbedder {
 ///
 /// Used in `main.rs` to distinguish "embedder unreachable" (always fatal at startup,
 /// per FR-011) from "embedder reachable but bad response" (can be bypassed by
-/// `LCG_EMBEDDING_DIM` per FR-008).
+/// `LCG_EMBEDDING_DIM` per FR-008). Also used by issue #499's standalone `--mcp-stdio`
+/// retry loop to decide whether a probe failure is worth retrying at all.
+///
+/// `is_request()` is checked alongside `is_connect()`/`is_timeout()` (of which it is a
+/// superset — every `is_connect()` error is also `is_request()`) because reqwest/hyper can
+/// surface a "connection was not ready" pool-cancellation error (`Kind::Request`, not
+/// `Kind::Connect`) when a client races a listener's very first moment of accepting
+/// connections — observed directly in #499's own binary-level test for the sidecar/lcg
+/// simultaneous-launch race this retry loop exists to cover, so it is a real (if narrow)
+/// manifestation of "not reachable yet," not merely a test artifact. This is safe to fold in
+/// broadly: `is_request()` only covers errors that occur while building/sending the request,
+/// which is structurally disjoint from `error_for_status()`'s `Kind::Status` (what
+/// `is_auth_error` below checks) and `.json()`'s `Kind::Decode` (the "unexpected response
+/// shape" case the catch-all probe-failure branch handles) — so this cannot misclassify
+/// either of those.
 pub fn is_transport_error(e: &Error) -> bool {
     match e {
-        Error::Http(re) => re.is_connect() || re.is_timeout(),
+        Error::Http(re) => re.is_connect() || re.is_timeout() || re.is_request(),
         Error::Ipc(msg) => {
             msg.starts_with("UDS connect")
                 || msg.starts_with("UDS HTTP/1.1 handshake")
@@ -675,6 +689,41 @@ impl Embedder for CountingEmbedder {
     }
 }
 
+// ── UnconfiguredEmbedder ────────────────────────────────────────────────────
+
+/// `AppState.degraded_reason` value set when standalone `--mcp-stdio` mode exhausts its bounded
+/// retry against an unreachable embedder at startup (issue #499, FR-003). Reuses the existing
+/// "DB never opened" degraded branch `knowledge_status` already exposes for other startup
+/// failures (e.g. `lbug_wal_corrupt`) — this is a new reason string on that same shape, not a
+/// new response field.
+pub const EMBEDDER_UNREACHABLE_DEGRADED_REASON: &str = "embedder_unreachable_at_startup";
+
+/// Stands in for "the embedder was unreachable at startup and the process degraded rather than
+/// exiting" (#499). Mirrors `UnconfiguredExtractor` (#331): every `embed()` call fails
+/// immediately rather than the process refusing to start. `AppState.embedder` is `Arc<dyn
+/// Embedder>`, not optional, so this placeholder satisfies that field without changing its type
+/// or touching any `.embed()` call site — none of them are reachable anyway while the DB is
+/// never opened, since `handle`'s degraded-mode guard rejects every method except a small exempt
+/// list (`crates/core/src/handlers.rs`).
+///
+/// `dim()` uses the trait's default (768) and is never actually read in this state: the only
+/// exempt-list handler that calls `state.embedder.dim()` (`knowledge_recover`) is itself
+/// rejected outright for this specific degraded reason before it gets there (see
+/// `handlers.rs`'s `handle_knowledge_recover`).
+pub struct UnconfiguredEmbedder;
+
+impl Embedder for UnconfiguredEmbedder {
+    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(async {
+            Err(Error::Ipc(
+                "embedder unreachable at startup; the process is running in degraded mode \
+                 (see knowledge_status) — restart once the embedder is reachable"
+                    .to_string(),
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +754,24 @@ mod tests {
     fn is_transport_error_rejects_other_ipc_errors() {
         let e = Error::Ipc("UDS embedder returned status 500".to_string());
         assert!(!is_transport_error(&e));
+    }
+
+    /// #499: reqwest/hyper can surface a "connection was not ready" pool-cancellation error
+    /// (`Kind::Request`, not `Kind::Connect`) when a client races a listener's very first
+    /// moment of accepting connections — observed directly in this issue's own binary-level
+    /// retry test. `is_transport_error` must classify any `is_request()` error as retryable,
+    /// not just the narrower `is_connect()`/`is_timeout()` cases, or the standalone
+    /// `--mcp-stdio` retry loop can spuriously treat a live sidecar/lcg race as fatal.
+    #[tokio::test]
+    async fn is_transport_error_recognizes_request_kind_errors_beyond_plain_connect() {
+        // A connection-refused error is both is_connect() and is_request() — confirms the
+        // superset relationship this fix relies on, so the broadened check doesn't need
+        // is_connect()/is_timeout() removed, only is_request() added.
+        let client = reqwest::Client::new();
+        let reqwest_err = client.post("http://127.0.0.1:1").send().await.unwrap_err();
+        assert!(reqwest_err.is_connect());
+        assert!(reqwest_err.is_request());
+        assert!(is_transport_error(&Error::Http(reqwest_err)));
     }
 
     #[test]
@@ -843,5 +910,16 @@ mod tests {
         with_key_env(Some(""), Some(""), Some(""), || {
             assert_eq!(resolve_embedding_api_key(TEST_URL), None);
         });
+    }
+
+    #[tokio::test]
+    async fn unconfigured_embedder_embed_always_errors() {
+        let e = UnconfiguredEmbedder.embed("hello").await;
+        assert!(e.is_err());
+    }
+
+    #[test]
+    fn unconfigured_embedder_dim_uses_trait_default() {
+        assert_eq!(UnconfiguredEmbedder.dim(), 768);
     }
 }

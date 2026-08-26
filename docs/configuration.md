@@ -84,7 +84,27 @@ neither exists, it exits with a clear error.
 
 The binary probes the embedder at startup to confirm it is reachable and auto-detect the
 embedding dimension. If the probe fails and `LCG_EMBEDDING_DIM` is not set, the process
-exits with an error rather than failing silently on the first embed request.
+exits with an error rather than failing silently on the first embed request. This is the
+behaviour for the default Unix-socket service (`liminis-context-graph` with no
+`--mcp-stdio` flag), and it is unchanged regardless of how the embedder failed to respond.
+
+**Standalone `--mcp-stdio` mode is different.** When an MCP client (Claude Desktop, an
+editor's MCP integration, etc.) launches `liminis-context-graph --mcp-stdio` directly,
+nobody is watching the process's stderr — the client just shows a generic "server failed
+to start," and the exit-with-an-error message above is never seen. To cover the common
+case where the client starts the embedder sidecar and `liminis-context-graph` as sibling
+processes with no ordering guarantee, standalone `--mcp-stdio` mode retries an
+unreachable embedder with bounded backoff (up to 5 seconds total) before giving up. If the
+embedder still isn't reachable once that window elapses, the process does **not** exit —
+it starts in a degraded state without opening the database. Call `knowledge_status` from
+within the MCP session to discover this: it reports `degraded: true` with
+`reason: "embedder_unreachable_at_startup"` and an empty `recovery_available` list (no
+`knowledge_recover` strategy can safely run in this state, since no embedding dimension
+was ever established — restart the process once the embedder is reachable). If the
+embedder becomes reachable during the retry window, startup proceeds normally with no
+degraded state at all. A hand-started socket-service process keeps the fail-fast behaviour
+above unchanged either way — this retry-and-degrade behaviour applies only to standalone
+`--mcp-stdio`.
 
 Start the embedder sidecar **before** starting the `liminis-context-graph` binary.
 Without it, the embedding-dependent IPC methods fail immediately with an embedding error:
