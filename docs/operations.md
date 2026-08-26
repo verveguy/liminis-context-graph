@@ -460,7 +460,16 @@ A `"mismatch"` is never a hard failure — it is deliberately self-healing, the 
 and updates the recorded identity to match — but only if no recompute *attempt* actually failed
 during that rebuild (e.g. the embedder was unreachable partway through); if one did, the identity
 is left unstamped (`"unknown"`) rather than persisted as a `"match"` it can't back up, so a rebuild
-that didn't fully succeed never reports a false confirmation. A row with no co-located source text
+that didn't fully succeed never reports a false confirmation. **This remedy applies to a
+same-dimension model-name change only.** `knowledge_rebuild_from_wal` operates against the
+already-created schema, so when the running embedder's dimension genuinely differs from the one
+the database was built with, a recomputed vector's length won't match the stored one, and the
+rebuild keeps the stale, wrong-dimension vector (counted under `embeddings_recompute_failed`)
+rather than fixing it — it will never report `"match"` for a real dimension change. For that case,
+use `knowledge_recover` with `{"strategy": "rebuild_from_workspace_wal"}` instead, which recreates
+the database schema at the new dimension before replaying; see
+[MCP client config recipes](configuration.md#mcp-client-config-recipes) in Configuration for the
+full explanation and worked examples. A row with no co-located source text
 to recompute from (`embeddings_recompute_fallback`, FR-002) does *not* by itself block the
 `"match"` write — that fallback is normal, ongoing WAL shape (e.g. a targeted `SET` that updates
 only a vector field), not evidence the rebuild failed. Until a mismatch is resolved, it is a live

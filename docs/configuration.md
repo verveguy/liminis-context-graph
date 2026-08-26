@@ -168,6 +168,153 @@ any other log output, or telemetry; if the configured URL embeds Basic-auth-styl
 (`user:pass@host`), that component is redacted before being echoed anywhere. See
 [ADR 0497](adr/0497-embedder-http-bearer-auth.md).
 
+### MCP client config recipes
+
+An MCP client (Claude Desktop, Claude Code, or any other MCP client) launches
+`liminis-context-graph` as a subprocess by specifying exactly `command`, `args`, `env`, and
+`cwd` in an `mcpServers` entry — the same `mcpServers` JSON shape already used in
+[Getting Started](getting-started.md#talk-to-it-over-mcp) and the
+[IPC & MCP Reference](ipc-mcp-reference.md#example-mcp-client-config). Those CLI flags and env
+vars are read by exactly the same resolution logic described above, regardless of what
+launched the process — there is no MCP-specific configuration surface. The five recipes below
+translate that resolution order into copy-pasteable client config for each embedder backend.
+
+**Default macOS sidecar — no `env` block needed.** The default UDS socket
+(`/tmp/liminis-inference.sock`) is auto-discovered, so an `mcpServers` entry for the bundled
+Swift CoreML sidecar needs no embedder-related `env` entry at all:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your-workspace"
+    }
+  }
+}
+```
+
+This applies to macOS only: the default-UDS auto-discovery tier doesn't exist on non-Unix
+platforms at all (see the environment variable table above), and the sidecar binary itself
+(Swift/CoreML) only runs on macOS regardless.
+
+**Local OpenAI-compatible server (Ollama, LM Studio, text-embeddings-inference, vLLM).** Point
+`LCG_EMBEDDING_URL` at the local server and set a matching `LCG_EMBEDDING_MODEL` — a mismatched
+model name produces a probe failure at startup rather than a clear error, so get it right:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your-workspace",
+      "env": {
+        "LCG_EMBEDDING_URL": "http://127.0.0.1:11434/v1/embeddings",
+        "LCG_EMBEDDING_MODEL": "nomic-embed-text"
+      }
+    }
+  }
+}
+```
+
+LM Studio, text-embeddings-inference, and vLLM follow the identical shape — only the port and
+`LCG_EMBEDDING_MODEL` change:
+
+| Server | Typical `LCG_EMBEDDING_URL` | Example `LCG_EMBEDDING_MODEL` |
+|---|---|---|
+| Ollama | `http://127.0.0.1:11434/v1/embeddings` | `nomic-embed-text` |
+| LM Studio | `http://127.0.0.1:1234/v1/embeddings` | whatever model is currently loaded in LM Studio |
+| text-embeddings-inference | `http://127.0.0.1:8080/v1/embeddings` | the model the server was launched with (`--model-id`) |
+| vLLM | `http://127.0.0.1:8000/v1/embeddings` | the model vLLM was launched with (`--model`) |
+
+Worth knowing (not necessarily a mistake): if the macOS default-UDS sidecar is also running on
+the same machine, it silently wins over this `env` block per the resolution order described
+above under [Embedder sidecar](#embedder-sidecar) — stop the sidecar, or pass an explicit
+`--embedder-uds`/`--embedder-http` flag (see the next recipe), to make this `env` block take
+effect.
+
+**Hosted OpenAI-compatible provider with an API key.** Set `LCG_EMBEDDING_URL` (or pass
+`--embedder-http` in `args`), `LCG_EMBEDDING_API_KEY` (falls back to `OPENAI_API_KEY` if
+unset — see the environment variable table above), and a matching `LCG_EMBEDDING_MODEL`:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write"],
+      "cwd": "/path/to/your-workspace",
+      "env": {
+        "LCG_EMBEDDING_URL": "https://api.openai.com/v1/embeddings",
+        "LCG_EMBEDDING_API_KEY": "sk-...",
+        "LCG_EMBEDDING_MODEL": "text-embedding-3-small"
+      }
+    }
+  }
+}
+```
+
+Caution: an MCP client config file is not a secrets manager — the key above is stored in
+plaintext wherever that config file lives on disk, the same as any other credential placed in
+an `env` block. Treat the config file itself as sensitive.
+
+**Explicit non-default UDS path.** If your sidecar-compatible embedder listens on a Unix
+domain socket at a path other than `/tmp/liminis-inference.sock` — or you want to force UDS
+selection even when a different sidecar occupies the default path — pass `--embedder-uds` as a
+CLI flag in `args`, not as an `env` var:
+
+```json
+{
+  "mcpServers": {
+    "liminis-context-graph": {
+      "command": "liminis-context-graph",
+      "args": ["--mcp-stdio", "--scope=read,write", "--embedder-uds", "/tmp/my-embedder.sock"],
+      "cwd": "/path/to/your-workspace",
+      "env": {
+        "LCG_EMBEDDING_MODEL": "bge-base-en-v1.5"
+      }
+    }
+  }
+}
+```
+
+No `env` block is required unless `LCG_EMBEDDING_MODEL` needs to differ from the default
+`bge-base-en-v1.5`. An explicit `--embedder-uds`/`--embedder-http` flag always wins over an
+embedder `env` var per the resolution order — worth a callout since it's a plausible source of
+"I set the env var and it's still not being used" confusion, distinct from the sidecar-silent-
+win case above: here it's *your own* flag taking precedence, not the sidecar's.
+
+#### Switching an existing workspace's embedder
+
+The following applies only when *switching* the embedder for a workspace that already has a
+`.lcg/` database with content in it. A fresh workspace with no pre-existing `.lcg/` has nothing
+to re-ingest, so none of this applies to first-time setup.
+
+**A dimension change is not a live config change.** `embedding_dim` is baked into the LadybugDB
+schema as a fixed-width vector column at database-creation time. Switching, say, from the
+macOS sidecar (768-dim, BGE-base-en-v1.5) to `text-embedding-3-small` (1536-dim) against an
+existing `.lcg/` database does not resize those columns. `knowledge_rebuild_from_wal` alone is
+**not** sufficient here: it recomputes vectors against the already-created schema and, when a
+recomputed vector's length doesn't match the already-stored one, it keeps the old
+wrong-dimension vector and counts the row under `embeddings_recompute_failed` rather than
+fixing it (see [Operations](operations.md#knowledge_status-health-fields)). The correct remedy is a
+full re-ingest, or `knowledge_recover` with `{"strategy": "rebuild_from_workspace_wal"}`, which
+drops and recreates the database (including schema, at the new embedder's dimension) before
+replaying every group's WAL back in.
+
+**`LCG_EMBEDDING_DIM` does not help here.** As described above under
+[Embedder sidecar](#embedder-sidecar), that variable only overrides a non-transport,
+non-auth *probe* failure at startup — it cannot resolve a genuine dimension mismatch against
+already-stored vectors, nor an unreachable or unauthenticated embedder.
+
+**Pin `cwd` to control where `.lcg/` lands.** Every recipe above includes a `cwd` field for
+this reason: an MCP client (not a shell you control) decides the launched process's working
+directory, and `.lcg/` is created relative to it. Omitting `cwd` leaves `.lcg/` wherever the
+client process's own default working directory happens to be — for most MCP clients, that is
+not your project directory.
+
 ## Extractor: local or hosted
 
 **An extraction provider is required only for extraction operations, not for startup.** A
