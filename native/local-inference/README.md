@@ -92,6 +92,8 @@ swift test
 
 Tests use stub `.mlpackage` fixtures (under `Tests/LocalInferenceTests/Fixtures/`) so the real model is not required to run them. Tokenizer fixtures live under `Tests/LocalInferenceTests/Fixtures/tokenizer-cache/` and ship in-tree.
 
+`.github/workflows/swift.yml` runs `swift build` and `swift test` on every PR and push that touches `native/local-inference/**`, on a `macos-26` runner. Still run `swift test` locally before pushing — CI is a backstop, not a substitute for catching failures early.
+
 If you need to regenerate the stub fixtures (after a real schema change), run:
 
 ```bash

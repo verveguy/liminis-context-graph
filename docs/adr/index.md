@@ -114,6 +114,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0497](0497-embedder-http-bearer-auth.md) | Bearer-Token Authentication for the Embedder HTTP Transport | 2026-08-25 |
 | [0499](0499-embedder-unreachable-retry-and-mcp-stdio-degrade.md) | Bounded Embedder-Probe Retry and Degrade-Without-Opening-DB for Standalone `--mcp-stdio` | 2026-08-25 |
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
+| [0502](0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md) | Pin an Explicit `macos-26` Runner for Swift Sidecar CI, Not Yet a Required Check | 2026-08-25 |
 | [0503](0503-swift-sidecar-source-of-truth.md) | `liminis-context-graph` Is the Sole Source of Truth for the Swift Sidecar | 2026-08-25 |
 
 ## Historical numbering

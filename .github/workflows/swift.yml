@@ -1,24 +1,51 @@
 name: Swift sidecar CI
 
-# Currently DISABLED.
+# Re-enabled 2026-08-25 (#502) after ~3 months disabled.
 #
 # The `native/local-inference/` Swift package targets macOS 26 (Foundation
-# Models on-device LLM) and `swift-tools-version: 6.2`. GitHub's
-# `macos-latest` runner image is still on macOS 15 + Swift 6.1 as of
-# 2026-05-30, so `swift test` fails with:
+# Models on-device LLM) and `swift-tools-version: 6.2`. This job was
+# `if: false` from 2026-05-30 because GitHub's `macos-latest` runner image
+# was still macOS 15 + Swift 6.1 at the time, so `swift build`/`swift test`
+# failed immediately with a tools-version mismatch. Every run since —
+# including every release tag from v0.13.0 through v0.13.4 — reported
+# `skipped`, giving no CI signal at all.
 #
-#     error: package 'local-inference' is using Swift tools version 6.2.0
-#            but the installed version is 6.1.0
+# By 2026-08-25, GitHub's macOS 26 runner rollout (GA 2026-02-26,
+# `macos-latest` migration completed ~2026-07-15 per
+# actions/runner-images#14167) had long since resolved the original
+# blocker. Rather than resume floating on `macos-latest`, this job pins the
+# explicit `macos-26` label so the *next* time the package's minimum macOS
+# requirement outruns `macos-latest` (as it did here), the job fails loudly
+# on a still-valid `macos-26` runner instead of silently skipping again. See
+# docs/adr/0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md for the
+# full rationale, including why this check is not yet a required
+# branch-protection status check.
 #
-# Re-enable by deleting the `if: false` line below once GHA's `macos-latest`
-# image catches up to macOS 26 + Xcode with Swift 6.2 — at which point the
-# `swift test` job will run normally on PRs that touch the sidecar.
+# The existing test suite (Tests/LocalInferenceTests/) runs entirely on
+# in-tree stub `.mlpackage` fixtures and mock adapters — no test here
+# depends on the ~400 MB CoreML embedding asset from
+# prepare-embedding-assets.sh or on live Foundation Models availability, so
+# `swift test` runs unmodified with no filtering.
 #
-# In the meantime, contributors should run `swift test` locally inside
-# `native/local-inference/` on a macOS 26 dev machine before pushing.
+# Contributors should still run `swift test` locally inside
+# `native/local-inference/` on a macOS 26 dev machine before pushing; this
+# job is now a real, enforced backstop for that, not a replacement.
+#
+# `push` is scoped to `main`/`maint/**` plus release tags (not left
+# unscoped) for the same reason `ci.yml`'s header documents: an unscoped
+# `push` alongside `pull_request` over the same paths fires two concurrent
+# runs on every push to an open PR branch — one via `push`, one via
+# `pull_request` — doubling usage of the `macos-26` runner class and
+# producing duplicate status checks. Release tags need their own explicit
+# entry here (FR-002/SC-002) since a `branches:` filter alone excludes tag
+# refs entirely. The concurrency group below additionally cancels a
+# still-running check when a newer commit lands on the same ref.
 
 on:
   push:
+    branches: [main, 'maint/**']
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
     paths:
       - 'native/local-inference/**'
       - '.github/workflows/swift.yml'
@@ -27,11 +54,14 @@ on:
       - 'native/local-inference/**'
       - '.github/workflows/swift.yml'
 
+concurrency:
+  group: swift-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   swift-test:
-    name: swift test (macos-latest)
-    if: false  # see header — waiting on GHA macOS 26 runner image
-    runs-on: macos-latest
+    name: swift build & test (macos-26)
+    runs-on: macos-26
     defaults:
       run:
         working-directory: native/local-inference
@@ -40,6 +70,9 @@ jobs:
 
       - name: Show Swift version
         run: swift --version
+
+      - name: swift build
+        run: swift build
 
       - name: swift test
         run: swift test
