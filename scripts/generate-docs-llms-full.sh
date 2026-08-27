@@ -74,6 +74,7 @@ ORDERED=(
   "index.md:${SITE_URL}/"
   "getting-started.md:${SITE_URL}/getting-started"
   "configuration.md:${SITE_URL}/configuration"
+  "embedding-options.md:${SITE_URL}/embedding-options"
   "ipc-mcp-reference.md:${SITE_URL}/ipc-mcp-reference"
   "telemetry.md:${SITE_URL}/telemetry"
   "ontology.md:${SITE_URL}/ontology"

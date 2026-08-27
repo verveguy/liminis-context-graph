@@ -71,6 +71,9 @@ not a legacy spelling of an LCG-specific variable, so using it triggers no depre
 
 ## Embedder sidecar
 
+> For a one-page comparison of every supported embedding option (platform, install, cost,
+> dimension, and verification status), see [Embedding Options](embedding-options.md).
+
 `OaiEmbedder` delegates embedding to an external service over the OpenAI-compatible
 `POST /v1/embeddings` contract. The binary supports two transports, selected via CLI flags:
 
@@ -127,7 +130,12 @@ command-line tools are required. See
 for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
-start the sidecar first, then start the binary. Extraction does **not** auto-detect this socket
+start the sidecar first, then start the binary. **This default path is not shared with the
+Electron `liminis` app.** The app does not use `/tmp/liminis-inference.sock` at all — it
+launches its own sidecar process bound to a separate, per-workspace socket at
+`<workspaceRoot>/.liminis/local-inference.sock`. A bare `liminis-context-graph` binary started
+by hand cannot reach the app's sidecar (or vice versa); they are two different sockets serving
+two different processes. Extraction does **not** auto-detect this socket
 (see [Extractor: local or hosted](#extractor-local-or-hosted)): the sidecar's Foundation Models
 backend is not recommended for extraction quality, so using it there requires the explicit
 `--extractor-uds /tmp/liminis-inference.sock` flag rather than happening by default.

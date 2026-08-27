@@ -16,6 +16,7 @@
 export const PAGES = [
   ['getting-started', 'Getting Started'],
   ['configuration', 'Configuration'],
+  ['embedding-options', 'Embedding Options'],
   ['ipc-mcp-reference', 'IPC & MCP Reference'],
   ['telemetry', 'Telemetry'],
   ['ontology', 'Ontology'],
