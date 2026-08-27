@@ -63,6 +63,7 @@ every group in the database — treat the process boundary as the trust boundary
 
 - **[Getting Started](getting-started.md)** — install, run, build from source, bundle in downstream apps.
 - **[Configuration](configuration.md)** — every environment variable and CLI flag.
+- **[Embedding Options](embedding-options.md)** — one capability matrix of local and remote embedding backends: platform, install, cost, and dimension.
 - **[IPC & MCP Reference](ipc-mcp-reference.md)** — the JSON-RPC and Model Context Protocol method surface.
 - **[Telemetry](telemetry.md)** — structured JSONL events emitted on stderr.
 - **[Ontology](ontology.md)** — the optional entity/relation type vocabulary.
