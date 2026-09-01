@@ -467,6 +467,67 @@ fn test_replay_golden_fixture_field_updates() {
     );
 }
 
+/// Issue #526, FR-005's one explicit, documented exception: `python_produced.jsonl`'s seq-5
+/// `RelatesToNode_` CREATE line inlines `fact_embedding: [0.1, 0.2, 0.3, 0.4]` as a raw Cypher
+/// literal, with `"params":{}` — no `$fact_embedding` placeholder at all, since this is an
+/// external, non-lcg-authored write shape (lcg's own writer always binds vectors as params via
+/// `exec_params`, never inlines a literal). Relevance detection in `recompute_row_embeddings` is
+/// driven entirely by whether the Cypher template contains `$fact_embedding` — this line never
+/// does, so it is never even recognized as carrying a vector to recompute, and replays exactly
+/// as written: out of scope for recompute by construction, not silently dropped or degraded.
+#[test]
+fn test_literal_inlined_fact_embedding_replays_unchanged() {
+    let db_dir = TempDir::new().unwrap();
+    let db_path = db_dir.path().join("test.db");
+
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+
+    // Isolate just seq 5's line so this test's pass/fail is legible on its own, independent of
+    // the broader golden-fixture tests above.
+    let wal_dir = TempDir::new().unwrap();
+    let line = fs::read_to_string(fixture_path("python_produced.jsonl"))
+        .unwrap()
+        .lines()
+        .find(|l| l.contains("\"seq\":5"))
+        .expect("fixture must still contain the seq-5 literal-inlined fact_embedding line")
+        .to_string();
+    assert!(
+        line.contains("fact_embedding: [0.1, 0.2, 0.3, 0.4]") && line.contains("\"params\":{}"),
+        "fixture line shape changed — this test's premise (a literal, paramless vector) no \
+         longer holds: {line}"
+    );
+    fs::write(
+        wal_dir.path().join("20260519_000000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    let stats = WalReplayer::new(wal_dir.path())
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+        .expect("replay");
+    assert_eq!(stats.lines_replayed, 1, "the single CREATE line must replay");
+    assert_eq!(stats.embeddings_recomputed, 0, "no recompute is possible for a literal value");
+    assert_eq!(stats.embeddings_skip_rows, 0, "not a vector-only SET, so never skip-eligible");
+
+    let rows = conn
+        .cypher_query("MATCH (rn:RelatesToNode_ {uuid: 'edge-0'}) RETURN rn.fact_embedding")
+        .expect("cypher ok");
+    assert!(!rows.is_empty(), "RelatesToNode_ edge-0 must exist");
+    let floats: Vec<f64> = rows[0][0]
+        .trim_matches(|c: char| c == '[' || c == ']')
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().unwrap())
+        .collect();
+    assert_eq!(
+        floats,
+        vec![0.1, 0.2, 0.3, 0.4],
+        "the literal-inlined vector must replay byte-for-byte unchanged, got: {:?}",
+        rows[0][0]
+    );
+}
+
 /// Pure MATCH … RETURN queries (no mutation clause) are classified as non-mutations and skipped (SC-006).
 #[test]
 fn test_replay_skips_pure_match_return() {
