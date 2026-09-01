@@ -59,7 +59,10 @@ pub use ipc::{IpcRequest, IpcResponse};
 pub use llm_router::LlmRouter;
 pub use ontology::{Ontology, OntologyMode};
 pub use rebuild_job::{JobStatus, RebuildJob};
-pub use replay::{FailureSample, ReplayOptions, ReplayProgress, ReplayStats, WalReplayer};
+pub use replay::{
+    zero_vector_embed_fn, FailureSample, RecomputeEmbedFn, ReplayOptions, ReplayProgress,
+    ReplayStats, WalReplayer,
+};
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
 pub use types::{
