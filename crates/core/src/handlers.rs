@@ -2644,7 +2644,7 @@ async fn handle_rebuild_from_wal(
                         group_id, e
                     );
                 } else {
-                    state.clear_group_drift(&group_id);
+                    state.clear_group_drift(&group_id, group_ontology);
                 }
             }
         }
@@ -3127,7 +3127,8 @@ async fn handle_rebuild_from_wal(
                                         bg_gid_for_result, e
                                     );
                                 } else {
-                                    bg_state_for_result.clear_group_drift(&bg_gid_for_result);
+                                    bg_state_for_result
+                                        .clear_group_drift(&bg_gid_for_result, group_ontology);
                                 }
                             }
                         }
