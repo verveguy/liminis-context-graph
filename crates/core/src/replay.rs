@@ -1767,7 +1767,7 @@ mod replay_tests {
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
             &mut params,
             embed_fn.as_ref(),
-            5,
+            1,
             &mut stats,
         );
 

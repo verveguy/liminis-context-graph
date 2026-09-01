@@ -178,9 +178,17 @@ fn test_replay_golden_fixture_counts() {
         .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay fixture");
 
-    // Lines 4, 6, 7 are MATCH-prefixed mutations; all 9 lines are replayed (seq 8 has apostrophes).
-    assert_eq!(stats.lines_replayed, 9, "9 mutation lines replayed");
-    assert_eq!(stats.lines_skipped(), 0, "no lines skipped");
+    // Line 4 is a MATCH-prefixed mutation with real content (attributes) — always replayed.
+    // Lines 6 and 7 are vector-only `SET`s (content_embedding/fact_embedding) with no co-located
+    // source text — issue #526, FR-005: skipped entirely rather than executed with a placeholder,
+    // since seq 2's own CREATE already recomputed episodic-0's content_embedding, and overwriting
+    // it here would only degrade it. 7 of the 9 lines are replayed (seq 8 has apostrophes).
+    assert_eq!(stats.lines_replayed, 7, "7 mutation lines replayed");
+    assert_eq!(stats.lines_skipped(), 0, "no lines skipped (failed/unrecognised/unparseable)");
+    assert_eq!(
+        stats.embeddings_skip_rows, 2,
+        "seq 6 (content_embedding) and seq 7 (fact_embedding) are vector-only SETs with no text"
+    );
 
     let entity_count = conn.count_nodes("Entity").unwrap();
     let episodic_count = conn.count_nodes("Episodic").unwrap();
@@ -379,7 +387,10 @@ fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
     );
 }
 
-/// MATCH-SET mutations in the fixture update field values; verify they landed (FR-006).
+/// MATCH-SET mutations in the fixture update field values; verify they landed — for a plain
+/// (non-vector) field, unconditionally; for a vector-only field, only when the record actually
+/// changes something recompute can act on (FR-006, updated for issue #526's skip-vs-zero-fill
+/// split — see the module-level doc on `test_replay_golden_fixture_counts`).
 #[test]
 fn test_replay_golden_fixture_field_updates() {
     let db_dir = TempDir::new().unwrap();
@@ -412,30 +423,43 @@ fn test_replay_golden_fixture_field_updates() {
         "entity-0 attributes should reflect MATCH-SET from seq 4"
     );
 
-    // Seq 6: MATCH Episodic episodic-0 SET content_embedding — verify the embedding changed.
-    // The original value (seq 2) was [0.5,0.5,0.5,0.5]; the update sets [0.9,0.8,0.7,0.6].
+    // Seq 6: MATCH Episodic episodic-0 SET content_embedding, with no co-located source text
+    // (issue #526, FR-005) — this vector-only SET is now skipped entirely (see
+    // `test_replay_golden_fixture_counts`'s `embeddings_skip_rows` assertion), so
+    // content_embedding stays exactly what seq 2's own CREATE recomputed: `zero_vector_embed_fn`
+    // ignores its "Content 0" text and always returns an all-zero vector.
     let emb_rows = conn
         .cypher_query("MATCH (n:Episodic {uuid: 'episodic-0'}) RETURN n.content_embedding")
         .expect("cypher ok");
     assert!(!emb_rows.is_empty(), "episodic-0 must exist");
     let emb_str = &emb_rows[0][0];
-    // The updated embedding [0.9,0.8,0.7,0.6] contains "0.9"; the original [0.5,0.5,0.5,0.5] does not.
-    assert!(
-        emb_str.contains("0.9"),
-        "content_embedding should reflect update to [0.9,0.8,0.7,0.6], got: {emb_str:?}"
+    let floats: Vec<f64> = emb_str
+        .trim_matches(|c: char| c == '[' || c == ']')
+        .split(',')
+        .map(|s| s.trim().parse::<f64>().unwrap())
+        .collect();
+    assert_eq!(
+        floats,
+        vec![0.0, 0.0, 0.0, 0.0],
+        "content_embedding must reflect seq 2's CREATE-time recompute, not seq 6's skipped SET \
+         (FR-002/FR-005 — a stored vector is never bound), got: {emb_str:?}"
     );
 
-    // Seq 7: MATCH RelatesToNode_ edge-0 SET fact_embedding — verify the embedding changed.
-    // The original value (seq 5 CREATE) was [0.1,0.2,0.3,0.4]; the update sets [0.5,0.4,0.3,0.2].
+    // Seq 7: MATCH RelatesToNode_ edge-0 SET fact_embedding, likewise a vector-only SET with no
+    // co-located source text — skipped, so fact_embedding stays exactly what seq 5's CREATE
+    // wrote. Seq 5 is the one deliberately un-recomputable shape (FR-005): `fact_embedding` is
+    // inlined as a raw Cypher literal `[0.1, 0.2, 0.3, 0.4]` with no `$fact_embedding` param at
+    // all (`"params":{}`), so replay's cypher-template-based relevance check never recognizes it
+    // as a vector to recompute — it executes unchanged, literal value and all.
     let fe_rows = conn
         .cypher_query("MATCH (rn:RelatesToNode_ {uuid: 'edge-0'}) RETURN rn.fact_embedding")
         .expect("cypher ok");
     assert!(!fe_rows.is_empty(), "RelatesToNode_ edge-0 must exist");
     let fe_str = &fe_rows[0][0];
-    // The updated embedding starts with 0.5; the original started with 0.1 (no "0.5" in original).
     assert!(
-        fe_str.contains("0.5"),
-        "fact_embedding should reflect update to [0.5,0.4,0.3,0.2], got: {fe_str:?}"
+        fe_str.contains("0.1"),
+        "fact_embedding must remain seq 5's literal-inlined [0.1,0.2,0.3,0.4] — seq 7's SET is \
+         skipped (FR-005), got: {fe_str:?}"
     );
 }
 
