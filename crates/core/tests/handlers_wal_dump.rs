@@ -649,7 +649,10 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
     // producing this mapped vector — making that regression visible here again.
     let recomputed_summary_vec = vec![0.5_f32, 0.6, 0.7, 0.8];
     let mut text_to_vec = std::collections::HashMap::new();
-    text_to_vec.insert("a pump manufacturer".to_string(), recomputed_summary_vec.clone());
+    text_to_vec.insert(
+        "a pump manufacturer".to_string(),
+        recomputed_summary_vec.clone(),
+    );
     let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(move |text: &str| {
         Ok(text_to_vec
             .get(text)

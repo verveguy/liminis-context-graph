@@ -184,7 +184,11 @@ fn test_replay_golden_fixture_counts() {
     // since seq 2's own CREATE already recomputed episodic-0's content_embedding, and overwriting
     // it here would only degrade it. 7 of the 9 lines are replayed (seq 8 has apostrophes).
     assert_eq!(stats.lines_replayed, 7, "7 mutation lines replayed");
-    assert_eq!(stats.lines_skipped(), 0, "no lines skipped (failed/unrecognised/unparseable)");
+    assert_eq!(
+        stats.lines_skipped(),
+        0,
+        "no lines skipped (failed/unrecognised/unparseable)"
+    );
     assert_eq!(
         stats.embeddings_skip_rows, 2,
         "seq 6 (content_embedding) and seq 7 (fact_embedding) are vector-only SETs with no text"
@@ -3170,7 +3174,7 @@ fn test_large_embedding_batch_replay_does_not_corrupt_db() {
         let conn = db.connect().unwrap();
         conn.init_schema(DIM).unwrap();
         let stats = WalReplayer::new(wal_dir.path())
-            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
             .expect("replay");
         assert_eq!(stats.lines_replayed, N as u64, "all rows must replay");
         assert_eq!(stats.failed_lines, 0, "no failures expected");
