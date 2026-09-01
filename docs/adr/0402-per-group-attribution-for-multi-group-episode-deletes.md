@@ -111,8 +111,9 @@ duplication; the signature change is made in place.
   sites corrected under the ADR-0385 pattern, alongside `handle_delete_by_group` and
   `knowledge_rebind_pointers` — see the dated correction note in
   [ADR-0378](0378-multi-stream-wal-per-group-directory.md)'s FR-004 section.
-- The per-group delete loop is wrapped in an explicit transaction, which is strictly more atomic
-  than the pre-#402 single-query form for the multi-group case.
+- The per-group delete loop is wrapped in an explicit transaction, which preserves the atomicity
+  the pre-#402 single-query form already had — splitting one `DETACH DELETE` into N per-group
+  queries does not weaken the all-or-nothing guarantee across the whole call.
 - No new `Conn` API surface, no new mutation-tagging mechanism — this issue is a direct
   application of already-existing, already-proven infrastructure to two more call sites, not a new
   design.

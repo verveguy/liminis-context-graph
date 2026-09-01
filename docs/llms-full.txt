@@ -3706,6 +3706,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0387](0387-wal-stream-generation-identity.md) | WAL Stream Generation Identity | 2026-08-13 |
 | [0392](0392-rebind-pointers-staleness-gate-binding-state.md) | `rebind_pointers`'s Staleness Gate Keys on Binding State, Not Only Position | 2026-08-15 |
 | [0398](0398-openssl-linkage-for-release-artifacts.md) | Link OpenSSL Statically So Release Artifacts Stay Self-Contained | 2026-08-15 |
+| [0402](0402-per-group-attribution-for-multi-group-episode-deletes.md) | Per-Group Mutation Attribution for Multi-Group Episode Deletes | 2026-09-01 |
 | [0414](0414-wal-generation-unknown-refuses-replay.md) | Unknown-Generation Streams Refuse to Advance, Not Warn | 2026-08-16 |
 | [0430](0430-ci-tee-pipefail.md) | Workflow-Level `shell: bash` to Restore `pipefail` for `\| tee` Steps | 2026-08-17 |
 | [0440](0440-recompute-embeddings-on-wal-replay.md) | Recompute Embeddings on WAL Replay, With a Sync Bridge and a Two-Mechanism Identity Split | 2026-08-19 |
