@@ -20,8 +20,11 @@
 #
 #     pkg-config --variable=libdir openssl
 #
-# The published 0.19.1 crate reads neither OPENSSL_DIR nor OPENSSL_ROOT_DIR, so
-# PKG_CONFIG_PATH is the only lever available without patching lbug.
+# As of 0.20.1, build.rs checks OPENSSL_DIR/OPENSSL_ROOT_DIR first and, if either
+# is set, uses that directory directly without consulting pkg-config at all (see
+# docs/adr/0398-openssl-linkage-for-release-artifacts.md's Amendment). This repo
+# sets neither, so that branch is inert here and PKG_CONFIG_PATH remains the
+# only lever this script needs.
 #
 # Left alone, the release binary picks up a dynamic libssl/libcrypto. On macOS
 # it also inherits Homebrew's absolute install name

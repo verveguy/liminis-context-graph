@@ -180,25 +180,27 @@ mod is_missing_table_error_tests {
         assert!(!is_missing_table_error(&err));
     }
 
-    /// Pins the *verbatim* error text lbug 0.19.1 produces for each condition these
-    /// classifiers match on. Every one of them keys off a Display-string substring, which
-    /// ADR-0009 calls out as fragile by design: upstream is free to reword an exception in a
-    /// patch release, and when it does, the failure is silent — auto-heal stops firing, an
-    /// idempotent index rebuild starts propagating, or `knowledge_status` stops degrading.
+    /// Pins the *verbatim* error text lbug produces for each condition these classifiers match
+    /// on. Every one of them keys off a Display-string substring, which ADR-0009 calls out as
+    /// fragile by design: upstream is free to reword an exception in a patch release, and when
+    /// it does, the failure is silent — auto-heal stops firing, an idempotent index rebuild
+    /// starts propagating, or `knowledge_status` stops degrading.
     ///
-    /// The strings below were captured by running each failing query against a live 0.19.1
-    /// engine over the IPC socket during the 0.17.0 → 0.19.1 bump (#398), not copied from a
-    /// changelog.
+    /// The strings below were captured by running each failing query against a live engine over
+    /// the IPC socket during the 0.17.0 → 0.19.1 bump (#398), not copied from a changelog. They
+    /// were re-probed against a live 0.20.1 engine directly (not merely inferred from the
+    /// existing tests passing) during the 0.19.1 → 0.20.1 bump (#529) and found byte-for-byte
+    /// unchanged for all four conditions below.
     ///
     /// **What this can and cannot catch.** The strings are literals, so these tests hold the
     /// *classifiers* to text the engine was observed to emit — loosen or tighten a matcher and
     /// they go red. They cannot detect the engine rewording an exception, because nothing here
     /// talks to lbug. Detecting that stays the job of the behavioral tests that exercise the
     /// real engine (`degraded_startup`, `auto_recovery`, the index auto-heal paths); the value
-    /// of this module is that when one of those fails after a bump, the observed 0.19.1 text is
-    /// recorded here to diff against instead of having to be re-derived. Re-probe the engine
+    /// of this module is that when one of those fails after a bump, the last-confirmed-live text
+    /// is recorded here to diff against instead of having to be re-derived. Re-probe the engine
     /// and update the classifier and these literals together on every lbug bump.
-    mod lbug_0_19_1_error_text {
+    mod lbug_error_text_pins {
         use super::*;
 
         #[test]
