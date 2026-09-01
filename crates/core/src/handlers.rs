@@ -1514,19 +1514,16 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let uuids = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
-        // `group_ids` is required and non-empty (issue #406) — a call naming more than one
-        // group can still genuinely span multiple groups, so per-operation attribution can't
-        // name one group there (FR-004), and it routes through the default group's writer, the
-        // same documented limitation as handle_delete_by_group. But a caller that named exactly
-        // one group is not ambiguous — route to that group directly rather than discarding
-        // information the request already gave us.
-        let target_group = match group_ids_owned.as_slice() {
-            [single] => single.as_str(),
-            _ => DEFAULT_GROUP_ID,
-        };
-        let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, target_group, seq, &state_c);
+        let (uuids, grouped) = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
+        // Each affected group's own deletions are already bucketed by the group whose data they
+        // actually modified (issue #402, following ADR-0385's precedent for
+        // handle_delete_by_group) — flush each bucket to its own group's writer, never the
+        // default group's, so a group-scoped rebuild of any named group sees its own deletion on
+        // its own WAL stream.
+        for (group_id, mutations) in grouped {
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        }
         Ok(uuids)
     })
     .await??;
@@ -1566,17 +1563,14 @@ async fn handle_delete_chunk_episode(
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let uuids = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
-        // Same FR-004 rationale as handle_delete_by_source above: a single named group is
-        // routed there directly; more than one group falls back to the default group's writer
-        // as a genuinely multi-group call. `group_ids` itself is required and non-empty
-        // (issue #406), so there is no "no filter" case to route here anymore.
-        let target_group = match group_ids_owned.as_slice() {
-            [single] => single.as_str(),
-            _ => DEFAULT_GROUP_ID,
-        };
-        let seq = wal_exec::wal_flush_ungrouped(&state_c, target_group, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, target_group, seq, &state_c);
+        let (uuids, grouped) = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
+        // Same rationale as handle_delete_by_source above (issue #402): each affected group's
+        // own deletions are already bucketed by the group they actually modified — flush each
+        // bucket to its own group's writer, never the default group's.
+        for (group_id, mutations) in grouped {
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        }
         Ok(uuids)
     })
     .await??;
