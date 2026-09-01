@@ -316,7 +316,13 @@ pub struct ReplayOptions {
     /// Cypher `UNWIND` execution transaction; the two windows are not required to share size or
     /// boundaries. Also the knob FR-008 relies on to bound cancellation latency: a pending window
     /// is dropped, unresolved, on cancellation (see `replay_opts`), so a larger window means more
-    /// buffered-but-unreplayed rows on a cancelled run, not a longer wait.
+    /// buffered-but-unreplayed rows on a cancelled run, not a longer wait. It also bounds
+    /// per-failure blast radius (accepted tradeoff, see ADR-0486's Consequences): since
+    /// `Embedder::embed_batch` is all-or-nothing, one transient failure (dropped connection, rate
+    /// limit, timeout) zero-fills/skips every row in the window that failure landed in, not just
+    /// one — set this lower (down to `1`, reproducing pre-#486 per-row isolation exactly) to trade
+    /// some round-trip reduction back for tighter failure isolation against a less reliable
+    /// embedder.
     pub embed_window_size: Option<usize>,
     /// Throttle interval in seconds for `[WAL PROGRESS]` log lines. When `None`, reads
     /// `LCG_REPLAY_LOG_INTERVAL_SECS` env var, defaulting to 30s. Production passes `None`;

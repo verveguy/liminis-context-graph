@@ -115,6 +115,19 @@ attempted," matching its pre-#486 semantics — the difference is purely how man
   single failed text hit pre-#486 (FR-004) — there is no separate "batch failure" branch, only a
   different (batched) source feeding the existing per-request `Option<Vec<f32>>` resolution,
   including `is_vector_only_set`'s independent per-row skip-vs-zero-fill decision (FR-003).
+  **Accepted tradeoff, raised in review**: this is a deliberate, spec-mandated widening of
+  per-failure blast radius, not an oversight — pre-#486 a transient embedder failure (a dropped
+  connection, a rate limit, a timeout) degraded only the one row being recomputed at that moment;
+  post-#486 the same transient failure zero-fills/skips every row queued in the current window (up
+  to `embed_window_size`, default 64, max 256), since `Embedder::embed_batch`'s all-or-nothing
+  contract gives `resolve_embed_window` no finer-grained signal to act on. This is exactly the cost
+  FR-004/Edge Cases accepted in exchange for SC-001's round-trip reduction, and recompute's
+  explicitly self-healing design (a zero-filled vector is a stale cache entry, not corrupted data —
+  see ADR-0526) means a batch-failure window is repaired by any later rebuild, not permanently
+  lost. An operator replaying against an embedder with a higher transient-failure rate can trade
+  some of SC-001's round-trip reduction back for tighter failure isolation by lowering
+  `LCG_REPLAY_EMBED_WINDOW_SIZE` (down to `1`, which reproduces the pre-#486 per-row isolation
+  exactly) — this is the intended lever, not a new one.
 - New knob: `LCG_REPLAY_EMBED_WINDOW_SIZE` / `ReplayOptions.embed_window_size` (default 64, valid
   range 1–256), validated by `resolve_embed_window_size` mirroring `resolve_batch_size`'s exact
   shape. At the default, the #217 fixture's 4,106 distinct texts collapse to at most 65 round-trips
