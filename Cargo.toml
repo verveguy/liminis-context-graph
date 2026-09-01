@@ -48,7 +48,7 @@ aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 # header, absent from cargo-dist's default ubuntu-22.04 (GCC 11). The v0.9.0
 # release x86_64 build failed with `fatal error: format: No such file or
 # directory`. arm64 already used 24.04-arm and built fine. Still required at
-# 0.19.1 — build.rs compiles the cxx bridges at C++20 regardless of the
+# 0.20.1 — build.rs compiles the cxx bridges at C++20 regardless of the
 # prebuilt path, since that is a local compile of the FFI bridge rather than
 # of the downloaded engine.
 x86_64-unknown-linux-gnu = "ubuntu-24.04"
@@ -75,7 +75,7 @@ libssl-dev = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
-lbug = "=0.19.1"
+lbug = "=0.20.1"
 thiserror = "2"
 tempfile = "3"
 regex = "1"
