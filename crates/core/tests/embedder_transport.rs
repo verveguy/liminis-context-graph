@@ -1000,14 +1000,21 @@ impl Embedder for RecordingEmbedder {
     fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, lcg_core::Error>> {
         Box::pin(async move {
             let result = self.inner.embed(text).await?;
-            let key = format!("{:x}", Sha256::digest(text.as_bytes()));
+            let request = serde_json::json!({ "text": text });
+            // Mirrors `cassette::request_key`'s documented contract (SHA-256 of the canonical
+            // serialized request value), so this test-local record stays self-consistent with
+            // the production `CassetteRecord.key` shape even though nothing here replays it.
+            let key = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_string(&request).unwrap().as_bytes())
+            );
             self.writer.append(&lcg_core::CassetteRecord {
                 key,
                 call_type: "embed".to_string(),
                 provider: "test".to_string(),
                 model: "test-model".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
-                request: serde_json::json!({ "text": text }),
+                request,
                 response: serde_json::to_value(&result)?,
             })?;
             Ok(result)
