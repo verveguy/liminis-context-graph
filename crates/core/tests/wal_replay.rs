@@ -13,6 +13,14 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+fn test_embedder_ctx() -> EmbedderContext {
+    EmbedderContext {
+        embedder: Arc::new(lcg_core::embedder::MockEmbedder::new(4)),
+        model: "mock".to_string(),
+        cache: Arc::new(EmbeddingCache::new()),
+    }
+}
+
 /// Replay reads files ordered by each file's first-line `seq`, not by full-filename
 /// lexicographic comparison (FR-003). Files are written to disk in non-filename order to stress
 /// the sort; their `seq` values already match ascending filename order here, so this test only
@@ -54,7 +62,9 @@ fn test_replay_files_in_seq_order() {
     conn.init_schema(4).unwrap();
 
     let replayer = WalReplayer::new(wal_dir.path());
-    let stats = replayer.replay(&conn).expect("replay");
+    let stats = replayer
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+        .expect("replay");
 
     assert_eq!(stats.files_read, 3);
     assert_eq!(stats.lines_replayed, 3);
@@ -86,7 +96,7 @@ fn test_replay_tolerates_truncated_final_line() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(stats.lines_skipped(), 1, "truncated line must be skipped");
@@ -113,7 +123,7 @@ fn test_replay_skips_unknown_op_without_abort() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must not abort");
 
     assert_eq!(
@@ -136,7 +146,7 @@ fn test_replay_empty_dir_succeeds() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay empty dir");
 
     assert_eq!(stats.lines_replayed, 0);
@@ -165,7 +175,7 @@ fn test_replay_golden_fixture_counts() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir_temp.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay fixture");
 
     // Lines 4, 6, 7 are MATCH-prefixed mutations; all 9 lines are replayed (seq 8 has apostrophes).
@@ -201,7 +211,7 @@ fn test_open_or_rebuild_from_wal() {
         db_path.to_str().unwrap(),
         wal_dir.to_str().unwrap(),
         4,
-        None,
+        test_embedder_ctx(),
     )
     .expect("open_or_rebuild");
     let stats = stats.expect("a rebuild ran, so ReplayStats must be returned (FR-001)");
@@ -251,13 +261,9 @@ fn test_open_or_rebuild_recomputes_embeddings_when_embedder_configured() {
         cache: Arc::new(EmbeddingCache::new()),
     };
 
-    let (db, stats) = Db::open_or_rebuild(
-        db_path.to_str().unwrap(),
-        wal_dir.to_str().unwrap(),
-        4,
-        Some(ctx),
-    )
-    .expect("open_or_rebuild");
+    let (db, stats) =
+        Db::open_or_rebuild(db_path.to_str().unwrap(), wal_dir.to_str().unwrap(), 4, ctx)
+            .expect("open_or_rebuild");
     let stats = stats.expect("a rebuild ran, so ReplayStats must be returned (FR-001)");
     assert!(
         stats.embeddings_recomputed > 0,
@@ -315,7 +321,7 @@ fn test_open_or_rebuild_surfaces_fidelity_warning_on_schema_gap() {
         db_path.to_str().unwrap(),
         wal_dir.to_str().unwrap(),
         4,
-        None,
+        test_embedder_ctx(),
     )
     .expect("open_or_rebuild must not error even when replay fails to prepare");
 
@@ -354,7 +360,7 @@ fn test_open_or_rebuild_returns_none_stats_when_db_already_exists() {
         db_path.to_str().unwrap(),
         wal_dir.to_str().unwrap(),
         4,
-        None,
+        test_embedder_ctx(),
     )
     .expect("open_or_rebuild");
 
@@ -393,7 +399,7 @@ fn test_replay_golden_fixture_field_updates() {
     .unwrap();
 
     let _stats = WalReplayer::new(wal_dir_temp.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay fixture");
 
     // Seq 4: MATCH Entity entity-0 SET attributes — verify the attribute value was written.
@@ -452,7 +458,7 @@ fn test_replay_skips_pure_match_return() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay");
 
     assert_eq!(
@@ -485,7 +491,7 @@ fn test_replay_match_prefixed_counter() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay");
 
     assert_eq!(stats.lines_replayed, 2, "both mutations must be replayed");
@@ -516,7 +522,7 @@ fn test_match_set_on_nonexistent_node_counts_as_no_op() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -555,7 +561,7 @@ fn test_match_delete_on_nonexistent_node_counts_as_delete_no_op() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -597,7 +603,7 @@ fn test_match_detach_delete_applies_when_target_exists() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -663,7 +669,7 @@ fn test_match_create_relationship_applies_when_targets_exist() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -717,7 +723,7 @@ fn test_match_create_relationship_no_op_when_target_missing() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -771,7 +777,7 @@ fn test_match_delete_no_op_does_not_feed_fidelity_warning() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(stats.match_delete_no_op, 11);
@@ -810,7 +816,7 @@ fn test_match_set_with_existing_return_clause_falls_back_and_still_applies() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -868,7 +874,7 @@ fn test_match_set_probe_execute_failure_falls_back_and_still_classifies_failure(
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must not abort on an execute-time failure");
 
     assert_eq!(
@@ -957,7 +963,7 @@ fn test_match_probe_execute_failure_does_not_poison_cache_for_next_flush() {
             &conn,
             ReplayOptions {
                 batch_size: Some(2),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on execute-time failures");
@@ -1030,7 +1036,7 @@ fn test_match_delete_no_op_prepare_cache_across_flushes() {
             &conn,
             ReplayOptions {
                 batch_size: Some(3),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -1085,7 +1091,7 @@ fn test_replay_tolerates_corrupt_first_line_when_determining_file_order() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -1138,7 +1144,7 @@ fn test_match_prefixed_no_op_feeds_fidelity_warning() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must not abort");
 
     assert_eq!(stats.match_prefixed_no_op, 11);
@@ -1172,7 +1178,7 @@ fn test_seq_regression_counted_and_still_applied() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must not abort on a seq regression");
 
     assert_eq!(
@@ -1228,7 +1234,7 @@ fn test_seq_regression_logging_is_capped_with_summary() {
                 progress_log_fn: Some(Box::new(move |line: &str| {
                     captured_clone.lock().unwrap().push(line.to_string());
                 })),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on seq regressions");
@@ -1300,7 +1306,7 @@ fn test_replay_reorders_files_by_seq_not_filename() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     // Correct seq order (CREATE seq=0, then SET seq=1) means the SET finds its target — no
@@ -1361,7 +1367,7 @@ fn test_replay_opts_from_seq() {
             &conn,
             ReplayOptions {
                 from_seq: 1, // skip seq=0
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts");
@@ -1403,7 +1409,7 @@ fn test_replay_opts_to_seq_excludes_later_lines() {
             &conn,
             ReplayOptions {
                 to_seq: Some(1), // exclude seq=2 (the "bad" mutation)
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts");
@@ -1459,7 +1465,7 @@ fn test_replay_opts_to_seq_equal_from_seq_replays_single_line() {
             ReplayOptions {
                 from_seq: 1,
                 to_seq: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts");
@@ -1503,7 +1509,7 @@ fn test_replay_opts_to_seq_at_max_matches_unbounded() {
             &conn,
             ReplayOptions {
                 to_seq: Some(100), // well above the true max of 2
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts");
@@ -1542,7 +1548,7 @@ fn test_replay_opts_rejects_to_seq_less_than_from_seq() {
         ReplayOptions {
             from_seq: 5,
             to_seq: Some(4),
-            ..Default::default()
+            ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
         },
     );
     let Err(err) = result else {
@@ -1592,7 +1598,7 @@ fn test_replay_opts_dry_run() {
             &conn,
             ReplayOptions {
                 dry_run: true,
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts dry_run");
@@ -1649,7 +1655,7 @@ fn test_replay_opts_progress_callback() {
                     });
                     true
                 })),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts progress");
@@ -1751,7 +1757,7 @@ fn test_replay_opts_progress_cancel_mid_run() {
                     }
                     true
                 })),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts cancel");
@@ -1805,7 +1811,7 @@ fn test_replay_skips_unreadable_file_and_continues() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must return Ok even with one unreadable file");
 
     assert_eq!(
@@ -1846,7 +1852,7 @@ fn test_replay_opts_progress_abort() {
             &conn,
             ReplayOptions {
                 progress_fn: Some(Box::new(|_| false)),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay_opts abort");
@@ -1891,7 +1897,7 @@ fn four_bucket_regression() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort even with failures");
@@ -1981,7 +1987,7 @@ fn sample_cap_respected() {
                 // is about classify_replay_failure's dedup-by-category logic (#239), not batch
                 // atomicity, so isolate one mechanism from the other.
                 batch_size: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort");
@@ -2042,7 +2048,7 @@ fn sample_dedup_counts_rows_beyond_cap() {
                 // share one identical literal template, so a larger batch would roll back after
                 // the first failure and classify only that one row. See sample_cap_respected.
                 batch_size: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort");
@@ -2097,7 +2103,7 @@ fn sample_dedup_same_template_different_error_are_distinct() {
                 // share one template, so a larger batch would roll back after the first failure
                 // and never attempt the second, classifying only one sample instead of two.
                 batch_size: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort");
@@ -2158,7 +2164,7 @@ fn sample_dedup_prepare_failure_site() {
             &conn,
             ReplayOptions {
                 failure_sample_cap: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on a prepare failure");
@@ -2192,7 +2198,7 @@ fn test_apostrophe_in_params_replays_correctly() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2254,7 +2260,7 @@ fn test_fidelity_warning_fires_above_threshold() {
                 // lines share one identical literal template, so a larger batch would roll back
                 // after the first failure and classify only that one row instead of all 11.
                 batch_size: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort");
@@ -2301,7 +2307,7 @@ fn test_community_node_replays_into_stub_table() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2349,7 +2355,7 @@ fn test_timestamp_in_params_replays_correctly() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2399,7 +2405,7 @@ fn test_falkordb_episodes_merge_replays_successfully() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2464,7 +2470,7 @@ fn test_falkordb_expired_at_merge_replays_successfully() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2518,7 +2524,7 @@ fn test_vecf32_inline_array_strips_correctly() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2556,7 +2562,7 @@ fn test_vecf32_param_ref_strips_correctly() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2594,7 +2600,7 @@ fn test_bulk_set_expands_to_individual_assignments() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2631,7 +2637,10 @@ fn empty_wal_all_zeros() {
     conn.init_schema(4).unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay_opts(&conn, ReplayOptions::default())
+        .replay_opts(
+            &conn,
+            ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4),
+        )
         .expect("replay empty dir");
 
     assert_eq!(stats.lines_replayed, 0);
@@ -2679,7 +2688,7 @@ fn test_all_unrecognised_wal_triggers_fidelity_warning() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must not abort");
 
     assert_eq!(stats.lines_replayed, 0);
@@ -2719,7 +2728,7 @@ fn test_healthy_replay_no_fidelity_warning_regression() {
     .unwrap();
 
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay must succeed");
 
     assert_eq!(stats.lines_replayed, 10);
@@ -2795,7 +2804,7 @@ fn batch_same_template_groups_into_unwind() {
             &conn,
             ReplayOptions {
                 batch_size: Some(4),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -2868,7 +2877,7 @@ fn batch_fallback_rolls_back_whole_batch_on_bad_row() {
             ReplayOptions {
                 batch_size: Some(5),
                 failure_sample_cap: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on batch failure");
@@ -2941,7 +2950,7 @@ fn batch_size_one_matches_per_row() {
             &conn,
             ReplayOptions {
                 batch_size: Some(1),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay with batch_size=1 must succeed");
@@ -2996,7 +3005,7 @@ fn batch_template_boundary_flushes_correctly() {
             &conn,
             ReplayOptions {
                 batch_size: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -3044,7 +3053,7 @@ fn batch_file_boundary_flushes_between_files() {
             &conn,
             ReplayOptions {
                 batch_size: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -3071,7 +3080,7 @@ fn batch_invalid_size_returns_error() {
         &conn,
         ReplayOptions {
             batch_size: Some(0),
-            ..Default::default()
+            ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
         },
     );
     let err_zero = match result_zero {
@@ -3087,7 +3096,7 @@ fn batch_invalid_size_returns_error() {
         &conn,
         ReplayOptions {
             batch_size: Some(257),
-            ..Default::default()
+            ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
         },
     );
     let err_big = match result_big {
@@ -3137,7 +3146,7 @@ fn test_large_embedding_batch_replay_does_not_corrupt_db() {
         let conn = db.connect().unwrap();
         conn.init_schema(DIM).unwrap();
         let stats = WalReplayer::new(wal_dir.path())
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("replay");
         assert_eq!(stats.lines_replayed, N as u64, "all rows must replay");
         assert_eq!(stats.failed_lines, 0, "no failures expected");
@@ -3224,7 +3233,8 @@ fn throughput_half2_vs_half1_flat() {
                 batch_size: None,
                 log_interval_override: None,
                 progress_log_fn: None,
-                recompute_embed_fn: None,
+                recompute_embed_fn: lcg_core::zero_vector_embed_fn(4),
+                recompute_embed_dim: 4,
             },
         )
         .expect("replay must succeed");
@@ -3308,7 +3318,7 @@ fn wal_replay_progress_log_lines() {
                 progress_log_fn: Some(Box::new(move |line: &str| {
                     captured_clone.lock().unwrap().push(line.to_string());
                 })),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -3398,7 +3408,7 @@ fn wal_replay_progress_throttle_default_interval() {
                 progress_log_fn: Some(Box::new(move |line: &str| {
                     captured_clone.lock().unwrap().push(line.to_string());
                 })),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must succeed");
@@ -3487,7 +3497,7 @@ fn sc001_prior_committed_transactions_survive_a_later_rollback() {
             ReplayOptions {
                 batch_size: Some(3),
                 failure_sample_cap: Some(10),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on a later transaction's failure");
@@ -3606,7 +3616,7 @@ fn sc002_cancel_mid_transaction_rolls_back_and_resume_matches_uninterrupted_repl
             ReplayOptions {
                 batch_size: Some(3),
                 cancel_fn: Some(cancel_fn),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("replay must not abort on cancellation");
@@ -3657,7 +3667,7 @@ fn sc002_cancel_mid_transaction_rolls_back_and_resume_matches_uninterrupted_repl
             ReplayOptions {
                 from_seq: last_committed_seq + 1,
                 batch_size: Some(3),
-                ..Default::default()
+                ..ReplayOptions::new(lcg_core::zero_vector_embed_fn(4), 4)
             },
         )
         .expect("resumed replay must succeed");
