@@ -261,7 +261,12 @@ pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
 /// `EmbeddingCache::get_or_compute_batch` inside this closure — `replay.rs` never constructs or
 /// touches a cache itself, and never deduplicates a window's texts on its own; that's the
 /// closure's job.
-pub type RecomputeEmbedFn = Box<dyn Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error> + Send>;
+pub type RecomputeEmbedFn = Box<EmbedBatchDyn>;
+
+/// The trait-object type `RecomputeEmbedFn` boxes — factored out (clippy's `type_complexity`)
+/// so a caller needing an unboxed reference (`resolve_embed_window`) can write `&EmbedBatchDyn`
+/// instead of repeating the full `dyn Fn(...) + Send` spelling.
+type EmbedBatchDyn = dyn Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error> + Send;
 
 /// `(embedding vector param, co-located source-text param)` pairs recognized during replay
 /// recompute (issue #526, FR-001/FR-002) — the crate-wide single source of truth for which
@@ -1021,7 +1026,7 @@ enum RowEmbeddingOutcome {
 ///   bump `embeddings_skip_rows` and are absent from the returned `Vec`.
 fn resolve_embed_window(
     window: Vec<PendingRow>,
-    embed_fn: &(dyn Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error> + Send),
+    embed_fn: &EmbedBatchDyn,
     embed_dim: usize,
     stats: &mut ReplayStats,
 ) -> Vec<ResolvedRow> {
