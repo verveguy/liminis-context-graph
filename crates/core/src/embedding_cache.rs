@@ -70,7 +70,6 @@ impl EmbedderContext {
             cache.get_or_compute(&model, dim, text, || handle.block_on(embedder.embed(text)))
         })
     }
-
 }
 
 /// Content-addressed, in-memory-only embedding cache. Safe to share across threads via `Arc`;

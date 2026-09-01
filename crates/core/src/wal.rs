@@ -1175,7 +1175,11 @@ mod tests {
         let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
         writer
             .with_chunk(|w| {
-                w.log_mutation("CREATE (:Entity {uuid: 'x'})", serde_json::Value::Null, "test")
+                w.log_mutation(
+                    "CREATE (:Entity {uuid: 'x'})",
+                    serde_json::Value::Null,
+                    "test",
+                )
             })
             .unwrap();
 

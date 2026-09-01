@@ -2447,26 +2447,17 @@ async fn handle_rebuild_from_wal(
                     });
                     f
                 });
-                // issue #440 FR-001/FR-006/FR-007: recompute embeddings from co-located source
-                // text rather than binding the WAL's stored vectors, warn if this WAL's recorded
-                // embedding identity mismatches the running embedder, and persist that identity
-                // alongside applied_seq below. Skipped for a dry run — replay_opts never invokes
-                // recompute_embed_fn when dry_run is set, so building the bridge (and its
-                // mismatch check) would be pure overhead.
-                let (recompute_embed_fn, embedding_identity) = if dry_run {
-                    (None, None)
-                } else {
-                    let embedder_ctx = crate::embedding_cache::EmbedderContext {
-                        embedder: Arc::clone(&state_c.embedder),
-                        model: state_c.embedding_model.clone(),
-                        cache: Arc::clone(&state_c.embedding_cache),
-                    };
-                    if let Some(msg) = embedder_ctx.check_replay_mismatch(&wal_dir_c) {
-                        eprintln!("[WAL WARN] {msg}");
-                    }
-                    let identity = embedder_ctx.identity();
-                    (Some(embedder_ctx.recompute_fn_via_handle()), Some(identity))
+                // issue #526 FR-001/FR-002: recompute embeddings from co-located source text,
+                // never bind a value stored in the WAL, and persist the resulting identity
+                // alongside applied_seq below (issue #440, FR-007). `recompute_embed_fn` is
+                // mandatory but harmless to build even for a dry run — `replay_opts` never
+                // invokes it when `dry_run` is set.
+                let embedder_ctx = crate::embedding_cache::EmbedderContext {
+                    embedder: Arc::clone(&state_c.embedder),
+                    model: state_c.embedding_model.clone(),
+                    cache: Arc::clone(&state_c.embedding_cache),
                 };
+                let embedding_identity = embedder_ctx.identity();
                 let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
@@ -2479,7 +2470,10 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
-                        recompute_embed_fn,
+                        ..ReplayOptions::new(
+                            embedder_ctx.recompute_fn_via_handle(),
+                            state_c.embedder.dim(),
+                        )
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
@@ -2541,15 +2535,14 @@ async fn handle_rebuild_from_wal(
                         // failed embed call left at least one stale, un-recomputed vector in
                         // place, so persisting `Some(identity)` here would make
                         // embedding_model_status silently over-claim "match".
-                        let embedding_identity = embedding_identity
-                            .filter(|_| stats.embeddings_recompute_had_no_failures());
+                        let group_embedding_identity = stats
+                            .embeddings_recompute_had_no_failures()
+                            .then(|| (embedding_identity.0.as_str(), embedding_identity.1));
                         match conn.set_wal_position(
                             &gid_c,
                             seq,
                             generation_for_replay.as_deref(),
-                            embedding_identity
-                                .as_ref()
-                                .map(|(model, dim)| (model.as_str(), *dim)),
+                            group_embedding_identity,
                         ) {
                             Ok(()) => {
                                 // FR-010: a reset-triggered self-heal also re-binds cross-group
@@ -2745,6 +2738,14 @@ async fn handle_rebuild_from_wal(
         let db = load_db(&state)?;
         let wal_dir_c = wal_dir.clone();
         let replay_started_at = std::time::Instant::now();
+        // `recompute_embed_fn` is mandatory but never actually invoked here — `replay_opts`
+        // skips recompute entirely when `dry_run` is set (issue #526).
+        let embedder_ctx = crate::embedding_cache::EmbedderContext {
+            embedder: Arc::clone(&state.embedder),
+            model: state.embedding_model.clone(),
+            cache: Arc::clone(&state.embedding_cache),
+        };
+        let embedding_dim = state.embedder.dim();
         let stats =
             tokio::task::spawn_blocking(move || -> Result<crate::replay::ReplayStats, Error> {
                 let conn = db.connect()?;
@@ -2754,13 +2755,7 @@ async fn handle_rebuild_from_wal(
                         from_seq,
                         to_seq,
                         dry_run: true,
-                        progress_fn: None,
-                        cancel_fn: None,
-                        failure_sample_cap: None,
-                        batch_size: None,
-                        log_interval_override: None,
-                        progress_log_fn: None,
-                        recompute_embed_fn: None,
+                        ..ReplayOptions::new(embedder_ctx.recompute_fn_via_handle(), embedding_dim)
                     },
                 )
             })
@@ -2913,22 +2908,15 @@ async fn handle_rebuild_from_wal(
                     }
                     true
                 });
-                // issue #440 FR-001/FR-006/FR-007: same recompute bridge + mismatch check +
-                // identity-to-persist derivation as the streaming path above.
-                let (recompute_embed_fn, embedding_identity) = if dry_run {
-                    (None, None)
-                } else {
-                    let embedder_ctx = crate::embedding_cache::EmbedderContext {
-                        embedder: Arc::clone(&bg_state.embedder),
-                        model: bg_state.embedding_model.clone(),
-                        cache: Arc::clone(&bg_state.embedding_cache),
-                    };
-                    if let Some(msg) = embedder_ctx.check_replay_mismatch(&wal_dir_c) {
-                        eprintln!("[WAL WARN] {msg}");
-                    }
-                    let identity = embedder_ctx.identity();
-                    (Some(embedder_ctx.recompute_fn_via_handle()), Some(identity))
+                // issue #526 FR-001/FR-002: same recompute bridge + identity-to-persist
+                // derivation as the streaming path above. `recompute_embed_fn` is mandatory but
+                // harmless to build even for a dry run — `replay_opts` never invokes it then.
+                let embedder_ctx = crate::embedding_cache::EmbedderContext {
+                    embedder: Arc::clone(&bg_state.embedder),
+                    model: bg_state.embedding_model.clone(),
+                    cache: Arc::clone(&bg_state.embedding_cache),
                 };
+                let embedding_identity = embedder_ctx.identity();
                 let stats = WalReplayer::new(&wal_dir_c).replay_opts(
                     &conn,
                     ReplayOptions {
@@ -2941,7 +2929,10 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
-                        recompute_embed_fn,
+                        ..ReplayOptions::new(
+                            embedder_ctx.recompute_fn_via_handle(),
+                            bg_state.embedder.dim(),
+                        )
                     },
                 )?;
                 // Rebuild all indexes (FTS + HNSW vector) once over the fully-loaded data.
@@ -2996,15 +2987,14 @@ async fn handle_rebuild_from_wal(
                         warn_on_rebuild_seq_gap(&conn, &bg_gid, from_seq, "reload(bg)");
                         // issue #440 FR-006/FR-008: same "only claim match if no recompute
                         // attempt failed" gate as the streaming path above.
-                        let embedding_identity = embedding_identity
-                            .filter(|_| stats.embeddings_recompute_had_no_failures());
+                        let group_embedding_identity = stats
+                            .embeddings_recompute_had_no_failures()
+                            .then(|| (embedding_identity.0.as_str(), embedding_identity.1));
                         match conn.set_wal_position(
                             &bg_gid,
                             seq,
                             bg_current_generation_for_replay.as_deref(),
-                            embedding_identity
-                                .as_ref()
-                                .map(|(model, dim)| (model.as_str(), *dim)),
+                            group_embedding_identity,
                         ) {
                             Ok(()) => {
                                 // FR-010: same post-replay re-bind as the streaming path — part
@@ -4659,7 +4649,7 @@ async fn handle_knowledge_recover_full(
             &wal_root,
             embedding_dim,
             sink,
-            Some(embedder_ctx),
+            embedder_ctx,
         )
     })
     .await?;
@@ -4813,19 +4803,16 @@ async fn recover_rebuild_from_workspace_wal(
                 (0u64, 0u64, 0u64);
             let embedding_identity = embedder_ctx.identity();
             for (gid, dir) in wal_group::list_group_wal_dirs(&wal_root)? {
-                // issue #440 FR-001/FR-006/FR-007: this strategy wipes and replays the *entire*
-                // embedded DB from WAL — exactly the "graph rebuilt from WAL" scenario the issue
-                // exists to fix — so it must recompute embeddings and warn on mismatch the same
-                // way the other replay call sites do, not bind the WAL's stored vectors verbatim.
-                if let Some(msg) = embedder_ctx.check_replay_mismatch(&dir) {
-                    eprintln!("[WAL WARN] {msg}");
-                }
+                // issue #526 FR-001/FR-002: this strategy wipes and replays the *entire* embedded
+                // DB from WAL — exactly the "graph rebuilt from WAL" scenario the issue exists to
+                // fix — so it must recompute embeddings from source text, never bind a vector
+                // value stored in the WAL, the same way every other replay call site does.
                 let stats = crate::replay::WalReplayer::new(&dir).replay_opts(
                     &conn,
-                    crate::replay::ReplayOptions {
-                        recompute_embed_fn: Some(embedder_ctx.recompute_fn_via_handle()),
-                        ..Default::default()
-                    },
+                    crate::replay::ReplayOptions::new(
+                        embedder_ctx.recompute_fn_via_handle(),
+                        embedding_dim,
+                    ),
                 )?;
                 if let Some(seq) = stats.last_committed_seq {
                     let generation = crate::wal_generation::read_generation(&dir);

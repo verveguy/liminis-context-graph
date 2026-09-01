@@ -851,7 +851,7 @@ async fn bootstrap_app_state(
                             &recovery_wal_root,
                             embedding_dim,
                             recovery_sink,
-                            Some(recovery_embedder_ctx),
+                            recovery_embedder_ctx,
                         )
                     })
                     .await;
