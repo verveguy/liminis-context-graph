@@ -47,10 +47,12 @@ fn storage_v41_database_opens_and_migrates_with_correct_reads() {
     );
 
     // Opening a storage-v41 database under the current (0.20.1-pinned) binary must succeed with
-    // no manual operator step — this is the in-place migration itself.
+    // no manual operator step. The on-disk rewrite to the current storage version happens at the
+    // first checkpoint (see CHANGELOG.md), not necessarily at open — this test doesn't force a
+    // checkpoint or assert the storage version, only that open is automatic and reads are correct.
     let db = Db::open(db_path.to_str().unwrap()).expect(
         "storage-v41 database failed to open under the current lbug pin; \
-         in-place migration (41 -> 47) is expected to be automatic",
+         opening it (the first step of in-place migration) is expected to be automatic",
     );
     let conn = db.connect().unwrap();
 
