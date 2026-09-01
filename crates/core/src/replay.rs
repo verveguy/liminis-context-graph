@@ -727,7 +727,7 @@ impl WalReplayer {
                     // inline-literal promotion must run between the other two: it needs
                     // strip_vecf32's output (a bare array literal only exists once `VECF32(...)`
                     // is unwrapped) and produces a `$vec_key` param reference that
-                    // recompute_row_embeddings below can then recognize and always overwrite —
+                    // resolve_embed_window can then recognize and always overwrite —
                     // without it, a legacy VECF32-inline-array row's stored vector would bind
                     // verbatim forever, contradicting FR-002/FR-003 (issue #526 review finding).
                     let norm_cypher = strip_vecf32(&wal_line.cypher);
