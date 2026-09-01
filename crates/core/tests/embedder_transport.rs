@@ -1200,10 +1200,15 @@ async fn embedder_http_cassette_never_leaks_authorization_or_key() {
 /// `concurrent_rw_integration.rs`.
 #[tokio::test]
 async fn http_transport_hung_backend_times_out_on_embed() {
-    let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
     let (addr, _server) = spawn_stub_http_hang_server().await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config");
+    // Scoped so the blocking env-var guard is dropped before the `.await` below: the timeout
+    // env vars are only read during `new_http` construction, so holding the guard any longer
+    // would needlessly block a tokio worker thread across an await point.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
 
     let start = std::time::Instant::now();
     let err = embedder.embed("hello world").await.unwrap_err();
@@ -1223,10 +1228,14 @@ async fn http_transport_hung_backend_times_out_on_embed() {
 /// `embed()`/`embed_batch()` — the startup probe is the same code path via `do_embed_raw`).
 #[tokio::test]
 async fn http_transport_hung_backend_times_out_on_probe() {
-    let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
     let (addr, _server) = spawn_stub_http_hang_server().await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config");
+    // See `http_transport_hung_backend_times_out_on_embed`'s comment: the guard is scoped to
+    // construction only, so it's dropped before the `.await` below.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
 
     let start = std::time::Instant::now();
     let err = embedder.probe().await.unwrap_err();
@@ -1259,9 +1268,13 @@ async fn http_transport_hung_backend_times_out_on_probe() {
             unroutable blackhole in the current network sandbox, which is not guaranteed on \
             every CI runner"]
 async fn http_transport_connect_timeout_independent_of_request_timeout() {
-    let _guard = EmbeddingTimeoutEnvGuard::set("30000", "300");
     let url = "http://192.0.2.1:9/v1/embeddings".to_string();
-    let embedder = OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config");
+    // See `http_transport_hung_backend_times_out_on_embed`'s comment: the guard is scoped to
+    // construction only, so it's dropped before the `.await` below.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("30000", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
 
     let start = std::time::Instant::now();
     let err = embedder.embed("hello world").await.unwrap_err();
@@ -1368,15 +1381,21 @@ async fn new_http_rejects_invalid_connect_timeout_override() {
 /// without a code change.
 #[tokio::test]
 async fn new_http_accepts_distinct_valid_timeout_overrides() {
-    let _guard = EmbeddingTimeoutEnvGuard::set("15000", "2500");
-    let embedder = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
-        .expect("distinct valid timeout overrides should construct successfully");
-    // Constructing successfully is the assertion (SC-004); exercise it against a live stub too,
-    // to confirm the resulting client is actually usable end-to-end with overrides applied.
     let (addr, _server) = spawn_stub_http_server(4).await;
-    drop(embedder);
-    let embedder2 = OaiEmbedder::new_http(format!("http://{addr}/v1/embeddings"), "test-model", 4)
-        .expect("valid embedder config");
+    // Scoped so the blocking env-var guard is dropped before the `.await` below: the timeout
+    // env vars are only read during `new_http` construction, so holding the guard any longer
+    // would needlessly block a tokio worker thread across an await point.
+    let embedder2 = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("15000", "2500");
+        let embedder = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+            .expect("distinct valid timeout overrides should construct successfully");
+        // Constructing successfully is the assertion (SC-004); exercise it against a live stub
+        // too, to confirm the resulting client is actually usable end-to-end with overrides
+        // applied.
+        drop(embedder);
+        OaiEmbedder::new_http(format!("http://{addr}/v1/embeddings"), "test-model", 4)
+            .expect("valid embedder config")
+    };
     let result = embedder2.embed("hello world").await.unwrap();
     assert_eq!(result.len(), 4);
 }

@@ -686,11 +686,6 @@ fn extract_embeddings_ordered(
         .collect()
 }
 
-/// Resolves the chunk size for `OaiEmbedder::embed_batch` from the `LCG_EMBED_BATCH_SIZE` env
-/// var. Valid range is 1–256; default 64 (mirrors `replay.rs::resolve_batch_size`'s validation
-/// shape). The endpoint's real per-request limit is unmeasured (spec Assumptions), so this is a
-/// conservative default with an escape-hatch override rather than a hardcoded, unverified
-/// constant.
 /// Resolves a millisecond-valued timeout from `env_var`, falling back to `default_ms` when
 /// unset. Strict validation (FR-006): an unparseable or zero value is rejected with
 /// `Error::Config` naming the offending var, mirroring `resolve_embed_batch_size`'s shape —
@@ -721,6 +716,11 @@ fn resolve_embedding_timeout_ms(
     Ok(std::time::Duration::from_millis(ms))
 }
 
+/// Resolves the chunk size for `OaiEmbedder::embed_batch` from the `LCG_EMBED_BATCH_SIZE` env
+/// var. Valid range is 1–256; default 64 (mirrors `replay.rs::resolve_batch_size`'s validation
+/// shape). The endpoint's real per-request limit is unmeasured (spec Assumptions), so this is a
+/// conservative default with an escape-hatch override rather than a hardcoded, unverified
+/// constant.
 fn resolve_embed_batch_size() -> Result<usize, Error> {
     let size = std::env::var("LCG_EMBED_BATCH_SIZE")
         .ok()
