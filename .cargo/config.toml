@@ -20,11 +20,13 @@
 #
 # The bundle stopped being *fully* self-contained in 0.18.0: OpenSSL moved out
 # of the archive (LadybugDB/ladybug#590, "Link against OpenSSL3"). lbug's
-# build.rs now emits `cargo:rustc-link-lib=dylib=ssl` and `=crypto`
-# unconditionally, and consults `pkg-config --variable=libdir openssl` — and
-# nothing else — for the search path. Neither OPENSSL_DIR nor OPENSSL_ROOT_DIR
-# is read by the published 0.19.1 crate, so PKG_CONFIG_PATH is the only lever.
-# Everything else listed above is still statically bundled.
+# build.rs emits `cargo:rustc-link-lib=dylib=ssl` and `=crypto`
+# unconditionally. As of 0.20.1, build.rs checks OPENSSL_DIR / OPENSSL_ROOT_DIR
+# first and uses that directory directly if either is set; this repo sets
+# neither, so it falls through to `pkg-config --variable=libdir openssl` (then,
+# if that fails, a vcpkg lookup and hardcoded Homebrew fallback paths — see
+# ADR-0398's amendment). PKG_CONFIG_PATH remains the effective lever in
+# practice. Everything else listed above is still statically bundled.
 #
 # Release artifacts must not inherit a dynamic libssl/libcrypto dependency —
 # that would break the self-contained single-binary install story the shell
@@ -35,7 +37,7 @@
 # dynamically, which is fine for local development.
 #
 # LBUG_VERSION pins the prebuilt lbug native bundle to match the `lbug` crate
-# (=0.19.1). Without it, lbug's build.rs downloads the *floating* `latest`
+# (=0.20.1). Without it, lbug's build.rs downloads the *floating* `latest`
 # ladybug release, building this crate's FFI against a newer, incompatible
 # native bundle. That skew broke the v0.9.0 release: the then-latest 0.18.1
 # bundle linked httplib against OpenSSL (`ssl_st`) while the pinned 0.17.0 crate
@@ -44,4 +46,4 @@
 # in lockstep across dev, CI, and release.
 [env]
 RUST_TEST_THREADS = "4"
-LBUG_VERSION = "0.19.1"
+LBUG_VERSION = "0.20.1"

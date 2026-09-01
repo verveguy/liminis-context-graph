@@ -11,17 +11,24 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Changed
 
-- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.19.1`, moving both the crate pin in
-  `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together. Picks
-  up upstream's buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint
-  lock-file cleanup fixes (0.19.0), batched detached-node relationship deletes, WAL group commits,
-  stats-aware query planning, and HNSW scalar quantization. No IPC or MCP tool schema, response
-  shape, or dispatch method changes.
+- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.20.1`, moving both the crate pin in
+  `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together, in a
+  single hop rather than staging through the intermediate `0.19.1`. Picks up upstream's
+  buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint lock-file cleanup
+  fixes (0.19.0), batched detached-node relationship deletes, WAL group commits, stats-aware query
+  planning, HNSW scalar quantization, plus three further correctness fixes on paths this project
+  actively exercises: a heap-corruption fix in the FTS query path when scans race committing
+  writers (`ladybug#845` — this project runs `CREATE_FTS_INDEX` on `Entity` and queries it
+  concurrently as a live service), an alignment fix between primary-key-lookup rows and the input
+  chunk selection (`ladybug#837`), and a fix for silent row loss when `LOAD FROM`/`UNWIND` feeds a
+  `MATCH` primary-key predicate (`ladybug#864`) — the latter two both touch the
+  `Entity.lookup_key` ART-index lookup path. No IPC or MCP tool schema, response shape, or
+  dispatch method changes.
 
   **Upgrading is one-way for the database — but not for your data.** A database created under
-  `0.17.0` (storage version 41) opens directly under `0.19.1`: no migration step, no
+  `0.17.0` (storage version 41) opens directly under `0.20.1`: no migration step, no
   export/reimport. The first checkpoint under the new binary then rewrites it to storage version
-  43, after which **an older `liminis-context-graph` binary will not open it again**.
+  47, after which **an older `liminis-context-graph` binary will not open it again**.
 
   This affects only `.lcg/db/`, which is a derived index. The WAL under `.lcg/wal/` is the source
   of truth and is plain JSONL owned by this project — its format is independent of lbug's storage

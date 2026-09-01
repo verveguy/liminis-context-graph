@@ -213,9 +213,34 @@ release path reproducible locally so it can be checked by hand before tagging. C
 properly means adding a macOS job or enabling cargo-dist's `pr-run-mode = "upload"`, which is
 separate work.
 
+## Amendment (2026-09-01, issue #529)
+
+The `lbug` pin moved from `0.19.1` to `0.20.1`. One claim in Context above is now historical
+rather than current: "Grepping the published `0.19.1` `build.rs` for `OPENSSL_DIR`,
+`OPENSSL_ROOT_DIR`, `vcpkg`, and `homebrew` returns nothing" — read that as a statement about
+`0.19.1`, which was current when this ADR was written. As of `0.20.1`, `build.rs` checks
+`OPENSSL_DIR`/`OPENSSL_ROOT_DIR` *first* and, if either is set, uses that directory directly
+without consulting `pkg-config` at all. It also gained a `vcpkg::find_package("openssl")` call
+(Windows-oriented, a no-op on our targets) and, after `pkg-config`, hardcoded macOS fallback probe
+paths (`/opt/homebrew/opt/openssl/lib`, `/usr/local/opt/openssl/lib` — note: unversioned, no `@3`
+suffix, a keg-alias path that typically doesn't exist since `openssl@3` is keg-only).
+
+**This does not change the decision.** This repo's build never sets `OPENSSL_DIR` or
+`OPENSSL_ROOT_DIR`, so the new first-checked branch is inert here and `PKG_CONFIG_PATH` remains
+the effective lever `stage-openssl-static.sh` relies on — the same lever, the same script, the
+same staging step placement. `-lssl`/`-lcrypto` are still emitted unconditionally as `dylib`, so
+the static-link strategy (an archives-only directory staged onto `PKG_CONFIG_PATH`) is
+unaffected. `#529` re-ran the full hand verification this ADR specifies (`stage-openssl-static.sh`
+→ release build → `assert-static-openssl.sh` → `otool -L`) against the `0.20.1` build rather than
+assuming the `0.19.1` result still held, in part because upstream `LadybugDB/ladybug#830`
+namespace-wraps vendored mbedtls to avoid a symbol clash with statically-linked duckdb — a
+C++-internal change invisible to `build.rs`, but exactly the kind of vendoring change this ADR's
+"macOS remains unproven by CI" risk exists to catch by hand rather than assume away.
+
 ## References
 
 - Issue #398 — the `0.17.0` → `0.19.1` upgrade
+- Issue #529 — the `0.19.1` → `0.20.1` upgrade (see Amendment above)
 - `LadybugDB/ladybug#590` — "Link against OpenSSL3" (0.18.0), the change that started this
 - `LadybugDB/ladybug#579`, `#581` — precompiled-binary OpenSSL dependencies
 - `LadybugDB/ladybug#682` — upstream's own absolute-install-name failure on the Node binding
