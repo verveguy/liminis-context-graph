@@ -122,6 +122,33 @@ async fn dispatch(id: i64, method: &str, params: Value, state: Arc<AppState>) ->
     serde_json::to_value(resp).unwrap()
 }
 
+/// Polls `knowledge_rebuild_status` for `job_id` until it reports `completed`, panicking on
+/// `failed` or a 10s timeout. Shared by every test that drives a background rebuild job via
+/// `knowledge_rebuild_from_wal` (mirrors `group_purge.rs`'s identical helper).
+async fn wait_for_rebuild_completion(job_id: &str, state: &Arc<AppState>) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            9000,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id}),
+            Arc::clone(state),
+        )
+        .await;
+        match status_v["result"]["status"].as_str().unwrap_or("?") {
+            "completed" => break,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 10s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    }
+}
+
 /// Counts the total number of JSONL lines across all `.jsonl` files in `dir`.
 fn count_wal_lines(dir: &std::path::Path) -> usize {
     if !dir.exists() {
@@ -496,6 +523,226 @@ async fn test_delete_chunk_episode_with_single_group_routes_to_that_group() {
     assert!(
         !default_group_dir.exists() || count_wal_lines(&default_group_dir) == 0,
         "a single-group-scoped delete_chunk_episode must not fall back to the default group's writer"
+    );
+}
+
+/// issue #402 / SC-001: a multi-group `knowledge_delete_chunk_episode` call must attribute its
+/// deletion to each affected group's own WAL stream — otherwise a group-scoped rebuild of one of
+/// the named groups (which purges that group and replays only its own WAL directory from seq 0)
+/// resurrects the episode the multi-group delete removed from it, because that group's own
+/// stream never recorded the deletion.
+#[tokio::test]
+async fn test_delete_chunk_episode_multi_group_survives_group_scoped_rebuild() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    // Same chunk_id, present in two non-default groups.
+    for (idx, group) in ["group-a", "group-b"].iter().enumerate() {
+        let v = dispatch(
+            1 + idx as i64,
+            "knowledge_add_episode",
+            json!({
+                "name": "shared-chunk",
+                "episode_body": format!("Episode body {idx}."),
+                "source": "text",
+                "source_description": format!("doc-{idx}.md"),
+                "reference_time": "2026-01-01 00:00:00",
+                "group_id": group
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert!(
+            v.get("result").is_some(),
+            "add_episode({group}) failed: {v}"
+        );
+    }
+
+    let episodes_in_a_before = {
+        let conn = db.connect().unwrap();
+        conn.count_episodics_by_group_ids(&["group-a"]).unwrap()
+    };
+    assert_eq!(
+        episodes_in_a_before, 1,
+        "group-a must have its episode before the delete"
+    );
+
+    let del_v = dispatch(
+        10,
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "shared-chunk", "group_ids": ["group-a", "group-b"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(del_v["result"]["success"], true, "{del_v}");
+    assert_eq!(del_v["result"]["deleted_count"], 2, "{del_v}");
+
+    let episodes_in_a_after_delete = {
+        let conn = db.connect().unwrap();
+        conn.count_episodics_by_group_ids(&["group-a"]).unwrap()
+    };
+    assert_eq!(
+        episodes_in_a_after_delete, 0,
+        "group-a's episode must be deleted"
+    );
+
+    // Group-scoped rebuild of group-a alone: purges group-a's data and replays only group-a's
+    // own WAL directory from seq 0. If the delete above landed only on the default group's
+    // stream, group-a's own stream still contains just the original CREATE, and this replay
+    // would resurrect the episode.
+    let rebuild_v = dispatch(
+        11,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": "group-a", "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(rebuild_v["result"]["success"], true, "{rebuild_v}");
+    let job_id = rebuild_v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+    wait_for_rebuild_completion(&job_id, &state).await;
+
+    let episodes_in_a_after_rebuild = {
+        let conn = db.connect().unwrap();
+        conn.count_episodics_by_group_ids(&["group-a"]).unwrap()
+    };
+    assert_eq!(
+        episodes_in_a_after_rebuild, 0,
+        "a group-scoped rebuild of group-a must not resurrect an episode a multi-group delete \
+         removed from it (issue #402)"
+    );
+}
+
+/// issue #402 / SC-001, FR-004: identical scenario to the chunk_episode test above, but for
+/// `knowledge_delete_by_source` — both handlers share the same fallback-to-default-group
+/// attribution defect, so both must be fixed and both must be covered.
+#[tokio::test]
+async fn test_delete_by_source_multi_group_survives_group_scoped_rebuild() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    for (idx, group) in ["group-a", "group-b"].iter().enumerate() {
+        let v = dispatch(
+            1 + idx as i64,
+            "knowledge_add_episode",
+            json!({
+                "name": format!("chunk-{idx}"),
+                "episode_body": format!("Episode body {idx}."),
+                "source": "text",
+                "source_description": "shared-source.md",
+                "reference_time": "2026-01-01 00:00:00",
+                "group_id": group
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert!(
+            v.get("result").is_some(),
+            "add_episode({group}) failed: {v}"
+        );
+    }
+
+    let episodes_in_a_before = {
+        let conn = db.connect().unwrap();
+        conn.count_episodics_by_group_ids(&["group-a"]).unwrap()
+    };
+    assert_eq!(
+        episodes_in_a_before, 1,
+        "group-a must have its episode before the delete"
+    );
+
+    let del_v = dispatch(
+        10,
+        "knowledge_delete_by_source",
+        json!({"source_file": "shared-source.md", "group_ids": ["group-a", "group-b"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(del_v["result"]["success"], true, "{del_v}");
+    assert_eq!(del_v["result"]["deleted_count"], 2, "{del_v}");
+
+    let rebuild_v = dispatch(
+        11,
+        "knowledge_rebuild_from_wal",
+        json!({"group_id": "group-a", "force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(rebuild_v["result"]["success"], true, "{rebuild_v}");
+    let job_id = rebuild_v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+    wait_for_rebuild_completion(&job_id, &state).await;
+
+    let episodes_in_a_after_rebuild = {
+        let conn = db.connect().unwrap();
+        conn.count_episodics_by_group_ids(&["group-a"]).unwrap()
+    };
+    assert_eq!(
+        episodes_in_a_after_rebuild, 0,
+        "a group-scoped rebuild of group-a must not resurrect an episode a multi-group \
+         delete_by_source removed from it (issue #402)"
+    );
+}
+
+/// issue #402 Edge Case: `group_ids` naming the default group alongside a non-default group is
+/// not a special case once the fix attributes per named group — each group's mutations land only
+/// in that group's own WAL directory, including the default group's, which receives only the
+/// mutations that actually belong to it.
+#[tokio::test]
+async fn test_delete_chunk_episode_default_group_plus_non_default_attributes_separately() {
+    let (db, _db_dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db.clone(), wal_dir.path().to_path_buf());
+
+    for group in ["liminis", "group-a"] {
+        let v = dispatch(
+            1,
+            "knowledge_add_episode",
+            json!({
+                "name": "shared-chunk",
+                "episode_body": "Episode body.",
+                "source": "text",
+                "source_description": "doc.md",
+                "reference_time": "2026-01-01 00:00:00",
+                "group_id": group
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert!(
+            v.get("result").is_some(),
+            "add_episode({group}) failed: {v}"
+        );
+    }
+
+    let default_group_dir = group_wal_dir(wal_dir.path(), "liminis");
+    let group_a_dir = group_wal_dir(wal_dir.path(), "group-a");
+    let default_lines_before = count_wal_lines(&default_group_dir);
+    let group_a_lines_before = count_wal_lines(&group_a_dir);
+
+    let del_v = dispatch(
+        2,
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "shared-chunk", "group_ids": ["liminis", "group-a"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(del_v["result"]["success"], true, "{del_v}");
+    assert_eq!(del_v["result"]["deleted_count"], 2, "{del_v}");
+
+    assert!(
+        count_wal_lines(&default_group_dir) > default_lines_before,
+        "the default group's own deletion must land in the default group's own WAL directory"
+    );
+    assert!(
+        count_wal_lines(&group_a_dir) > group_a_lines_before,
+        "group-a's own deletion must land in group-a's own WAL directory"
     );
 }
 
