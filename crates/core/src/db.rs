@@ -288,8 +288,10 @@ fn build_sync_recompute_fn(
     let embedder = Arc::clone(&ctx.embedder);
     let cache = Arc::clone(&ctx.cache);
     let (model, dim) = ctx.identity();
-    Ok(Box::new(move |text: &str| {
-        cache.get_or_compute(&model, dim, text, || rt.block_on(embedder.embed(text)))
+    Ok(Box::new(move |texts: &[&str]| {
+        cache.get_or_compute_batch(&model, dim, texts, |miss_texts| {
+            rt.block_on(embedder.embed_batch(miss_texts))
+        })
     }))
 }
 

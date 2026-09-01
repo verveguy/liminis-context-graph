@@ -266,14 +266,17 @@ async fn measure_cold_vs_warm_cache_replay_over_real_corpus_wal() {
         cache: Arc::clone(&cache),
     };
 
-    // Cold: the cache starts empty, so every recognized vector is a genuine cache miss.
+    // Cold: the cache starts empty, so every recognized vector is a genuine cache miss. Real
+    // round-trips now go through `embed_batch` (issue #486), not single-text `embed` — so
+    // `batch_call_count()` is the count that reflects genuine embedder round-trips;
+    // `call_count()` would read 0 under the batched recompute path even on a real cache miss.
     let (cold_stats, cold_elapsed) = replay_once(&ctx, dim, "cold").await;
-    let cold_real_calls = counting_embedder.call_count();
+    let cold_real_calls = counting_embedder.batch_call_count();
 
     // Warm: same `ctx` (same cache, already populated from the cold pass above), fresh DB —
     // every text in this fixture was already seen, so every recompute should resolve from cache.
     let (warm_stats, warm_elapsed) = replay_once(&ctx, dim, "warm").await;
-    let warm_real_calls = counting_embedder.call_count() - cold_real_calls;
+    let warm_real_calls = counting_embedder.batch_call_count() - cold_real_calls;
 
     println!(
         "[SC-005] real_corpus_wal replay cost — cold cache: {:.3}s, {} lines_replayed, \

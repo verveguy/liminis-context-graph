@@ -166,12 +166,16 @@ pub struct ReplayStats {
     /// key — recompute runs unconditionally, on every replay, for every row whose Cypher
     /// template references a recognized vector placeholder (issue #526, FR-001/FR-002).
     pub embeddings_recomputed: u64,
-    /// Count of times `ReplayOptions::recompute_embed_fn` was actually invoked (issue #440,
-    /// FR-003). This measures callback invocations, including callback cache hits — it does not
-    /// measure underlying embedder computations or cache misses, because caching (e.g.
-    /// `EmbeddingCache`) happens inside the caller-supplied closure rather than in `replay.rs`
-    /// itself. SC-005's cache-effectiveness bound is verified against this counter via a plain
-    /// counting closure that wraps the cache, not against `EmbeddingCache` internals directly.
+    /// Count of embedding vector params `replay.rs` attempted to recompute — one increment per
+    /// `(row, vec_key)` request queued into a window's batched `ReplayOptions::recompute_embed_fn`
+    /// call (issue #486; previously one increment per single-text callback invocation, issue
+    /// #440 FR-003, before recompute was batched). This measures request attempts, not physical
+    /// `recompute_embed_fn` invocations — under batching, one invocation now resolves an entire
+    /// window's worth of requests at once — and does not measure underlying embedder computations
+    /// or cache misses, because caching (e.g. `EmbeddingCache`) happens inside the caller-supplied
+    /// closure rather than in `replay.rs` itself. SC-005's cache-effectiveness bound is verified
+    /// against this counter via a plain counting closure that wraps the cache, not against
+    /// `EmbeddingCache` internals directly.
     pub embed_calls: u64,
     /// Count of embedding vector params that had no co-located source text available to recompute
     /// from (issue #526, FR-002/FR-005) — renamed from the pre-#526 `embeddings_recompute_fallback`
@@ -240,16 +244,24 @@ pub type ProgressFn = Box<dyn Fn(&ReplayProgress) -> bool + Send>;
 pub type CancelFn = Box<dyn Fn() -> bool + Send>;
 /// Callback that receives a `[WAL PROGRESS]` log line; replaces `eprintln!` in tests.
 pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
-/// Synchronous embedding callback invoked once per WAL row whose Cypher template references a
-/// recognized embedding vector placeholder (issue #526, FR-001/FR-002). `WalReplayer` itself has
-/// no tokio dependency and several call sites run with no ambient runtime at all (its own unit
-/// tests, `real_corpus_replay_perf.rs`) — so recompute is expressed as a plain sync closure, and
-/// each caller bridges its own `Arc<dyn Embedder>` into this shape however fits its own runtime
-/// context (`Handle::current().block_on` from inside `spawn_blocking`, or a small dedicated
-/// single-threaded runtime for a bare-sync caller). A caller wanting a cache (FR-003 of issue
-/// #440) wraps `EmbeddingCache::get_or_compute` inside this closure — `replay.rs` never
-/// constructs or touches a cache itself.
-pub type RecomputeEmbedFn = Box<dyn Fn(&str) -> Result<Vec<f32>, Error> + Send>;
+/// Synchronous, batch-shaped embedding callback (issue #486; single-text prior to that, issue
+/// #526/#440) invoked once per embedding-batch window — a bounded buffer of WAL rows' co-located
+/// source texts, distinct from the row-count window itself — rather than once per WAL row. Mirrors
+/// `Embedder::embed_batch`'s own all-or-nothing shape: on success, returns exactly one vector per
+/// input text in the same order; a failure (whether the whole call errors, or the returned
+/// `Vec`'s length doesn't match the request) is treated as "no value for any text in this call"
+/// and every affected row falls through to the same per-row zero-fill-or-skip fallback a single
+/// failed text would have hit before this issue (FR-004; see `resolve_embed_window`).
+/// `WalReplayer` itself has no tokio dependency and several call sites run with no ambient
+/// runtime at all (its own unit tests, `real_corpus_replay_perf.rs`) — so recompute is expressed
+/// as a plain sync closure, and each caller bridges its own `Arc<dyn Embedder>` into this shape
+/// however fits its own runtime context (`Handle::current().block_on` from inside
+/// `spawn_blocking`, or a small dedicated single-threaded runtime for a bare-sync caller). A
+/// caller wanting a cache (FR-003 of issue #440, FR-006 of issue #486) wraps
+/// `EmbeddingCache::get_or_compute_batch` inside this closure — `replay.rs` never constructs or
+/// touches a cache itself, and never deduplicates a window's texts on its own; that's the
+/// closure's job.
+pub type RecomputeEmbedFn = Box<dyn Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error> + Send>;
 
 /// `(embedding vector param, co-located source-text param)` pairs recognized during replay
 /// recompute (issue #526, FR-001/FR-002) — the crate-wide single source of truth for which
@@ -291,6 +303,16 @@ pub struct ReplayOptions {
     /// Valid range: 1–256. When `None`, reads `LCG_REPLAY_BATCH_SIZE` env var, defaulting to 64.
     /// Set to `Some(1)` to disable batching and reproduce the pre-batching per-row behavior.
     pub batch_size: Option<usize>,
+    /// Maximum number of WAL rows buffered before their embedding recompute is resolved via one
+    /// `recompute_embed_fn` call (issue #486). Valid range: 1–256. When `None`, reads
+    /// `LCG_REPLAY_EMBED_WINDOW_SIZE` env var, defaulting to 64. Independent of `batch_size`
+    /// (FR-009) — this bounds how many rows' embedding recompute is buffered into one
+    /// `Embedder::embed_batch`-shaped call, not how many same-template rows are grouped into one
+    /// Cypher `UNWIND` execution transaction; the two windows are not required to share size or
+    /// boundaries. Also the knob FR-008 relies on to bound cancellation latency: a pending window
+    /// is dropped, unresolved, on cancellation (see `replay_opts`), so a larger window means more
+    /// buffered-but-unreplayed rows on a cancelled run, not a longer wait.
+    pub embed_window_size: Option<usize>,
     /// Throttle interval in seconds for `[WAL PROGRESS]` log lines. When `None`, reads
     /// `LCG_REPLAY_LOG_INTERVAL_SECS` env var, defaulting to 30s. Production passes `None`;
     /// tests may pass `Some(0)` to force every progress event to emit a log line.
@@ -299,16 +321,17 @@ pub struct ReplayOptions {
     /// lines are written to stderr via `eprintln!`. Production passes `None`; tests inject a
     /// closure capturing to `Arc<Mutex<Vec<String>>>` to verify throttle behaviour.
     pub progress_log_fn: Option<ProgressLogFn>,
-    /// Mandatory recompute-on-replay callback (issue #526, FR-001/FR-002) — replay never binds a
-    /// vector value found in a WAL record. Every row whose Cypher template references a
-    /// recognized embedding vector placeholder (`name_embedding`/`fact_embedding`/
-    /// `content_embedding`/`summary_embedding`, see [`EMBEDDING_TEXT_PAIRS`]) always has its
-    /// vector recomputed by this callback from co-located source text. There is no "disabled"
-    /// mode and no `Option` wrapper: once the writer stops emitting vector params
-    /// unconditionally, a caller with no embedder has no safe value to bind for a `CREATE`
-    /// template's vector placeholder at all, so every caller — production and test alike — must
-    /// supply one. See [`ReplayOptions::new`] and `zero_vector_embed_fn` for callers that don't
-    /// care about embedding fidelity.
+    /// Mandatory recompute-on-replay callback (issue #526, FR-001/FR-002; batched since issue
+    /// #486, FR-001) — replay never binds a vector value found in a WAL record. Every row whose
+    /// Cypher template references a recognized embedding vector placeholder
+    /// (`name_embedding`/`fact_embedding`/`content_embedding`/`summary_embedding`, see
+    /// [`EMBEDDING_TEXT_PAIRS`]) always has its vector recomputed by this callback from
+    /// co-located source text, resolved a whole `embed_window_size`-bounded window at a time
+    /// rather than one row at a time. There is no "disabled" mode and no `Option` wrapper: once
+    /// the writer stops emitting vector params unconditionally, a caller with no embedder has no
+    /// safe value to bind for a `CREATE` template's vector placeholder at all, so every caller —
+    /// production and test alike — must supply one. See [`ReplayOptions::new`] and
+    /// `zero_vector_embed_fn` for callers that don't care about embedding fidelity.
     pub recompute_embed_fn: RecomputeEmbedFn,
     /// The embedder's fixed output dimension (issue #526). Used to size a same-dimension
     /// zero-vector fallback when recompute has no source text (or fails) for a record that isn't
@@ -322,8 +345,8 @@ pub struct ReplayOptions {
 impl ReplayOptions {
     /// Builds `ReplayOptions` with `recompute_embed_fn`/`recompute_embed_dim` set and every other
     /// field at its convenience default (unbounded `from_seq`/`to_seq`, not a dry run, no
-    /// progress/cancel callbacks, batch size/failure cap/log interval read from their env vars,
-    /// no progress log sink).
+    /// progress/cancel callbacks, batch size/embed window size/failure cap/log interval read from
+    /// their env vars, no progress log sink).
     pub fn new(recompute_embed_fn: RecomputeEmbedFn, recompute_embed_dim: usize) -> Self {
         Self {
             from_seq: 0,
@@ -333,6 +356,7 @@ impl ReplayOptions {
             cancel_fn: None,
             failure_sample_cap: None,
             batch_size: None,
+            embed_window_size: None,
             log_interval_override: None,
             progress_log_fn: None,
             recompute_embed_fn,
@@ -341,7 +365,7 @@ impl ReplayOptions {
     }
 }
 
-/// A trivial [`RecomputeEmbedFn`] that returns a fixed-size zero vector for any input text,
+/// A trivial [`RecomputeEmbedFn`] that returns a fixed-size zero vector for every input text,
 /// ignoring the text entirely. `ReplayOptions::recompute_embed_fn` is mandatory (issue #526), so
 /// every caller needs *some* correctly-sized function to supply — this one is for a caller that
 /// just needs a schema-valid vector bound and doesn't itself care about embedding fidelity (most
@@ -349,7 +373,7 @@ impl ReplayOptions {
 /// does care about fidelity should bridge a real `Embedder` (e.g. `HashEmbedder`, `NameMapEmbedder`)
 /// into a sync closure instead.
 pub fn zero_vector_embed_fn(dim: usize) -> RecomputeEmbedFn {
-    Box::new(move |_text: &str| Ok(vec![0.0f32; dim]))
+    Box::new(move |texts: &[&str]| Ok(vec![vec![0.0f32; dim]; texts.len()]))
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -419,6 +443,10 @@ impl WalReplayer {
 
         // Validate batch size before touching any WAL files (FR-005).
         let batch_size = resolve_batch_size(&opts)?;
+        // Validate the embedding-batch window size too, before touching any WAL files (issue
+        // #486, mirroring the batch-size validation above) — an independent knob from
+        // `batch_size` (FR-009).
+        let embed_window_size = resolve_embed_window_size(&opts)?;
 
         let sample_cap = opts.failure_sample_cap.unwrap_or_else(|| {
             std::env::var("LCG_REPLAY_FAILURE_SAMPLES")
@@ -515,6 +543,13 @@ impl WalReplayer {
         // Single-entry prepared-statement cache carried across `flush_batch` calls for this
         // whole run — see `PreparedCache`'s doc comment for the LRU-1 scope decision (#238).
         let mut prepared_cache: Option<PreparedCache> = None;
+        // Buffer of not-yet-recomputed rows awaiting the next embedding-batch window flush
+        // (issue #486) — resolved via `resolve_embed_window` once it reaches `embed_window_size`,
+        // at EOF, or (implicitly, by being dropped unresolved) on cancellation. Deliberately not
+        // flushed at WAL-file boundaries, unlike the Cypher execution batch below — the two
+        // windows are independent (FR-009) and maximizing this one's size across file boundaries
+        // is what bounds embedder round-trips (SC-001).
+        let mut pending_window: Vec<PendingRow> = Vec::new();
         // Running max `seq` across the whole call, for FR-004's monotonicity check.
         let mut max_seq_seen: Option<u64> = None;
         // Caps individual `[WAL WARN] seq regression` lines — a WAL dir with two interleaved
@@ -696,81 +731,58 @@ impl WalReplayer {
                     let (norm_cypher, params) = expand_bulk_property_set(&norm_cypher, wal_params);
 
                     // Extract the params map for batch accumulation.
-                    let mut params_map = match params {
+                    let params_map = match params {
                         serde_json::Value::Object(m) => m,
                         _ => serde_json::Map::new(),
                     };
 
-                    // Recompute embedding vectors from co-located source text (issue #526,
-                    // FR-001/FR-002), before this row is ever pushed into a batch — never inside
-                    // flush_batch's open transaction, so a slow/unreachable embedder cannot hold
-                    // an lbug transaction open across up to `batch_size` network round-trips.
-                    // Mandatory: there is no "recompute disabled" mode any more (issue #526) —
-                    // every row whose template references a recognized vector placeholder always
-                    // goes through this, whether the WAL is fresh (no stored value at all) or
-                    // legacy (a stored value present but always ignored, FR-002/FR-003).
-                    let outcome = recompute_row_embeddings(
-                        &norm_cypher,
-                        &mut params_map,
-                        opts.recompute_embed_fn.as_ref(),
-                        opts.recompute_embed_dim,
-                        &mut stats,
-                    );
+                    // Buffer this row for batched embedding recompute (issue #486) rather than
+                    // recomputing it inline — resolved a whole `embed_window_size`-bounded window
+                    // at a time via `resolve_embed_window`, always strictly before any row in
+                    // that window is pushed into the Cypher execution batch (FR-010): a window is
+                    // only ever resolved (and its rows only ever reach `flush_batch`'s open
+                    // transaction) at the flush points below, never while `pending_window` is
+                    // simply being appended to.
+                    pending_window.push(PendingRow {
+                        cypher: norm_cypher,
+                        params_map,
+                        match_prefixed: is_match_prefixed,
+                        seq: wal_line.seq,
+                    });
 
-                    if outcome == RowEmbeddingOutcome::Skip {
-                        // A vector-only `SET` with no source text to recompute from (issue #526,
-                        // FR-005) — executing it with a placeholder would overwrite whatever real
-                        // vector the entity's own CREATE record already computed for that column.
-                        // Skip the row entirely: never pushed into the batch, never executed.
-                        stats.embeddings_skip_rows += 1;
-                    } else {
-                        // Flush the current batch when the template changes (FR-001).
-                        if !batch.is_empty() && batch.template != norm_cypher {
-                            let outcome = flush_batch(
-                                &mut batch,
-                                conn,
-                                &mut stats,
-                                sample_cap,
-                                &mut prepared_cache,
-                                opts.cancel_fn.as_ref(),
-                            )?;
-                            if outcome.cancelled {
-                                break 'files;
-                            }
-                        }
-
-                        // Push this mutation into the batch.
-                        if batch.is_empty() {
-                            batch.template = norm_cypher;
-                        }
-                        batch.rows.push(params_map);
-                        batch.match_prefixed.push(is_match_prefixed);
-                        batch.seqs.push(wal_line.seq);
-
-                        // Flush when the batch reaches the size limit (FR-002, FR-003). Same
-                        // template as the just-flushed batch reuses the cached prepared statement
-                        // (issue #238) instead of re-preparing.
-                        if batch.len() >= batch_size {
-                            let outcome = flush_batch(
-                                &mut batch,
-                                conn,
-                                &mut stats,
-                                sample_cap,
-                                &mut prepared_cache,
-                                opts.cancel_fn.as_ref(),
-                            )?;
-                            if outcome.cancelled {
-                                break 'files;
-                            }
+                    if pending_window.len() >= embed_window_size {
+                        let resolved = resolve_embed_window(
+                            std::mem::take(&mut pending_window),
+                            opts.recompute_embed_fn.as_ref(),
+                            opts.recompute_embed_dim,
+                            &mut stats,
+                        );
+                        let cancelled = push_resolved_rows(
+                            resolved,
+                            &mut batch,
+                            conn,
+                            &mut stats,
+                            sample_cap,
+                            &mut prepared_cache,
+                            batch_size,
+                            opts.cancel_fn.as_ref(),
+                        )?;
+                        if cancelled {
+                            break 'files;
                         }
                     }
                 }
 
                 mutations_in_file += 1;
 
-                // Cancel check: abort immediately if client disconnected
+                // Cancel check: abort immediately if client disconnected. Any row still sitting
+                // in `pending_window` has not been resolved (no embed call issued, no counter
+                // touched — see `resolve_embed_window`'s doc comment) and is dropped here rather
+                // than flushed, so cancellation latency is never made worse by waiting for an
+                // arbitrarily large in-flight embedding window to finish (issue #486, FR-008).
                 if let Some(ref cancel) = opts.cancel_fn {
                     if cancel() {
+                        pending_window.clear();
                         break 'files;
                     }
                 }
@@ -831,6 +843,28 @@ impl WalReplayer {
                     break 'files;
                 }
             }
+        }
+
+        // Flush any remaining embed window at EOF (issue #486) — the last, possibly-partial
+        // window must still be resolved and applied, not silently dropped. A no-op if
+        // cancellation already cleared `pending_window` above.
+        if !opts.dry_run && !pending_window.is_empty() {
+            let resolved = resolve_embed_window(
+                std::mem::take(&mut pending_window),
+                opts.recompute_embed_fn.as_ref(),
+                opts.recompute_embed_dim,
+                &mut stats,
+            );
+            push_resolved_rows(
+                resolved,
+                &mut batch,
+                conn,
+                &mut stats,
+                sample_cap,
+                &mut prepared_cache,
+                batch_size,
+                opts.cancel_fn.as_ref(),
+            )?;
         }
 
         // Flush any remaining batch after cancel/abort or EOF (FR-007, FR-011).
@@ -926,8 +960,30 @@ fn compute_fidelity_warning(stats: &ReplayStats, threshold: f64) -> Option<Strin
 /// `SEQ_REGRESSION_LOG_CAP`'s existing precedent for the same reason.
 const EMBED_FAILURE_LOG_CAP: u64 = 10;
 
-/// Result of [`recompute_row_embeddings`] for one WAL row.
-#[derive(Debug, PartialEq, Eq)]
+/// A normalized WAL row buffered for batched embedding recompute (issue #486), not yet resolved
+/// and not yet eligible to enter the Cypher execution batch. Holds exactly what
+/// `resolve_embed_window` and (once resolved) `push_resolved_rows` need — the same fields
+/// `ReplayBatch` accumulates per row, just not committed to a template-grouped batch slot yet.
+struct PendingRow {
+    cypher: String,
+    params_map: serde_json::Map<String, serde_json::Value>,
+    match_prefixed: bool,
+    seq: u64,
+}
+
+/// A [`PendingRow`] whose embedding recompute has been fully resolved by `resolve_embed_window` —
+/// every recognized vector param either bound to a freshly recomputed value or zero-filled.
+/// Ready to enter the Cypher execution batch via `push_resolved_rows`. A row that was skipped
+/// entirely (see [`RowEmbeddingOutcome::Skip`]) never becomes a `ResolvedRow`.
+struct ResolvedRow {
+    cypher: String,
+    params_map: serde_json::Map<String, serde_json::Value>,
+    match_prefixed: bool,
+    seq: u64,
+}
+
+/// Per-row outcome tracked internally while [`resolve_embed_window`] resolves a whole window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowEmbeddingOutcome {
     /// Execute the row normally (the common case — either no vector param applied, or every
     /// applicable one was recomputed or zero-filled).
@@ -939,100 +995,267 @@ enum RowEmbeddingOutcome {
     Skip,
 }
 
-/// Recomputes each recognized embedding vector param referenced by `cypher` from its co-located
-/// source-text param (issue #526, FR-001/FR-002/SC-005), mutating `params_map` in place and
-/// updating `stats`'s recompute counters. Replay never binds a vector value found in a WAL record
-/// — every recognized vector param is always either freshly recomputed or explicitly zero-filled,
-/// regardless of whether `params_map` happens to carry a stored value at all (FR-002/FR-003).
+/// Resolves every recognized embedding vector param across an entire window of buffered rows
+/// (issue #486, FR-001), replacing the pre-#486 per-row `recompute_row_embeddings` with a
+/// three-phase pass that issues at most one `embed_fn` call for the whole window instead of one
+/// per row. Behaviorally identical to invoking the pre-#486 per-row logic once per row in the
+/// window — same counters, same fallback semantics (FR-002/FR-003) — only the number of
+/// `embed_fn` round-trips changes.
 ///
-/// For each `(vec_key, text_key)` pair in [`EMBEDDING_TEXT_PAIRS`]: relevance is decided by
-/// whether **`cypher`** references `$vec_key` — not by whether `params_map` carries the key —
-/// since the writer no longer emits it at all for a freshly-written WAL (issue #526). A row whose
-/// template doesn't reference `vec_key` is left alone (most WAL rows reference none of the four).
-/// For a row that does:
-/// - `text_key` present in `params_map` as a non-empty string → `embed_fn` is invoked once;
-///   success replaces `vec_key`'s value and bumps `embeddings_recomputed`. Failure (embedder
-///   error, a recomputed vector whose length doesn't match `embed_dim`, or a computed vector
-///   containing NaN/infinity that can't round-trip through JSON) falls through to the same
-///   zero-fill-or-skip handling as missing text, below, and bumps `embeddings_recompute_failed`
-///   (never fatal — recompute is explicitly self-healing).
-/// - `text_key` missing/empty, or recompute failed → [`is_vector_only_set`] decides what happens:
-///   a vector-only `SET` (no other real content in the same mutation) produces
-///   [`RowEmbeddingOutcome::Skip`] so the caller drops the row entirely, preserving whatever
-///   value already sits in that column; any other record (most commonly a `CREATE`, which must
-///   still be created — dropping it would fail SC-002's count parity) gets a same-dimension zero
-///   vector bound instead. Counted in `embeddings_recompute_skipped_no_text`.
-fn recompute_row_embeddings(
-    cypher: &str,
-    params_map: &mut serde_json::Map<String, serde_json::Value>,
-    embed_fn: &(dyn Fn(&str) -> Result<Vec<f32>, Error> + Send),
+/// - **Phase 1** (no I/O): for each row, for each `(vec_key, text_key)` pair in
+///   [`EMBEDDING_TEXT_PAIRS`] referenced by that row's `cypher` (relevance is decided by whether
+///   **`cypher`** references `$vec_key`, not by whether `params_map` carries the key — same
+///   template-driven recognition as before, issue #526), a present non-empty `text_key` queues a
+///   batched request (bumping `embed_calls`); a missing/empty one resolves immediately (bumping
+///   `embeddings_recompute_skipped_no_text`, needing no embedder round-trip at all).
+/// - **Phase 2**: every queued request across the whole window is submitted in one `embed_fn`
+///   call. A whole-call failure (`Err`, or a returned `Vec` whose length doesn't match the
+///   request) degrades **every** request in the window through the identical per-request
+///   fallback a single failed text would have hit pre-#486 (FR-004) — there is no separate
+///   "batch failure" code path. A successful call validates each returned vector exactly as
+///   before (dimension check, then NaN/infinity check), bumping `embeddings_recomputed` or
+///   `embeddings_recompute_failed` per request.
+/// - **Phase 3**: each row's resolved keys decide, independently per row (FR-003), whether it
+///   proceeds (bound to freshly recomputed and/or zero-filled values) or is dropped —
+///   [`is_vector_only_set`] governs the same zero-fill-vs-skip choice as before. Skipped rows
+///   bump `embeddings_skip_rows` and are absent from the returned `Vec`.
+fn resolve_embed_window(
+    window: Vec<PendingRow>,
+    embed_fn: &(dyn Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error> + Send),
     embed_dim: usize,
     stats: &mut ReplayStats,
-) -> RowEmbeddingOutcome {
-    let mut outcome = RowEmbeddingOutcome::Proceed;
+) -> Vec<ResolvedRow> {
+    let mut rows = window;
+    let mut row_outcome = vec![RowEmbeddingOutcome::Proceed; rows.len()];
 
-    for (vec_key, text_key) in EMBEDDING_TEXT_PAIRS {
-        if !cypher.contains(&format!("${vec_key}")) {
-            continue;
-        }
+    // Phase 1 (read-only over `rows`): resolve no-text keys immediately; queue the rest.
+    let mut immediate: Vec<(usize, &'static str)> = Vec::new();
+    let mut request_texts: Vec<String> = Vec::new();
+    let mut request_targets: Vec<(usize, &'static str)> = Vec::new();
 
-        let text = params_map.get(*text_key).and_then(|v| v.as_str());
-        let recomputed = match text {
-            Some(text) if !text.is_empty() => {
-                stats.embed_calls += 1;
-                match embed_fn(text).and_then(|vector| {
-                    if vector.len() != embed_dim {
-                        return Err(Error::Ipc(format!(
-                            "recomputed embedding has {} components but the configured \
-                             embedding dimension is {embed_dim}",
-                            vector.len()
-                        )));
-                    }
-                    vector_to_json(&vector).ok_or_else(|| {
-                        Error::Ipc(
-                            "recomputed embedding vector contains a non-finite value".to_string(),
-                        )
-                    })
-                }) {
-                    Ok(json_vector) => {
-                        stats.embeddings_recomputed += 1;
-                        Some(json_vector)
-                    }
-                    Err(e) => {
-                        if stats.embeddings_recompute_failed < EMBED_FAILURE_LOG_CAP {
-                            eprintln!("[WAL WARN] embedding recompute failed for {vec_key}: {e}");
-                        } else if stats.embeddings_recompute_failed == EMBED_FAILURE_LOG_CAP {
-                            eprintln!(
-                                "[WAL WARN] embedding recompute: further per-row failure \
-                                 details suppressed after {EMBED_FAILURE_LOG_CAP} — see the \
-                                 final embeddings_recompute_failed count for the true total"
-                            );
-                        }
-                        stats.embeddings_recompute_failed += 1;
-                        None
-                    }
+    for (row_idx, row) in rows.iter().enumerate() {
+        for (vec_key, text_key) in EMBEDDING_TEXT_PAIRS {
+            if !row.cypher.contains(&format!("${vec_key}")) {
+                continue;
+            }
+            match row.params_map.get(*text_key).and_then(|v| v.as_str()) {
+                Some(text) if !text.is_empty() => {
+                    stats.embed_calls += 1;
+                    request_texts.push(text.to_string());
+                    request_targets.push((row_idx, vec_key));
                 }
-            }
-            _ => {
-                stats.embeddings_recompute_skipped_no_text += 1;
-                None
-            }
-        };
-
-        match recomputed {
-            Some(json_vector) => {
-                params_map.insert((*vec_key).to_string(), json_vector);
-            }
-            None if is_vector_only_set(cypher, vec_key) => {
-                outcome = RowEmbeddingOutcome::Skip;
-            }
-            None => {
-                params_map.insert((*vec_key).to_string(), zero_vector_json(embed_dim));
+                _ => {
+                    stats.embeddings_recompute_skipped_no_text += 1;
+                    immediate.push((row_idx, vec_key));
+                }
             }
         }
     }
 
-    outcome
+    // Phase 2a: resolve the immediate (no-text) requests — no batch call needed for these.
+    for (row_idx, vec_key) in immediate {
+        apply_key_resolution(
+            &mut rows[row_idx],
+            &mut row_outcome[row_idx],
+            vec_key,
+            None,
+            embed_dim,
+        );
+    }
+
+    // Phase 2b: one batched embed call for the window's queued requests.
+    if !request_texts.is_empty() {
+        let texts_ref: Vec<&str> = request_texts.iter().map(String::as_str).collect();
+        match embed_fn(&texts_ref) {
+            Ok(vectors) if vectors.len() == texts_ref.len() => {
+                for ((row_idx, vec_key), vector) in request_targets.into_iter().zip(vectors) {
+                    match validate_recomputed_vector(vector, embed_dim) {
+                        Ok(json_vector) => {
+                            stats.embeddings_recomputed += 1;
+                            apply_key_resolution(
+                                &mut rows[row_idx],
+                                &mut row_outcome[row_idx],
+                                vec_key,
+                                Some(json_vector),
+                                embed_dim,
+                            );
+                        }
+                        Err(e) => {
+                            log_embed_failure(
+                                stats.embeddings_recompute_failed,
+                                vec_key,
+                                &e.to_string(),
+                            );
+                            stats.embeddings_recompute_failed += 1;
+                            apply_key_resolution(
+                                &mut rows[row_idx],
+                                &mut row_outcome[row_idx],
+                                vec_key,
+                                None,
+                                embed_dim,
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(vectors) => {
+                // A whole-call length mismatch is treated exactly like a whole-call `Err` below —
+                // no request in this window got a usable vector.
+                let err_str = format!(
+                    "embed batch returned {} vectors for {} requested texts",
+                    vectors.len(),
+                    texts_ref.len()
+                );
+                for (row_idx, vec_key) in request_targets {
+                    log_embed_failure(stats.embeddings_recompute_failed, vec_key, &err_str);
+                    stats.embeddings_recompute_failed += 1;
+                    apply_key_resolution(
+                        &mut rows[row_idx],
+                        &mut row_outcome[row_idx],
+                        vec_key,
+                        None,
+                        embed_dim,
+                    );
+                }
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                for (row_idx, vec_key) in request_targets {
+                    log_embed_failure(stats.embeddings_recompute_failed, vec_key, &err_str);
+                    stats.embeddings_recompute_failed += 1;
+                    apply_key_resolution(
+                        &mut rows[row_idx],
+                        &mut row_outcome[row_idx],
+                        vec_key,
+                        None,
+                        embed_dim,
+                    );
+                }
+            }
+        }
+    }
+
+    // Phase 3: assemble output, dropping skipped rows (FR-003/FR-005).
+    let mut resolved = Vec::with_capacity(rows.len());
+    for (row, outcome) in rows.into_iter().zip(row_outcome) {
+        match outcome {
+            RowEmbeddingOutcome::Skip => stats.embeddings_skip_rows += 1,
+            RowEmbeddingOutcome::Proceed => resolved.push(ResolvedRow {
+                cypher: row.cypher,
+                params_map: row.params_map,
+                match_prefixed: row.match_prefixed,
+                seq: row.seq,
+            }),
+        }
+    }
+    resolved
+}
+
+/// Applies one key's recompute resolution to `row`/`outcome` — the same per-key decision
+/// `recompute_row_embeddings` made inline pre-#486: bind the recomputed value, or (via
+/// [`is_vector_only_set`]) either skip the whole row or zero-fill this key.
+fn apply_key_resolution(
+    row: &mut PendingRow,
+    outcome: &mut RowEmbeddingOutcome,
+    vec_key: &str,
+    recomputed: Option<serde_json::Value>,
+    embed_dim: usize,
+) {
+    match recomputed {
+        Some(json_vector) => {
+            row.params_map.insert(vec_key.to_string(), json_vector);
+        }
+        None if is_vector_only_set(&row.cypher, vec_key) => {
+            *outcome = RowEmbeddingOutcome::Skip;
+        }
+        None => {
+            row.params_map
+                .insert(vec_key.to_string(), zero_vector_json(embed_dim));
+        }
+    }
+}
+
+/// Validates one recomputed vector exactly as `recompute_row_embeddings` did inline pre-#486:
+/// rejects a wrong dimension, then rejects a non-finite component. Applied per-item regardless of
+/// whether the vector came from a single-text call or a batched one (constraint noted in this
+/// issue's Research: per-item validation is orthogonal to batching).
+fn validate_recomputed_vector(
+    vector: Vec<f32>,
+    embed_dim: usize,
+) -> Result<serde_json::Value, Error> {
+    if vector.len() != embed_dim {
+        return Err(Error::Ipc(format!(
+            "recomputed embedding has {} components but the configured \
+             embedding dimension is {embed_dim}",
+            vector.len()
+        )));
+    }
+    vector_to_json(&vector).ok_or_else(|| {
+        Error::Ipc("recomputed embedding vector contains a non-finite value".to_string())
+    })
+}
+
+/// Logs (subject to `EMBED_FAILURE_LOG_CAP`) one request's embedding recompute failure.
+/// `failed_so_far` must be `stats.embeddings_recompute_failed` read *before* the caller increments
+/// it for this failure — the cap check is against the count of failures logged so far, matching
+/// `recompute_row_embeddings`'s pre-#486 ordering exactly.
+fn log_embed_failure(failed_so_far: u64, vec_key: &str, err_str: &str) {
+    if failed_so_far < EMBED_FAILURE_LOG_CAP {
+        eprintln!("[WAL WARN] embedding recompute failed for {vec_key}: {err_str}");
+    } else if failed_so_far == EMBED_FAILURE_LOG_CAP {
+        eprintln!(
+            "[WAL WARN] embedding recompute: further per-row failure \
+             details suppressed after {EMBED_FAILURE_LOG_CAP} — see the \
+             final embeddings_recompute_failed count for the true total"
+        );
+    }
+}
+
+/// Pushes a window's resolved rows into the Cypher execution batch, flushing on template change
+/// or size limit — the exact per-row push logic `replay_opts`'s main loop applied inline pre-#486,
+/// extracted so it can run over a whole window's worth of rows at once (issue #486). Returns
+/// `true` if a flush reported cancellation, in which case the caller must stop reading further
+/// WAL lines; not every `resolved` row is guaranteed to have been pushed in that case (`flush_batch`
+/// already reflects the outcome in `stats`, matching this function's pre-#486 inline equivalent).
+#[allow(clippy::too_many_arguments)]
+fn push_resolved_rows(
+    resolved: Vec<ResolvedRow>,
+    batch: &mut ReplayBatch,
+    conn: &Conn<'_>,
+    stats: &mut ReplayStats,
+    sample_cap: usize,
+    prepared_cache: &mut Option<PreparedCache>,
+    batch_size: usize,
+    cancel_fn: Option<&CancelFn>,
+) -> Result<bool, Error> {
+    for row in resolved {
+        // Flush the current batch when the template changes (FR-001).
+        if !batch.is_empty() && batch.template != row.cypher {
+            let outcome = flush_batch(batch, conn, stats, sample_cap, prepared_cache, cancel_fn)?;
+            if outcome.cancelled {
+                return Ok(true);
+            }
+        }
+
+        // Push this mutation into the batch.
+        if batch.is_empty() {
+            batch.template = row.cypher;
+        }
+        batch.rows.push(row.params_map);
+        batch.match_prefixed.push(row.match_prefixed);
+        batch.seqs.push(row.seq);
+
+        // Flush when the batch reaches the size limit (FR-002, FR-003). Same template as the
+        // just-flushed batch reuses the cached prepared statement (issue #238) instead of
+        // re-preparing.
+        if batch.len() >= batch_size {
+            let outcome = flush_batch(batch, conn, stats, sample_cap, prepared_cache, cancel_fn)?;
+            if outcome.cancelled {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Converts a computed embedding vector to a JSON array of numbers, or `None` if any component
@@ -1147,6 +1370,38 @@ fn resolve_batch_size(opts: &ReplayOptions) -> Result<usize, Error> {
     if size == 0 || size > 256 {
         return Err(Error::Config(format!(
             "batch size {size} is out of range; expected 1–256"
+        )));
+    }
+    Ok(size)
+}
+
+/// Resolves the embedding-batch window size from `opts.embed_window_size` or the
+/// `LCG_REPLAY_EMBED_WINDOW_SIZE` env var (issue #486).
+///
+/// Valid range is 1–256, mirroring `resolve_batch_size`'s validation shape exactly, but this is
+/// an independent knob (FR-009): it bounds how many WAL rows are buffered before their embedding
+/// recompute is resolved via one `ReplayOptions::recompute_embed_fn` call, not how many
+/// same-template rows are grouped into one Cypher `UNWIND` execution transaction.
+fn resolve_embed_window_size(opts: &ReplayOptions) -> Result<usize, Error> {
+    let size = if let Some(s) = opts.embed_window_size {
+        s
+    } else {
+        std::env::var("LCG_REPLAY_EMBED_WINDOW_SIZE")
+            .ok()
+            .map(|v| {
+                v.parse::<usize>().map_err(|_| {
+                    Error::Config(format!(
+                        "LCG_REPLAY_EMBED_WINDOW_SIZE={v:?} is not a valid integer; \
+                         expected 1–256"
+                    ))
+                })
+            })
+            .transpose()?
+            .unwrap_or(64)
+    };
+    if size == 0 || size > 256 {
+        return Err(Error::Config(format!(
+            "embedding window size {size} is out of range; expected 1–256"
         )));
     }
     Ok(size)
@@ -1574,6 +1829,44 @@ mod replay_tests {
         assert_eq!(resolve_batch_size(&opts).unwrap(), 256);
     }
 
+    // ── resolve_embed_window_size (issue #486) — mirrors resolve_batch_size's tests above ────
+
+    #[test]
+    fn test_resolve_embed_window_size_defaults_to_64() {
+        let opts = ReplayOptions {
+            embed_window_size: Some(64),
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
+        };
+        assert_eq!(resolve_embed_window_size(&opts).unwrap(), 64);
+    }
+
+    #[test]
+    fn test_resolve_embed_window_size_rejects_zero() {
+        let opts = ReplayOptions {
+            embed_window_size: Some(0),
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
+        };
+        assert!(resolve_embed_window_size(&opts).is_err());
+    }
+
+    #[test]
+    fn test_resolve_embed_window_size_rejects_over_256() {
+        let opts = ReplayOptions {
+            embed_window_size: Some(257),
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
+        };
+        assert!(resolve_embed_window_size(&opts).is_err());
+    }
+
+    #[test]
+    fn test_resolve_embed_window_size_accepts_256() {
+        let opts = ReplayOptions {
+            embed_window_size: Some(256),
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
+        };
+        assert_eq!(resolve_embed_window_size(&opts).unwrap(), 256);
+    }
+
     fn zero_stats() -> ReplayStats {
         ReplayStats {
             lines_replayed: 0,
@@ -1619,29 +1912,46 @@ mod replay_tests {
         );
     }
 
-    // --- recompute_row_embeddings (issue #526, FR-001/FR-002/FR-005/SC-005) ---
+    // --- resolve_embed_window (issue #486; formerly recompute_row_embeddings, issue #526) ---
 
     const ENTITY_CREATE_CYPHER: &str = "CREATE (:Entity {uuid: $uuid, name: $name, \
          name_embedding: $name_embedding, summary: $summary, \
          summary_embedding: $summary_embedding})";
 
+    /// Builds a single-row window from `cypher`/`params` — the common case for a test porting
+    /// pre-#486's `recompute_row_embeddings` (which took one row at a time).
+    fn one_row_window(
+        cypher: &str,
+        params_map: serde_json::Map<String, serde_json::Value>,
+    ) -> Vec<PendingRow> {
+        vec![PendingRow {
+            cypher: cypher.to_string(),
+            params_map,
+            match_prefixed: false,
+            seq: 0,
+        }]
+    }
+
     #[test]
-    fn recompute_row_embeddings_uses_embed_fn_when_text_present() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32, 2.0]));
+    fn resolve_embed_window_uses_embed_fn_when_text_present() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 2.0]).collect())
+        });
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
 
-        let outcome = recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
-        assert_eq!(params["name_embedding"], serde_json::json!([5.0, 2.0]));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([5.0, 2.0])
+        );
         assert_eq!(stats.embeddings_recomputed, 1);
         assert_eq!(stats.embed_calls, 1);
         assert_eq!(stats.embeddings_recompute_skipped_no_text, 0);
@@ -1652,24 +1962,23 @@ mod replay_tests {
     /// is present and recompute succeeds, the stored value (here, a very different vector) is
     /// fully replaced, not merely ignored.
     #[test]
-    fn recompute_row_embeddings_never_binds_a_stored_vector_value() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![1.0, 1.0]));
+    fn resolve_embed_window_never_binds_a_stored_vector_value() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|texts: &[&str]| Ok(vec![vec![1.0, 1.0]; texts.len()]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
         // A legacy WAL might still carry a stored vector under this key — it must never survive.
         params.insert("name_embedding".to_string(), serde_json::json!([9.0, 9.0]));
 
-        recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
         assert_eq!(
-            params["name_embedding"],
+            resolved[0].params_map["name_embedding"],
             serde_json::json!([1.0, 1.0]),
             "the stored value must be fully replaced by the recomputed one (FR-002)"
         );
@@ -1680,27 +1989,28 @@ mod replay_tests {
     /// created for SC-002 count parity) gets a same-dimension zero vector instead of being
     /// skipped or left unbound.
     #[test]
-    fn recompute_row_embeddings_zero_fills_a_create_type_row_when_text_missing() {
+    fn resolve_embed_window_zero_fills_a_create_type_row_when_text_missing() {
         let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| panic!("embed_fn must not be called when text is absent"));
+            Box::new(|_texts: &[&str]| panic!("embed_fn must not be called when text is absent"));
         let mut stats = zero_stats();
-        let mut params = serde_json::Map::new();
+        let params = serde_json::Map::new();
         // No "name" param present at all.
 
-        let outcome = recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            3,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 3, &mut stats);
 
         assert_eq!(
-            outcome,
-            RowEmbeddingOutcome::Proceed,
+            resolved.len(),
+            1,
             "a CREATE-type row must never be skipped — dropping it would lose the whole entity"
         );
-        assert_eq!(params["name_embedding"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([0.0, 0.0, 0.0])
+        );
         assert_eq!(stats.embeddings_recompute_skipped_no_text, 1);
         assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
@@ -1711,53 +2021,47 @@ mod replay_tests {
     /// entirely — never executed — so it can't overwrite a real vector already computed by the
     /// entity's own CREATE record.
     #[test]
-    fn recompute_row_embeddings_skips_a_vector_only_set_when_text_missing() {
+    fn resolve_embed_window_skips_a_vector_only_set_when_text_missing() {
         let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| panic!("embed_fn must not be called when text is absent"));
+            Box::new(|_texts: &[&str]| panic!("embed_fn must not be called when text is absent"));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("uuid".to_string(), serde_json::json!("ep1"));
 
-        let outcome = recompute_row_embeddings(
+        let window = one_row_window(
             "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
-            &mut params,
-            embed_fn.as_ref(),
-            4,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 4, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Skip);
+        assert!(resolved.is_empty());
         assert_eq!(stats.embeddings_recompute_skipped_no_text, 1);
         assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
-        assert!(
-            !params.contains_key("content_embedding"),
-            "a skipped row's params are never touched — the caller drops the whole row"
-        );
+        assert_eq!(stats.embeddings_skip_rows, 1);
     }
 
     /// An embed-call failure during replay is treated exactly like missing text: a vector-only
     /// `SET` is skipped rather than binding a placeholder that would overwrite a real vector.
     #[test]
-    fn recompute_row_embeddings_skips_a_vector_only_set_on_embed_error() {
+    fn resolve_embed_window_skips_a_vector_only_set_on_embed_error() {
         let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| Err(Error::Ipc("embedder unreachable".to_string())));
+            Box::new(|_texts: &[&str]| Err(Error::Ipc("embedder unreachable".to_string())));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("content".to_string(), serde_json::json!("some content"));
 
-        let outcome = recompute_row_embeddings(
+        let window = one_row_window(
             "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Skip);
+        assert!(resolved.is_empty());
         assert_eq!(stats.embeddings_recompute_failed, 1);
         assert_eq!(stats.embed_calls, 1);
         assert_eq!(stats.embeddings_recomputed, 0);
+        assert_eq!(stats.embeddings_skip_rows, 1);
     }
 
     /// A recomputed vector whose length differs from the configured embedding dimension (e.g.
@@ -1766,22 +2070,21 @@ mod replay_tests {
     /// whole same-template batch, not just this row (see `flush_batch`). Treated the same as any
     /// other recompute failure: for this CREATE-type row, zero-filled rather than skipped.
     #[test]
-    fn recompute_row_embeddings_zero_fills_on_length_mismatch() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![1.0, 2.0, 3.0]));
+    fn resolve_embed_window_zero_fills_on_length_mismatch() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|texts: &[&str]| Ok(vec![vec![1.0, 2.0, 3.0]; texts.len()]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
 
-        recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
         assert_eq!(
-            params["name_embedding"],
+            resolved[0].params_map["name_embedding"],
             serde_json::json!([0.0, 0.0]),
             "a wrong-length recomputed vector must never be bound — zero-fill instead"
         );
@@ -1794,37 +2097,35 @@ mod replay_tests {
 
     #[test]
     fn embeddings_recompute_had_no_failures_true_when_all_rows_recomputed_cleanly() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32]));
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|texts: &[&str]| Ok(texts.iter().map(|t| vec![t.len() as f32]).collect()));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
 
-        recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            1,
-            &mut stats,
+            params,
         );
+        resolve_embed_window(window, embed_fn.as_ref(), 1, &mut stats);
 
         assert!(stats.embeddings_recompute_had_no_failures());
     }
 
     #[test]
     fn embeddings_recompute_had_no_failures_true_despite_a_skip() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![9.0]));
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|texts: &[&str]| Ok(vec![vec![9.0]; texts.len()]));
         let mut stats = zero_stats();
-        let mut params = serde_json::Map::new();
+        let params = serde_json::Map::new();
         // No co-located "content" text present → FR-002/FR-005 skip, not a failure. This is
         // normal, ongoing WAL shape (a SET-only mutation), not evidence the embedder failed —
         // must not suppress a call site's identity persistence on its own.
-        recompute_row_embeddings(
+        let window = one_row_window(
             "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
-            &mut params,
-            embed_fn.as_ref(),
-            1,
-            &mut stats,
+            params,
         );
+        resolve_embed_window(window, embed_fn.as_ref(), 1, &mut stats);
 
         assert!(stats.embeddings_recompute_had_no_failures());
     }
@@ -1832,39 +2133,32 @@ mod replay_tests {
     #[test]
     fn embeddings_recompute_had_no_failures_false_after_an_embed_failure() {
         let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| Err(Error::Ipc("embedder unreachable".to_string())));
+            Box::new(|_texts: &[&str]| Err(Error::Ipc("embedder unreachable".to_string())));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("content".to_string(), serde_json::json!("some content"));
 
-        recompute_row_embeddings(
+        let window = one_row_window(
             "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
         assert!(!stats.embeddings_recompute_had_no_failures());
     }
 
     #[test]
-    fn recompute_row_embeddings_ignores_rows_without_a_recognized_vector_placeholder() {
+    fn resolve_embed_window_ignores_rows_without_a_recognized_vector_placeholder() {
         let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| panic!("embed_fn must not be called for this row"));
+            Box::new(|_texts: &[&str]| panic!("embed_fn must not be called for this row"));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("uuid".to_string(), serde_json::json!("abc"));
 
-        let outcome = recompute_row_embeddings(
-            "MERGE (n:MENTIONS {ep: $ep})",
-            &mut params,
-            embed_fn.as_ref(),
-            4,
-            &mut stats,
-        );
+        let window = one_row_window("MERGE (n:MENTIONS {ep: $ep})", params);
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 4, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
+        assert_eq!(resolved.len(), 1);
         assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recompute_skipped_no_text, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
@@ -1875,34 +2169,38 @@ mod replay_tests {
     /// still recognized and recomputed — relevance is decided by the template, not by whether the
     /// stored param happens to be present.
     #[test]
-    fn recompute_row_embeddings_recognizes_a_stripped_wal_row_via_the_template() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32, 0.0]));
+    fn resolve_embed_window_recognizes_a_stripped_wal_row_via_the_template() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 0.0]).collect())
+        });
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Al"));
         // No "name_embedding" key at all — a freshly-written, post-#526 WAL row.
 
-        let outcome = recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
-        assert_eq!(params["name_embedding"], serde_json::json!([2.0, 0.0]));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([2.0, 0.0])
+        );
         assert_eq!(stats.embeddings_recomputed, 1);
     }
 
-    /// SC-005: replaying repeated identical (text, model) pairs must invoke the embedder fewer
-    /// times than there are matching rows. `replay.rs` itself has no cache — the caller-supplied
-    /// closure is responsible for one (FR-003 of issue #440) — so this wraps a real
-    /// `EmbeddingCache` inside the closure and counts the closure's own compute-path invocations
-    /// separately from `stats.embed_calls` (which counts every row `replay.rs` attempted, cache
-    /// hit or miss alike).
+    /// SC-005/FR-006: replaying repeated identical (text, model) pairs — even within the *same*
+    /// window, not just across separate `resolve_embed_window` calls — must invoke the real
+    /// embedder fewer times than there are matching rows. `replay.rs` itself never dedups a
+    /// window's texts; the caller-supplied closure is responsible for that (issue #440 FR-003,
+    /// issue #486 FR-006) — so this wraps a real `EmbeddingCache::get_or_compute_batch` inside the
+    /// closure and counts its own compute-path invocations separately from `stats.embed_calls`
+    /// (which counts every request `resolve_embed_window` attempted, cache hit or miss alike).
     #[test]
-    fn cache_bounds_embedder_invocations_for_repeated_text() {
+    fn cache_bounds_embedder_invocations_for_repeated_text_within_one_window() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
 
@@ -1910,36 +2208,40 @@ mod replay_tests {
         let real_calls = Arc::new(AtomicUsize::new(0));
         let cache_ref = Arc::clone(&cache);
         let real_calls_ref = Arc::clone(&real_calls);
-        let embed_fn: RecomputeEmbedFn = Box::new(move |text: &str| {
-            cache_ref.get_or_compute("test-model", 2, text, || {
-                real_calls_ref.fetch_add(1, Ordering::SeqCst);
-                Ok(vec![1.0, 2.0])
+        let embed_fn: RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
+            cache_ref.get_or_compute_batch("test-model", 2, texts, |miss_texts| {
+                real_calls_ref.fetch_add(miss_texts.len(), Ordering::SeqCst);
+                Ok(vec![vec![1.0, 2.0]; miss_texts.len()])
             })
         });
 
         let mut stats = zero_stats();
+        let mut window = Vec::new();
         for _ in 0..3 {
             let mut params = serde_json::Map::new();
             params.insert("name".to_string(), serde_json::json!("Alice"));
-            recompute_row_embeddings(
-                "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-                &mut params,
-                embed_fn.as_ref(),
-                2,
-                &mut stats,
-            );
+            window.push(PendingRow {
+                cypher: "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: \
+                          $name_embedding})"
+                    .to_string(),
+                params_map: params,
+                match_prefixed: false,
+                seq: 0,
+            });
         }
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
+        assert_eq!(resolved.len(), 3);
         assert_eq!(
             stats.embed_calls, 3,
-            "replay.rs attempts recompute once per matching row"
+            "resolve_embed_window attempts recompute once per matching row"
         );
         assert_eq!(stats.embeddings_recomputed, 3);
         assert_eq!(
             real_calls.load(Ordering::SeqCst),
             1,
             "the cache inside the closure must bound real embedder invocations to the number \
-             of distinct texts, not the number of matching rows (SC-005)"
+             of distinct texts within one window, not the number of matching rows (SC-005/FR-006)"
         );
     }
 
@@ -1948,49 +2250,196 @@ mod replay_tests {
     /// any other recompute failure (zero-fill for this CREATE-type row), not panic or corrupt
     /// params.
     #[test]
-    fn recompute_row_embeddings_zero_fills_on_non_finite_vector() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![f32::NAN, 1.0]));
+    fn resolve_embed_window_zero_fills_on_non_finite_vector() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|texts: &[&str]| Ok(vec![vec![f32::NAN, 1.0]; texts.len()]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
 
-        recompute_row_embeddings(
+        let window = one_row_window(
             "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
+            params,
         );
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
-        assert_eq!(params["name_embedding"], serde_json::json!([0.0, 0.0]));
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([0.0, 0.0])
+        );
         assert_eq!(stats.embeddings_recompute_failed, 1);
         assert_eq!(stats.embeddings_recomputed, 0);
     }
 
     /// The two-vector-params-in-one-row case (`insert_entity`'s CREATE template: both
     /// `name_embedding` and `summary_embedding`) — each pair is recomputed independently from its
-    /// own co-located text.
+    /// own co-located text, via a single batch call covering both.
     #[test]
-    fn recompute_row_embeddings_handles_multiple_vector_params_in_one_row() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32, 0.0]));
+    fn resolve_embed_window_handles_multiple_vector_params_in_one_row() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts.iter().map(|t| vec![t.len() as f32, 0.0]).collect())
+        });
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Al"));
         params.insert("summary".to_string(), serde_json::json!("Alice summary"));
 
-        let outcome = recompute_row_embeddings(
-            ENTITY_CREATE_CYPHER,
-            &mut params,
-            embed_fn.as_ref(),
-            2,
-            &mut stats,
-        );
+        let window = one_row_window(ENTITY_CREATE_CYPHER, params);
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
 
-        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
-        assert_eq!(params["name_embedding"], serde_json::json!([2.0, 0.0]));
-        assert_eq!(params["summary_embedding"], serde_json::json!([13.0, 0.0]));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([2.0, 0.0])
+        );
+        assert_eq!(
+            resolved[0].params_map["summary_embedding"],
+            serde_json::json!([13.0, 0.0])
+        );
         assert_eq!(stats.embeddings_recomputed, 2);
         assert_eq!(stats.embed_calls, 2);
+    }
+
+    // --- resolve_embed_window: genuine multi-row-window behavior (issue #486) ---
+
+    /// FR-001: a window spanning multiple rows issues exactly one batch call covering all of
+    /// their texts, not one call per row.
+    #[test]
+    fn resolve_embed_window_issues_one_batch_call_for_multiple_rows() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_ref = Arc::clone(&call_count);
+        let embed_fn: RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
+            call_count_ref.fetch_add(1, Ordering::SeqCst);
+            Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+        });
+
+        let mut stats = zero_stats();
+        let mut window = Vec::new();
+        for name in ["Alice", "Bob", "Carol"] {
+            let mut params = serde_json::Map::new();
+            params.insert("name".to_string(), serde_json::json!(name));
+            window.push(PendingRow {
+                cypher: "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: \
+                          $name_embedding})"
+                    .to_string(),
+                params_map: params,
+                match_prefixed: false,
+                seq: 0,
+            });
+        }
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 1, &mut stats);
+
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "one batch call must cover every row's text, not one call per row"
+        );
+        assert_eq!(stats.embed_calls, 3);
+        assert_eq!(stats.embeddings_recomputed, 3);
+    }
+
+    /// FR-004/SC-003: within an otherwise-successful batch call, a per-item validation failure
+    /// (here, one row's returned vector has the wrong dimension) affects only that row — the
+    /// other rows in the same window resolve normally.
+    #[test]
+    fn resolve_embed_window_partial_item_failure_only_affects_that_row() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    if *t == "bad" {
+                        vec![1.0] // wrong length — embed_dim below is 2
+                    } else {
+                        vec![t.len() as f32, 0.0]
+                    }
+                })
+                .collect())
+        });
+        let mut stats = zero_stats();
+        let mut window = Vec::new();
+        for name in ["Alice", "bad", "Carol"] {
+            let mut params = serde_json::Map::new();
+            params.insert("name".to_string(), serde_json::json!(name));
+            window.push(PendingRow {
+                cypher: "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: \
+                          $name_embedding})"
+                    .to_string(),
+                params_map: params,
+                match_prefixed: false,
+                seq: 0,
+            });
+        }
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
+
+        assert_eq!(
+            resolved.len(),
+            3,
+            "every row is CREATE-type, so even the failed one is zero-filled, not dropped"
+        );
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([5.0, 0.0])
+        );
+        assert_eq!(
+            resolved[1].params_map["name_embedding"],
+            serde_json::json!([0.0, 0.0]),
+            "the wrong-length vector must be zero-filled, not bound"
+        );
+        assert_eq!(
+            resolved[2].params_map["name_embedding"],
+            serde_json::json!([5.0, 0.0])
+        );
+        assert_eq!(stats.embeddings_recomputed, 2);
+        assert_eq!(stats.embeddings_recompute_failed, 1);
+    }
+
+    /// FR-004/SC-003: a whole-call failure degrades every row in the window through its own,
+    /// independent per-row fallback (FR-003) — it never forces a uniform outcome across rows just
+    /// because they shared one failed batch call.
+    #[test]
+    fn resolve_embed_window_whole_call_error_degrades_each_row_independently() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|_texts: &[&str]| Err(Error::Ipc("embedder unreachable".to_string())));
+        let mut stats = zero_stats();
+        let mut window = Vec::new();
+
+        let mut create_params = serde_json::Map::new();
+        create_params.insert("name".to_string(), serde_json::json!("Alice"));
+        window.push(PendingRow {
+            cypher: "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: \
+                      $name_embedding})"
+                .to_string(),
+            params_map: create_params,
+            match_prefixed: false,
+            seq: 0,
+        });
+        let mut set_params = serde_json::Map::new();
+        set_params.insert("content".to_string(), serde_json::json!("some content"));
+        window.push(PendingRow {
+            cypher: "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding"
+                .to_string(),
+            params_map: set_params,
+            match_prefixed: true,
+            seq: 1,
+        });
+
+        let resolved = resolve_embed_window(window, embed_fn.as_ref(), 2, &mut stats);
+
+        assert_eq!(
+            resolved.len(),
+            1,
+            "only the CREATE-type row survives; the vector-only SET row is skipped"
+        );
+        assert_eq!(
+            resolved[0].params_map["name_embedding"],
+            serde_json::json!([0.0, 0.0])
+        );
+        assert_eq!(stats.embeddings_recompute_failed, 2);
+        assert_eq!(stats.embeddings_skip_rows, 1);
     }
 
     // ── is_vector_only_set (issue #526, FR-005) ─────────────────────────────────────────────
@@ -2354,5 +2803,133 @@ mod replay_tests {
              the cache — this is a bonus, not a requirement (spec.md edge cases)"
         );
         assert_eq!(stats.lines_replayed, 10);
+    }
+
+    // ── replay_opts-level embedding-window integration tests (issue #486) ───────────────────
+
+    /// Writes one `Entity` CREATE WAL line whose `name` param drives `$name_embedding` recompute
+    /// — unlike `write_wal_cypher_line`, which only ever supplies `uuid`.
+    fn write_wal_entity_create_line(
+        wal_dir: &std::path::Path,
+        filename: &str,
+        seq: u64,
+        uuid: &str,
+        name: &str,
+    ) {
+        let cypher = "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})";
+        let content = format!(
+            "{{\"seq\":{seq},\"ts\":\"2026-01-01T00:00:00Z\",\"db\":\"test\",\
+             \"cypher\":{cypher_json},\"params\":{{\"uuid\":\"{uuid}\",\"name\":\"{name}\"}}}}\n",
+            cypher_json = serde_json::to_string(cypher).unwrap(),
+        );
+        let path = wal_dir.join(filename);
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+    }
+
+    /// FR-008: cancellation firing while rows sit in the pending embedding window (not yet
+    /// flushed, since `embed_window_size` here is far larger than the WAL's row count) must drop
+    /// those rows without ever issuing an embed call or touching any embedding counter — the
+    /// spec's edge case that a large in-flight window must not make cancellation wait longer.
+    #[test]
+    fn cancel_mid_embed_window_drops_pending_rows_without_touching_counters() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        for i in 0..5 {
+            write_wal_entity_create_line(
+                &wal_dir,
+                "0001.jsonl",
+                i + 1,
+                &format!("e-{i}"),
+                &format!("name-{i}"),
+            );
+        }
+
+        let embed_fn: RecomputeEmbedFn = Box::new(|_texts: &[&str]| {
+            panic!(
+                "embed_fn must never be called — cancellation must fire before the pending \
+                 window (embed_window_size=64) ever fills for this 5-row WAL"
+            )
+        });
+        let cancelled_after = std::sync::atomic::AtomicUsize::new(0);
+        let cancel_fn: CancelFn = Box::new(move || {
+            let n = cancelled_after.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            n >= 2 // cancel on the 3rd per-row check, mid-window
+        });
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    cancel_fn: Some(cancel_fn),
+                    ..ReplayOptions::new(embed_fn, 4)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            stats.embed_calls, 0,
+            "cancellation must drop the pending window before any embed call is issued"
+        );
+        assert_eq!(stats.embeddings_recomputed, 0);
+        assert_eq!(stats.embeddings_recompute_skipped_no_text, 0);
+        assert_eq!(
+            stats.lines_replayed, 0,
+            "every row was still buffered, unresolved, when cancellation fired"
+        );
+    }
+
+    /// Edge case (spec.md): the last window in a replay may be smaller than
+    /// `embed_window_size` — it must still be resolved and applied at EOF, not silently dropped.
+    #[test]
+    fn last_partial_window_at_eof_is_still_resolved() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        for i in 0..5 {
+            write_wal_entity_create_line(
+                &wal_dir,
+                "0001.jsonl",
+                i + 1,
+                &format!("e-{i}"),
+                &format!("name-{i}"),
+            );
+        }
+
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 0.0, 0.0, 0.0])
+                .collect())
+        });
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    embed_window_size: Some(64), // far larger than the 5 rows written
+                    ..ReplayOptions::new(embed_fn, 4)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            stats.lines_replayed, 5,
+            "a final, smaller-than-window-size batch of rows must still be resolved and \
+             applied at EOF, not dropped"
+        );
+        assert_eq!(stats.embeddings_recomputed, 5);
+        assert_eq!(stats.failed_lines, 0);
     }
 }
