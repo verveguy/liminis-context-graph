@@ -196,7 +196,9 @@ async fn test_dump_wal_round_trip() {
     let db1 = open_db(&db1_path);
     {
         let conn = db1.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let entities_before = db1.connect().unwrap().count_nodes("Entity").unwrap();
@@ -240,7 +242,7 @@ async fn test_dump_wal_round_trip() {
     {
         let conn = db2.connect().unwrap();
         let stats = WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("dump replay must succeed");
         assert_eq!(stats.failed_lines, 0, "zero replay failures");
         assert!(
@@ -306,7 +308,9 @@ async fn test_dump_wal_no_vecf32_in_output() {
     let db = open_db(&db_path);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let dump_dir = dir.path().join("dump-vf");
@@ -373,7 +377,9 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
     let db = open_db(&db_path);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let dump_dir = dir.path().join("dump-dup");
@@ -448,7 +454,9 @@ async fn test_dump_wal_timestamp_fidelity() {
     let db1 = open_db(&db1_path);
     {
         let conn = db1.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
     assert_eq!(
         db1.connect().unwrap().count_nodes("Entity").unwrap(),
@@ -517,7 +525,7 @@ async fn test_dump_wal_timestamp_fidelity() {
     let replay_stats = {
         let conn = db2.connect().unwrap();
         WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("dump WAL replay must succeed")
     };
     assert_eq!(
@@ -633,7 +641,7 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
     {
         let conn = db2.connect().unwrap();
         let stats = WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("dump replay must succeed");
         assert_eq!(stats.failed_lines, 0, "zero replay failures");
     }

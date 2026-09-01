@@ -1044,7 +1044,7 @@ async fn story6_dump_wal_always_mints_a_new_generation() {
     {
         let conn = db.connect().unwrap();
         lcg_core::replay::WalReplayer::new(&seed_wal_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .unwrap();
     }
 

@@ -224,7 +224,14 @@ async fn test_run_full_recovery_sequence_torn_wal() {
         let db_path = db_path.clone();
         let wal_root = wal_root.clone();
         move || {
-            recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink, test_embedder_ctx())
+            recovery::run_full_recovery_sequence(
+                &db_path,
+                "liminis",
+                &wal_root,
+                DIM,
+                sink,
+                test_embedder_ctx(),
+            )
         }
     })
     .await

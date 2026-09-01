@@ -820,7 +820,9 @@ async fn assert_entity_and_relationship_survive_wal_replay() {
     {
         let conn2 = db2.connect().unwrap();
         conn2.init_schema(DIM).unwrap();
-        let stats = WalReplayer::new(wal_dir.path()).replay(&conn2).unwrap();
+        let stats = WalReplayer::new(wal_dir.path())
+            .replay(&conn2, lcg_core::zero_vector_embed_fn(DIM), DIM)
+            .unwrap();
         assert!(
             stats.lines_replayed > 0,
             "WAL replay must process some lines"
