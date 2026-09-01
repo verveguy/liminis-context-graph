@@ -62,15 +62,27 @@ nothing about embedding recompute cares which file a row's source text came from
 
 ## Decision 3: Cancellation drops the pending window rather than flushing it
 
-**Chosen**: The existing per-row `cancel_fn` check (unchanged position, right after a row is
-buffered) gains one action on a positive cancellation: `pending_window.clear()` before
-`break 'files`. Every `ReplayStats` embedding counter mutation happens *inside*
-`resolve_embed_window`, which — being an ordinary synchronous function call, never itself
-interrupted — either runs to full completion or is never invoked at all for a given window. A
-dropped window has therefore touched zero embedding counters for its buffered rows.
+**Chosen**: The per-row `cancel_fn` check (unchanged position, right after a row is buffered)
+clears `pending_window` before `break 'files`, exactly as originally shipped. Review (issue #486)
+subsequently found that this was not the *only* way the file loop can exit early: `progress_fn`
+returning `false` (checked once per file and once per 1000 mutations), a mid-loop
+`push_resolved_rows`-reported cancellation (the embed-window-full flush pushing into a Cypher
+batch that itself gets cancelled), and the WAL-file-boundary `flush_batch` call reporting
+cancellation can all also `break 'files` — none of which touched `pending_window` in the
+originally-shipped code, so a leftover, unresolved window could survive to the EOF flush below and
+get silently resolved and applied *after* the caller had already asked to stop. The fix
+(`replay_aborted: bool`, set at every one of these `break 'files` sites, not only the `cancel_fn`
+one) generalizes this decision's guarantee: **any** early exit from the file loop — for any
+reason — drops `pending_window` unresolved, gating the EOF flush on `!replay_aborted` in addition
+to `!pending_window.is_empty()`. Every `ReplayStats` embedding counter mutation still happens
+*inside* `resolve_embed_window`, which — being an ordinary synchronous function call, never itself
+interrupted — either runs to full completion or is never invoked at all for a given window; a
+window whose resolution is skipped because `replay_aborted` is set has therefore touched zero
+embedding counters for its buffered rows, the same guarantee as the original single-site version.
 
-**Rejected**: resolving (flushing) the pending window before honoring cancellation, so no buffered
-row's recompute work is "wasted."
+**Rejected**: resolving (flushing) the pending window before honoring cancellation/abort, so no
+buffered row's recompute work is "wasted"; also rejected (in the follow-up fix) leaving the guard
+scoped to `cancel_fn` alone once the other three early-exit sites were found to share the same gap.
 
 **Rationale**: this is the most direct reading of the spec's own edge case — cancellation "is not
 forced to wait for an arbitrarily large in-flight batch window to finish first" (FR-008). Flushing
@@ -78,7 +90,9 @@ on cancellation would make cancellation latency scale with `embed_window_size` (
 worth of embedder round-trip time), regressing today's per-row bound. Dropping is safe: those rows
 were never executed against the database (dropped before `push_resolved_rows`), so a resumed
 replay simply re-reads and re-buffers them from `last_committed_seq` onward, the same recovery
-model already used for any other interrupted replay.
+model already used for any other interrupted replay. Scoping the guard to *every* early-exit site
+rather than just `cancel_fn` closes the gap for good instead of leaving three near-identical bugs
+for the next caller (e.g. one relying on `progress_fn` alone) to rediscover one at a time.
 
 ## Decision 4: `embed_calls` increments at request-queue time inside window resolution, not at buffer time
 
