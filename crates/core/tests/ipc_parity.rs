@@ -361,7 +361,48 @@ async fn parity_get_edges_by_group_empty() {
     assert_ok_resp(&v, 4);
     assert!(v["result"].is_object(), "expected object envelope: {v}");
     assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
+    assert!(v["result"]["facts"].is_array(), "expected facts array: {v}");
+    assert_eq!(
+        v["result"]["edges"], v["result"]["facts"],
+        "edges and facts must be identical: {v}"
+    );
     assert_eq!(v["result"]["count"], 0);
+}
+
+/// Issue #524 SC-001: same dual-key equality check as the empty-case test above, but with a
+/// seeded relationship — proves the two keys reference the actual list, not two independent
+/// (possibly diverging) empty defaults.
+#[tokio::test]
+async fn parity_get_edges_by_group_dual_key_nonempty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        4001,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-524-3",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 4001);
+
+    let v = dispatch_val(4002, "knowledge_get_edges_by_group", json!({}), state).await;
+    assert_ok_resp(&v, 4002);
+    let result = &v["result"];
+    assert!(result["edges"].is_array(), "expected edges array: {v}");
+    assert!(result["facts"].is_array(), "expected facts array: {v}");
+    assert_eq!(
+        result["edges"], result["facts"],
+        "edges and facts must be identical: {v}"
+    );
+    let count = result["count"].as_u64().unwrap();
+    assert_eq!(count, 1, "expected 1 relationship: {v}");
+    assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
 }
 
 #[tokio::test]
@@ -470,6 +511,48 @@ async fn parity_find_relationships_requires_embedder() {
         v.get("result").is_some() || v["error"]["code"] == -32000,
         "unexpected response shape: {v}"
     );
+}
+
+/// Issue #524 SC-001: a populated `knowledge_find_relationships` response must carry the
+/// same relationship list under both `edges` and `facts` — an empty-only test can't catch a
+/// bug that aliases one key to `[]` instead of the real list.
+#[tokio::test]
+async fn parity_find_relationships_dual_key_nonempty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        460,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-524-1",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 460);
+
+    let v = dispatch_val(
+        461,
+        "knowledge_find_relationships",
+        json!({"query": "works at", "num_results": 5}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 461);
+    let result = &v["result"];
+    assert!(result["edges"].is_array(), "expected edges array: {v}");
+    assert!(result["facts"].is_array(), "expected facts array: {v}");
+    assert_eq!(
+        result["edges"], result["facts"],
+        "edges and facts must be identical: {v}"
+    );
+    let count = result["count"].as_u64().unwrap();
+    assert_eq!(count, 1, "expected 1 relationship: {v}");
+    assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
 }
 
 // ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
@@ -1824,7 +1907,48 @@ async fn parity_list_relationships_empty() {
     let v = dispatch_val(44, "knowledge_list_relationships", json!({}), state).await;
     assert_ok_resp(&v, 44);
     assert!(v["result"]["facts"].is_array(), "expected facts array: {v}");
+    assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
+    assert_eq!(
+        v["result"]["edges"], v["result"]["facts"],
+        "edges and facts must be identical: {v}"
+    );
     assert_eq!(v["result"]["count"], 0, "empty db: {v}");
+}
+
+/// Issue #524 SC-001: same dual-key equality check as the empty-case test above, but with a
+/// seeded relationship — proves the two keys reference the actual list, not two independent
+/// (possibly diverging) empty defaults.
+#[tokio::test]
+async fn parity_list_relationships_dual_key_nonempty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        4401,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-524-2",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 4401);
+
+    let v = dispatch_val(4402, "knowledge_list_relationships", json!({}), state).await;
+    assert_ok_resp(&v, 4402);
+    let result = &v["result"];
+    assert!(result["facts"].is_array(), "expected facts array: {v}");
+    assert!(result["edges"].is_array(), "expected edges array: {v}");
+    assert_eq!(
+        result["edges"], result["facts"],
+        "edges and facts must be identical: {v}"
+    );
+    let count = result["count"].as_u64().unwrap();
+    assert_eq!(count, 1, "expected 1 relationship: {v}");
+    assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
 }
 
 // ── Tier 1b: knowledge_get_entity_neighbors ───────────────────────────────────
