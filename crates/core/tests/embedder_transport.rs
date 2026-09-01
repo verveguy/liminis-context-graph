@@ -9,7 +9,9 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use lcg_core::embedder::{Embedder, OaiEmbedder};
+use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 
 const STUB_MODEL: &str = "stub-model";
@@ -971,4 +973,109 @@ async fn uds_transport_embed_batch_chunks_oversized_batch() {
 
     assert_eq!(request_count.load(Ordering::SeqCst), 3);
     assert_eq!(results.len(), texts.len());
+}
+
+// ── Cassette leak coverage (#509) ────────────────────────────────────────────
+//
+// The embedder has no cassette-recording integration of its own — `grep -r cassette
+// crates/core/src/embedder.rs` returns nothing, and no `LCG_RECORD_EMBED`-equivalent env var
+// exists in `main.rs`. `RecordingEmbedder` below is a **test-local** decorator, mirroring
+// `lcg_core::cassette::RecordingExtractor`'s shape (itself mirroring `CountingEmbedder` above)
+// at the `Embedder` trait boundary. No production code changes are made or needed: `embed`'s
+// `&str -> Vec<f32>` signature is structurally as credential-free as `Extractor`'s, since the
+// API key lives one layer below, inside `OaiEmbedder`'s private HTTP transport — so a decorator
+// wrapping only the trait boundary cannot observe or record it even if it tried.
+struct RecordingEmbedder {
+    inner: Arc<dyn Embedder>,
+    writer: Arc<lcg_core::CassetteWriter>,
+}
+
+impl RecordingEmbedder {
+    fn new(inner: Arc<dyn Embedder>, writer: Arc<lcg_core::CassetteWriter>) -> Self {
+        Self { inner, writer }
+    }
+}
+
+impl Embedder for RecordingEmbedder {
+    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, lcg_core::Error>> {
+        Box::pin(async move {
+            let result = self.inner.embed(text).await?;
+            let key = format!("{:x}", Sha256::digest(text.as_bytes()));
+            self.writer.append(&lcg_core::CassetteRecord {
+                key,
+                call_type: "embed".to_string(),
+                provider: "test".to_string(),
+                model: "test-model".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                request: serde_json::json!({ "text": text }),
+                response: serde_json::to_value(&result)?,
+            })?;
+            Ok(result)
+        })
+    }
+}
+
+/// Acceptance Scenario 1/FR-004: proves the sentinel key crossed the wire (the stub captured
+/// `Authorization: Bearer <sentinel>`) *before* trusting the "no leak" assertions below — a
+/// decorator wrapping only the `Embedder` trait boundary would pass those assertions
+/// vacuously if the key had never been sent at all, since nothing at that boundary carries
+/// credentials by construction (see the module-doc comment on `RecordingEmbedder` above).
+///
+/// Acceptance Scenario 2/FR-003: the recorded cassette's raw bytes never contain the sentinel
+/// key's literal value.
+///
+/// Acceptance Scenario 3/FR-003: the recorded cassette's raw bytes never contain the
+/// case-insensitive string `authorization` anywhere — not just absent as a header field name —
+/// so a future redaction bug that relocates the value under a different field name would still
+/// be caught.
+#[tokio::test]
+async fn embedder_http_cassette_never_leaks_authorization_or_key() {
+    const SENTINEL_API_KEY: &str = "sk-embed-cassette-leak-9f3d2c71";
+    let dim = 16;
+    let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let inner: Arc<dyn Embedder> = Arc::new(
+        OaiEmbedder::new_http(url, "test-model", dim)
+            .with_api_key(Some(SENTINEL_API_KEY.to_string())),
+    );
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let cassette_path = dir.path().join("embed_cassette.jsonl");
+    let writer = Arc::new(lcg_core::CassetteWriter::open(&cassette_path).unwrap());
+    let recorder = RecordingEmbedder::new(inner, Arc::clone(&writer));
+
+    recorder.embed("some text to embed").await.unwrap();
+
+    // Sanity check (FR-004): prove the sentinel key was actually transmitted over the wire,
+    // so the "never leaks" assertions below are not vacuously true because the key never
+    // appeared anywhere to begin with.
+    {
+        let headers = captured.lock().unwrap();
+        assert_eq!(headers.len(), 1, "expected exactly one recorded request");
+        let auth = headers[0]
+            .iter()
+            .find(|h| h.to_lowercase().starts_with("authorization:"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no Authorization header in request headers: {:?}",
+                    headers[0]
+                )
+            });
+        assert_eq!(*auth, format!("authorization: Bearer {SENTINEL_API_KEY}"));
+    }
+
+    // Edge Case: guard against a silent no-op recorder producing an empty file that would
+    // make the leak assertions below pass vacuously.
+    let raw = std::fs::read(&cassette_path).unwrap();
+    assert!(!raw.is_empty(), "cassette file must not be empty");
+    let raw_str = String::from_utf8_lossy(&raw);
+
+    assert!(
+        !raw_str.contains(SENTINEL_API_KEY),
+        "embedder cassette must never contain the API key value"
+    );
+    assert!(
+        !raw_str.to_lowercase().contains("authorization"),
+        "embedder cassette must never contain the string \"authorization\" anywhere"
+    );
 }
