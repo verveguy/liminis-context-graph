@@ -2537,7 +2537,7 @@ async fn handle_rebuild_from_wal(
                         // embedding_model_status silently over-claim "match".
                         let group_embedding_identity = stats
                             .embeddings_recompute_had_no_failures()
-                            .then(|| (embedding_identity.0.as_str(), embedding_identity.1));
+                            .then_some((embedding_identity.0.as_str(), embedding_identity.1));
                         match conn.set_wal_position(
                             &gid_c,
                             seq,
@@ -2989,7 +2989,7 @@ async fn handle_rebuild_from_wal(
                         // attempt failed" gate as the streaming path above.
                         let group_embedding_identity = stats
                             .embeddings_recompute_had_no_failures()
-                            .then(|| (embedding_identity.0.as_str(), embedding_identity.1));
+                            .then_some((embedding_identity.0.as_str(), embedding_identity.1));
                         match conn.set_wal_position(
                             &bg_gid,
                             seq,

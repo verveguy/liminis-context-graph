@@ -442,7 +442,7 @@ pub fn run_full_recovery_sequence(
             // whose replay had no failed recompute attempt — see
             // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
             let group_embedding_identity =
-                fully_recomputed.then(|| (embedding_identity.0.as_str(), embedding_identity.1));
+                fully_recomputed.then_some((embedding_identity.0.as_str(), embedding_identity.1));
             if let Err(e) =
                 conn.set_wal_position(gid, *seq, generation.as_deref(), group_embedding_identity)
             {

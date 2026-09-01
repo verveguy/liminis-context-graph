@@ -507,9 +507,18 @@ fn test_literal_inlined_fact_embedding_replays_unchanged() {
     let stats = WalReplayer::new(wal_dir.path())
         .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
         .expect("replay");
-    assert_eq!(stats.lines_replayed, 1, "the single CREATE line must replay");
-    assert_eq!(stats.embeddings_recomputed, 0, "no recompute is possible for a literal value");
-    assert_eq!(stats.embeddings_skip_rows, 0, "not a vector-only SET, so never skip-eligible");
+    assert_eq!(
+        stats.lines_replayed, 1,
+        "the single CREATE line must replay"
+    );
+    assert_eq!(
+        stats.embeddings_recomputed, 0,
+        "no recompute is possible for a literal value"
+    );
+    assert_eq!(
+        stats.embeddings_skip_rows, 0,
+        "not a vector-only SET, so never skip-eligible"
+    );
 
     let rows = conn
         .cypher_query("MATCH (rn:RelatesToNode_ {uuid: 'edge-0'}) RETURN rn.fact_embedding")
