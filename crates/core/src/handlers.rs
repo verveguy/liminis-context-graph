@@ -1075,7 +1075,8 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     };
 
     let count = edges.len();
-    Ok(json!({"facts": edges, "count": count}))
+    let edges_json = serde_json::to_value(&edges)?;
+    Ok(json!({"edges": edges_json.clone(), "facts": edges_json, "count": count}))
 }
 
 // ── Other read handlers — hold shared read guard across spawn_blocking ────────
@@ -1170,7 +1171,8 @@ async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
     drop(_guard);
 
     let count = edges.len();
-    Ok(json!({"edges": edges, "count": count}))
+    let edges_json = serde_json::to_value(&edges)?;
+    Ok(json!({"edges": edges_json.clone(), "facts": edges_json, "count": count}))
 }
 
 async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -1383,7 +1385,8 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     drop(_guard);
 
     let count = facts.len();
-    Ok(json!({ "facts": facts, "count": count }))
+    let facts_json = serde_json::to_value(&facts)?;
+    Ok(json!({ "edges": facts_json.clone(), "facts": facts_json, "count": count }))
 }
 
 async fn handle_get_entity_neighbors(

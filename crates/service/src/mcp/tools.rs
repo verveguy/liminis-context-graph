@@ -89,7 +89,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_find_relationships",
             description: "Hybrid (full-text + vector) search for relationships (facts) \
                            matching a query. Returned edges' `episode_uuids` is always \
-                           empty on this read path (not populated).",
+                           empty on this read path (not populated). The response includes \
+                           the relationship list under both `edges` and `facts` keys \
+                           (identical aliases); `edges` is the canonical name.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -143,7 +145,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_get_edges_by_group",
             description: "List all relationship edges belonging to the given group IDs, or \
                            every group's edges when group_ids is omitted. Returned edges' \
-                           `episode_uuids` is always empty on this read path (not populated).",
+                           `episode_uuids` is always empty on this read path (not populated). \
+                           The response includes the edge list under both `edges` and `facts` \
+                           keys (identical aliases); `edges` is the canonical name.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -217,7 +221,9 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "List relationship edges (facts), optionally scoped to specific \
                            group IDs. Each edge's `episode_uuids` lists episodes that mention \
                            its source or target entity (either-endpoint co-occurrence), not \
-                           evidence for that specific relationship.",
+                           evidence for that specific relationship. The response includes the \
+                           relationship list under both `edges` and `facts` keys (identical \
+                           aliases); `edges` is the canonical name.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
