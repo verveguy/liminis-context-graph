@@ -965,7 +965,7 @@ pub async fn add_episode(
                 group_id, e
             );
         } else {
-            state.clear_group_drift(group_id);
+            state.clear_group_drift(group_id, resolved_ontology.clone());
         }
     }
 
