@@ -74,16 +74,23 @@ omit the collection key.
 | Method | Collection key | Shape |
 |--------|----------------|-------|
 | `knowledge_find_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_find_relationships` | `facts` | `{facts, count}` |
+| `knowledge_find_relationships` | `facts` [^524] | `{facts, edges, count}` |
 | `knowledge_get_episodes` | `episodes` | `{episodes, count}` |
 | `knowledge_get_nodes_by_group` | `nodes` | `{nodes, count}` |
-| `knowledge_get_edges_by_group` | `edges` | `{edges, count}` |
+| `knowledge_get_edges_by_group` | `edges` [^524] | `{edges, facts, count}` |
 | `knowledge_get_edges_by_uuids` | `edges` | `{edges, count}` |
 | `knowledge_search_passages` | `passages` | `{passages, count}` |
 | `knowledge_list_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_list_relationships` | `facts` | `{facts, count}` |
+| `knowledge_list_relationships` | `facts` [^524] | `{facts, edges, count}` |
 | `knowledge_get_entity_neighbors` | `nodes` (primary) | `{center_uuid, nodes, edges, count, node_count, edge_count}` |
 | `knowledge_get_entities_by_source` | `nodes` | `{source, nodes, count}` |
+
+[^524]: As of issue #524, these three methods return the relationship list under **both**
+`edges` and `facts` as identical aliases — `edges` is the canonical name going forward,
+`facts` is retained for backward compatibility with existing callers. This deviates from
+the one-key-per-record-type convention above; it exists because two callers previously
+guessed different keys for the same shape and one silently got `[]` instead of an error.
+No other method in this table has a second alias key.
 
 Single-record and scalar responses are out of scope: `knowledge_status`, `health_check`,
 `knowledge_close`, and single-entity getters return records directly.
