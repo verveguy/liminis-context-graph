@@ -579,3 +579,181 @@ pub async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embedder::MockEmbedder;
+    use crate::extractor::MockExtractor;
+    use crate::ontology::{EntityTypeDef, OntologyMode};
+    use crate::telemetry::NoopSink;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    const EMB_DIM: usize = 4;
+
+    fn ontology_with(mode: OntologyMode, names: &[&str]) -> Ontology {
+        Ontology {
+            mode,
+            entity_types: names
+                .iter()
+                .map(|n| EntityTypeDef {
+                    name: n.to_string(),
+                    description: None,
+                    parent: None,
+                })
+                .collect(),
+            relation_types: vec![],
+            ancestor_map: HashMap::new(),
+        }
+    }
+
+    fn make_state(workspace_root: &Path, ontology: Option<Ontology>) -> AppState {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Db::open(dir.path().join("test.db").to_str().unwrap()).unwrap());
+        {
+            let conn = db.connect().unwrap();
+            conn.init_schema(EMB_DIM).unwrap();
+        }
+        let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+        // Leak the TempDir's backing directory for the lifetime of this state — the DB file
+        // itself only needs to outlive the test, and these unit tests don't assert on it.
+        std::mem::forget(dir);
+        AppState {
+            db: ArcSwapOption::from(Some(db)),
+            degraded_reason: Arc::new(Mutex::new(None)),
+            embedder: Arc::new(MockEmbedder::new(EMB_DIM)),
+            extractor: Arc::new(MockExtractor),
+            dedup: Arc::new(PassthroughDedupAdapter),
+            write_lock: Arc::new(RwLock::new(())),
+            sink,
+            db_path: "test.db".to_string(),
+            wal_root: None,
+            wal_max_events_per_file: 10_000,
+            wal_max_bytes_per_file: 5 * 1024 * 1024,
+            embedding_model: "bge-base-en-v1.5".to_string(),
+            wal_writers: Arc::new(Mutex::new(HashMap::new())),
+            active_writes: Arc::new(AtomicUsize::new(0)),
+            rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+            workspace_root: Some(workspace_root.to_path_buf()),
+            indices_built: Arc::new(AtomicBool::new(false)),
+            cancel_token: CancellationToken::new(),
+            cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+            ontology: ontology.map(Arc::new),
+            ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+            group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+            embedding_cache: Arc::new(EmbeddingCache::new()),
+        }
+    }
+
+    fn write_group_ontology_file(workspace_root: &Path, group_id: &str, content: &str) {
+        let path = crate::ontology::group_ontology_path(workspace_root, group_id).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+    }
+
+    // Issue #495, User Story 1: a concurrent remediation's drift clear must survive a
+    // subsequent, stale first-resolution insert for the same never-before-resolved group.
+    #[test]
+    fn concurrent_remediation_clear_survives_a_stale_first_resolution_insert() {
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+
+        // Group's per-group file on disk declares {Person, Organization}, but its recorded
+        // sidecar only reflects {Person} — the pre-remediation state `resolve_ontology`'s stale
+        // read observes.
+        write_group_ontology_file(
+            root,
+            "group-a",
+            "mode: open\nentity_types:\n  - name: Person\n  - name: Organization\n",
+        );
+        ontology_sidecar::write_group_sidecar(
+            root,
+            "group-a",
+            Some(&ontology_with(OntologyMode::Open, &["Person"])),
+        )
+        .unwrap();
+
+        let state = make_state(root, None);
+
+        // Simulates `resolve_ontology`'s read-compute half: observes drift against the
+        // as-yet-unremediated sidecar.
+        let (resolved, stale_entry) = state.compute_group_ontology_entry("group-a");
+        assert!(
+            stale_entry.drift.drifted,
+            "the stale read must observe drift, since the sidecar hasn't caught up to the \
+             per-group file yet"
+        );
+
+        // Simulates a concurrent remediation (WAL rebuild / add_episode) completing in the
+        // window between that read and `resolve_ontology`'s insert: it writes a matching
+        // sidecar and clears drift via `clear_group_drift`, racing ahead of the stale insert.
+        ontology_sidecar::write_group_sidecar(
+            root,
+            "group-a",
+            Some(&ontology_with(
+                OntologyMode::Open,
+                &["Person", "Organization"],
+            )),
+        )
+        .unwrap();
+        state.clear_group_drift("group-a", resolved.clone());
+        assert!(
+            !state
+                .group_drift_status("group-a")
+                .expect("clear_group_drift must upsert an entry when none existed")
+                .drifted,
+            "the remediation's clear must record not-drifted"
+        );
+
+        // The stale insert now arrives — it must not clobber the remediation's clear.
+        state.insert_group_ontology_entry_if_absent("group-a", stale_entry);
+        assert!(
+            !state
+                .group_drift_status("group-a")
+                .expect("entry must still exist")
+                .drifted,
+            "a stale first-resolution insert must not overwrite a concurrent remediation's clear"
+        );
+    }
+
+    // Guards the risk flagged in Research: `clear_group_drift`'s upsert path must record the
+    // ontology it was given, not `None` — a wrong seed here is cached for the process's entire
+    // life, since a cache hit short-circuits `resolve_ontology` forever after.
+    #[test]
+    fn clear_group_drift_upsert_records_the_given_ontology() {
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+        let state = make_state(root, None);
+
+        let ontology = Arc::new(ontology_with(OntologyMode::Open, &["Person"]));
+        assert!(state.group_drift_status("group-a").is_none());
+
+        state.clear_group_drift("group-a", Some(ontology.clone()));
+
+        let resolved = state.resolve_ontology("group-a");
+        assert!(
+            resolved.is_some_and(|o| Arc::ptr_eq(&o, &ontology)),
+            "resolve_ontology must return the ontology clear_group_drift's upsert recorded, \
+             not None or a freshly re-resolved value"
+        );
+    }
+
+    // Edge case: an already-cached group is unaffected by the insert-if-absent change —
+    // `resolve_ontology` never reaches the compute/insert path again once cached.
+    #[test]
+    fn already_resolved_group_is_unaffected_by_insert_if_absent() {
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+        let state = make_state(root, None);
+
+        let first = state.resolve_ontology("group-a");
+        let second = state.resolve_ontology("group-a");
+        assert_eq!(
+            first.is_some(),
+            second.is_some(),
+            "repeated resolution of an already-cached group must be stable"
+        );
+        assert_eq!(state.group_ontologies.lock().unwrap().len(), 1);
+    }
+}
