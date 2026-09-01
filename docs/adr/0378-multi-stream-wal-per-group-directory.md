@@ -237,6 +237,20 @@ caller for "every group in this workspace" (see the issue's deployment-invariant
 `handle_query_cypher` remains the sole call site still exempted under this section's original
 rationale — an arbitrary-Cypher escape hatch has no group attribution to derive by design.
 
+**Correction (#402, 2026-09-01): `handle_delete_by_source` and `handle_delete_chunk_episode` are
+also corrected, though neither was ever one of the four sites originally enumerated above.** Both
+grew the identical "route to `DEFAULT_GROUP_ID` when more than one group is named" pattern
+independently, citing this section's FR-004 rationale by analogy in their own inline comments —
+but at the time they were written, `group_ids` was still optional (pre-#406) and neither #385 nor
+#447's corrective passes covered them (#385 fixed exactly the two originally-enumerated
+multi-group-by-design sites; #447 fixed the two maintenance passes). #406 made `group_ids`
+mandatory and non-empty for both handlers, which is exactly the precondition #385 required to do
+per-group attribution: each call now mutates a small, fully-known set of specific groups. #402
+applied #385's mechanism (`GroupedMutations`, `Conn::drain_mutations_into`, reused unmodified) to
+these two remaining sites — see
+[ADR-0402](0402-per-group-attribution-for-multi-group-episode-deletes.md). `handle_query_cypher`
+remains the sole FR-004-exempted call site.
+
 ### FR-006: `knowledge_rebuild_from_wal`'s `force_clear` stops wiping the whole DB file
 
 The pre-378 `force_clear` path (`clear_db_for_rebuild`) deleted and reopened the entire lbug DB —
