@@ -48,6 +48,21 @@ pub struct GroupOntologyEntry {
     pub drift: GroupDriftStatus,
 }
 
+/// `AppState::group_ontologies`'s value type (issue #495). A group's first `resolve_ontology`
+/// call brackets its read-compute-insert sequence with a `Resolving` marker before it reads the
+/// sidecar, so that a concurrent remediation's `clear_group_drift` — landing in the window
+/// between that read and the eventual insert — can tell "a first resolution is racing me right
+/// now" (upsert, so the stale insert that follows can't clobber this clear) apart from "nothing
+/// has resolved this group yet" (stay absent, preserving FR-007: a remediation alone must never
+/// populate the cache as a side effect). Only `Resolved` is a real answer — `group_drift_status`,
+/// `all_group_drift_statuses`, and the `resolve_ontology`/`peek_or_load_ontology` cache-hit fast
+/// paths all treat `Resolving` the same as absent.
+#[derive(Debug, Clone)]
+pub enum GroupOntologyCacheState {
+    Resolving,
+    Resolved(GroupOntologyEntry),
+}
+
 pub struct AppState {
     /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
     /// under the write lock without holding an inner Mutex. `None` represents degraded state
@@ -119,7 +134,7 @@ pub struct AppState {
     /// call sites (tests, a bench, `wal_exec.rs`'s helper) needs no edit: they all write
     /// `group_ontologies: Arc::new(Mutex::new(HashMap::new()))` with the value type inferred
     /// from this field's declaration alone. See ADR-0451.
-    pub group_ontologies: Arc<Mutex<HashMap<String, GroupOntologyEntry>>>,
+    pub group_ontologies: Arc<Mutex<HashMap<String, GroupOntologyCacheState>>>,
     /// Content-addressed embedding cache (issue #440, FR-003) shared across every WAL-replaying
     /// call site that recomputes embeddings during this process's lifetime — constructed once in
     /// `main.rs` right after the embedder is probed, so it stays warm across the startup-recovery
@@ -294,20 +309,52 @@ impl AppState {
     /// method existed.
     pub fn resolve_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
         if let Ok(guard) = self.group_ontologies.lock() {
-            if let Some(cached) = guard.get(group_id) {
+            if let Some(GroupOntologyCacheState::Resolved(cached)) = guard.get(group_id) {
                 return cached.ontology.clone();
             }
         }
 
+        // Mark this group as being resolved *before* the sidecar read below, so a concurrent
+        // remediation's `clear_group_drift` landing in the window between this read and this
+        // call's own insert (issue #495) can tell it's racing an in-flight resolution and upsert
+        // accordingly, rather than stay absent (FR-007). A no-op if another racing
+        // first-resolution of this same group already marked it (Edge Case: two racing
+        // first-resolutions — both fall through and compute redundantly, exactly as the pre-#495
+        // unconditional-insert behavior did for this ordering), or if it's already `Resolved`.
+        self.mark_group_resolving(group_id);
+
         let (resolved, entry) = self.compute_group_ontology_entry(group_id);
-        self.insert_group_ontology_entry_if_absent(group_id, entry);
+        let drift = entry.drift.clone();
+        // Only warn if this thread's (possibly stale) computation actually won the race and
+        // became the cached state (issue #495): if a concurrent remediation's `clear_group_drift`
+        // got there first, `entry` is discarded below and the group is not actually drifted, so
+        // printing here would reproduce the same false-positive stderr symptom the cache-state
+        // fix already closes.
+        if self.insert_group_ontology_entry_if_not_resolved(group_id, entry) && drift.drifted {
+            eprintln!(
+                "liminis-context-graph: ontology: drift detected for group {group_id:?} — {} — recommend Recreate + re-ingest",
+                drift.drift_summary.as_deref().unwrap_or("unknown change")
+            );
+        }
         resolved
+    }
+
+    /// Marks `group_id` as having a first resolution in flight (issue #495), unless it's already
+    /// `Resolved` or already `Resolving` (a no-op either way — see [`Self::resolve_ontology`]'s
+    /// Edge Case notes). Lets a concurrent `clear_group_drift` distinguish "a first resolution is
+    /// racing me right now" from "nothing has resolved this group yet" (FR-007).
+    fn mark_group_resolving(&self, group_id: &str) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            guard
+                .entry(group_id.to_string())
+                .or_insert(GroupOntologyCacheState::Resolving);
+        }
     }
 
     /// Computes `group_id`'s resolved ontology and drift status by reading its sidecar, without
     /// touching `group_ontologies` — the read-and-compute half of [`Self::resolve_ontology`]'s
-    /// first-resolution path, split out so the insert half can be insert-if-absent (issue #495:
-    /// this split makes the two halves independently, deterministically testable).
+    /// first-resolution path, split out so the insert half can be insert-if-not-resolved (issue
+    /// #495: this split makes the two halves independently, deterministically testable).
     fn compute_group_ontology_entry(
         &self,
         group_id: &str,
@@ -345,12 +392,9 @@ impl AppState {
             resolved.as_deref(),
             has_prior_data,
         );
-        if drifted {
-            eprintln!(
-                "liminis-context-graph: ontology: drift detected for group {group_id:?} — {} — recommend Recreate + re-ingest",
-                drift_summary.as_deref().unwrap_or("unknown change")
-            );
-        }
+        // Emitting the stderr warning is deferred to the caller (issue #495): whether this
+        // computation is actually drifted-and-cached depends on whether it wins the
+        // insert-if-not-resolved race in `resolve_ontology`, which isn't known yet here.
 
         let entry = GroupOntologyEntry {
             ontology: resolved.clone(),
@@ -362,21 +406,41 @@ impl AppState {
         (resolved, entry)
     }
 
-    /// Inserts `entry` for `group_id` only if no entry already exists (issue #495). Closes the
-    /// stale-drift-insert race: a concurrent remediation (WAL rebuild or successful `add_episode`)
-    /// racing this group's first resolution now always wins if it reaches the cache first — via
-    /// `clear_group_drift`'s upsert — since this insert can no longer clobber it. Paired with that
-    /// upsert, whichever writer reaches `group_ontologies` first for a never-before-resolved group
-    /// determines the cached state; no lock is ever held across a DB round trip or sidecar read.
-    fn insert_group_ontology_entry_if_absent(&self, group_id: &str, entry: GroupOntologyEntry) {
+    /// Inserts `entry` for `group_id` unless it's already `Resolved` (issue #495), returning
+    /// whether `entry` actually became the cached state. Closes the stale-drift-insert race: a
+    /// concurrent remediation (WAL rebuild or successful `add_episode`) racing this group's first
+    /// resolution now always wins if it reaches the cache first — via `clear_group_drift`'s
+    /// upsert of the `Resolving` marker `resolve_ontology` leaves before calling this — since
+    /// this insert finds the slot already `Resolved` and backs off instead of clobbering it. If
+    /// the slot is still `Resolving` (this call's own marker, or another racing first-resolution's
+    /// — see the Edge Case in `resolve_ontology`) or absent, `entry` is inserted. No lock is ever
+    /// held across a DB round trip or sidecar read. The return value lets the caller
+    /// (`resolve_ontology`) avoid warning about drift that lost the race and was never cached.
+    fn insert_group_ontology_entry_if_not_resolved(
+        &self,
+        group_id: &str,
+        entry: GroupOntologyEntry,
+    ) -> bool {
         match self.group_ontologies.lock() {
             Ok(mut guard) => {
-                guard.entry(group_id.to_string()).or_insert(entry);
+                if matches!(
+                    guard.get(group_id),
+                    Some(GroupOntologyCacheState::Resolved(_))
+                ) {
+                    false
+                } else {
+                    guard.insert(
+                        group_id.to_string(),
+                        GroupOntologyCacheState::Resolved(entry),
+                    );
+                    true
+                }
             }
             Err(e) => {
                 eprintln!(
                     "liminis-context-graph: group_ontologies: lock poisoned for group {group_id:?}: {e}"
                 );
+                false
             }
         }
     }
@@ -409,7 +473,7 @@ impl AppState {
     /// observed by a caller in between.
     pub fn peek_or_load_ontology(&self, group_id: &str) -> Option<Arc<Ontology>> {
         if let Ok(guard) = self.group_ontologies.lock() {
-            if let Some(cached) = guard.get(group_id) {
+            if let Some(GroupOntologyCacheState::Resolved(cached)) = guard.get(group_id) {
                 return cached.ontology.clone();
             }
         }
@@ -418,25 +482,31 @@ impl AppState {
 
     /// Returns `group_id`'s cached drift status, or `None` if that group's ontology has not yet
     /// been resolved in this process (User Story 4, Scenario 2) — distinct from `Some(status)`
-    /// with `drifted: false`.
+    /// with `drifted: false`. A group with only a `Resolving` marker (a first resolution still in
+    /// flight, issue #495) is treated the same as absent — that marker isn't a real answer.
     pub fn group_drift_status(&self, group_id: &str) -> Option<GroupDriftStatus> {
-        self.group_ontologies
-            .lock()
-            .ok()?
-            .get(group_id)
-            .map(|e| e.drift.clone())
+        match self.group_ontologies.lock().ok()?.get(group_id)? {
+            GroupOntologyCacheState::Resolved(e) => Some(e.drift.clone()),
+            GroupOntologyCacheState::Resolving => None,
+        }
     }
 
     /// Returns every group's cached drift status for `knowledge_status` (FR-002a) — purely from
     /// the in-memory cache, never a disk scan, so a group this process has never resolved is
-    /// simply absent rather than falsely reported as "not drifted".
+    /// simply absent rather than falsely reported as "not drifted". Groups with only a
+    /// `Resolving` marker (issue #495) are excluded for the same reason.
     pub fn all_group_drift_statuses(&self) -> Vec<(String, GroupDriftStatus)> {
         self.group_ontologies
             .lock()
             .map(|guard| {
                 guard
                     .iter()
-                    .map(|(gid, entry)| (gid.clone(), entry.drift.clone()))
+                    .filter_map(|(gid, state)| match state {
+                        GroupOntologyCacheState::Resolved(entry) => {
+                            Some((gid.clone(), entry.drift.clone()))
+                        }
+                        GroupOntologyCacheState::Resolving => None,
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -446,24 +516,35 @@ impl AppState {
     /// after a successful remediation (a WAL rebuild or a fresh `add_episode` ingest) for that
     /// specific group, never for every cached group (see ADR-0451).
     ///
-    /// Upserts (issue #495): if the group has no cache entry yet — the case during a
-    /// never-before-resolved group's first-resolution race, since `resolve_ontology` only inserts
-    /// after its own read-compute sequence completes — this creates a fresh, non-drifted entry
-    /// seeded with `ontology` instead of doing nothing. That lets a remediation's clear win the
-    /// race even when it reaches the cache before `resolve_ontology`'s own insert: paired with
-    /// that insert becoming insert-if-absent, whichever writer arrives first now determines the
-    /// cached state. `ontology` must be the caller's already-resolved value for this group (all
-    /// three call sites have one in hand); a wrong value here would be cached for the life of the
-    /// process, since a cache hit short-circuits `resolve_ontology` forever after.
+    /// Three cases (issue #495):
+    /// - **Already `Resolved`**: mutated in place, as before #495 — the common case.
+    /// - **`Resolving`**: a first resolution of this same group is racing this remediation right
+    ///   now, in the window between `resolve_ontology`'s sidecar read and its own insert. Upsert a
+    ///   fresh, non-drifted entry seeded with `ontology` so that later insert finds the slot
+    ///   already `Resolved` and backs off instead of clobbering this clear with a stale
+    ///   `drifted: true` computed from the pre-remediation sidecar. `ontology` must be the
+    ///   caller's already-resolved value for this group (all three call sites have one in hand); a
+    ///   wrong value here would be cached for the life of the process, since a cache hit
+    ///   short-circuits `resolve_ontology` forever after.
+    /// - **Absent**: no resolution is in flight for this group at all — this remediation is
+    ///   running alone. Stays a no-op, same as pre-#495: a remediation must never populate the
+    ///   drift cache as a side effect for a group nothing has genuinely resolved yet (FR-007;
+    ///   regression-tested by `per_group_ontology.rs`'s
+    ///   `wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache`).
     pub fn clear_group_drift(&self, group_id: &str, ontology: Option<Arc<Ontology>>) {
         if let Ok(mut guard) = self.group_ontologies.lock() {
-            guard
-                .entry(group_id.to_string())
-                .and_modify(|e| e.drift = GroupDriftStatus::default())
-                .or_insert_with(|| GroupOntologyEntry {
-                    ontology,
-                    drift: GroupDriftStatus::default(),
-                });
+            match guard.get_mut(group_id) {
+                Some(GroupOntologyCacheState::Resolved(e)) => {
+                    e.drift = GroupDriftStatus::default();
+                }
+                Some(slot @ GroupOntologyCacheState::Resolving) => {
+                    *slot = GroupOntologyCacheState::Resolved(GroupOntologyEntry {
+                        ontology,
+                        drift: GroupDriftStatus::default(),
+                    });
+                }
+                None => {}
+            }
         }
     }
 
@@ -608,17 +689,19 @@ mod tests {
         }
     }
 
-    fn make_state(workspace_root: &Path, ontology: Option<Ontology>) -> AppState {
-        let dir = TempDir::new().unwrap();
+    // Mirrors `tests/per_group_ontology.rs`'s `make_db`: the caller owns the `TempDir` for the
+    // test's scope so it's cleaned up on drop, instead of leaking its backing directory.
+    fn make_db(dir: &TempDir) -> Arc<Db> {
         let db = Arc::new(Db::open(dir.path().join("test.db").to_str().unwrap()).unwrap());
         {
             let conn = db.connect().unwrap();
             conn.init_schema(EMB_DIM).unwrap();
         }
+        db
+    }
+
+    fn make_state(db: Arc<Db>, workspace_root: &Path, ontology: Option<Ontology>) -> AppState {
         let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-        // Leak the TempDir's backing directory for the lifetime of this state — the DB file
-        // itself only needs to outlive the test, and these unit tests don't assert on it.
-        std::mem::forget(dir);
         AppState {
             db: ArcSwapOption::from(Some(db)),
             degraded_reason: Arc::new(Mutex::new(None)),
@@ -674,7 +757,12 @@ mod tests {
         )
         .unwrap();
 
-        let state = make_state(root, None);
+        let db_dir = TempDir::new().unwrap();
+        let state = make_state(make_db(&db_dir), root, None);
+
+        // Simulates `resolve_ontology`'s own mark-resolving step, which runs before its sidecar
+        // read so a racing remediation's clear can tell a first resolution is in flight.
+        state.mark_group_resolving("group-a");
 
         // Simulates `resolve_ontology`'s read-compute half: observes drift against the
         // as-yet-unremediated sidecar.
@@ -701,13 +789,13 @@ mod tests {
         assert!(
             !state
                 .group_drift_status("group-a")
-                .expect("clear_group_drift must upsert an entry when none existed")
+                .expect("clear_group_drift must upsert over the Resolving marker")
                 .drifted,
             "the remediation's clear must record not-drifted"
         );
 
         // The stale insert now arrives — it must not clobber the remediation's clear.
-        state.insert_group_ontology_entry_if_absent("group-a", stale_entry);
+        state.insert_group_ontology_entry_if_not_resolved("group-a", stale_entry);
         assert!(
             !state
                 .group_drift_status("group-a")
@@ -717,18 +805,23 @@ mod tests {
         );
     }
 
-    // Guards the risk flagged in Research: `clear_group_drift`'s upsert path must record the
-    // ontology it was given, not `None` — a wrong seed here is cached for the process's entire
-    // life, since a cache hit short-circuits `resolve_ontology` forever after.
+    // Guards the risk flagged in Research: `clear_group_drift`'s upsert path (triggered when a
+    // first resolution is racing it) must record the ontology it was given, not `None` — a wrong
+    // seed here is cached for the process's entire life, since a cache hit short-circuits
+    // `resolve_ontology` forever after.
     #[test]
-    fn clear_group_drift_upsert_records_the_given_ontology() {
+    fn clear_group_drift_upsert_during_in_flight_resolution_records_the_given_ontology() {
         let workspace_dir = TempDir::new().unwrap();
         let root = workspace_dir.path();
-        let state = make_state(root, None);
+        let db_dir = TempDir::new().unwrap();
+        let state = make_state(make_db(&db_dir), root, None);
 
         let ontology = Arc::new(ontology_with(OntologyMode::Open, &["Person"]));
         assert!(state.group_drift_status("group-a").is_none());
 
+        // Without this, `clear_group_drift` must stay a no-op (see the next test) — the upsert
+        // path only triggers when a first resolution is genuinely in flight.
+        state.mark_group_resolving("group-a");
         state.clear_group_drift("group-a", Some(ontology.clone()));
 
         let resolved = state.resolve_ontology("group-a");
@@ -739,13 +832,38 @@ mod tests {
         );
     }
 
-    // Edge case: an already-cached group is unaffected by the insert-if-absent change —
-    // `resolve_ontology` never reaches the compute/insert path again once cached.
+    // FR-007 regression guard (issue #495): a remediation's clear must never populate the drift
+    // cache for a group nothing has genuinely resolved yet — only an in-flight resolution's
+    // `Resolving` marker may make `clear_group_drift` upsert. Without this, a bare
+    // upsert-on-absence (the design this test replaced) reintroduces the exact bug
+    // `per_group_ontology.rs`'s `wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache`
+    // guards against: a WAL rebuild of a never-resolved group would populate its drift cache as a
+    // side effect, even with no `resolve_ontology` call anywhere in the picture.
     #[test]
-    fn already_resolved_group_is_unaffected_by_insert_if_absent() {
+    fn clear_group_drift_is_a_noop_when_no_resolution_is_in_flight() {
         let workspace_dir = TempDir::new().unwrap();
         let root = workspace_dir.path();
-        let state = make_state(root, None);
+        let db_dir = TempDir::new().unwrap();
+        let state = make_state(make_db(&db_dir), root, None);
+
+        let ontology = Arc::new(ontology_with(OntologyMode::Open, &["Person"]));
+        state.clear_group_drift("group-a", Some(ontology));
+
+        assert!(
+            state.group_drift_status("group-a").is_none(),
+            "a remediation's clear must not populate the drift cache for a group nothing has \
+             genuinely resolved yet (FR-007)"
+        );
+    }
+
+    // Edge case: an already-cached group is unaffected by the insert-if-not-resolved change —
+    // `resolve_ontology` never reaches the compute/insert path again once cached.
+    #[test]
+    fn already_resolved_group_is_unaffected_by_insert_if_not_resolved() {
+        let workspace_dir = TempDir::new().unwrap();
+        let root = workspace_dir.path();
+        let db_dir = TempDir::new().unwrap();
+        let state = make_state(make_db(&db_dir), root, None);
 
         let first = state.resolve_ontology("group-a");
         let second = state.resolve_ontology("group-a");
