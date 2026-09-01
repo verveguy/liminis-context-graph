@@ -266,11 +266,31 @@ fn ipc_req(id: i64, method: &str, params: Value) -> IpcRequest {
 /// No other test in this binary sets `LCG_EMBEDDING_TIMEOUT_MS`/`LCG_EMBEDDING_CONNECT_TIMEOUT_MS`
 /// (only `MockEmbedder` is used elsewhere in this file), so this test can set/clear them directly
 /// without a cross-test env-var lock — unlike `embedder_transport.rs`, which has many concurrent
-/// `OaiEmbedder::new_http` callers in the same binary.
+/// `OaiEmbedder::new_http` callers in the same binary. Cleanup is still RAII (`EnvVarGuard`,
+/// below), not a manual `remove_var` at the end of the test, so a panic on any assertion in
+/// between doesn't leak the override into the rest of this binary's process.
+struct EnvVarGuard {
+    keys: &'static [&'static str],
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        for key in self.keys {
+            std::env::remove_var(key);
+        }
+    }
+}
+
 #[tokio::test]
 async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write() {
     std::env::set_var("LCG_EMBEDDING_TIMEOUT_MS", "300");
     std::env::set_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS", "300");
+    let _env_guard = EnvVarGuard {
+        keys: &[
+            "LCG_EMBEDDING_TIMEOUT_MS",
+            "LCG_EMBEDDING_CONNECT_TIMEOUT_MS",
+        ],
+    };
 
     let dim = 4;
     let (db, _dir) = make_db(dim);
@@ -356,9 +376,6 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
         .expect("concurrent update must not hang indefinitely — write_lock was not released")
         .unwrap();
     let update_elapsed = start_update.elapsed();
-
-    std::env::remove_var("LCG_EMBEDDING_TIMEOUT_MS");
-    std::env::remove_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS");
 
     let create_val = serde_json::to_value(create_resp).unwrap();
     assert!(
