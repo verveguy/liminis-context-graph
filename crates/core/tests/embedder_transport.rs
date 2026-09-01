@@ -563,7 +563,7 @@ async fn http_transport_embed_roundtrip() {
     let dim = 16;
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
     let result = embedder.embed("hello world").await.unwrap();
     assert_eq!(result.len(), dim, "embedding dim should match stub");
 }
@@ -573,7 +573,7 @@ async fn http_transport_probe_returns_dim_and_model() {
     let dim = 32;
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", 1);
+    let embedder = OaiEmbedder::new_http(url, "test-model", 1).expect("valid embedder config");
     let (probed_dim, probed_model) = embedder.probe().await.unwrap();
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
@@ -723,8 +723,9 @@ async fn http_transport_sends_bearer_header_when_key_configured() {
     let dim = 16;
     let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder =
-        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim)
+        .expect("valid embedder config")
+        .with_api_key(Some("sekret-key".to_string()));
 
     embedder.embed("hello world").await.unwrap();
     embedder.probe().await.unwrap();
@@ -747,7 +748,7 @@ async fn http_transport_no_authorization_header_when_key_unset() {
     let dim = 16;
     let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     embedder.embed("hello world").await.unwrap();
 
@@ -806,8 +807,9 @@ async fn http_transport_embed_batch_sends_bearer_header_when_key_configured() {
     let dim = 4;
     let (addr, _server, captured) = spawn_stub_http_batch_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder =
-        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim)
+        .expect("valid embedder config")
+        .with_api_key(Some("sekret-key".to_string()));
 
     let texts = ["one", "two", "three"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -845,7 +847,7 @@ async fn http_transport_embed_batch_single_request_and_correct_order() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three", "four", "five"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -874,7 +876,7 @@ async fn http_transport_embed_batch_chunks_oversized_batch() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["a", "b", "c", "d", "e"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -894,7 +896,7 @@ async fn http_transport_embed_batch_empty_input_issues_no_request() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts: [&str; 0] = [];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -917,7 +919,7 @@ async fn http_transport_embed_batch_mismatched_response_errors() {
     let dim = 4;
     let (addr, _server) = spawn_stub_http_fixed_count_server(dim, 2).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three"];
     let err = embedder.embed_batch(&texts).await.unwrap_err();
