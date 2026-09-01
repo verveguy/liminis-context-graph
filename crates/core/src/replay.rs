@@ -555,6 +555,13 @@ impl WalReplayer {
         // windows are independent (FR-009) and maximizing this one's size across file boundaries
         // is what bounds embedder round-trips (SC-001).
         let mut pending_window: Vec<PendingRow> = Vec::new();
+        // Set at every `break 'files` site — cancellation via `cancel_fn`, `progress_fn`
+        // returning `false`, or a `flush_batch`/`push_resolved_rows`-reported cancel mid-flush.
+        // Guards the EOF embed-window flush below: any early exit from the file loop must drop
+        // `pending_window` unresolved, exactly like the per-row `cancel_fn` check already does,
+        // rather than let the EOF flush silently issue embedder calls and DB writes after the
+        // caller asked to stop (review finding on issue #486).
+        let mut replay_aborted = false;
         // Running max `seq` across the whole call, for FR-004's monotonicity check.
         let mut max_seq_seen: Option<u64> = None;
         // Caps individual `[WAL WARN] seq regression` lines — a WAL dir with two interleaved
@@ -581,6 +588,7 @@ impl WalReplayer {
                 };
                 if let Some(ref f) = opts.progress_fn {
                     if !f(&p) {
+                        replay_aborted = true;
                         break 'files;
                     }
                 }
@@ -773,6 +781,7 @@ impl WalReplayer {
                             opts.cancel_fn.as_ref(),
                         )?;
                         if cancelled {
+                            replay_aborted = true;
                             break 'files;
                         }
                     }
@@ -788,6 +797,7 @@ impl WalReplayer {
                 if let Some(ref cancel) = opts.cancel_fn {
                     if cancel() {
                         pending_window.clear();
+                        replay_aborted = true;
                         break 'files;
                     }
                 }
@@ -810,6 +820,7 @@ impl WalReplayer {
                         };
                         if let Some(ref f) = opts.progress_fn {
                             if !f(&p) {
+                                replay_aborted = true;
                                 break 'files;
                             }
                         }
@@ -845,15 +856,20 @@ impl WalReplayer {
                     opts.cancel_fn.as_ref(),
                 )?;
                 if outcome.cancelled {
+                    replay_aborted = true;
                     break 'files;
                 }
             }
         }
 
         // Flush any remaining embed window at EOF (issue #486) — the last, possibly-partial
-        // window must still be resolved and applied, not silently dropped. A no-op if
-        // cancellation already cleared `pending_window` above.
-        if !opts.dry_run && !pending_window.is_empty() {
+        // window must still be resolved and applied, not silently dropped, *unless* the file loop
+        // above exited early (`replay_aborted`) — whether via `cancel_fn`, `progress_fn`
+        // returning `false`, or a `flush_batch`/`push_resolved_rows`-reported cancel. Every one of
+        // those early-exit paths must drop `pending_window` unresolved, the same guarantee the
+        // per-row `cancel_fn` check already gives by explicitly clearing it — an aborted replay
+        // must never issue embedder calls or DB writes after the caller asked to stop.
+        if !opts.dry_run && !replay_aborted && !pending_window.is_empty() {
             let resolved = resolve_embed_window(
                 std::mem::take(&mut pending_window),
                 opts.recompute_embed_fn.as_ref(),
@@ -1837,7 +1853,7 @@ mod replay_tests {
     // ── resolve_embed_window_size (issue #486) — mirrors resolve_batch_size's tests above ────
 
     #[test]
-    fn test_resolve_embed_window_size_defaults_to_64() {
+    fn test_resolve_embed_window_size_accepts_explicit_64() {
         let opts = ReplayOptions {
             embed_window_size: Some(64),
             ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
@@ -2936,5 +2952,67 @@ mod replay_tests {
         );
         assert_eq!(stats.embeddings_recomputed, 5);
         assert_eq!(stats.failed_lines, 0);
+    }
+
+    /// Review finding (issue #486): cancellation reported by the WAL-file-boundary `flush_batch`
+    /// call — as opposed to the per-row `cancel_fn` check, which already clears `pending_window`
+    /// itself — must also stop the EOF embed-window flush from resolving whatever rows were still
+    /// buffered, unresolved, in `pending_window` when that boundary flush tripped. Before the
+    /// `replay_aborted` guard, the EOF block would resolve that leftover window unconditionally,
+    /// issuing an embedder call after the caller's cancellation had already been honored.
+    #[test]
+    fn replay_aborted_at_file_boundary_flush_drops_leftover_pending_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let db = make_db_with_schema(&dir);
+        // 5 rows, one file, sharing one CREATE template. embed_window_size=2 resolves rows 1-2
+        // and 3-4 into `batch` (batch_size=5, so neither push triggers a Cypher flush); row 5
+        // is left sitting in `pending_window`, unresolved, when EOF-of-file is reached.
+        for i in 0..5 {
+            write_wal_entity_create_line(
+                &wal_dir,
+                "0001.jsonl",
+                i + 1,
+                &format!("e-{i}"),
+                &format!("name-{i}"),
+            );
+        }
+
+        let embed_fn: RecomputeEmbedFn = Box::new(|texts: &[&str]| {
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 0.0, 0.0, 0.0])
+                .collect())
+        });
+
+        // False for the main loop's 5 per-row cancel checks (one per WAL line read); true from
+        // the 6th call onward, which lands inside the file-boundary `flush_batch`'s per-row loop
+        // over the 4 already-resolved rows sitting in `batch`.
+        let call_n = AtomicUsize::new(0);
+        let cancel_fn: CancelFn = Box::new(move || call_n.fetch_add(1, Ordering::SeqCst) >= 5);
+
+        let conn = db.connect().unwrap();
+        let stats = WalReplayer::new(&wal_dir)
+            .replay_opts(
+                &conn,
+                ReplayOptions {
+                    embed_window_size: Some(2),
+                    batch_size: Some(5),
+                    cancel_fn: Some(cancel_fn),
+                    ..ReplayOptions::new(embed_fn, 4)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            stats.embed_calls, 4,
+            "row 5's leftover pending window must never reach an embed call once the \
+             file-boundary flush already reported cancellation"
+        );
+        assert_eq!(stats.embeddings_recomputed, 4);
     }
 }
