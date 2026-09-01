@@ -158,11 +158,11 @@ pub struct ReplayStats {
     /// Count of `flush_batch` transactions that were rolled back — either by the lbug engine's
     /// auto-rollback-on-exception or by an explicit `ROLLBACK` on cancellation (issue #240).
     pub transactions_rolled_back: u64,
-    /// Count of embedding vector params (`name_embedding`/`fact_embedding`/`content_embedding`)
-    /// successfully derived by invoking `ReplayOptions::recompute_embed_fn` on the row's
-    /// co-located source text, replacing the value bound into the graph (issue #440, FR-001).
-    /// Only incremented when `recompute_embed_fn` is configured; stays 0 for a caller that
-    /// leaves recompute disabled (today's stored-vector replay behavior).
+    /// Count of embedding vector params (`name_embedding`/`fact_embedding`/`content_embedding`/
+    /// `summary_embedding`) successfully derived by invoking `ReplayOptions::recompute_embed_fn`
+    /// on the row's co-located source text, replacing whatever the WAL record carried for that
+    /// key — recompute runs unconditionally, on every replay, for every row whose Cypher
+    /// template references a recognized vector placeholder (issue #526, FR-001/FR-002).
     pub embeddings_recomputed: u64,
     /// Count of times `ReplayOptions::recompute_embed_fn` was actually invoked (issue #440,
     /// FR-003). This measures callback invocations, including callback cache hits — it does not
@@ -171,22 +171,36 @@ pub struct ReplayStats {
     /// itself. SC-005's cache-effectiveness bound is verified against this counter via a plain
     /// counting closure that wraps the cache, not against `EmbeddingCache` internals directly.
     pub embed_calls: u64,
-    /// Count of embedding vector params left bound to their stored WAL value, verbatim, because
-    /// `recompute_embed_fn` was configured but the row had no co-located source text available
-    /// (issue #440, FR-002). Only incremented when `recompute_embed_fn` is configured — like
-    /// `embeddings_recomputed`, this counter lives inside `recompute_row_embeddings`, which is
-    /// only called when `opts.recompute_embed_fn` is `Some`, so it stays 0 (not incremented at
-    /// all) for a caller that leaves recompute disabled entirely; that caller's rows are bound to
-    /// their stored vectors exactly as before this issue, just with none of the new counters
-    /// tracking it. Never a failure; this is today's replay behavior for that row, preserved
-    /// exactly.
-    pub embeddings_recompute_fallback: u64,
+    /// Count of embedding vector params that had no co-located source text available to recompute
+    /// from (issue #526, FR-002/FR-005) — renamed from the pre-#526 `embeddings_recompute_fallback`
+    /// now that there is no stored vector left to fall back to. What happens to the row depends on
+    /// whether the vector param is the mutation's only purpose: a vector-only `SET` with no text is
+    /// skipped entirely (counted in [`Self::embeddings_skip_rows`], preserving whatever the
+    /// entity's own CREATE record already computed for that column), while any other record (most
+    /// commonly a CREATE, which must still be created) gets a same-dimension zero vector instead —
+    /// see `is_vector_only_set`. Never a failure by itself; this is normal, ongoing WAL shape (e.g.
+    /// the pre-existing Python/graphiti-driver SET-only vector updates in
+    /// `tests/fixtures/wal/python_produced.jsonl`), not evidence the embedder is unreachable.
+    pub embeddings_recompute_skipped_no_text: u64,
     /// Count of embedding vector params left bound to their stored WAL value, verbatim, because
     /// `recompute_embed_fn` was invoked but returned an error (issue #440) — e.g. the embedder
     /// sidecar was transiently unreachable. Never fatal to replay (recompute is explicitly
     /// self-healing, per the spec's Assumptions), but counted separately from
-    /// `embeddings_recompute_fallback` so a transient outage is never silent.
+    /// `embeddings_recompute_skipped_no_text` so a transient outage is never silent.
     pub embeddings_recompute_failed: u64,
+    /// Count of WAL rows skipped entirely — never executed against the database at all — because
+    /// they were a vector-only `SET` mutation (see `is_vector_only_set`) with no co-located source
+    /// text to recompute from, and no failure either (issue #526, FR-005). Executing such a row
+    /// with a placeholder zero vector would *overwrite* whatever real vector the entity's own
+    /// CREATE record already computed for that column, actively degrading it — skipping preserves
+    /// it. This is the one WAL record shape confirmed to have no source text co-located in the
+    /// same record (the pre-existing Python/graphiti-driver SET-only vector updates already in the
+    /// wild); every other vector-bearing record kind either already co-locates its text or, for a
+    /// CREATE-type record that fails recompute, gets a zero-vector fallback instead of being
+    /// skipped (see `embeddings_recompute_skipped_no_text`). Excluded from `lines_replayed` and
+    /// from the `fidelity_warning` ratio, matching `legacy_skipped_lines`'s precedent: this is
+    /// benign, expected WAL shape, not a sign of a broken replay.
+    pub embeddings_skip_rows: u64,
 }
 
 impl ReplayStats {
@@ -199,16 +213,17 @@ impl ReplayStats {
     /// True when no embedding recompute *attempt* failed during this replay
     /// (`embeddings_recompute_failed == 0`) — e.g. the embedder sidecar was never unreachable,
     /// no recomputed vector had the wrong dimension, none was non-finite. Deliberately does
-    /// **not** require `embeddings_recompute_fallback == 0`: a row with no co-located source
-    /// text (FR-002 — e.g. a `SET`-only mutation that updates a field without re-supplying the
-    /// text an already-recomputed vector on that node was derived from) is normal, ongoing WAL
-    /// shape, not a defect, and is common enough on real corpora that requiring zero fallbacks
-    /// would make a replay/rebuild almost never confirm a match. A replay call site persisting
-    /// an embedding identity (issue #440, FR-006/FR-007) alongside `applied_seq` should gate
-    /// that write on this: persisting `Some(identity)` after a real recompute failure would make
-    /// `embedding_model_status` read `"match"` for a group that silently kept stale vectors
-    /// because the embedder couldn't be reached — the exact silent-divergence FR-008 exists to
-    /// prevent. `embeddings_recompute_fallback` remains a purely informational counter.
+    /// **not** require `embeddings_recompute_skipped_no_text == 0`: a row with no co-located
+    /// source text (FR-002/FR-005 — e.g. a `SET`-only mutation that updates a field without
+    /// re-supplying the text an already-recomputed vector on that node was derived from) is
+    /// normal, ongoing WAL shape, not a defect, and is common enough on real corpora that
+    /// requiring zero skips would make a replay/rebuild almost never confirm a match. A replay
+    /// call site persisting an embedding identity (issue #440, FR-006/FR-007) alongside
+    /// `applied_seq` should gate that write on this: persisting `Some(identity)` after a real
+    /// recompute failure would make `embedding_model_status` read `"match"` for a group that
+    /// silently kept stale vectors because the embedder couldn't be reached — the exact
+    /// silent-divergence FR-008 exists to prevent. `embeddings_recompute_skipped_no_text` remains
+    /// a purely informational counter.
     pub fn embeddings_recompute_had_no_failures(&self) -> bool {
         self.embeddings_recompute_failed == 0
     }
@@ -220,28 +235,37 @@ pub type ProgressFn = Box<dyn Fn(&ReplayProgress) -> bool + Send>;
 pub type CancelFn = Box<dyn Fn() -> bool + Send>;
 /// Callback that receives a `[WAL PROGRESS]` log line; replaces `eprintln!` in tests.
 pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
-/// Synchronous embedding callback (issue #440) invoked once per WAL row that carries a
-/// recognized embedding vector param with co-located source text (FR-001). `WalReplayer` itself
-/// has no tokio dependency and several call sites run with no ambient runtime at all (its own
-/// unit tests, `real_corpus_replay_perf.rs`) — so recompute is expressed as a plain sync closure,
-/// and each caller bridges its own `Arc<dyn Embedder>` into this shape however fits its own
-/// runtime context (`Handle::current().block_on` from inside `spawn_blocking`, or a small
-/// dedicated single-threaded runtime for a bare-sync caller). A caller wanting a cache (FR-003)
-/// wraps `EmbeddingCache::get_or_compute` inside this closure — `replay.rs` never constructs or
-/// touches a cache itself.
+/// Synchronous embedding callback invoked once per WAL row whose Cypher template references a
+/// recognized embedding vector placeholder (issue #526, FR-001/FR-002). `WalReplayer` itself has
+/// no tokio dependency and several call sites run with no ambient runtime at all (its own unit
+/// tests, `real_corpus_replay_perf.rs`) — so recompute is expressed as a plain sync closure, and
+/// each caller bridges its own `Arc<dyn Embedder>` into this shape however fits its own runtime
+/// context (`Handle::current().block_on` from inside `spawn_blocking`, or a small dedicated
+/// single-threaded runtime for a bare-sync caller). A caller wanting a cache (FR-003 of issue
+/// #440) wraps `EmbeddingCache::get_or_compute` inside this closure — `replay.rs` never
+/// constructs or touches a cache itself.
 pub type RecomputeEmbedFn = Box<dyn Fn(&str) -> Result<Vec<f32>, Error> + Send>;
 
 /// `(embedding vector param, co-located source-text param)` pairs recognized during replay
-/// recompute (issue #440, FR-001/FR-002). Per the spec's Assumptions, these are the only three
-/// embedding kinds present in the schema today.
+/// recompute (issue #526, FR-001/FR-002) — the crate-wide single source of truth for which
+/// columns are embedding vectors, shared with [`crate::wal::VECTOR_PARAM_KEYS`] (the writer's
+/// strip list; kept in sync by `tests::embedding_text_pairs_key_set_matches_wal_strip_list`).
+///
+/// A pair's relevance to a given WAL row is decided by whether the row's **Cypher template**
+/// contains the vector param's `$placeholder` — not by whether the row's params object happens to
+/// carry that key. This is what lets replay recognize a vector-bearing row after the writer has
+/// stopped emitting the param at all (issue #526): the template still says `$name_embedding`,
+/// even though nothing supplies it any more. It also means an older, vector-bearing WAL replays
+/// identically — the template text is unchanged either way, only whether the JSON also happens to
+/// carry a stale value differs, and that stale value is always ignored (FR-002/FR-003).
 const EMBEDDING_TEXT_PAIRS: &[(&str, &str)] = &[
     ("name_embedding", "name"),
     ("fact_embedding", "fact"),
     ("content_embedding", "content"),
+    ("summary_embedding", "summary"),
 ];
 
 /// Options for `WalReplayer::replay_opts`.
-#[derive(Default)]
 pub struct ReplayOptions {
     /// Skip WAL lines with `seq < from_seq`. Default: 0 (replay all).
     pub from_seq: u64,
@@ -270,13 +294,57 @@ pub struct ReplayOptions {
     /// lines are written to stderr via `eprintln!`. Production passes `None`; tests inject a
     /// closure capturing to `Arc<Mutex<Vec<String>>>` to verify throttle behaviour.
     pub progress_log_fn: Option<ProgressLogFn>,
-    /// Optional recompute-on-replay callback (issue #440, FR-001). When `Some`, every row
-    /// carrying a recognized embedding vector param (`name_embedding`/`fact_embedding`/
-    /// `content_embedding`, see `EMBEDDING_TEXT_PAIRS`) with co-located, non-empty source text
-    /// has its vector recomputed by this callback instead of binding the value stored in the
-    /// WAL. When `None` (the default), replay behaves exactly as it did before this issue —
-    /// stored vectors are bound verbatim.
-    pub recompute_embed_fn: Option<RecomputeEmbedFn>,
+    /// Mandatory recompute-on-replay callback (issue #526, FR-001/FR-002) — replay never binds a
+    /// vector value found in a WAL record. Every row whose Cypher template references a
+    /// recognized embedding vector placeholder (`name_embedding`/`fact_embedding`/
+    /// `content_embedding`/`summary_embedding`, see [`EMBEDDING_TEXT_PAIRS`]) always has its
+    /// vector recomputed by this callback from co-located source text. There is no "disabled"
+    /// mode and no `Option` wrapper: once the writer stops emitting vector params
+    /// unconditionally, a caller with no embedder has no safe value to bind for a `CREATE`
+    /// template's vector placeholder at all, so every caller — production and test alike — must
+    /// supply one. See [`ReplayOptions::new`] and `zero_vector_embed_fn` for callers that don't
+    /// care about embedding fidelity.
+    pub recompute_embed_fn: RecomputeEmbedFn,
+    /// The embedder's fixed output dimension (issue #526). Used to size a same-dimension
+    /// zero-vector fallback when recompute has no source text (or fails) for a record that isn't
+    /// a vector-only `SET` and so must still be executed (see `is_vector_only_set`), and to
+    /// reject a recomputed vector whose length doesn't match — `lbug`'s embedding columns are
+    /// fixed-width (`FLOAT[dim]`), so binding a wrong-length vector fails at `execute_prepared`
+    /// and rolls back the *entire* same-template batch (see `flush_batch`), not just one row.
+    pub recompute_embed_dim: usize,
+}
+
+impl ReplayOptions {
+    /// Builds `ReplayOptions` with `recompute_embed_fn`/`recompute_embed_dim` set and every other
+    /// field at its convenience default (unbounded `from_seq`/`to_seq`, not a dry run, no
+    /// progress/cancel callbacks, batch size/failure cap/log interval read from their env vars,
+    /// no progress log sink).
+    pub fn new(recompute_embed_fn: RecomputeEmbedFn, recompute_embed_dim: usize) -> Self {
+        Self {
+            from_seq: 0,
+            to_seq: None,
+            dry_run: false,
+            progress_fn: None,
+            cancel_fn: None,
+            failure_sample_cap: None,
+            batch_size: None,
+            log_interval_override: None,
+            progress_log_fn: None,
+            recompute_embed_fn,
+            recompute_embed_dim,
+        }
+    }
+}
+
+/// A trivial [`RecomputeEmbedFn`] that returns a fixed-size zero vector for any input text,
+/// ignoring the text entirely. `ReplayOptions::recompute_embed_fn` is mandatory (issue #526), so
+/// every caller needs *some* correctly-sized function to supply — this one is for a caller that
+/// just needs a schema-valid vector bound and doesn't itself care about embedding fidelity (most
+/// commonly a test replaying a fixture that doesn't exercise recompute correctness). A test that
+/// does care about fidelity should bridge a real `Embedder` (e.g. `HashEmbedder`, `NameMapEmbedder`)
+/// into a sync closure instead.
+pub fn zero_vector_embed_fn(dim: usize) -> RecomputeEmbedFn {
+    Box::new(move |_text: &str| Ok(vec![0.0f32; dim]))
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.

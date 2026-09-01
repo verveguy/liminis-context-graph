@@ -210,10 +210,10 @@ pub async fn backfill_summary_embeddings(
         // proportionally to WRITE_BATCH_SIZE.
         let summary_refs: Vec<&str> = batch.iter().map(|c| c.summary.as_str()).collect();
         let embeddings = state.embedder.embed_batch(&summary_refs).await?;
-        let batch_data: Vec<(String, Vec<f32>)> = batch
+        let batch_data: Vec<(String, String, Vec<f32>)> = batch
             .iter()
             .zip(embeddings)
-            .map(|(candidate, emb)| (candidate.uuid.clone(), emb))
+            .map(|(candidate, emb)| (candidate.uuid.clone(), candidate.summary.clone(), emb))
             .collect();
 
         let db_c = Arc::clone(&db);
@@ -222,12 +222,19 @@ pub async fn backfill_summary_embeddings(
 
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let conn = db_c.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-            for (uuid, emb) in &batch_data {
+            for (uuid, summary, emb) in &batch_data {
                 // No WHERE guard (unlike backfill_relation_types): every candidate is
                 // unconditionally re-embedded on each run, by design (see module doc).
+                //
+                // `summary` is re-SET to its own already-current value alongside
+                // `summary_embedding` (issue #526, FR-005) — not because the text changes here,
+                // but so this WAL record carries its embedding's source text co-located in the
+                // same record. Without it, replay has no text to recompute this vector from and
+                // must skip the SET outright once replay stops binding a stored vector value.
                 conn.exec_params(
-                    "MATCH (n:Entity {uuid: $uuid}) SET n.summary_embedding = $emb",
-                    json!({ "uuid": uuid, "emb": emb }),
+                    "MATCH (n:Entity {uuid: $uuid}) \
+                     SET n.summary_embedding = $summary_embedding, n.summary = $summary",
+                    json!({ "uuid": uuid, "summary_embedding": emb, "summary": summary }),
                 )?;
             }
             let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());

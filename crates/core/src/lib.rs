@@ -36,7 +36,6 @@ pub mod telemetry;
 pub mod token_budget;
 pub mod types;
 pub mod wal;
-pub mod wal_embedding_identity;
 pub(crate) mod wal_exec;
 pub mod wal_generation;
 pub mod wal_group;

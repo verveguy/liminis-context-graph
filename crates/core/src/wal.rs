@@ -19,6 +19,24 @@ pub struct WalRotationInfo {
     pub closed_events: usize,
 }
 
+/// Embedding vector param keys that never belong in a durable WAL record (issue #526, FR-001) —
+/// a vector is a local cache of the database, always recomputed from co-located source text on
+/// replay (`replay::EMBEDDING_TEXT_PAIRS`), never content of the log itself. Stripped from every
+/// mutation's params in [`WalWriter::log_mutation`] before it is ever written to disk, regardless
+/// of write path — the live-write drain (`wal_exec.rs`) and `dump.rs`'s direct `log_mutation`
+/// calls both funnel through this one function, so there is no second strip site to keep in sync.
+///
+/// Kept in sync with `replay::EMBEDDING_TEXT_PAIRS`'s key set by a same-crate test
+/// (`replay::tests::embedding_text_pairs_key_set_matches_wal_strip_list`) — the two lists must
+/// never drift apart, since a key present in one but not the other would either leave a vector
+/// un-stripped here or leave replay unable to recognize a vector this writer no longer emits.
+pub(crate) const VECTOR_PARAM_KEYS: &[&str] = &[
+    "name_embedding",
+    "fact_embedding",
+    "content_embedding",
+    "summary_embedding",
+];
+
 /// One WAL record — five-field JSONL schema matching the Python `graphiti_core/driver/wal.py`.
 /// Fields are declared in `seq, ts, db, cypher, params` order; serde_json preserves
 /// struct field declaration order, matching Python's `json.dumps()` dict insertion order.
@@ -110,6 +128,10 @@ impl WalWriter {
     }
 
     /// Buffers a mutation. Filters out reads and index DDL; must be called inside `with_chunk`.
+    ///
+    /// `params` has every [`VECTOR_PARAM_KEYS`] entry stripped before the line is buffered
+    /// (issue #526, FR-001) — a vector is a local cache, recomputed from co-located source text
+    /// on replay, never durable log content.
     pub fn log_mutation(
         &mut self,
         cypher: &str,
@@ -131,7 +153,7 @@ impl WalWriter {
             ts,
             db: database.to_string(),
             cypher: cypher.to_string(),
-            params,
+            params: strip_vector_params(params),
         };
         self.global_seq += 1;
         self.pending_lines.push(line);
@@ -842,6 +864,21 @@ pub(crate) fn first_seq_in_file(path: &Path) -> Option<u64> {
 /// without reading each file's entire contents just to find its last line.
 const TAIL_READ_WINDOW: u64 = 256 * 1024;
 
+/// Removes every [`VECTOR_PARAM_KEYS`] entry from `params` (issue #526, FR-001). A no-op when
+/// `params` isn't a JSON object (e.g. `Value::Null`, recorded by `Conn::raw_query` for
+/// non-parameterized DDL) or carries none of these keys.
+fn strip_vector_params(params: serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(mut map) => {
+            for key in VECTOR_PARAM_KEYS {
+                map.remove(*key);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other,
+    }
+}
+
 /// Returns a copy of `s` with Cypher single-quoted string literals replaced by a single space.
 /// Handles `\'` escape sequences inside literals.  Used by `log_mutation` to prevent DML
 /// keywords that happen to appear inside stored string values from being misclassified as
@@ -1027,6 +1064,124 @@ fn first_seq_in_file_call_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── log_mutation vector-param stripping (issue #526, FR-001) ────────────────────────────
+
+    /// Reads every `.jsonl` line back out of `dir`, across every file, in file-then-line order —
+    /// enough for these tests, which each write exactly one line via a single `with_chunk` call.
+    fn read_wal_lines(dir: &Path) -> Vec<WalLine> {
+        let mut files: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("jsonl"))
+            .collect();
+        files.sort();
+        files
+            .iter()
+            .flat_map(|p| {
+                fs::read_to_string(p)
+                    .unwrap()
+                    .lines()
+                    .map(|l| serde_json::from_str::<WalLine>(l).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn log_mutation_strips_vector_params_from_a_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation(
+                    "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: \
+                     $name_embedding, summary: $summary, summary_embedding: \
+                     $summary_embedding})",
+                    serde_json::json!({
+                        "uuid": "e1",
+                        "name": "Alice",
+                        "name_embedding": [1.0, 0.0, 0.0, 0.0],
+                        "summary": "Alice summary",
+                        "summary_embedding": [0.0, 1.0, 0.0, 0.0],
+                    }),
+                    "test",
+                )
+            })
+            .unwrap();
+
+        let lines = read_wal_lines(tmp.path());
+        let params = &lines[0].params;
+        assert!(params.get("name_embedding").is_none());
+        assert!(params.get("summary_embedding").is_none());
+        assert_eq!(params.get("uuid").unwrap(), "e1");
+        assert_eq!(params.get("name").unwrap(), "Alice");
+        assert_eq!(params.get("summary").unwrap(), "Alice summary");
+    }
+
+    #[test]
+    fn log_mutation_leaves_non_vector_params_and_mutations_unaffected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation(
+                    "MERGE (n:Entity {uuid: $uuid}) SET n.name = $name",
+                    serde_json::json!({ "uuid": "e1", "name": "Alice" }),
+                    "test",
+                )
+            })
+            .unwrap();
+
+        let lines = read_wal_lines(tmp.path());
+        let params = &lines[0].params;
+        assert_eq!(params.get("uuid").unwrap(), "e1");
+        assert_eq!(params.get("name").unwrap(), "Alice");
+    }
+
+    #[test]
+    fn log_mutation_strips_vector_params_from_a_dump_shaped_direct_call() {
+        // dump.rs calls `WalWriter::log_mutation` directly (not through `wal_exec.rs`'s
+        // `wal_params()` helper) — this test pins that the strip still applies via the one
+        // choke point every write path shares, matching `dump.rs`'s MERGE-form re-materialization
+        // templates.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation(
+                    "MERGE (n:Episodic {uuid: $uuid}) SET n.content = $content, \
+                     n.content_embedding = $content_embedding",
+                    serde_json::json!({
+                        "uuid": "ep1",
+                        "content": "some text",
+                        "content_embedding": [1.0, 2.0, 3.0, 4.0],
+                    }),
+                    "test",
+                )
+            })
+            .unwrap();
+
+        let lines = read_wal_lines(tmp.path());
+        let params = &lines[0].params;
+        assert!(params.get("content_embedding").is_none());
+        assert_eq!(params.get("content").unwrap(), "some text");
+    }
+
+    #[test]
+    fn log_mutation_strip_is_a_no_op_for_null_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut writer = WalWriter::new(tmp.path(), 1000, 0).unwrap();
+        writer
+            .with_chunk(|w| {
+                w.log_mutation("CREATE (:Entity {uuid: 'x'})", serde_json::Value::Null, "test")
+            })
+            .unwrap();
+
+        let lines = read_wal_lines(tmp.path());
+        assert_eq!(lines[0].params, serde_json::Value::Null);
+    }
 
     #[test]
     fn looks_like_mutation_detects_keywords_touching_parentheses() {

@@ -16,7 +16,6 @@
 //! incorrect result.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
@@ -45,7 +44,8 @@ pub struct EmbedderContext {
 }
 
 impl EmbedderContext {
-    /// `(model, dim)` identity to compare/persist via `wal_embedding_identity`/`WalPosition`.
+    /// `(model, dim)` identity to compare/persist via `WalPositionRecord` (FR-004) — the sole
+    /// surviving model-identity mechanism now that the WAL-side stamp is gone (issue #526).
     pub fn identity(&self) -> (String, i64) {
         (self.model.clone(), self.embedder.dim() as i64)
     }
@@ -71,15 +71,6 @@ impl EmbedderContext {
         })
     }
 
-    /// Formats FR-006's replay-time mismatch message against `wal_dir`'s recorded embedding
-    /// identity, if this context's identity differs from it — `None` when there's no mismatch
-    /// (including "unknown", per `wal_embedding_identity::check_model_identity_for_replay`).
-    /// Callers decide how to surface it (`[WAL WARN]` log line, etc.); this only computes it, so
-    /// all four replay call sites report identical wording.
-    pub fn check_replay_mismatch(&self, wal_dir: &Path) -> Option<String> {
-        let (model, dim) = self.identity();
-        crate::wal_embedding_identity::check_model_identity_for_replay(wal_dir, (&model, dim))
-    }
 }
 
 /// Content-addressed, in-memory-only embedding cache. Safe to share across threads via `Arc`;

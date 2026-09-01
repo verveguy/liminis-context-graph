@@ -492,24 +492,6 @@ impl AppState {
                 self.wal_max_bytes_per_file,
             ) {
                 Ok(w) => {
-                    // Mint this group's embedding-model identity stamp (issue #440, FR-005) the
-                    // same way `wal_generation`'s own reset token is minted — gated on
-                    // `global_seq() == 0` so a pre-existing populated stream (no stamp yet) is
-                    // never retroactively backfilled, only a genuinely fresh one. Non-fatal on
-                    // error, matching the generation-mint error handling this mirrors: a missed
-                    // stamp only means FR-006's replay-time check stays "unknown" for this
-                    // stream, never a false mismatch.
-                    if w.global_seq() == 0 {
-                        if let Err(e) = crate::wal_embedding_identity::ensure_model_identity(
-                            &dir,
-                            &self.embedding_model,
-                            self.embedder.dim() as i64,
-                        ) {
-                            eprintln!(
-                                "[WAL WARN] wal_writers: failed to mint embedding-model identity for group {group_id:?} at {dir:?} (non-fatal): {e}"
-                            );
-                        }
-                    }
                     guard.insert(group_id.to_string(), w);
                 }
                 Err(e) => {
