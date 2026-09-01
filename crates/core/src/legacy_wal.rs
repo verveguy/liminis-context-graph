@@ -9,11 +9,14 @@
 //! - Transforms that change only how a param *value* is typed/formatted →
 //!   `db.rs::json_value_for_param` (e.g., RFC-3339 and space-format timestamp coercion)
 //!
-//! Pipeline order in `replay.rs`: `strip_vecf32` → `expand_bulk_property_set` → bound-param execution
+//! Pipeline order in `replay.rs`: `strip_vecf32` → `promote_inline_vector_literals_to_params` →
+//! `expand_bulk_property_set` → bound-param execution
 
 use std::sync::OnceLock;
 
 use regex::Regex;
+
+use crate::wal::VECTOR_PARAM_KEYS;
 
 /// Strips FalkorDB's `vecf32(...)` vector-constructor wrapper from a Cypher string.
 ///
@@ -77,6 +80,68 @@ pub(crate) fn strip_vecf32(cypher: &str) -> String {
     }
 
     result
+}
+
+/// Rewrites a bare inline vector-array literal assigned to a recognized embedding column (issue
+/// #526, a review finding on this issue's own PR) into a `$<vec_key>` param reference, inserting
+/// the literal's parsed value into `params` under that key — the shape `strip_vecf32` leaves
+/// behind for a legacy `VECF32([...])`-wrapped literal, e.g. `ep.content_embedding = VECF32([0.1,
+/// 0.2, 0.3, 0.4])` strips to `ep.content_embedding = [0.1, 0.2, 0.3, 0.4]`, with no `$` placeholder
+/// at all. Without this rewrite, `replay::recompute_row_embeddings`'s relevance check
+/// (`cypher.contains("$vec_key")`) can never recognize the row as vector-bearing, so a legacy
+/// VECF32-inline-array WAL row would silently keep its stored vector bound forever — even when
+/// co-located source text is present and recompute could otherwise run — contradicting FR-002/
+/// FR-003's "never bind a stored value" guarantee. A `vecf32($param)` param-ref form needs no such
+/// rewrite: it already produces a `$`-prefixed reference after `strip_vecf32` alone, as long as the
+/// WAL's own param name matches the column name (the shape every known param-ref producer uses).
+///
+/// Only matches `<vec_key> = [<...>]` — an assignment that was never `VECF32`-wrapped (a plain
+/// bound param, `<vec_key> = $vec_key`) has no `[` immediately after `=`, so this is a no-op for
+/// every non-legacy WAL row. Takes `params` by value, mirroring `expand_bulk_property_set`.
+pub(crate) fn promote_inline_vector_literals_to_params(
+    cypher: &str,
+    params: serde_json::Value,
+) -> (String, serde_json::Value) {
+    static RES: OnceLock<Vec<(&'static str, Regex)>> = OnceLock::new();
+    let res = RES.get_or_init(|| {
+        VECTOR_PARAM_KEYS
+            .iter()
+            .map(|key| {
+                let re =
+                    Regex::new(&format!(r"(?i)\b{key}\s*=\s*(\[[^\]]*\])")).expect("valid regex");
+                (*key, re)
+            })
+            .collect()
+    });
+
+    if !matches!(&params, serde_json::Value::Object(_)) {
+        return (cypher.to_string(), params);
+    }
+    let mut params = params;
+
+    let mut result = cypher.to_string();
+    for (vec_key, re) in res {
+        // Re-search `result` on each iteration (not the original `cypher`) since an earlier
+        // key's replacement may have shifted byte offsets.
+        let Some(caps) = re.captures(&result) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&caps[1]) else {
+            // Malformed literal — leave it as-is rather than risk binding a partially-rewritten
+            // Cypher string; the row falls through to whatever happens today (a bind error at
+            // execute_prepared, surfaced as a normal replay failure).
+            continue;
+        };
+        let full = caps.get(0).unwrap();
+        let (start, end) = (full.start(), full.end());
+        result.replace_range(start..end, &format!("{vec_key} = ${vec_key}"));
+        params
+            .as_object_mut()
+            .expect("checked Object above")
+            .insert((*vec_key).to_string(), parsed);
+    }
+
+    (result, params)
 }
 
 /// Expands FalkorDB/Neo4j bulk property-set `SET n = $props` to individual assignments.
@@ -201,6 +266,71 @@ mod tests {
     fn strip_vecf32_no_op_when_absent() {
         let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n.name = $name";
         assert_eq!(strip_vecf32(cypher), cypher);
+    }
+
+    // --- promote_inline_vector_literals_to_params (issue #526) ---
+
+    /// The exact gap a review finding flagged on this issue's own PR: a legacy `VECF32([...])`
+    /// literal, once `strip_vecf32` unwraps it to a bare array, must become a `$vec_key` param
+    /// reference — otherwise replay's relevance check (`cypher.contains("$vec_key")`) never
+    /// recognizes the row, and the stored literal binds forever, unrecomputed.
+    #[test]
+    fn promote_inline_vector_literal_rewrites_to_param_reference() {
+        let cypher = strip_vecf32(
+            "MERGE (ep:Episodic {uuid: $uuid}) SET ep.content = $content, \
+             ep.content_embedding = VECF32([0.1, 0.2, 0.3, 0.4])",
+        );
+        let params = json!({"uuid": "ep1", "content": "hello"});
+        let (new_cypher, new_params) = promote_inline_vector_literals_to_params(&cypher, params);
+        assert!(
+            new_cypher.contains("content_embedding = $content_embedding"),
+            "expected a param reference; got: {new_cypher}"
+        );
+        assert_eq!(new_params["content_embedding"], json!([0.1, 0.2, 0.3, 0.4]));
+        // The original non-vector params must survive untouched.
+        assert_eq!(new_params["uuid"], json!("ep1"));
+        assert_eq!(new_params["content"], json!("hello"));
+    }
+
+    #[test]
+    fn promote_inline_vector_literal_handles_multiple_keys_in_one_row() {
+        // `SET ... =` form, matching the real shapes seen in
+        // `tests/fixtures/wal/falkordb_era_episodes.jsonl` — lcg's own writer never inlines a
+        // vector literal at all (it always binds via params), so a `CREATE {...}` colon-syntax
+        // literal wrapped in `VECF32(...)` has no known real-world producer to model here.
+        let cypher = strip_vecf32(
+            "MERGE (n:Entity {uuid: $uuid}) ON CREATE SET n.name = $name, \
+             n.name_embedding = VECF32([1.0, 0.0]), n.summary = $summary, \
+             n.summary_embedding = VECF32([0.0, 1.0])",
+        );
+        let params = json!({"uuid": "e1", "name": "Alice", "summary": "Alice summary"});
+        let (new_cypher, new_params) = promote_inline_vector_literals_to_params(&cypher, params);
+        assert!(new_cypher.contains("name_embedding = $name_embedding"));
+        assert!(new_cypher.contains("summary_embedding = $summary_embedding"));
+        assert_eq!(new_params["name_embedding"], json!([1.0, 0.0]));
+        assert_eq!(new_params["summary_embedding"], json!([0.0, 1.0]));
+    }
+
+    /// A `vecf32($param)` param-ref form already produces a `$`-prefixed reference after
+    /// `strip_vecf32` alone — this function must be a no-op for it (no `[` immediately after `=`).
+    #[test]
+    fn promote_inline_vector_literal_is_noop_for_param_ref_form() {
+        let cypher = strip_vecf32("SET n.name_embedding = vecf32($name_embedding)");
+        let params = json!({"name_embedding": [1.0, 2.0]});
+        let (new_cypher, new_params) =
+            promote_inline_vector_literals_to_params(&cypher, params.clone());
+        assert_eq!(new_cypher, cypher);
+        assert_eq!(new_params, params);
+    }
+
+    #[test]
+    fn promote_inline_vector_literal_no_op_when_absent() {
+        let cypher = "MERGE (n:Entity {uuid: $uuid}) SET n.name = $name";
+        let params = json!({"uuid": "abc", "name": "Alice"});
+        let (new_cypher, new_params) =
+            promote_inline_vector_literals_to_params(cypher, params.clone());
+        assert_eq!(new_cypher, cypher);
+        assert_eq!(new_params, params);
     }
 
     // --- expand_bulk_property_set ---

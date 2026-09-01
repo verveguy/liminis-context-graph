@@ -84,6 +84,12 @@ async fn dispatch(id: i64, method: &str, params: Value, state: Arc<AppState>) ->
 }
 
 /// Writes test WAL files into `wal_dir` with one Entity, one Episodic, and one MENTIONS edge.
+///
+/// Uses the real `$name_embedding`/`$content_embedding` param names (matching the column names,
+/// the convention every real writer uses), not a synthetic mismatched name — a mismatched name
+/// would bypass both `WalWriter::log_mutation`'s FR-001 strip list and replay's FR-002 template-
+/// based recompute detection, silently defeating the very contract this issue's round-trip tests
+/// exist to exercise (a review finding on this issue's own PR).
 fn write_test_wal(wal_dir: &std::path::Path) {
     let mut writer = WalWriter::new(wal_dir, 10_000, 0).unwrap();
     writer
@@ -92,7 +98,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
             w.log_mutation(
                 "MERGE (n:Entity {uuid: $uuid}) SET \
                  n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                 n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                 n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                  n.summary = $summary, n.attributes = $attrs",
                 json!({
                     "uuid": "rt-entity-1",
@@ -100,7 +106,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                     "gid": "rt-group",
                     "labels": ["Entity"],
                     "created_at": "2026-01-01 00:00:00",
-                    "emb": [1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64],
+                    "name_embedding": [1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64],
                     "summary": "Alice summary",
                     "attrs": "{}",
                 }),
@@ -112,7 +118,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                  n.name = $name, n.group_id = $gid, \
                  n.created_at = timestamp($created_at), n.source = $source, \
                  n.source_description = $src_desc, n.content = $content, \
-                 n.content_embedding = $emb, \
+                 n.content_embedding = $content_embedding, \
                  n.valid_at = timestamp($valid_at), n.entity_edges = $edges",
                 json!({
                     "uuid": "rt-ep-1",
@@ -122,7 +128,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                     "source": "text",
                     "src_desc": "test source",
                     "content": "Alice is a person.",
-                    "emb": [0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64],
+                    "content_embedding": [0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64],
                     "valid_at": "2026-01-01 00:00:00",
                     "edges": [],
                 }),
@@ -287,7 +293,7 @@ async fn test_dump_wal_no_vecf32_in_output() {
                 w.log_mutation(
                     "MERGE (n:Entity {uuid: $uuid}) SET \
                      n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                     n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                      n.summary = $summary, n.attributes = $attrs",
                     json!({
                         "uuid": "vf-entity-1",
@@ -295,7 +301,7 @@ async fn test_dump_wal_no_vecf32_in_output() {
                         "gid": "vf-group",
                         "labels": ["Entity"],
                         "created_at": "2026-01-01 00:00:00",
-                        "emb": [0.1_f64, 0.2_f64, 0.3_f64, 0.4_f64],
+                        "name_embedding": [0.1_f64, 0.2_f64, 0.3_f64, 0.4_f64],
                         "summary": "embedding test",
                         "attrs": "{}",
                     }),
@@ -356,7 +362,7 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
                 w.log_mutation(
                     "MERGE (n:Entity {uuid: $uuid}) SET \
                      n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                     n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                      n.summary = $summary, n.attributes = $attrs",
                     json!({
                         "uuid": "dup-entity-1",
@@ -364,7 +370,7 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
                         "gid": "dup-group",
                         "labels": ["Entity"],
                         "created_at": "2026-01-01 00:00:00",
-                        "emb": [0.5_f64, 0.5_f64, 0.5_f64, 0.5_f64],
+                        "name_embedding": [0.5_f64, 0.5_f64, 0.5_f64, 0.5_f64],
                         "summary": "",
                         "attrs": "{}",
                     }),

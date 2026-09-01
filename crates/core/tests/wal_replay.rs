@@ -2602,6 +2602,11 @@ fn test_falkordb_expired_at_merge_replays_successfully() {
 }
 
 /// FR-008b: VECF32([…]) inline array form strips correctly and the containing mutation succeeds.
+///
+/// Issue #526 (a review finding on this issue's own PR): this row has co-located `content` text,
+/// so once the inline literal is promoted to a `$content_embedding` param reference, recompute
+/// must actually run and replace the WAL-stored `[0.1, 0.2, 0.3, 0.4]` literal — not silently bind
+/// it verbatim, which would contradict FR-002/FR-003's "never bind a stored value" guarantee.
 #[test]
 fn test_vecf32_inline_array_strips_correctly() {
     let wal_dir = TempDir::new().unwrap();
@@ -2621,8 +2626,15 @@ fn test_vecf32_inline_array_strips_correctly() {
     )
     .unwrap();
 
+    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(|text: &str| {
+        assert_eq!(
+            text, "inline test",
+            "recompute must use the co-located content text"
+        );
+        Ok(vec![9.0, 8.0, 7.0, 6.0])
+    });
     let stats = WalReplayer::new(wal_dir.path())
-        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+        .replay(&conn, embed_fn, 4)
         .expect("replay must succeed");
 
     assert_eq!(
@@ -2637,6 +2649,30 @@ fn test_vecf32_inline_array_strips_correctly() {
             .collect::<Vec<_>>()
     );
     assert_eq!(stats.lines_replayed, 1);
+    assert_eq!(
+        stats.embeddings_recomputed, 1,
+        "the inline literal must be recognized and recomputed, not silently bound verbatim"
+    );
+
+    let rows = conn
+        .cypher_query("MATCH (ep:Episodic {uuid: 'ep-inline-vecf32'}) RETURN ep.content_embedding")
+        .expect("cypher ok");
+    assert!(!rows.is_empty(), "the episodic node must exist");
+    let emb_str = &rows[0][0];
+    let floats: Vec<f64> = emb_str
+        .trim_matches(|c: char| c == '[' || c == ']')
+        .split(',')
+        .map(|s| {
+            s.trim().parse::<f64>().unwrap_or_else(|_| {
+                panic!("embedding component must parse as a float: {emb_str:?}")
+            })
+        })
+        .collect();
+    assert_eq!(
+        floats,
+        vec![9.0, 8.0, 7.0, 6.0],
+        "content_embedding must be the recomputed vector, not the WAL's stored [0.1, 0.2, 0.3, 0.4], got: {emb_str:?}"
+    );
 }
 
 /// FR-008b: vecf32($param) lowercase param-ref form strips correctly.

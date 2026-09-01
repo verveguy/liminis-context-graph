@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use crate::db::Conn;
 use crate::error::Error;
-use crate::legacy_wal::{expand_bulk_property_set, strip_vecf32};
+use crate::legacy_wal::{
+    expand_bulk_property_set, promote_inline_vector_literals_to_params, strip_vecf32,
+};
 use crate::wal::{first_seq_in_file, strip_quoted_literals, WalLine};
 
 /// lbug error-message substrings (lowercase) that classify a replay failure as a known legacy
@@ -182,11 +184,14 @@ pub struct ReplayStats {
     /// the pre-existing Python/graphiti-driver SET-only vector updates in
     /// `tests/fixtures/wal/python_produced.jsonl`), not evidence the embedder is unreachable.
     pub embeddings_recompute_skipped_no_text: u64,
-    /// Count of embedding vector params left bound to their stored WAL value, verbatim, because
-    /// `recompute_embed_fn` was invoked but returned an error (issue #440) — e.g. the embedder
-    /// sidecar was transiently unreachable. Never fatal to replay (recompute is explicitly
-    /// self-healing, per the spec's Assumptions), but counted separately from
-    /// `embeddings_recompute_skipped_no_text` so a transient outage is never silent.
+    /// Count of embedding vector params where `recompute_embed_fn` was invoked but returned an
+    /// error (issue #440) — e.g. the embedder sidecar was transiently unreachable, or the
+    /// recomputed vector had the wrong dimension or was non-finite. Never a stored WAL value:
+    /// post-#526, this is treated exactly like missing text — `is_vector_only_set` decides
+    /// whether the row is skipped entirely or zero-filled (issue #526, FR-002/FR-005). Never fatal
+    /// to replay (recompute is explicitly self-healing, per the spec's Assumptions), but counted
+    /// separately from `embeddings_recompute_skipped_no_text` so a transient outage is never
+    /// silent.
     pub embeddings_recompute_failed: u64,
     /// Count of WAL rows skipped entirely — never executed against the database at all — because
     /// they were a vector-only `SET` mutation (see `is_vector_only_set`) with no co-located source
@@ -677,10 +682,18 @@ impl WalReplayer {
                         stats.match_prefixed_replayed += 1;
                     }
                 } else {
-                    // Normalize the template and params (strip_vecf32, expand_bulk_property_set).
+                    // Normalize the template and params (strip_vecf32,
+                    // promote_inline_vector_literals_to_params, expand_bulk_property_set). The
+                    // inline-literal promotion must run between the other two: it needs
+                    // strip_vecf32's output (a bare array literal only exists once `VECF32(...)`
+                    // is unwrapped) and produces a `$vec_key` param reference that
+                    // recompute_row_embeddings below can then recognize and always overwrite —
+                    // without it, a legacy VECF32-inline-array row's stored vector would bind
+                    // verbatim forever, contradicting FR-002/FR-003 (issue #526 review finding).
                     let norm_cypher = strip_vecf32(&wal_line.cypher);
-                    let (norm_cypher, params) =
-                        expand_bulk_property_set(&norm_cypher, wal_line.params);
+                    let (norm_cypher, wal_params) =
+                        promote_inline_vector_literals_to_params(&norm_cypher, wal_line.params);
+                    let (norm_cypher, params) = expand_bulk_property_set(&norm_cypher, wal_params);
 
                     // Extract the params map for batch accumulation.
                     let mut params_map = match params {
@@ -1039,28 +1052,40 @@ fn zero_vector_json(dim: usize) -> serde_json::Value {
     serde_json::Value::Array(vec![serde_json::json!(0.0); dim])
 }
 
-/// Whether `cypher`'s top-level `SET` clause assigns only `vec_key` — i.e. this mutation exists
-/// for no purpose other than writing this one vector value, so nothing else can be silently lost
-/// by skipping the whole row when no source text is available (issue #526, FR-005). Detected
-/// structurally (counting `SET`-clause assignments) rather than via a fixed record-kind list, so
-/// it also covers any future single-purpose vector `SET` this codebase hasn't written yet — not
-/// just today's known pre-existing Python/graphiti-driver shape
-/// (`tests/fixtures/wal/python_produced.jsonl`).
+/// Whether `cypher`'s top-level `SET` clause assigns only recognized embedding vector params
+/// (one of them being `vec_key`) and nothing else — i.e. this mutation exists for no purpose
+/// other than writing vector value(s), so nothing else can be silently lost by skipping the whole
+/// row when no source text is available (issue #526, FR-005). Detected structurally (every
+/// `SET`-clause assignment must target a key in [`crate::wal::VECTOR_PARAM_KEYS`]) rather than via
+/// a fixed record-kind list, so it also covers any future single-purpose vector `SET` this
+/// codebase hasn't written yet — not just today's known pre-existing Python/graphiti-driver shape
+/// (`tests/fixtures/wal/python_produced.jsonl`). Checking every assignment, not just counting them,
+/// matters: a `SET` clause with two-or-more vector-only assignments and nothing else (e.g.
+/// `SET n.name_embedding = $name_embedding, n.summary_embedding = $summary_embedding`) must still
+/// count as vector-only — a plain assignment count would misclassify it as `false` past the first
+/// comma and zero-fill both columns instead of skipping, overwriting whatever real vectors they
+/// already held.
 ///
 /// A `CREATE`-form record (`insert_entity`/`insert_episodic`/`insert_relates_to_edge`/
 /// `insert_cross_group_edge`, and `dump.rs`'s `MERGE ... SET a=$a, b=$b, ...` re-materialization
 /// templates) is never vector-only: a bare `CREATE (...)` has no `SET` keyword to find at all, and
 /// a `MERGE ... SET` template that also sets other real properties (name, summary, fact, ...) has
-/// more than one assignment in its `SET` clause — both cases return `false` here regardless of how
-/// many properties the record sets, since the row must still be executed to avoid losing the rest
-/// of what it creates.
+/// at least one assignment that isn't a recognized vector param — both cases return `false` here,
+/// since the row must still be executed to avoid losing the rest of what it creates.
 fn is_vector_only_set(cypher: &str, vec_key: &str) -> bool {
     let upper = cypher.to_uppercase();
     let Some(set_idx) = find_word(&upper, "SET") else {
         return false;
     };
     let set_clause = &cypher[set_idx + 3..];
-    set_clause.split(',').count() <= 1 && set_clause.contains(&format!("${vec_key}"))
+    if !set_clause.contains(&format!("${vec_key}")) {
+        return false;
+    }
+    set_clause.split(',').all(|assignment| {
+        crate::wal::VECTOR_PARAM_KEYS
+            .iter()
+            .any(|k| assignment.contains(&format!("${k}")))
+    })
 }
 
 /// Finds the byte offset of `word` as a standalone token in `haystack` (already uppercased),
@@ -2001,6 +2026,18 @@ mod replay_tests {
              n.summary = $summary",
             "summary_embedding",
         ));
+    }
+
+    /// A `SET` clause with two-or-more vector-only assignments and nothing else must still be
+    /// vector-only — a plain assignment-count check would stop at "count == 2" and misclassify
+    /// this as a real-content row, zero-filling both columns instead of skipping and overwriting
+    /// whatever real vectors they already held (a review finding on this issue's own PR).
+    #[test]
+    fn is_vector_only_set_true_for_multiple_vector_only_assignments() {
+        let cypher = "MATCH (n:Entity {uuid: $uuid}) SET n.name_embedding = $name_embedding, \
+                       n.summary_embedding = $summary_embedding";
+        assert!(is_vector_only_set(cypher, "name_embedding"));
+        assert!(is_vector_only_set(cypher, "summary_embedding"));
     }
 
     /// FR-008/SC-003: a wholly-unrecognised WAL (`total` driven entirely by
