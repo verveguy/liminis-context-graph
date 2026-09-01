@@ -84,6 +84,12 @@ async fn dispatch(id: i64, method: &str, params: Value, state: Arc<AppState>) ->
 }
 
 /// Writes test WAL files into `wal_dir` with one Entity, one Episodic, and one MENTIONS edge.
+///
+/// Uses the real `$name_embedding`/`$content_embedding` param names (matching the column names,
+/// the convention every real writer uses), not a synthetic mismatched name — a mismatched name
+/// would bypass both `WalWriter::log_mutation`'s FR-001 strip list and replay's FR-002 template-
+/// based recompute detection, silently defeating the very contract this issue's round-trip tests
+/// exist to exercise (a review finding on this issue's own PR).
 fn write_test_wal(wal_dir: &std::path::Path) {
     let mut writer = WalWriter::new(wal_dir, 10_000, 0).unwrap();
     writer
@@ -92,7 +98,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
             w.log_mutation(
                 "MERGE (n:Entity {uuid: $uuid}) SET \
                  n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                 n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                 n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                  n.summary = $summary, n.attributes = $attrs",
                 json!({
                     "uuid": "rt-entity-1",
@@ -100,7 +106,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                     "gid": "rt-group",
                     "labels": ["Entity"],
                     "created_at": "2026-01-01 00:00:00",
-                    "emb": [1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64],
+                    "name_embedding": [1.0_f64, 0.0_f64, 0.0_f64, 0.0_f64],
                     "summary": "Alice summary",
                     "attrs": "{}",
                 }),
@@ -112,7 +118,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                  n.name = $name, n.group_id = $gid, \
                  n.created_at = timestamp($created_at), n.source = $source, \
                  n.source_description = $src_desc, n.content = $content, \
-                 n.content_embedding = $emb, \
+                 n.content_embedding = $content_embedding, \
                  n.valid_at = timestamp($valid_at), n.entity_edges = $edges",
                 json!({
                     "uuid": "rt-ep-1",
@@ -122,7 +128,7 @@ fn write_test_wal(wal_dir: &std::path::Path) {
                     "source": "text",
                     "src_desc": "test source",
                     "content": "Alice is a person.",
-                    "emb": [0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64],
+                    "content_embedding": [0.0_f64, 1.0_f64, 0.0_f64, 0.0_f64],
                     "valid_at": "2026-01-01 00:00:00",
                     "edges": [],
                 }),
@@ -196,7 +202,9 @@ async fn test_dump_wal_round_trip() {
     let db1 = open_db(&db1_path);
     {
         let conn = db1.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let entities_before = db1.connect().unwrap().count_nodes("Entity").unwrap();
@@ -240,7 +248,7 @@ async fn test_dump_wal_round_trip() {
     {
         let conn = db2.connect().unwrap();
         let stats = WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("dump replay must succeed");
         assert_eq!(stats.failed_lines, 0, "zero replay failures");
         assert!(
@@ -285,7 +293,7 @@ async fn test_dump_wal_no_vecf32_in_output() {
                 w.log_mutation(
                     "MERGE (n:Entity {uuid: $uuid}) SET \
                      n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                     n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                      n.summary = $summary, n.attributes = $attrs",
                     json!({
                         "uuid": "vf-entity-1",
@@ -293,7 +301,7 @@ async fn test_dump_wal_no_vecf32_in_output() {
                         "gid": "vf-group",
                         "labels": ["Entity"],
                         "created_at": "2026-01-01 00:00:00",
-                        "emb": [0.1_f64, 0.2_f64, 0.3_f64, 0.4_f64],
+                        "name_embedding": [0.1_f64, 0.2_f64, 0.3_f64, 0.4_f64],
                         "summary": "embedding test",
                         "attrs": "{}",
                     }),
@@ -306,7 +314,9 @@ async fn test_dump_wal_no_vecf32_in_output() {
     let db = open_db(&db_path);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let dump_dir = dir.path().join("dump-vf");
@@ -352,7 +362,7 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
                 w.log_mutation(
                     "MERGE (n:Entity {uuid: $uuid}) SET \
                      n.name = $name, n.group_id = $gid, n.labels = $labels, \
-                     n.created_at = timestamp($created_at), n.name_embedding = $emb, \
+                     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
                      n.summary = $summary, n.attributes = $attrs",
                     json!({
                         "uuid": "dup-entity-1",
@@ -360,7 +370,7 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
                         "gid": "dup-group",
                         "labels": ["Entity"],
                         "created_at": "2026-01-01 00:00:00",
-                        "emb": [0.5_f64, 0.5_f64, 0.5_f64, 0.5_f64],
+                        "name_embedding": [0.5_f64, 0.5_f64, 0.5_f64, 0.5_f64],
                         "summary": "",
                         "attrs": "{}",
                     }),
@@ -373,7 +383,9 @@ async fn test_dump_wal_refuses_existing_nonempty_dir() {
     let db = open_db(&db_path);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
 
     let dump_dir = dir.path().join("dump-dup");
@@ -448,7 +460,9 @@ async fn test_dump_wal_timestamp_fidelity() {
     let db1 = open_db(&db1_path);
     {
         let conn = db1.connect().unwrap();
-        WalReplayer::new(&seed_wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&seed_wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .unwrap();
     }
     assert_eq!(
         db1.connect().unwrap().count_nodes("Entity").unwrap(),
@@ -517,7 +531,7 @@ async fn test_dump_wal_timestamp_fidelity() {
     let replay_stats = {
         let conn = db2.connect().unwrap();
         WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
             .expect("dump WAL replay must succeed")
     };
     assert_eq!(
@@ -570,12 +584,19 @@ async fn test_dump_wal_timestamp_fidelity() {
 
 // ── #470: Entity.summary_embedding survives dump→replay ──────────────────────
 
-/// A real (non-zero) `summary_embedding` must survive a `knowledge_dump_wal` → replay round
-/// trip, not silently reset to NULL. Regression test for a gap where `dump_entities_page` and
-/// `ENTITY_CYPHER` were updated for every other Entity column except this one, added alongside
-/// #470's own column — the dumped WAL line would omit `summary_embedding` entirely, and
-/// replaying it would leave the column NULL on the target DB, breaking the "always a same-length
-/// FLOAT[dim] vector, never absent" invariant the schema migration establishes.
+/// A `knowledge_dump_wal` → replay round trip must leave `Entity.summary_embedding` recomputed
+/// from the dumped `summary` text, not NULL and not left bound to whatever value db1 happened to
+/// store. Regression test for a gap where `dump_entities_page` and `ENTITY_CYPHER` were updated
+/// for every other Entity column except this one, added alongside #470's own column — the dumped
+/// WAL line would omit `summary_embedding`'s co-located `summary` text entirely, and replaying it
+/// would leave the column NULL on the target DB, breaking the "always a same-length FLOAT[dim]
+/// vector, never absent" invariant the schema migration establishes.
+///
+/// Updated for issue #526: replay never binds a *stored* vector any more (FR-002), so the
+/// meaningful assertion is no longer "the exact same bytes survive the round trip" — it's "the
+/// dumped record still carries `summary` co-located with `summary_embedding`'s placeholder, so
+/// replay's mandatory recompute produces a real, non-zero vector derived from that text" rather
+/// than silently leaving the column NULL or zero-filled.
 #[tokio::test]
 async fn test_dump_wal_preserves_entity_summary_embedding() {
     let dir = TempDir::new().unwrap();
@@ -628,12 +649,29 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
         "dump must succeed: {dump_v}"
     );
 
+    // A deterministic embed fn keyed on the dumped `summary` text (issue #526): if dump.rs's
+    // ENTITY_CYPHER ever regressed to omitting the co-located `summary` param, replay would find
+    // no text for `summary_embedding` and zero-fill it (a CREATE-type row, per FR-005) instead of
+    // producing this mapped vector — making that regression visible here again.
+    let recomputed_summary_vec = vec![0.5_f32, 0.6, 0.7, 0.8];
+    let mut text_to_vec = std::collections::HashMap::new();
+    text_to_vec.insert(
+        "a pump manufacturer".to_string(),
+        recomputed_summary_vec.clone(),
+    );
+    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(move |text: &str| {
+        Ok(text_to_vec
+            .get(text)
+            .cloned()
+            .unwrap_or_else(|| vec![0.0; 4]))
+    });
+
     let db2_path = dir.path().join("db2-se.db");
     let db2 = open_db(&db2_path);
     {
         let conn = db2.connect().unwrap();
         let stats = WalReplayer::new(&dump_dir)
-            .replay(&conn)
+            .replay(&conn, embed_fn, 4)
             .expect("dump replay must succeed");
         assert_eq!(stats.failed_lines, 0, "zero replay failures");
     }
@@ -646,9 +684,18 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
         ))
         .unwrap();
     assert_eq!(after_rows.len(), 1);
-    let after = after_rows[0][0].clone();
+    let after = &after_rows[0][0];
+    let expected = format!(
+        "[{}]",
+        recomputed_summary_vec
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     assert_eq!(
-        before, after,
-        "summary_embedding must survive a dump -> replay round trip unchanged"
+        after, &expected,
+        "summary_embedding must be recomputed from the dumped summary text (FR-002), not left \
+         NULL or zero-filled — before dump: {before:?}, after replay: {after:?}"
     );
 }

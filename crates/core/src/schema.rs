@@ -107,10 +107,10 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // sidecar file.
     // `embedding_model`/`embedding_dim` (issue #440, FR-007) record the embedder identity under
     // which this group's currently-applied vectors were computed — compared at query/startup
-    // time against the running embedder's identity to surface a mismatch (FR-008), independent
-    // of the write-time `.wal-embedding-model.json` sidecar (`wal_embedding_identity`), which
-    // answers a different question ("what did this WAL claim") from this one ("what does the
-    // graph actually contain now").
+    // time against the running embedder's identity to surface a mismatch (FR-008). This is the
+    // sole surviving model-identity mechanism (issue #526, FR-004): the write-time
+    // `.wal-embedding-model.json` sidecar this comment used to also reference was removed once
+    // replay stopped ever binding a stored vector, since nothing was left for it to govern.
     conn.raw_query(
         "CREATE NODE TABLE IF NOT EXISTS WalPosition (\
          id STRING PRIMARY KEY, \

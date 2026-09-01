@@ -16,6 +16,7 @@ use lcg_core::{
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
+    embedding_cache::{EmbedderContext, EmbeddingCache},
     extractor::MockExtractor,
     handlers,
     ipc::IpcRequest,
@@ -32,6 +33,14 @@ use tokio_util::sync::CancellationToken;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const DIM: usize = 4;
+
+fn test_embedder_ctx() -> EmbedderContext {
+    EmbedderContext {
+        embedder: Arc::new(MockEmbedder::new(DIM)),
+        model: "mock".to_string(),
+        cache: Arc::new(EmbeddingCache::new()),
+    }
+}
 
 fn make_db(dir: &TempDir) -> (Db, String) {
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
@@ -200,7 +209,9 @@ async fn test_run_full_recovery_sequence_torn_wal() {
     // Replay WAL into DB so the episode exists at the checkpoint
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+            .unwrap();
     }
     drop(db);
 
@@ -213,7 +224,14 @@ async fn test_run_full_recovery_sequence_torn_wal() {
         let db_path = db_path.clone();
         let wal_root = wal_root.clone();
         move || {
-            recovery::run_full_recovery_sequence(&db_path, "liminis", &wal_root, DIM, sink, None)
+            recovery::run_full_recovery_sequence(
+                &db_path,
+                "liminis",
+                &wal_root,
+                DIM,
+                sink,
+                test_embedder_ctx(),
+            )
         }
     })
     .await
@@ -274,7 +292,9 @@ async fn test_knowledge_recover_full_on_degraded_engine() {
     write_episode_wal_line(&wal_dir, "0001.jsonl", 1, ep_uuid);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+            .unwrap();
     }
     drop(db);
 
@@ -354,7 +374,9 @@ async fn test_knowledge_recover_full_idempotent_on_healthy_engine() {
     write_episode_wal_line(&wal_dir, "0001.jsonl", 1, ep_uuid);
     {
         let conn = db.connect().unwrap();
-        WalReplayer::new(&wal_dir).replay(&conn).unwrap();
+        WalReplayer::new(&wal_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+            .unwrap();
     }
 
     let state = make_healthy_state(Arc::new(db), wal_dir);

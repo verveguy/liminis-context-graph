@@ -121,6 +121,13 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
 /// `(embedding vector param, co-located source-text param)` pairs — mirrors
 /// `replay.rs`'s `EMBEDDING_TEXT_PAIRS`, duplicated here (not imported — that const is private)
 /// since this file validates the same contract from outside the crate's replay path.
+///
+/// Deliberately **not** extended with `("summary_embedding", "summary")` (issue #526), unlike
+/// `replay.rs`'s own list: this fixture was captured before issue #470 introduced
+/// `summary_embedding`, so it contains zero such records, and `validate_recompute_matches_stored_
+/// vectors_for_real_corpus_wal`'s per-kind loop below asserts `count > 0` for every entry here —
+/// adding a kind this historical fixture structurally cannot contain would just break that
+/// assertion, not add coverage.
 const EMBEDDING_TEXT_PAIRS: &[(&str, &str)] = &[
     ("name_embedding", "name"),
     ("fact_embedding", "fact"),
@@ -150,8 +157,15 @@ fn measure_replay_throughput_over_real_corpus_wal() {
 
     let conn = db.connect().unwrap();
     let start = Instant::now();
+    // issue #526: recompute is now mandatory on every replay — a trivial zero-vector fn keeps
+    // this test measuring WAL replay throughput itself, not embedder cost (no live embedder
+    // required, matching this test's own "no IPC layer, no index build" framing above).
     let stats = WalReplayer::new(wal_dir())
-        .replay(&conn)
+        .replay(
+            &conn,
+            lcg_core::zero_vector_embed_fn(embedding_dim()),
+            embedding_dim(),
+        )
         .expect("replay must succeed against the real-corpus fixture");
     let elapsed = start.elapsed();
 
@@ -179,76 +193,26 @@ fn measure_replay_throughput_over_real_corpus_wal() {
     );
 }
 
-/// issue #440 FR-011/SC-004: measures the added cost of recompute-during-replay relative to
-/// today's stored-vector replay, and reports the embedding cache's effectiveness at bounding it
-/// (FR-003) — explicitly as a hit rate (`embed_calls` vs. distinct texts cached), not just a
-/// timing figure, so a cache that isn't actually helping is visible rather than assumed
-/// effective. Requires a live embedder reachable and matching this fixture's dimension (see
-/// `connect_live_embedder`) — degrades to a `[SKIP]` rather than failing when unavailable, since
-/// this is explicitly not guaranteed on every CI runner (this file's own module doc, and
-/// `README.md`'s "Known limitations").
-///
-/// **Caveat on the hit-rate figure this reports**: this fixture is a *single* `group_id`
-/// (`apollo_program`). WAL records are post-dedup `CREATE`s — each distinct entity name, fact,
-/// or episode content is written to the WAL exactly once per group — so a single-group replay
-/// has essentially no repeated (text, model) pairs to hit on (measured: ~0.5%, 4,126 vectors →
-/// 4,106 distinct texts). The cache is expected to earn its keep primarily in two situations
-/// this benchmark does not exercise: ingest-time embedding (the same name embedded repeatedly
-/// across chunks before dedup collapses it — outside replay's scope) and a multi-group
-/// workspace replay, where the same entity name recurring across different groups produces
-/// separate `Entity` nodes and genuinely repeated cache keys. Treat the number reported below as
-/// this single-group fixture's number, not a general claim about the cache's effectiveness.
-///
-/// Run explicitly:
-///   cargo test -p lcg-core --test real_corpus_replay_perf --release -- --ignored --nocapture \
-///     measure_recompute_overhead_over_real_corpus_wal
-#[tokio::test]
-#[ignore]
-async fn measure_recompute_overhead_over_real_corpus_wal() {
-    let Some(embedder) = connect_live_embedder().await else {
-        return;
-    };
-    let dim = embedding_dim();
-
-    // Baseline: today's stored-vector replay (recompute disabled) — same fixture, no embedder
-    // calls at all.
-    let baseline_dir = tempfile::TempDir::new().unwrap();
-    let baseline_db_path = baseline_dir
+/// Replays the real-corpus fixture once into a fresh DB via `ctx`'s recompute bridge, returning
+/// the resulting stats and wall-clock elapsed time. Shared by the cold/warm-cache measurement
+/// below — each call opens its own fresh DB (so DB-side effects never leak between runs) while
+/// `ctx`'s `EmbeddingCache` is passed in by the caller, so cache warmth *can* carry across calls
+/// when the caller wants it to.
+async fn replay_once(
+    ctx: &EmbedderContext,
+    dim: usize,
+    label: &str,
+) -> (lcg_core::ReplayStats, std::time::Duration) {
+    let ctx = ctx.clone();
+    let db_dir = tempfile::TempDir::new().unwrap();
+    let db_path = db_dir
         .path()
-        .join("baseline.db")
+        .join(format!("{label}.db"))
         .to_str()
         .unwrap()
         .to_string();
-    let db = Db::open(&baseline_db_path).unwrap();
-    {
-        let conn = db.connect().unwrap();
-        conn.init_schema(dim).unwrap();
-    }
-    let conn = db.connect().unwrap();
-    let baseline_start = Instant::now();
-    let baseline_stats = WalReplayer::new(wal_dir())
-        .replay(&conn)
-        .expect("baseline replay must succeed");
-    let baseline_elapsed = baseline_start.elapsed();
-
-    // Recompute-enabled: fresh DB, same fixture, every recognized embedding vector recomputed
-    // via the live embedder through the same EmbeddingCache/RecomputeEmbedFn bridge production
-    // uses (EmbedderContext::recompute_fn_via_handle).
-    let recompute_dir = tempfile::TempDir::new().unwrap();
-    let recompute_db_path = recompute_dir
-        .path()
-        .join("recompute.db")
-        .to_str()
-        .unwrap()
-        .to_string();
-    let cache = Arc::new(EmbeddingCache::new());
-    let ctx = EmbedderContext {
-        embedder: Arc::new(embedder) as Arc<dyn Embedder>,
-        model: FIXTURE_EMBEDDING_MODEL.to_string(),
-        cache: Arc::clone(&cache),
-    };
-    let (recompute_stats, recompute_elapsed) = tokio::task::spawn_blocking(move || {
-        let db = Db::open(&recompute_db_path).unwrap();
+    tokio::task::spawn_blocking(move || {
+        let db = Db::open(&db_path).unwrap();
         {
             let conn = db.connect().unwrap();
             conn.init_schema(dim).unwrap();
@@ -257,73 +221,94 @@ async fn measure_recompute_overhead_over_real_corpus_wal() {
         let recompute_embed_fn = ctx.recompute_fn_via_handle();
         let start = Instant::now();
         let stats = WalReplayer::new(wal_dir())
-            .replay_opts(
-                &conn,
-                ReplayOptions {
-                    recompute_embed_fn: Some(recompute_embed_fn),
-                    ..Default::default()
-                },
-            )
-            .expect("recompute-enabled replay must succeed");
+            .replay_opts(&conn, ReplayOptions::new(recompute_embed_fn, dim))
+            .expect("replay must succeed against the real-corpus fixture");
         (stats, start.elapsed())
     })
     .await
-    .expect("recompute replay task must not panic");
+    .expect("replay task must not panic")
+}
 
-    let added_cost = recompute_elapsed.as_secs_f64() - baseline_elapsed.as_secs_f64();
-    // FR-003's effectiveness claim, made explicit rather than left implicit in raw counts: of
-    // every recompute attempt (embed_calls), what fraction resolved to an already-cached distinct
-    // text rather than a fresh embedder call. cache.len() is the number of *distinct* texts ever
-    // computed, so (embed_calls - cache.len()) is the number of calls the cache actually saved.
-    let distinct_texts = cache.len() as u64;
-    let cache_hits_saved = recompute_stats.embed_calls.saturating_sub(distinct_texts);
-    let cache_hit_rate = if recompute_stats.embed_calls > 0 {
-        cache_hits_saved as f64 / recompute_stats.embed_calls as f64
-    } else {
-        0.0
+/// issue #526 SC-005: reports WAL replay time and embedder call volume for the real-corpus
+/// fixture, with and without a warm content-addressed cache, so the recompute cost this issue
+/// makes unconditional is a measured, reported property rather than an assumption. Requires a
+/// live embedder reachable and matching this fixture's dimension (see `connect_live_embedder`) —
+/// degrades to a `[SKIP]` rather than failing when unavailable, since this is explicitly not
+/// guaranteed on every CI runner (this file's own module doc, and `README.md`'s "Known
+/// limitations").
+///
+/// "Cold" and "warm" here means the *cache's* warmth, not the OS page cache: the same
+/// `EmbeddingCache` instance is reused across both replays (into two separate fresh DBs), so the
+/// first (cold) pass populates it from a live embedder call per distinct text, and the second
+/// (warm) pass — replaying the identical fixture — should resolve every recognized vector from
+/// the cache alone. `CountingEmbedder` wraps the live embedder so the *real* embedder call count
+/// (not just `ReplayStats::embed_calls`, which counts every row `replay.rs` attempted regardless
+/// of cache hit or miss) is directly observable for each pass.
+///
+/// Run explicitly:
+///   cargo test -p lcg-core --test real_corpus_replay_perf --release -- --ignored --nocapture \
+///     measure_cold_vs_warm_cache_replay_over_real_corpus_wal
+#[tokio::test]
+#[ignore]
+async fn measure_cold_vs_warm_cache_replay_over_real_corpus_wal() {
+    let Some(embedder) = connect_live_embedder().await else {
+        return;
     };
+    let dim = embedding_dim();
+
+    let counting_embedder = Arc::new(lcg_core::embedder::CountingEmbedder::new(
+        Arc::new(embedder) as Arc<dyn Embedder>,
+    ));
+    let cache = Arc::new(EmbeddingCache::new());
+    let ctx = EmbedderContext {
+        embedder: Arc::clone(&counting_embedder) as Arc<dyn Embedder>,
+        model: FIXTURE_EMBEDDING_MODEL.to_string(),
+        cache: Arc::clone(&cache),
+    };
+
+    // Cold: the cache starts empty, so every recognized vector is a genuine cache miss.
+    let (cold_stats, cold_elapsed) = replay_once(&ctx, dim, "cold").await;
+    let cold_real_calls = counting_embedder.call_count();
+
+    // Warm: same `ctx` (same cache, already populated from the cold pass above), fresh DB —
+    // every text in this fixture was already seen, so every recompute should resolve from cache.
+    let (warm_stats, warm_elapsed) = replay_once(&ctx, dim, "warm").await;
+    let warm_real_calls = counting_embedder.call_count() - cold_real_calls;
+
     println!(
-        "[SC-004] real_corpus_wal replay cost — baseline (stored vectors): {:.3}s, \
-         {} lines_replayed | recompute-enabled: {:.3}s, {} lines_replayed, \
-         {} embeddings_recomputed, {} embed_calls (replay.rs attempts), \
-         {} embeddings_recompute_fallback, {} embeddings_recompute_failed \
-         | added cost: {:.3}s ({:.2}x baseline)",
-        baseline_elapsed.as_secs_f64(),
-        baseline_stats.lines_replayed,
-        recompute_elapsed.as_secs_f64(),
-        recompute_stats.lines_replayed,
-        recompute_stats.embeddings_recomputed,
-        recompute_stats.embed_calls,
-        recompute_stats.embeddings_recompute_fallback,
-        recompute_stats.embeddings_recompute_failed,
-        added_cost,
-        recompute_elapsed.as_secs_f64() / baseline_elapsed.as_secs_f64().max(0.001),
-    );
-    println!(
-        "[FR-003] embedding cache effectiveness (this single-group fixture only — see this \
-         test's doc comment): {distinct_texts} distinct texts cached out of {} recompute \
-         attempts ({cache_hits_saved} calls saved, {:.1}% hit rate)",
-        recompute_stats.embed_calls,
-        cache_hit_rate * 100.0,
+        "[SC-005] real_corpus_wal replay cost — cold cache: {:.3}s, {} lines_replayed, \
+         {} embeddings_recomputed, {} embed_calls (replay.rs attempts), {cold_real_calls} real \
+         embedder calls | warm cache: {:.3}s, {} lines_replayed, {} embeddings_recomputed, \
+         {} embed_calls, {warm_real_calls} real embedder calls",
+        cold_elapsed.as_secs_f64(),
+        cold_stats.lines_replayed,
+        cold_stats.embeddings_recomputed,
+        cold_stats.embed_calls,
+        warm_elapsed.as_secs_f64(),
+        warm_stats.lines_replayed,
+        warm_stats.embeddings_recomputed,
+        warm_stats.embed_calls,
     );
 
     assert_eq!(
-        recompute_stats.failed_lines, 0,
-        "recompute-enabled replay must not fail any lines against the golden fixture"
+        cold_stats.failed_lines, 0,
+        "cold-cache replay must not fail any lines against the golden fixture"
     );
     assert_eq!(
-        recompute_stats.lines_replayed, baseline_stats.lines_replayed,
-        "recompute must not change which lines replay successfully, only the vectors bound"
+        warm_stats.failed_lines, 0,
+        "warm-cache replay must not fail any lines against the golden fixture"
+    );
+    assert_eq!(
+        cold_stats.lines_replayed, warm_stats.lines_replayed,
+        "cache warmth must not change which lines replay successfully, only the embedder calls made"
     );
     assert!(
-        recompute_stats.embeddings_recomputed > 0,
+        cold_stats.embeddings_recomputed > 0,
         "recompute must have actually run for this fixture (4,126 embedding vectors expected)"
     );
-    // FR-003: the cache must never grow larger than the number of recompute attempts (a trivial
-    // upper bound, but one that would break if a cache implementation double-counted or leaked).
-    assert!(
-        (cache.len() as u64) <= recompute_stats.embed_calls,
-        "cached distinct-text count must not exceed the number of recompute attempts"
+    assert_eq!(
+        warm_real_calls, 0,
+        "a fully warm cache replaying the identical fixture must make zero real embedder calls (FR-003)"
     );
 }
 

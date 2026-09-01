@@ -135,19 +135,18 @@ impl Db {
     /// framework available, so a bracketed-tag `eprintln!` matches this codebase's existing
     /// `[WAL WARN]`/`[WAL PROGRESS]` convention.
     ///
-    /// `embedder`, when `Some` (issue #440), enables recompute-on-replay (FR-001): every
-    /// replayed row's recognized embedding vector param is recomputed from its co-located source
-    /// text via the given embedder rather than bound verbatim from the WAL, and the resulting
-    /// model identity is persisted alongside `applied_seq`/`generation` (FR-007). `None` (e.g. a
-    /// caller with no embedder configured, or most existing tests) preserves today's exact
-    /// stored-vector replay behavior. This function has no ambient tokio runtime — its own test
-    /// callers run bare-sync — so a dedicated single-threaded runtime is built internally to
-    /// drive the embedder when recompute is enabled.
+    /// `embedder` (issue #526: mandatory, not `Option` — there is no "recompute disabled" mode)
+    /// enables recompute-on-replay (FR-001): every replayed row's recognized embedding vector
+    /// param is recomputed from its co-located source text via the given embedder, and never
+    /// bound from a value stored in the WAL (FR-002). The resulting model identity is persisted
+    /// alongside `applied_seq`/`generation` (FR-007, issue #440). This function has no ambient
+    /// tokio runtime — its own test callers run bare-sync — so a dedicated single-threaded
+    /// runtime is built internally to drive the embedder.
     pub fn open_or_rebuild(
         db_path: &str,
         wal_dir: &str,
         embedding_dim: usize,
-        embedder: Option<crate::embedding_cache::EmbedderContext>,
+        embedder: crate::embedding_cache::EmbedderContext,
     ) -> Result<(Self, Option<crate::replay::ReplayStats>), Error> {
         let db_exists = Path::new(db_path).exists();
         let wal_dir_path = Path::new(wal_dir);
@@ -167,16 +166,10 @@ impl Db {
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
 
-            if let Some(ctx) = &embedder {
-                warn_on_embedding_model_mismatch(wal_dir_path, ctx);
-            }
-            let recompute_embed_fn = embedder.as_ref().map(build_sync_recompute_fn).transpose()?;
+            let recompute_embed_fn = build_sync_recompute_fn(&embedder)?;
             let stats = crate::replay::WalReplayer::new(wal_dir).replay_opts(
                 &conn,
-                crate::replay::ReplayOptions {
-                    recompute_embed_fn,
-                    ..Default::default()
-                },
+                crate::replay::ReplayOptions::new(recompute_embed_fn, embedding_dim),
             )?;
             if let Some(ref warning) = stats.fidelity_warning {
                 eprintln!("[WAL REBUILD WARNING] {warning}");
@@ -213,10 +206,9 @@ impl Db {
                 // issue #440 FR-006/FR-008: only claim the running embedder's identity if
                 // no recompute attempt actually failed during this replay — see
                 // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
-                let embedding_identity = embedder
-                    .as_ref()
-                    .filter(|_| stats.embeddings_recompute_had_no_failures())
-                    .map(|ctx| ctx.identity());
+                let embedding_identity = stats
+                    .embeddings_recompute_had_no_failures()
+                    .then(|| embedder.identity());
                 if let Err(e) = conn.set_wal_position(
                     crate::wal_group::DEFAULT_GROUP_ID,
                     seq,
@@ -279,15 +271,6 @@ impl Db {
             executed_mutations: RefCell::new(Vec::new()),
             lookup_key_status: &self.lookup_key_status,
         })
-    }
-}
-
-/// `[WAL WARN]`-logs `Db::open_or_rebuild`'s FR-006 embedding-model mismatch check (issue #440)
-/// against `wal_dir`'s recorded identity, if any. No-op (and no log) when there's no mismatch —
-/// see `wal_embedding_identity::check_model_identity_for_replay` for what counts as one.
-fn warn_on_embedding_model_mismatch(wal_dir: &Path, ctx: &crate::embedding_cache::EmbedderContext) {
-    if let Some(msg) = ctx.check_replay_mismatch(wal_dir) {
-        eprintln!("[WAL WARN] {msg}");
     }
 }
 

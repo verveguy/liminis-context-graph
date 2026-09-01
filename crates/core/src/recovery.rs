@@ -246,22 +246,20 @@ pub(crate) fn group_has_no_content(
 /// `knowledge_rebuild_from_wal` even if this function's own bookkeeping missed it — but silently
 /// vanishing from the live, queryable graph on an autonomous self-heal is a correctness bug this
 /// function must not have.
-/// `embedder_ctx`, when `Some` (issue #440), enables recompute-on-replay (FR-001) for both the
-/// checkpoint-drop and full-rebuild paths below: every replayed row's recognized embedding
-/// vector param is recomputed from its co-located source text rather than bound verbatim from
-/// the WAL, and the resulting model identity is persisted alongside each group's `applied_seq`
-/// (FR-007). Before each group's replay, the WAL's recorded embedding identity (if any) is
-/// compared against `embedder_ctx`'s and a `[WAL WARN]` is logged on mismatch (FR-006) — never
-/// fatal, per the spec's self-healing framing. `None` preserves today's exact stored-vector
-/// replay behavior. This function is intended to run inside `tokio::task::spawn_blocking`, so
-/// the sync bridge uses `Handle::current().block_on` rather than building its own runtime.
+/// `embedder_ctx` (issue #526: mandatory, not `Option`) enables recompute-on-replay (FR-001) for
+/// both the checkpoint-drop and full-rebuild paths below: every replayed row's recognized
+/// embedding vector param is recomputed from its co-located source text, and never bound from a
+/// value stored in the WAL (FR-002). The resulting model identity is persisted alongside each
+/// group's `applied_seq` (FR-007, issue #440). This function is intended to run inside
+/// `tokio::task::spawn_blocking`, so the sync bridge uses `Handle::current().block_on` rather
+/// than building its own runtime.
 pub fn run_full_recovery_sequence(
     db_path: &str,
     group_id: &str,
     wal_root: &Path,
     embedding_dim: usize,
     sink: Arc<dyn TelemetrySink>,
-    embedder_ctx: Option<EmbedderContext>,
+    embedder_ctx: EmbedderContext,
 ) -> Result<(Db, RecoveryReport), Error> {
     let wal_dir = crate::wal_group::group_wal_dir(wal_root, group_id)?;
     sink.emit(TelemetryEvent::WalAutoRecovery {
@@ -345,8 +343,8 @@ pub fn run_full_recovery_sequence(
     // why persisting before the index rebuild succeeds would defeat the `null` = "unknown, needs
     // full rebuild" safety invariant the rest of this module relies on.
     // Positions gain a third element, the embedding identity to persist alongside
-    // seq/generation (issue #440, FR-007) — `None` when `embedder_ctx` is `None`.
-    let embedding_identity = embedder_ctx.as_ref().map(|ctx| ctx.identity());
+    // seq/generation (issue #440, FR-007).
+    let embedding_identity = embedder_ctx.identity();
     let replay_started = Instant::now();
     let (mutations_replayed, positions_to_persist) = if used_fallback {
         // The DB was just wiped in its entirety — restore every group's data, not only
@@ -356,18 +354,12 @@ pub fn run_full_recovery_sequence(
         let mut total = 0u64;
         let mut positions = Vec::new();
         for (gid, dir) in crate::wal_group::list_group_wal_dirs(wal_root)? {
-            if let Some(ctx) = &embedder_ctx {
-                warn_on_embedding_model_mismatch(&dir, ctx);
-            }
-            let recompute_embed_fn = embedder_ctx
-                .as_ref()
-                .map(EmbedderContext::recompute_fn_via_handle);
+            let recompute_embed_fn = embedder_ctx.recompute_fn_via_handle();
             let group_stats = WalReplayer::new(&dir).replay_opts(
                 &conn,
                 ReplayOptions {
                     from_seq: 0,
-                    recompute_embed_fn,
-                    ..Default::default()
+                    ..ReplayOptions::new(recompute_embed_fn, embedding_dim)
                 },
             )?;
             total += group_stats.lines_replayed;
@@ -383,20 +375,14 @@ pub fn run_full_recovery_sequence(
         }
         (total, positions)
     } else {
-        if let Some(ctx) = &embedder_ctx {
-            warn_on_embedding_model_mismatch(&wal_dir, ctx);
-        }
-        let recompute_embed_fn = embedder_ctx
-            .as_ref()
-            .map(EmbedderContext::recompute_fn_via_handle);
+        let recompute_embed_fn = embedder_ctx.recompute_fn_via_handle();
         let conn = db.connect()?;
         schema::drop_fts_indexes(&conn);
         let stats = WalReplayer::new(&wal_dir).replay_opts(
             &conn,
             ReplayOptions {
                 from_seq,
-                recompute_embed_fn,
-                ..Default::default()
+                ..ReplayOptions::new(recompute_embed_fn, embedding_dim)
             },
         )?;
         let positions = stats
@@ -455,10 +441,8 @@ pub fn run_full_recovery_sequence(
             // issue #440 FR-006/FR-008: only claim the running embedder's identity for a group
             // whose replay had no failed recompute attempt — see
             // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
-            let group_embedding_identity = embedding_identity
-                .as_ref()
-                .filter(|_| *fully_recomputed)
-                .map(|(model, dim)| (model.as_str(), *dim));
+            let group_embedding_identity =
+                fully_recomputed.then_some((embedding_identity.0.as_str(), embedding_identity.1));
             if let Err(e) =
                 conn.set_wal_position(gid, *seq, generation.as_deref(), group_embedding_identity)
             {
@@ -506,14 +490,6 @@ pub fn run_full_recovery_sequence(
             drop_elapsed_ms,
         },
     ))
-}
-
-/// `[WAL WARN]`-logs this function's FR-006 embedding-model mismatch check (issue #440) against
-/// `wal_dir`'s recorded identity, if any. No-op (and no log) when there's no mismatch.
-fn warn_on_embedding_model_mismatch(wal_dir: &Path, ctx: &EmbedderContext) {
-    if let Some(msg) = ctx.check_replay_mismatch(wal_dir) {
-        eprintln!("[WAL WARN] {msg}");
-    }
 }
 
 /// Step 1 happy path: rename torn WAL aside, reopen DB at last checkpoint, init schema.

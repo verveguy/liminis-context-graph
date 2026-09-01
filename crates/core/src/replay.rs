@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use crate::db::Conn;
 use crate::error::Error;
-use crate::legacy_wal::{expand_bulk_property_set, strip_vecf32};
+use crate::legacy_wal::{
+    expand_bulk_property_set, promote_inline_vector_literals_to_params, strip_vecf32,
+};
 use crate::wal::{first_seq_in_file, strip_quoted_literals, WalLine};
 
 /// lbug error-message substrings (lowercase) that classify a replay failure as a known legacy
@@ -158,11 +160,11 @@ pub struct ReplayStats {
     /// Count of `flush_batch` transactions that were rolled back — either by the lbug engine's
     /// auto-rollback-on-exception or by an explicit `ROLLBACK` on cancellation (issue #240).
     pub transactions_rolled_back: u64,
-    /// Count of embedding vector params (`name_embedding`/`fact_embedding`/`content_embedding`)
-    /// successfully derived by invoking `ReplayOptions::recompute_embed_fn` on the row's
-    /// co-located source text, replacing the value bound into the graph (issue #440, FR-001).
-    /// Only incremented when `recompute_embed_fn` is configured; stays 0 for a caller that
-    /// leaves recompute disabled (today's stored-vector replay behavior).
+    /// Count of embedding vector params (`name_embedding`/`fact_embedding`/`content_embedding`/
+    /// `summary_embedding`) successfully derived by invoking `ReplayOptions::recompute_embed_fn`
+    /// on the row's co-located source text, replacing whatever the WAL record carried for that
+    /// key — recompute runs unconditionally, on every replay, for every row whose Cypher
+    /// template references a recognized vector placeholder (issue #526, FR-001/FR-002).
     pub embeddings_recomputed: u64,
     /// Count of times `ReplayOptions::recompute_embed_fn` was actually invoked (issue #440,
     /// FR-003). This measures callback invocations, including callback cache hits — it does not
@@ -171,22 +173,39 @@ pub struct ReplayStats {
     /// itself. SC-005's cache-effectiveness bound is verified against this counter via a plain
     /// counting closure that wraps the cache, not against `EmbeddingCache` internals directly.
     pub embed_calls: u64,
-    /// Count of embedding vector params left bound to their stored WAL value, verbatim, because
-    /// `recompute_embed_fn` was configured but the row had no co-located source text available
-    /// (issue #440, FR-002). Only incremented when `recompute_embed_fn` is configured — like
-    /// `embeddings_recomputed`, this counter lives inside `recompute_row_embeddings`, which is
-    /// only called when `opts.recompute_embed_fn` is `Some`, so it stays 0 (not incremented at
-    /// all) for a caller that leaves recompute disabled entirely; that caller's rows are bound to
-    /// their stored vectors exactly as before this issue, just with none of the new counters
-    /// tracking it. Never a failure; this is today's replay behavior for that row, preserved
-    /// exactly.
-    pub embeddings_recompute_fallback: u64,
-    /// Count of embedding vector params left bound to their stored WAL value, verbatim, because
-    /// `recompute_embed_fn` was invoked but returned an error (issue #440) — e.g. the embedder
-    /// sidecar was transiently unreachable. Never fatal to replay (recompute is explicitly
-    /// self-healing, per the spec's Assumptions), but counted separately from
-    /// `embeddings_recompute_fallback` so a transient outage is never silent.
+    /// Count of embedding vector params that had no co-located source text available to recompute
+    /// from (issue #526, FR-002/FR-005) — renamed from the pre-#526 `embeddings_recompute_fallback`
+    /// now that there is no stored vector left to fall back to. What happens to the row depends on
+    /// whether the vector param is the mutation's only purpose: a vector-only `SET` with no text is
+    /// skipped entirely (counted in [`Self::embeddings_skip_rows`], preserving whatever the
+    /// entity's own CREATE record already computed for that column), while any other record (most
+    /// commonly a CREATE, which must still be created) gets a same-dimension zero vector instead —
+    /// see `is_vector_only_set`. Never a failure by itself; this is normal, ongoing WAL shape (e.g.
+    /// the pre-existing Python/graphiti-driver SET-only vector updates in
+    /// `tests/fixtures/wal/python_produced.jsonl`), not evidence the embedder is unreachable.
+    pub embeddings_recompute_skipped_no_text: u64,
+    /// Count of embedding vector params where `recompute_embed_fn` was invoked but returned an
+    /// error (issue #440) — e.g. the embedder sidecar was transiently unreachable, or the
+    /// recomputed vector had the wrong dimension or was non-finite. Never a stored WAL value:
+    /// post-#526, this is treated exactly like missing text — `is_vector_only_set` decides
+    /// whether the row is skipped entirely or zero-filled (issue #526, FR-002/FR-005). Never fatal
+    /// to replay (recompute is explicitly self-healing, per the spec's Assumptions), but counted
+    /// separately from `embeddings_recompute_skipped_no_text` so a transient outage is never
+    /// silent.
     pub embeddings_recompute_failed: u64,
+    /// Count of WAL rows skipped entirely — never executed against the database at all — because
+    /// they were a vector-only `SET` mutation (see `is_vector_only_set`) with no co-located source
+    /// text to recompute from, and no failure either (issue #526, FR-005). Executing such a row
+    /// with a placeholder zero vector would *overwrite* whatever real vector the entity's own
+    /// CREATE record already computed for that column, actively degrading it — skipping preserves
+    /// it. This is the one WAL record shape confirmed to have no source text co-located in the
+    /// same record (the pre-existing Python/graphiti-driver SET-only vector updates already in the
+    /// wild); every other vector-bearing record kind either already co-locates its text or, for a
+    /// CREATE-type record that fails recompute, gets a zero-vector fallback instead of being
+    /// skipped (see `embeddings_recompute_skipped_no_text`). Excluded from `lines_replayed` and
+    /// from the `fidelity_warning` ratio, matching `legacy_skipped_lines`'s precedent: this is
+    /// benign, expected WAL shape, not a sign of a broken replay.
+    pub embeddings_skip_rows: u64,
 }
 
 impl ReplayStats {
@@ -199,16 +218,17 @@ impl ReplayStats {
     /// True when no embedding recompute *attempt* failed during this replay
     /// (`embeddings_recompute_failed == 0`) — e.g. the embedder sidecar was never unreachable,
     /// no recomputed vector had the wrong dimension, none was non-finite. Deliberately does
-    /// **not** require `embeddings_recompute_fallback == 0`: a row with no co-located source
-    /// text (FR-002 — e.g. a `SET`-only mutation that updates a field without re-supplying the
-    /// text an already-recomputed vector on that node was derived from) is normal, ongoing WAL
-    /// shape, not a defect, and is common enough on real corpora that requiring zero fallbacks
-    /// would make a replay/rebuild almost never confirm a match. A replay call site persisting
-    /// an embedding identity (issue #440, FR-006/FR-007) alongside `applied_seq` should gate
-    /// that write on this: persisting `Some(identity)` after a real recompute failure would make
-    /// `embedding_model_status` read `"match"` for a group that silently kept stale vectors
-    /// because the embedder couldn't be reached — the exact silent-divergence FR-008 exists to
-    /// prevent. `embeddings_recompute_fallback` remains a purely informational counter.
+    /// **not** require `embeddings_recompute_skipped_no_text == 0`: a row with no co-located
+    /// source text (FR-002/FR-005 — e.g. a `SET`-only mutation that updates a field without
+    /// re-supplying the text an already-recomputed vector on that node was derived from) is
+    /// normal, ongoing WAL shape, not a defect, and is common enough on real corpora that
+    /// requiring zero skips would make a replay/rebuild almost never confirm a match. A replay
+    /// call site persisting an embedding identity (issue #440, FR-006/FR-007) alongside
+    /// `applied_seq` should gate that write on this: persisting `Some(identity)` after a real
+    /// recompute failure would make `embedding_model_status` read `"match"` for a group that
+    /// silently kept stale vectors because the embedder couldn't be reached — the exact
+    /// silent-divergence FR-008 exists to prevent. `embeddings_recompute_skipped_no_text` remains
+    /// a purely informational counter.
     pub fn embeddings_recompute_had_no_failures(&self) -> bool {
         self.embeddings_recompute_failed == 0
     }
@@ -220,28 +240,37 @@ pub type ProgressFn = Box<dyn Fn(&ReplayProgress) -> bool + Send>;
 pub type CancelFn = Box<dyn Fn() -> bool + Send>;
 /// Callback that receives a `[WAL PROGRESS]` log line; replaces `eprintln!` in tests.
 pub type ProgressLogFn = Box<dyn Fn(&str) + Send>;
-/// Synchronous embedding callback (issue #440) invoked once per WAL row that carries a
-/// recognized embedding vector param with co-located source text (FR-001). `WalReplayer` itself
-/// has no tokio dependency and several call sites run with no ambient runtime at all (its own
-/// unit tests, `real_corpus_replay_perf.rs`) — so recompute is expressed as a plain sync closure,
-/// and each caller bridges its own `Arc<dyn Embedder>` into this shape however fits its own
-/// runtime context (`Handle::current().block_on` from inside `spawn_blocking`, or a small
-/// dedicated single-threaded runtime for a bare-sync caller). A caller wanting a cache (FR-003)
-/// wraps `EmbeddingCache::get_or_compute` inside this closure — `replay.rs` never constructs or
-/// touches a cache itself.
+/// Synchronous embedding callback invoked once per WAL row whose Cypher template references a
+/// recognized embedding vector placeholder (issue #526, FR-001/FR-002). `WalReplayer` itself has
+/// no tokio dependency and several call sites run with no ambient runtime at all (its own unit
+/// tests, `real_corpus_replay_perf.rs`) — so recompute is expressed as a plain sync closure, and
+/// each caller bridges its own `Arc<dyn Embedder>` into this shape however fits its own runtime
+/// context (`Handle::current().block_on` from inside `spawn_blocking`, or a small dedicated
+/// single-threaded runtime for a bare-sync caller). A caller wanting a cache (FR-003 of issue
+/// #440) wraps `EmbeddingCache::get_or_compute` inside this closure — `replay.rs` never
+/// constructs or touches a cache itself.
 pub type RecomputeEmbedFn = Box<dyn Fn(&str) -> Result<Vec<f32>, Error> + Send>;
 
 /// `(embedding vector param, co-located source-text param)` pairs recognized during replay
-/// recompute (issue #440, FR-001/FR-002). Per the spec's Assumptions, these are the only three
-/// embedding kinds present in the schema today.
+/// recompute (issue #526, FR-001/FR-002) — the crate-wide single source of truth for which
+/// columns are embedding vectors, shared with [`crate::wal::VECTOR_PARAM_KEYS`] (the writer's
+/// strip list; kept in sync by `tests::embedding_text_pairs_key_set_matches_wal_strip_list`).
+///
+/// A pair's relevance to a given WAL row is decided by whether the row's **Cypher template**
+/// contains the vector param's `$placeholder` — not by whether the row's params object happens to
+/// carry that key. This is what lets replay recognize a vector-bearing row after the writer has
+/// stopped emitting the param at all (issue #526): the template still says `$name_embedding`,
+/// even though nothing supplies it any more. It also means an older, vector-bearing WAL replays
+/// identically — the template text is unchanged either way, only whether the JSON also happens to
+/// carry a stale value differs, and that stale value is always ignored (FR-002/FR-003).
 const EMBEDDING_TEXT_PAIRS: &[(&str, &str)] = &[
     ("name_embedding", "name"),
     ("fact_embedding", "fact"),
     ("content_embedding", "content"),
+    ("summary_embedding", "summary"),
 ];
 
 /// Options for `WalReplayer::replay_opts`.
-#[derive(Default)]
 pub struct ReplayOptions {
     /// Skip WAL lines with `seq < from_seq`. Default: 0 (replay all).
     pub from_seq: u64,
@@ -270,13 +299,57 @@ pub struct ReplayOptions {
     /// lines are written to stderr via `eprintln!`. Production passes `None`; tests inject a
     /// closure capturing to `Arc<Mutex<Vec<String>>>` to verify throttle behaviour.
     pub progress_log_fn: Option<ProgressLogFn>,
-    /// Optional recompute-on-replay callback (issue #440, FR-001). When `Some`, every row
-    /// carrying a recognized embedding vector param (`name_embedding`/`fact_embedding`/
-    /// `content_embedding`, see `EMBEDDING_TEXT_PAIRS`) with co-located, non-empty source text
-    /// has its vector recomputed by this callback instead of binding the value stored in the
-    /// WAL. When `None` (the default), replay behaves exactly as it did before this issue —
-    /// stored vectors are bound verbatim.
-    pub recompute_embed_fn: Option<RecomputeEmbedFn>,
+    /// Mandatory recompute-on-replay callback (issue #526, FR-001/FR-002) — replay never binds a
+    /// vector value found in a WAL record. Every row whose Cypher template references a
+    /// recognized embedding vector placeholder (`name_embedding`/`fact_embedding`/
+    /// `content_embedding`/`summary_embedding`, see [`EMBEDDING_TEXT_PAIRS`]) always has its
+    /// vector recomputed by this callback from co-located source text. There is no "disabled"
+    /// mode and no `Option` wrapper: once the writer stops emitting vector params
+    /// unconditionally, a caller with no embedder has no safe value to bind for a `CREATE`
+    /// template's vector placeholder at all, so every caller — production and test alike — must
+    /// supply one. See [`ReplayOptions::new`] and `zero_vector_embed_fn` for callers that don't
+    /// care about embedding fidelity.
+    pub recompute_embed_fn: RecomputeEmbedFn,
+    /// The embedder's fixed output dimension (issue #526). Used to size a same-dimension
+    /// zero-vector fallback when recompute has no source text (or fails) for a record that isn't
+    /// a vector-only `SET` and so must still be executed (see `is_vector_only_set`), and to
+    /// reject a recomputed vector whose length doesn't match — `lbug`'s embedding columns are
+    /// fixed-width (`FLOAT[dim]`), so binding a wrong-length vector fails at `execute_prepared`
+    /// and rolls back the *entire* same-template batch (see `flush_batch`), not just one row.
+    pub recompute_embed_dim: usize,
+}
+
+impl ReplayOptions {
+    /// Builds `ReplayOptions` with `recompute_embed_fn`/`recompute_embed_dim` set and every other
+    /// field at its convenience default (unbounded `from_seq`/`to_seq`, not a dry run, no
+    /// progress/cancel callbacks, batch size/failure cap/log interval read from their env vars,
+    /// no progress log sink).
+    pub fn new(recompute_embed_fn: RecomputeEmbedFn, recompute_embed_dim: usize) -> Self {
+        Self {
+            from_seq: 0,
+            to_seq: None,
+            dry_run: false,
+            progress_fn: None,
+            cancel_fn: None,
+            failure_sample_cap: None,
+            batch_size: None,
+            log_interval_override: None,
+            progress_log_fn: None,
+            recompute_embed_fn,
+            recompute_embed_dim,
+        }
+    }
+}
+
+/// A trivial [`RecomputeEmbedFn`] that returns a fixed-size zero vector for any input text,
+/// ignoring the text entirely. `ReplayOptions::recompute_embed_fn` is mandatory (issue #526), so
+/// every caller needs *some* correctly-sized function to supply — this one is for a caller that
+/// just needs a schema-valid vector bound and doesn't itself care about embedding fidelity (most
+/// commonly a test replaying a fixture that doesn't exercise recompute correctness). A test that
+/// does care about fidelity should bridge a real `Embedder` (e.g. `HashEmbedder`, `NameMapEmbedder`)
+/// into a sync closure instead.
+pub fn zero_vector_embed_fn(dim: usize) -> RecomputeEmbedFn {
+    Box::new(move |_text: &str| Ok(vec![0.0f32; dim]))
 }
 
 /// Progress snapshot passed to the `ReplayOptions::progress_fn` callback.
@@ -305,8 +378,19 @@ impl WalReplayer {
     }
 
     /// Reads all JSONL files, executes known mutations, skips truncated/unknown lines (R-05, R-08).
-    pub fn replay(&self, conn: &Conn<'_>) -> Result<ReplayStats, Error> {
-        self.replay_opts(conn, ReplayOptions::default())
+    ///
+    /// `recompute_embed_fn`/`recompute_embed_dim` are mandatory (issue #526) — see
+    /// [`ReplayOptions::recompute_embed_fn`] for why there is no "disabled" mode.
+    pub fn replay(
+        &self,
+        conn: &Conn<'_>,
+        recompute_embed_fn: RecomputeEmbedFn,
+        recompute_embed_dim: usize,
+    ) -> Result<ReplayStats, Error> {
+        self.replay_opts(
+            conn,
+            ReplayOptions::new(recompute_embed_fn, recompute_embed_dim),
+        )
     }
 
     /// Like `replay` but with `from_seq`/`to_seq` filtering, dry-run mode, and optional progress
@@ -380,8 +464,9 @@ impl WalReplayer {
             transactions_rolled_back: 0,
             embeddings_recomputed: 0,
             embed_calls: 0,
-            embeddings_recompute_fallback: 0,
+            embeddings_recompute_skipped_no_text: 0,
             embeddings_recompute_failed: 0,
+            embeddings_skip_rows: 0,
         };
 
         if !self.wal_dir.exists() {
@@ -597,10 +682,18 @@ impl WalReplayer {
                         stats.match_prefixed_replayed += 1;
                     }
                 } else {
-                    // Normalize the template and params (strip_vecf32, expand_bulk_property_set).
+                    // Normalize the template and params (strip_vecf32,
+                    // promote_inline_vector_literals_to_params, expand_bulk_property_set). The
+                    // inline-literal promotion must run between the other two: it needs
+                    // strip_vecf32's output (a bare array literal only exists once `VECF32(...)`
+                    // is unwrapped) and produces a `$vec_key` param reference that
+                    // recompute_row_embeddings below can then recognize and always overwrite —
+                    // without it, a legacy VECF32-inline-array row's stored vector would bind
+                    // verbatim forever, contradicting FR-002/FR-003 (issue #526 review finding).
                     let norm_cypher = strip_vecf32(&wal_line.cypher);
-                    let (norm_cypher, params) =
-                        expand_bulk_property_set(&norm_cypher, wal_line.params);
+                    let (norm_cypher, wal_params) =
+                        promote_inline_vector_literals_to_params(&norm_cypher, wal_line.params);
+                    let (norm_cypher, params) = expand_bulk_property_set(&norm_cypher, wal_params);
 
                     // Extract the params map for batch accumulation.
                     let mut params_map = match params {
@@ -608,51 +701,67 @@ impl WalReplayer {
                         _ => serde_json::Map::new(),
                     };
 
-                    // Recompute embedding vectors from co-located source text (issue #440,
+                    // Recompute embedding vectors from co-located source text (issue #526,
                     // FR-001/FR-002), before this row is ever pushed into a batch — never inside
                     // flush_batch's open transaction, so a slow/unreachable embedder cannot hold
                     // an lbug transaction open across up to `batch_size` network round-trips.
-                    if let Some(ref embed_fn) = opts.recompute_embed_fn {
-                        recompute_row_embeddings(&mut params_map, embed_fn.as_ref(), &mut stats);
-                    }
+                    // Mandatory: there is no "recompute disabled" mode any more (issue #526) —
+                    // every row whose template references a recognized vector placeholder always
+                    // goes through this, whether the WAL is fresh (no stored value at all) or
+                    // legacy (a stored value present but always ignored, FR-002/FR-003).
+                    let outcome = recompute_row_embeddings(
+                        &norm_cypher,
+                        &mut params_map,
+                        opts.recompute_embed_fn.as_ref(),
+                        opts.recompute_embed_dim,
+                        &mut stats,
+                    );
 
-                    // Flush the current batch when the template changes (FR-001).
-                    if !batch.is_empty() && batch.template != norm_cypher {
-                        let outcome = flush_batch(
-                            &mut batch,
-                            conn,
-                            &mut stats,
-                            sample_cap,
-                            &mut prepared_cache,
-                            opts.cancel_fn.as_ref(),
-                        )?;
-                        if outcome.cancelled {
-                            break 'files;
+                    if outcome == RowEmbeddingOutcome::Skip {
+                        // A vector-only `SET` with no source text to recompute from (issue #526,
+                        // FR-005) — executing it with a placeholder would overwrite whatever real
+                        // vector the entity's own CREATE record already computed for that column.
+                        // Skip the row entirely: never pushed into the batch, never executed.
+                        stats.embeddings_skip_rows += 1;
+                    } else {
+                        // Flush the current batch when the template changes (FR-001).
+                        if !batch.is_empty() && batch.template != norm_cypher {
+                            let outcome = flush_batch(
+                                &mut batch,
+                                conn,
+                                &mut stats,
+                                sample_cap,
+                                &mut prepared_cache,
+                                opts.cancel_fn.as_ref(),
+                            )?;
+                            if outcome.cancelled {
+                                break 'files;
+                            }
                         }
-                    }
 
-                    // Push this mutation into the batch.
-                    if batch.is_empty() {
-                        batch.template = norm_cypher;
-                    }
-                    batch.rows.push(params_map);
-                    batch.match_prefixed.push(is_match_prefixed);
-                    batch.seqs.push(wal_line.seq);
+                        // Push this mutation into the batch.
+                        if batch.is_empty() {
+                            batch.template = norm_cypher;
+                        }
+                        batch.rows.push(params_map);
+                        batch.match_prefixed.push(is_match_prefixed);
+                        batch.seqs.push(wal_line.seq);
 
-                    // Flush when the batch reaches the size limit (FR-002, FR-003). Same
-                    // template as the just-flushed batch reuses the cached prepared statement
-                    // (issue #238) instead of re-preparing.
-                    if batch.len() >= batch_size {
-                        let outcome = flush_batch(
-                            &mut batch,
-                            conn,
-                            &mut stats,
-                            sample_cap,
-                            &mut prepared_cache,
-                            opts.cancel_fn.as_ref(),
-                        )?;
-                        if outcome.cancelled {
-                            break 'files;
+                        // Flush when the batch reaches the size limit (FR-002, FR-003). Same
+                        // template as the just-flushed batch reuses the cached prepared statement
+                        // (issue #238) instead of re-preparing.
+                        if batch.len() >= batch_size {
+                            let outcome = flush_batch(
+                                &mut batch,
+                                conn,
+                                &mut stats,
+                                sample_cap,
+                                &mut prepared_cache,
+                                opts.cancel_fn.as_ref(),
+                            )?;
+                            if outcome.cancelled {
+                                break 'files;
+                            }
                         }
                     }
                 }
@@ -817,50 +926,65 @@ fn compute_fidelity_warning(stats: &ReplayStats, threshold: f64) -> Option<Strin
 /// `SEQ_REGRESSION_LOG_CAP`'s existing precedent for the same reason.
 const EMBED_FAILURE_LOG_CAP: u64 = 10;
 
-/// Recomputes each recognized embedding vector param in `params_map` from its co-located
-/// source-text param (issue #440, FR-001/FR-002/SC-005), mutating `params_map` in place and
-/// updating `stats`'s recompute counters.
+/// Result of [`recompute_row_embeddings`] for one WAL row.
+#[derive(Debug, PartialEq, Eq)]
+enum RowEmbeddingOutcome {
+    /// Execute the row normally (the common case — either no vector param applied, or every
+    /// applicable one was recomputed or zero-filled).
+    Proceed,
+    /// Skip the row entirely — never execute it against the database at all. Only produced for a
+    /// vector-only `SET` mutation (see [`is_vector_only_set`]) with no source text to recompute
+    /// from: executing it with a placeholder zero vector would overwrite whatever real vector the
+    /// entity's own CREATE record already computed for that column (issue #526, FR-005).
+    Skip,
+}
+
+/// Recomputes each recognized embedding vector param referenced by `cypher` from its co-located
+/// source-text param (issue #526, FR-001/FR-002/SC-005), mutating `params_map` in place and
+/// updating `stats`'s recompute counters. Replay never binds a vector value found in a WAL record
+/// — every recognized vector param is always either freshly recomputed or explicitly zero-filled,
+/// regardless of whether `params_map` happens to carry a stored value at all (FR-002/FR-003).
 ///
-/// For each `(vec_key, text_key)` pair in [`EMBEDDING_TEXT_PAIRS`]: if `params_map` doesn't carry
-/// `vec_key` at all, the pair doesn't apply to this row and is skipped silently (most WAL rows
-/// carry none of the three). If it does carry `vec_key` but the value isn't a JSON array — a
-/// malformed or unexpected record shape (Edge Cases) — it's left untouched and counted the same
-/// as the no-co-located-text fallback below, since there's nothing sound to recompute into.
-/// Otherwise:
-/// - `text_key` present as a non-empty string → `embed_fn` is invoked once; success replaces
-///   `vec_key`'s value and bumps `embeddings_recomputed`; failure (embedder error, a recomputed
-///   vector whose length differs from the stored vector's — e.g. the WAL was captured under a
-///   different embedding dimension, Edge Cases — or a computed vector containing NaN/infinity
-///   that can't round-trip through JSON) leaves the stored value bound verbatim and bumps
-///   `embeddings_recompute_failed` (never fatal — recompute is explicitly self-healing). The
-///   length check matters operationally, not just for correctness: `lbug`'s embedding columns are
-///   fixed-width (`FLOAT[dim]`), so binding a wrong-length vector would fail at `execute_prepared`
-///   and roll back the *entire* same-template batch (see `flush_batch`), not just this row.
-/// - `text_key` missing/empty → the stored value is left bound verbatim (FR-002) and
-///   `embeddings_recompute_fallback` is bumped.
+/// For each `(vec_key, text_key)` pair in [`EMBEDDING_TEXT_PAIRS`]: relevance is decided by
+/// whether **`cypher`** references `$vec_key` — not by whether `params_map` carries the key —
+/// since the writer no longer emits it at all for a freshly-written WAL (issue #526). A row whose
+/// template doesn't reference `vec_key` is left alone (most WAL rows reference none of the four).
+/// For a row that does:
+/// - `text_key` present in `params_map` as a non-empty string → `embed_fn` is invoked once;
+///   success replaces `vec_key`'s value and bumps `embeddings_recomputed`. Failure (embedder
+///   error, a recomputed vector whose length doesn't match `embed_dim`, or a computed vector
+///   containing NaN/infinity that can't round-trip through JSON) falls through to the same
+///   zero-fill-or-skip handling as missing text, below, and bumps `embeddings_recompute_failed`
+///   (never fatal — recompute is explicitly self-healing).
+/// - `text_key` missing/empty, or recompute failed → [`is_vector_only_set`] decides what happens:
+///   a vector-only `SET` (no other real content in the same mutation) produces
+///   [`RowEmbeddingOutcome::Skip`] so the caller drops the row entirely, preserving whatever
+///   value already sits in that column; any other record (most commonly a `CREATE`, which must
+///   still be created — dropping it would fail SC-002's count parity) gets a same-dimension zero
+///   vector bound instead. Counted in `embeddings_recompute_skipped_no_text`.
 fn recompute_row_embeddings(
+    cypher: &str,
     params_map: &mut serde_json::Map<String, serde_json::Value>,
     embed_fn: &(dyn Fn(&str) -> Result<Vec<f32>, Error> + Send),
+    embed_dim: usize,
     stats: &mut ReplayStats,
-) {
+) -> RowEmbeddingOutcome {
+    let mut outcome = RowEmbeddingOutcome::Proceed;
+
     for (vec_key, text_key) in EMBEDDING_TEXT_PAIRS {
-        let stored_len = match params_map.get(*vec_key) {
-            Some(serde_json::Value::Array(a)) => a.len(),
-            Some(_) => {
-                stats.embeddings_recompute_fallback += 1;
-                continue;
-            }
-            None => continue,
-        };
+        if !cypher.contains(&format!("${vec_key}")) {
+            continue;
+        }
+
         let text = params_map.get(*text_key).and_then(|v| v.as_str());
-        match text {
+        let recomputed = match text {
             Some(text) if !text.is_empty() => {
                 stats.embed_calls += 1;
                 match embed_fn(text).and_then(|vector| {
-                    if vector.len() != stored_len {
+                    if vector.len() != embed_dim {
                         return Err(Error::Ipc(format!(
-                            "recomputed embedding has {} components but the stored vector has \
-                             {stored_len}; keeping the stored vector",
+                            "recomputed embedding has {} components but the configured \
+                             embedding dimension is {embed_dim}",
                             vector.len()
                         )));
                     }
@@ -871,15 +995,12 @@ fn recompute_row_embeddings(
                     })
                 }) {
                     Ok(json_vector) => {
-                        params_map.insert((*vec_key).to_string(), json_vector);
                         stats.embeddings_recomputed += 1;
+                        Some(json_vector)
                     }
                     Err(e) => {
                         if stats.embeddings_recompute_failed < EMBED_FAILURE_LOG_CAP {
-                            eprintln!(
-                                "[WAL WARN] embedding recompute failed for {vec_key} (falling \
-                                 back to stored vector): {e}"
-                            );
+                            eprintln!("[WAL WARN] embedding recompute failed for {vec_key}: {e}");
                         } else if stats.embeddings_recompute_failed == EMBED_FAILURE_LOG_CAP {
                             eprintln!(
                                 "[WAL WARN] embedding recompute: further per-row failure \
@@ -888,14 +1009,30 @@ fn recompute_row_embeddings(
                             );
                         }
                         stats.embeddings_recompute_failed += 1;
+                        None
                     }
                 }
             }
             _ => {
-                stats.embeddings_recompute_fallback += 1;
+                stats.embeddings_recompute_skipped_no_text += 1;
+                None
+            }
+        };
+
+        match recomputed {
+            Some(json_vector) => {
+                params_map.insert((*vec_key).to_string(), json_vector);
+            }
+            None if is_vector_only_set(cypher, vec_key) => {
+                outcome = RowEmbeddingOutcome::Skip;
+            }
+            None => {
+                params_map.insert((*vec_key).to_string(), zero_vector_json(embed_dim));
             }
         }
     }
+
+    outcome
 }
 
 /// Converts a computed embedding vector to a JSON array of numbers, or `None` if any component
@@ -907,6 +1044,80 @@ fn vector_to_json(vector: &[f32]) -> Option<serde_json::Value> {
         .map(|f| serde_json::Number::from_f64(*f as f64).map(serde_json::Value::Number))
         .collect::<Option<Vec<_>>>()
         .map(serde_json::Value::Array)
+}
+
+/// A same-dimension all-zero vector, as a JSON array — never NaN/infinite, so this always
+/// succeeds (unlike `vector_to_json`, which can reject a genuinely computed vector).
+fn zero_vector_json(dim: usize) -> serde_json::Value {
+    serde_json::Value::Array(vec![serde_json::json!(0.0); dim])
+}
+
+/// Whether `cypher`'s top-level `SET` clause assigns only recognized embedding vector params
+/// (one of them being `vec_key`) and nothing else — i.e. this mutation exists for no purpose
+/// other than writing vector value(s), so nothing else can be silently lost by skipping the whole
+/// row when no source text is available (issue #526, FR-005). Detected structurally (every
+/// `SET`-clause assignment must target a key in [`crate::wal::VECTOR_PARAM_KEYS`]) rather than via
+/// a fixed record-kind list, so it also covers any future single-purpose vector `SET` this
+/// codebase hasn't written yet — not just today's known pre-existing Python/graphiti-driver shape
+/// (`tests/fixtures/wal/python_produced.jsonl`). Checking every assignment, not just counting them,
+/// matters: a `SET` clause with two-or-more vector-only assignments and nothing else (e.g.
+/// `SET n.name_embedding = $name_embedding, n.summary_embedding = $summary_embedding`) must still
+/// count as vector-only — a plain assignment count would misclassify it as `false` past the first
+/// comma and zero-fill both columns instead of skipping, overwriting whatever real vectors they
+/// already held.
+///
+/// A `CREATE`-form record (`insert_entity`/`insert_episodic`/`insert_relates_to_edge`/
+/// `insert_cross_group_edge`, and `dump.rs`'s `MERGE ... SET a=$a, b=$b, ...` re-materialization
+/// templates) is never vector-only: a bare `CREATE (...)` has no `SET` keyword to find at all, and
+/// a `MERGE ... SET` template that also sets other real properties (name, summary, fact, ...) has
+/// at least one assignment that isn't a recognized vector param — both cases return `false` here,
+/// since the row must still be executed to avoid losing the rest of what it creates.
+///
+/// Slices and matches entirely within the uppercased copy's own byte-offset space — never the
+/// original `cypher`'s (a review finding on this issue's own PR). `set_idx`, found in `upper`, is
+/// only a valid slice boundary in `upper`: `str::to_uppercase()` is not guaranteed to preserve
+/// byte length (e.g. `ǰ` U+01F0, 2 bytes, uppercases to `J̌` = `J` + combining caron, 3 bytes), so
+/// a literal string value elsewhere in `cypher` (e.g. an external, non-lcg-authored WAL row's raw
+/// Cypher text, not a bound param) could shift `upper`'s byte offsets out of step with `cypher`'s —
+/// slicing `cypher` at `upper`'s offset could then land mid-character and panic. Every substring
+/// this function searches for (`vec_key`, `$`, `SET`) is ASCII, so matching stays correct when both
+/// sides of every comparison are uppercased consistently.
+fn is_vector_only_set(cypher: &str, vec_key: &str) -> bool {
+    let upper = cypher.to_uppercase();
+    let Some(set_idx) = find_word(&upper, "SET") else {
+        return false;
+    };
+    let set_clause = &upper[set_idx + 3..];
+    let vec_key_upper = vec_key.to_uppercase();
+    if !set_clause.contains(&format!("${vec_key_upper}")) {
+        return false;
+    }
+    set_clause.split(',').all(|assignment| {
+        crate::wal::VECTOR_PARAM_KEYS
+            .iter()
+            .any(|k| assignment.contains(&format!("${}", k.to_uppercase())))
+    })
+}
+
+/// Finds the byte offset of `word` as a standalone token in `haystack` (already uppercased),
+/// bounded by non-alphanumeric characters (whitespace, parentheses, string start/end) — good
+/// enough for the fixed, machine-generated Cypher shapes `is_vector_only_set` inspects, unlike
+/// `wal::looks_like_mutation`'s fuller tokenizer, which also has to tolerate hand-typed queries
+/// through the `cypher` MCP scope.
+fn find_word(haystack: &str, word: &str) -> Option<usize> {
+    let bytes = haystack.as_bytes();
+    let wlen = word.len();
+    let mut start = 0;
+    while let Some(rel) = haystack[start..].find(word) {
+        let idx = start + rel;
+        let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
+        let after_ok = idx + wlen >= bytes.len() || !bytes[idx + wlen].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return Some(idx);
+        }
+        start = idx + wlen;
+    }
+    None
 }
 
 /// Resolves the batch size from `opts.batch_size` or the `LCG_REPLAY_BATCH_SIZE` env var.
@@ -1331,7 +1542,7 @@ mod replay_tests {
     fn test_resolve_batch_size_defaults_to_64() {
         let opts = ReplayOptions {
             batch_size: Some(64),
-            ..Default::default()
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
         };
         assert_eq!(resolve_batch_size(&opts).unwrap(), 64);
     }
@@ -1340,7 +1551,7 @@ mod replay_tests {
     fn test_resolve_batch_size_rejects_zero() {
         let opts = ReplayOptions {
             batch_size: Some(0),
-            ..Default::default()
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
         };
         assert!(resolve_batch_size(&opts).is_err());
     }
@@ -1349,7 +1560,7 @@ mod replay_tests {
     fn test_resolve_batch_size_rejects_over_256() {
         let opts = ReplayOptions {
             batch_size: Some(257),
-            ..Default::default()
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
         };
         assert!(resolve_batch_size(&opts).is_err());
     }
@@ -1358,7 +1569,7 @@ mod replay_tests {
     fn test_resolve_batch_size_accepts_256() {
         let opts = ReplayOptions {
             batch_size: Some(256),
-            ..Default::default()
+            ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
         };
         assert_eq!(resolve_batch_size(&opts).unwrap(), 256);
     }
@@ -1386,12 +1597,33 @@ mod replay_tests {
             transactions_rolled_back: 0,
             embeddings_recomputed: 0,
             embed_calls: 0,
-            embeddings_recompute_fallback: 0,
+            embeddings_recompute_skipped_no_text: 0,
             embeddings_recompute_failed: 0,
+            embeddings_skip_rows: 0,
         }
     }
 
-    // --- recompute_row_embeddings (issue #440, FR-001/FR-002/SC-005) ---
+    // ── wal.rs / replay.rs vector-key drift guard (issue #526) ──────────────────────────────
+
+    #[test]
+    fn embedding_text_pairs_key_set_matches_wal_strip_list() {
+        let mut replay_keys: Vec<&str> = EMBEDDING_TEXT_PAIRS.iter().map(|(k, _)| *k).collect();
+        let mut wal_keys: Vec<&str> = crate::wal::VECTOR_PARAM_KEYS.to_vec();
+        replay_keys.sort_unstable();
+        wal_keys.sort_unstable();
+        assert_eq!(
+            replay_keys, wal_keys,
+            "replay's recompute pairs and wal's strip list must cover exactly the same \
+             vector-param keys, or a key present in one but not the other would either leave a \
+             vector un-stripped or leave replay unable to recognize it"
+        );
+    }
+
+    // --- recompute_row_embeddings (issue #526, FR-001/FR-002/FR-005/SC-005) ---
+
+    const ENTITY_CREATE_CYPHER: &str = "CREATE (:Entity {uuid: $uuid, name: $name, \
+         name_embedding: $name_embedding, summary: $summary, \
+         summary_embedding: $summary_embedding})";
 
     #[test]
     fn recompute_row_embeddings_uses_embed_fn_when_text_present() {
@@ -1399,109 +1631,162 @@ mod replay_tests {
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
-        params.insert("name_embedding".to_string(), serde_json::json!([9.0, 9.0]));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        let outcome = recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
 
+        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
         assert_eq!(params["name_embedding"], serde_json::json!([5.0, 2.0]));
         assert_eq!(stats.embeddings_recomputed, 1);
         assert_eq!(stats.embed_calls, 1);
-        assert_eq!(stats.embeddings_recompute_fallback, 0);
+        assert_eq!(stats.embeddings_recompute_skipped_no_text, 0);
         assert_eq!(stats.embeddings_recompute_failed, 0);
     }
 
-    /// FR-002: no co-located source text present for the vector param → the stored value is
-    /// left bound verbatim, and the embedder is never invoked.
+    /// FR-002/FR-005: a stored vector in the WAL row is never bound — even when co-located text
+    /// is present and recompute succeeds, the stored value (here, a very different vector) is
+    /// fully replaced, not merely ignored.
     #[test]
-    fn recompute_row_embeddings_falls_back_when_text_missing() {
-        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![9.0]));
+    fn recompute_row_embeddings_never_binds_a_stored_vector_value() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![1.0, 1.0]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
-        params.insert("fact_embedding".to_string(), serde_json::json!([1.0, 2.0]));
+        params.insert("name".to_string(), serde_json::json!("Alice"));
+        // A legacy WAL might still carry a stored vector under this key — it must never survive.
+        params.insert("name_embedding".to_string(), serde_json::json!([9.0, 9.0]));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
 
         assert_eq!(
-            params["fact_embedding"],
-            serde_json::json!([1.0, 2.0]),
-            "stored vector must be left verbatim (FR-002)"
+            params["name_embedding"],
+            serde_json::json!([1.0, 1.0]),
+            "the stored value must be fully replaced by the recomputed one (FR-002)"
         );
-        assert_eq!(stats.embeddings_recompute_fallback, 1);
+    }
+
+    /// FR-005: a `CREATE`-type record with no co-located text (embedder hiccup notwithstanding,
+    /// this shouldn't happen in practice for a real CREATE template, but the row must still be
+    /// created for SC-002 count parity) gets a same-dimension zero vector instead of being
+    /// skipped or left unbound.
+    #[test]
+    fn recompute_row_embeddings_zero_fills_a_create_type_row_when_text_missing() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|_text: &str| panic!("embed_fn must not be called when text is absent"));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        // No "name" param present at all.
+
+        let outcome = recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            3,
+            &mut stats,
+        );
+
+        assert_eq!(
+            outcome,
+            RowEmbeddingOutcome::Proceed,
+            "a CREATE-type row must never be skipped — dropping it would lose the whole entity"
+        );
+        assert_eq!(params["name_embedding"], serde_json::json!([0.0, 0.0, 0.0]));
+        assert_eq!(stats.embeddings_recompute_skipped_no_text, 1);
         assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
     }
 
-    /// An embed-call failure during replay falls back to the stored vector rather than aborting
-    /// replay — recompute is explicitly self-healing (spec Assumptions).
+    /// FR-005: a vector-only `SET` mutation (the pre-existing Python/graphiti-driver shape, and
+    /// the pre-#526 `backfill_summary_embeddings.rs` shape) with no co-located text is skipped
+    /// entirely — never executed — so it can't overwrite a real vector already computed by the
+    /// entity's own CREATE record.
     #[test]
-    fn recompute_row_embeddings_falls_back_on_embed_error() {
+    fn recompute_row_embeddings_skips_a_vector_only_set_when_text_missing() {
+        let embed_fn: RecomputeEmbedFn =
+            Box::new(|_text: &str| panic!("embed_fn must not be called when text is absent"));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        params.insert("uuid".to_string(), serde_json::json!("ep1"));
+
+        let outcome = recompute_row_embeddings(
+            "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
+            &mut params,
+            embed_fn.as_ref(),
+            4,
+            &mut stats,
+        );
+
+        assert_eq!(outcome, RowEmbeddingOutcome::Skip);
+        assert_eq!(stats.embeddings_recompute_skipped_no_text, 1);
+        assert_eq!(stats.embed_calls, 0);
+        assert_eq!(stats.embeddings_recomputed, 0);
+        assert!(
+            !params.contains_key("content_embedding"),
+            "a skipped row's params are never touched — the caller drops the whole row"
+        );
+    }
+
+    /// An embed-call failure during replay is treated exactly like missing text: a vector-only
+    /// `SET` is skipped rather than binding a placeholder that would overwrite a real vector.
+    #[test]
+    fn recompute_row_embeddings_skips_a_vector_only_set_on_embed_error() {
         let embed_fn: RecomputeEmbedFn =
             Box::new(|_text: &str| Err(Error::Ipc("embedder unreachable".to_string())));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("content".to_string(), serde_json::json!("some content"));
-        params.insert(
-            "content_embedding".to_string(),
-            serde_json::json!([3.0, 4.0]),
+
+        let outcome = recompute_row_embeddings(
+            "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
         );
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
-
-        assert_eq!(params["content_embedding"], serde_json::json!([3.0, 4.0]));
+        assert_eq!(outcome, RowEmbeddingOutcome::Skip);
         assert_eq!(stats.embeddings_recompute_failed, 1);
         assert_eq!(stats.embed_calls, 1);
         assert_eq!(stats.embeddings_recomputed, 0);
     }
 
-    /// A recomputed vector whose length differs from the stored vector's (e.g. the WAL was
-    /// captured under a different embedding dimension, Edge Cases) must not be bound — `lbug`'s
-    /// embedding columns are fixed-width, so a wrong-length bind would fail at `execute_prepared`
-    /// and roll back the whole same-template batch, not just this row (see `flush_batch`).
-    /// Treated the same as any other recompute failure: stored vector kept, counted.
+    /// A recomputed vector whose length differs from the configured embedding dimension (e.g.
+    /// the embedder's model changed) must not be bound — `lbug`'s embedding columns are
+    /// fixed-width, so a wrong-length bind would fail at `execute_prepared` and roll back the
+    /// whole same-template batch, not just this row (see `flush_batch`). Treated the same as any
+    /// other recompute failure: for this CREATE-type row, zero-filled rather than skipped.
     #[test]
-    fn recompute_row_embeddings_falls_back_on_length_mismatch() {
+    fn recompute_row_embeddings_zero_fills_on_length_mismatch() {
         let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![1.0, 2.0, 3.0]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
-        params.insert("name_embedding".to_string(), serde_json::json!([9.0, 9.0]));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
 
         assert_eq!(
             params["name_embedding"],
-            serde_json::json!([9.0, 9.0]),
-            "a wrong-length recomputed vector must never replace the stored one"
+            serde_json::json!([0.0, 0.0]),
+            "a wrong-length recomputed vector must never be bound — zero-fill instead"
         );
         assert_eq!(stats.embeddings_recompute_failed, 1);
         assert_eq!(stats.embed_calls, 1);
-        assert_eq!(stats.embeddings_recomputed, 0);
-    }
-
-    /// A `vec_key` present with a non-array (malformed/unexpected) value has nothing sound to
-    /// recompute into (Edge Cases) — left untouched, counted the same as the no-co-located-text
-    /// fallback, and the embedder must never be invoked for it.
-    #[test]
-    fn recompute_row_embeddings_counts_malformed_vector_value_as_fallback() {
-        let embed_fn: RecomputeEmbedFn =
-            Box::new(|_text: &str| panic!("embed_fn must not be called for a malformed vec_key"));
-        let mut stats = zero_stats();
-        let mut params = serde_json::Map::new();
-        params.insert("name".to_string(), serde_json::json!("Alice"));
-        params.insert(
-            "name_embedding".to_string(),
-            serde_json::json!("not-an-array"),
-        );
-
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
-
-        assert_eq!(
-            params["name_embedding"],
-            serde_json::json!("not-an-array"),
-            "malformed value must be left untouched"
-        );
-        assert_eq!(stats.embeddings_recompute_fallback, 1);
-        assert_eq!(stats.embed_calls, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
     }
 
@@ -1513,24 +1798,33 @@ mod replay_tests {
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
-        params.insert("name_embedding".to_string(), serde_json::json!([9.0]));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            1,
+            &mut stats,
+        );
 
         assert!(stats.embeddings_recompute_had_no_failures());
     }
 
     #[test]
-    fn embeddings_recompute_had_no_failures_true_despite_a_fallback() {
+    fn embeddings_recompute_had_no_failures_true_despite_a_skip() {
         let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![9.0]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
-        // No co-located "fact" text present → FR-002 fallback, not a failure. This is normal,
-        // ongoing WAL shape (e.g. a SET-only mutation), not evidence the embedder failed —
+        // No co-located "content" text present → FR-002/FR-005 skip, not a failure. This is
+        // normal, ongoing WAL shape (a SET-only mutation), not evidence the embedder failed —
         // must not suppress a call site's identity persistence on its own.
-        params.insert("fact_embedding".to_string(), serde_json::json!([1.0, 2.0]));
-
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
+            &mut params,
+            embed_fn.as_ref(),
+            1,
+            &mut stats,
+        );
 
         assert!(stats.embeddings_recompute_had_no_failures());
     }
@@ -1542,37 +1836,71 @@ mod replay_tests {
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("content".to_string(), serde_json::json!("some content"));
-        params.insert(
-            "content_embedding".to_string(),
-            serde_json::json!([3.0, 4.0]),
-        );
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
 
         assert!(!stats.embeddings_recompute_had_no_failures());
     }
 
     #[test]
-    fn recompute_row_embeddings_ignores_rows_without_a_recognized_vector_param() {
+    fn recompute_row_embeddings_ignores_rows_without_a_recognized_vector_placeholder() {
         let embed_fn: RecomputeEmbedFn =
             Box::new(|_text: &str| panic!("embed_fn must not be called for this row"));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("uuid".to_string(), serde_json::json!("abc"));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        let outcome = recompute_row_embeddings(
+            "MERGE (n:MENTIONS {ep: $ep})",
+            &mut params,
+            embed_fn.as_ref(),
+            4,
+            &mut stats,
+        );
 
+        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
         assert_eq!(stats.embed_calls, 0);
-        assert_eq!(stats.embeddings_recompute_fallback, 0);
+        assert_eq!(stats.embeddings_recompute_skipped_no_text, 0);
         assert_eq!(stats.embeddings_recomputed, 0);
+    }
+
+    /// A legacy WAL row whose Cypher template still references `$name_embedding` but whose
+    /// params object no longer carries it (issue #526: the writer stopped emitting the param) is
+    /// still recognized and recomputed — relevance is decided by the template, not by whether the
+    /// stored param happens to be present.
+    #[test]
+    fn recompute_row_embeddings_recognizes_a_stripped_wal_row_via_the_template() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32, 0.0]));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), serde_json::json!("Al"));
+        // No "name_embedding" key at all — a freshly-written, post-#526 WAL row.
+
+        let outcome = recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
+
+        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
+        assert_eq!(params["name_embedding"], serde_json::json!([2.0, 0.0]));
+        assert_eq!(stats.embeddings_recomputed, 1);
     }
 
     /// SC-005: replaying repeated identical (text, model) pairs must invoke the embedder fewer
     /// times than there are matching rows. `replay.rs` itself has no cache — the caller-supplied
-    /// closure is responsible for one (FR-003) — so this wraps a real `EmbeddingCache` inside the
-    /// closure and counts the closure's own compute-path invocations separately from
-    /// `stats.embed_calls` (which counts every row `replay.rs` attempted, cache hit or miss
-    /// alike).
+    /// closure is responsible for one (FR-003 of issue #440) — so this wraps a real
+    /// `EmbeddingCache` inside the closure and counts the closure's own compute-path invocations
+    /// separately from `stats.embed_calls` (which counts every row `replay.rs` attempted, cache
+    /// hit or miss alike).
     #[test]
     fn cache_bounds_embedder_invocations_for_repeated_text() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1593,8 +1921,13 @@ mod replay_tests {
         for _ in 0..3 {
             let mut params = serde_json::Map::new();
             params.insert("name".to_string(), serde_json::json!("Alice"));
-            params.insert("name_embedding".to_string(), serde_json::json!([0.0, 0.0]));
-            recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+            recompute_row_embeddings(
+                "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+                &mut params,
+                embed_fn.as_ref(),
+                2,
+                &mut stats,
+            );
         }
 
         assert_eq!(
@@ -1612,20 +1945,127 @@ mod replay_tests {
 
     /// FR-010's tolerance target lives with the recompute path it validates: a computed vector
     /// containing NaN/infinity can't round-trip through JSON, so it must be treated the same as
-    /// any other recompute failure (fallback to the stored vector), not panic or corrupt params.
+    /// any other recompute failure (zero-fill for this CREATE-type row), not panic or corrupt
+    /// params.
     #[test]
-    fn recompute_row_embeddings_falls_back_on_non_finite_vector() {
+    fn recompute_row_embeddings_zero_fills_on_non_finite_vector() {
         let embed_fn: RecomputeEmbedFn = Box::new(|_text: &str| Ok(vec![f32::NAN, 1.0]));
         let mut stats = zero_stats();
         let mut params = serde_json::Map::new();
         params.insert("name".to_string(), serde_json::json!("Alice"));
-        params.insert("name_embedding".to_string(), serde_json::json!([1.0, 1.0]));
 
-        recompute_row_embeddings(&mut params, embed_fn.as_ref(), &mut stats);
+        recompute_row_embeddings(
+            "CREATE (:Entity {uuid: $uuid, name: $name, name_embedding: $name_embedding})",
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
 
-        assert_eq!(params["name_embedding"], serde_json::json!([1.0, 1.0]));
+        assert_eq!(params["name_embedding"], serde_json::json!([0.0, 0.0]));
         assert_eq!(stats.embeddings_recompute_failed, 1);
         assert_eq!(stats.embeddings_recomputed, 0);
+    }
+
+    /// The two-vector-params-in-one-row case (`insert_entity`'s CREATE template: both
+    /// `name_embedding` and `summary_embedding`) — each pair is recomputed independently from its
+    /// own co-located text.
+    #[test]
+    fn recompute_row_embeddings_handles_multiple_vector_params_in_one_row() {
+        let embed_fn: RecomputeEmbedFn = Box::new(|text: &str| Ok(vec![text.len() as f32, 0.0]));
+        let mut stats = zero_stats();
+        let mut params = serde_json::Map::new();
+        params.insert("name".to_string(), serde_json::json!("Al"));
+        params.insert("summary".to_string(), serde_json::json!("Alice summary"));
+
+        let outcome = recompute_row_embeddings(
+            ENTITY_CREATE_CYPHER,
+            &mut params,
+            embed_fn.as_ref(),
+            2,
+            &mut stats,
+        );
+
+        assert_eq!(outcome, RowEmbeddingOutcome::Proceed);
+        assert_eq!(params["name_embedding"], serde_json::json!([2.0, 0.0]));
+        assert_eq!(params["summary_embedding"], serde_json::json!([13.0, 0.0]));
+        assert_eq!(stats.embeddings_recomputed, 2);
+        assert_eq!(stats.embed_calls, 2);
+    }
+
+    // ── is_vector_only_set (issue #526, FR-005) ─────────────────────────────────────────────
+
+    #[test]
+    fn is_vector_only_set_true_for_a_bare_set_only_mutation() {
+        assert!(is_vector_only_set(
+            "MATCH (n:Episodic {uuid:$uuid}) SET n.content_embedding=$content_embedding",
+            "content_embedding",
+        ));
+        assert!(is_vector_only_set(
+            "MATCH (n:RelatesToNode_ {uuid:$uuid}) SET n.fact_embedding=$fact_embedding",
+            "fact_embedding",
+        ));
+    }
+
+    #[test]
+    fn is_vector_only_set_false_for_a_create_form_record() {
+        // No `SET` keyword at all — properties are inline in the `CREATE` literal.
+        assert!(!is_vector_only_set(ENTITY_CREATE_CYPHER, "name_embedding"));
+        assert!(!is_vector_only_set(
+            ENTITY_CREATE_CYPHER,
+            "summary_embedding"
+        ));
+    }
+
+    #[test]
+    fn is_vector_only_set_false_for_a_multi_assignment_set_clause() {
+        // dump.rs's MERGE-form re-materialization shape — a SET clause with several assignments,
+        // one of which is the vector — must never be treated as vector-only.
+        assert!(!is_vector_only_set(
+            "MERGE (n:Entity {uuid: $uuid}) SET n.name = $name, n.name_embedding = \
+             $name_embedding, n.summary = $summary",
+            "name_embedding",
+        ));
+    }
+
+    #[test]
+    fn is_vector_only_set_false_for_the_fixed_backfill_shape() {
+        // Issue #526's own fix to `backfill_summary_embeddings.rs`: now that it also re-sets
+        // `summary`, its SET clause has two assignments and is no longer vector-only.
+        assert!(!is_vector_only_set(
+            "MATCH (n:Entity {uuid: $uuid}) SET n.summary_embedding = $summary_embedding, \
+             n.summary = $summary",
+            "summary_embedding",
+        ));
+    }
+
+    /// A `SET` clause with two-or-more vector-only assignments and nothing else must still be
+    /// vector-only — a plain assignment-count check would stop at "count == 2" and misclassify
+    /// this as a real-content row, zero-filling both columns instead of skipping and overwriting
+    /// whatever real vectors they already held (a review finding on this issue's own PR).
+    #[test]
+    fn is_vector_only_set_true_for_multiple_vector_only_assignments() {
+        let cypher = "MATCH (n:Entity {uuid: $uuid}) SET n.name_embedding = $name_embedding, \
+                       n.summary_embedding = $summary_embedding";
+        assert!(is_vector_only_set(cypher, "name_embedding"));
+        assert!(is_vector_only_set(cypher, "summary_embedding"));
+    }
+
+    /// A review finding on this issue's own PR: `set_idx` is found in the uppercased copy of
+    /// `cypher` but was previously used to slice the *original* `cypher` — unsound whenever
+    /// `str::to_uppercase()` doesn't preserve byte length. `ǰ` (U+01F0, 2 bytes) uppercases to a
+    /// `J` plus a combining caron (3 bytes total), a 1-byte expansion; placed ahead of `SET`, it
+    /// shifts the uppercased copy's byte offsets 1 past the original string's. The `é` (2 bytes)
+    /// immediately after `SET` is exactly where that 1-byte shift lands: slicing the *original*
+    /// `cypher` at the *uppercased* copy's offset for `SET`'s end used to split `é`'s two bytes,
+    /// panicking with "byte index 34 is not a char boundary" (confirmed against the pre-fix
+    /// code). Slicing `upper` throughout, as the fixed code does, can never do this — `upper`'s
+    /// own offsets are always valid within `upper`, regardless of any Unicode expansion in
+    /// `cypher`.
+    #[test]
+    fn is_vector_only_set_does_not_panic_on_byte_length_expanding_uppercase() {
+        let cypher = "MATCH (n:Entity {uuid: 'ǰ'}) SETé n.content_embedding = $content_embedding";
+        assert!(is_vector_only_set(cypher, "content_embedding"));
     }
 
     /// FR-008/SC-003: a wholly-unrecognised WAL (`total` driven entirely by
@@ -1766,7 +2206,7 @@ mod replay_tests {
                 &conn,
                 ReplayOptions {
                     batch_size: Some(3),
-                    ..Default::default()
+                    ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
                 },
             )
             .unwrap();
@@ -1814,7 +2254,7 @@ mod replay_tests {
                 &conn,
                 ReplayOptions {
                     batch_size: Some(3),
-                    ..Default::default()
+                    ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
                 },
             )
             .unwrap();
@@ -1860,7 +2300,7 @@ mod replay_tests {
                 &conn,
                 ReplayOptions {
                     batch_size: Some(3),
-                    ..Default::default()
+                    ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
                 },
             )
             .unwrap();
@@ -1903,7 +2343,7 @@ mod replay_tests {
                 &conn,
                 ReplayOptions {
                     batch_size: Some(64),
-                    ..Default::default()
+                    ..ReplayOptions::new(zero_vector_embed_fn(4), 4)
                 },
             )
             .unwrap();

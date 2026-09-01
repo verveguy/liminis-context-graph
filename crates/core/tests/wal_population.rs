@@ -572,7 +572,9 @@ async fn test_wal_rebuild_reproduces_counts() {
     // Replay the WAL into the fresh DB.
     let replayer = WalReplayer::new(&group_dir);
     let conn = rebuild_db.connect().unwrap();
-    let stats = replayer.replay(&conn).unwrap();
+    let stats = replayer
+        .replay(&conn, lcg_core::zero_vector_embed_fn(EMB_DIM), EMB_DIM)
+        .unwrap();
 
     assert!(
         stats.lines_replayed > 0,
@@ -674,7 +676,9 @@ async fn relation_type_survives_wal_round_trip() {
 
     let replayer = WalReplayer::new(&group_dir);
     let conn = rebuild_db.connect().unwrap();
-    let stats = replayer.replay(&conn).unwrap();
+    let stats = replayer
+        .replay(&conn, lcg_core::zero_vector_embed_fn(EMB_DIM), EMB_DIM)
+        .unwrap();
     assert!(
         stats.lines_replayed > 0,
         "WAL replay must process at least one mutation line"

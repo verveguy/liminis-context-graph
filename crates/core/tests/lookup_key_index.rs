@@ -13,12 +13,23 @@
 use std::fs;
 
 use lcg_core::corrections::{apply_corrections_file, merge_entities, MergeEntitiesParams};
+use lcg_core::embedder::MockEmbedder;
+use lcg_core::embedding_cache::{EmbedderContext, EmbeddingCache};
 use lcg_core::{schema, Db, EntityRow, WalReplayer};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const DIM: usize = 4;
 const TS: &str = "2026-01-01T00:00:00Z";
 const GROUP: &str = "liminis";
+
+fn test_embedder_ctx() -> EmbedderContext {
+    EmbedderContext {
+        embedder: Arc::new(MockEmbedder::new(DIM)),
+        model: "mock".to_string(),
+        cache: Arc::new(EmbeddingCache::new()),
+    }
+}
 
 fn open_db(dir: &TempDir) -> Db {
     let db = Db::open(dir.path().join("test.db").to_str().unwrap()).unwrap();
@@ -377,7 +388,9 @@ fn wal_replay_leaves_lookup_key_null_until_explicit_backfill() {
     )
     .unwrap();
 
-    WalReplayer::new(wal_dir.path()).replay(&conn).unwrap();
+    WalReplayer::new(wal_dir.path())
+        .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+        .unwrap();
     assert_eq!(conn.count_nodes("Entity").unwrap(), 1);
     assert!(
         conn.get_entity_by_name_ci("Replayed", GROUP)
@@ -440,7 +453,7 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
         db_path.to_str().unwrap(),
         wal_dir.path().to_str().unwrap(),
         DIM,
-        None,
+        test_embedder_ctx(),
     )
     .unwrap();
     let conn = db.connect().unwrap();
@@ -492,7 +505,9 @@ fn scan_fallback_resolves_and_self_heals_a_row_with_no_lookup_key() {
         format!("{line}\n"),
     )
     .unwrap();
-    WalReplayer::new(wal_dir.path()).replay(&conn).unwrap();
+    WalReplayer::new(wal_dir.path())
+        .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+        .unwrap();
 
     // Simulate the FR-012 failure posture directly: a post-replay backfill attempt failed, so
     // the caller marks the migration status failed rather than leaving callers to trust it.

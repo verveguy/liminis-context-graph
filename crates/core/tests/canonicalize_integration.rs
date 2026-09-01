@@ -749,7 +749,9 @@ async fn test_wal_round_trip_fidelity() {
     {
         let conn2 = db2.connect().unwrap();
         conn2.init_schema(DIM).unwrap();
-        let stats = WalReplayer::new(wal_dir.path()).replay(&conn2).unwrap();
+        let stats = WalReplayer::new(wal_dir.path())
+            .replay(&conn2, lcg_core::zero_vector_embed_fn(DIM), DIM)
+            .unwrap();
         assert!(stats.lines_replayed > 0, "WAL replay should replay lines");
     }
 
