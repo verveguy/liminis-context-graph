@@ -119,6 +119,51 @@ never commit release prep directly to `main` — then tag the merge commit.
    it isn't, either fix the underlying failure first or record in the release PR why the release
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
    `v0.11.0` did (#298).
+0b. **Run the sidecar-gated tests, and record their output in the release PR.** Two tests need a
+   live embedding sidecar and **skip silently when one is absent** — they print `[SKIP]` and *pass*,
+   so a green board says nothing about whether they ran. They are the only checks that measure
+   recompute cost and validate that recomputed vectors match what was previously stored, so a
+   release that has never run them ships that behaviour unverified.
+
+   Start the sidecar (see `crates/core/tests/fixtures/real_corpus_wal/README.md` for the tokenizer
+   cache and model paths it needs):
+
+   ```sh
+   LOCAL_INFERENCE_EMBEDDING_MODEL="$PWD/native/local-inference/bge-base-en-v1.5.mlpackage" \
+   LOCAL_INFERENCE_HF_CACHE="$PWD/resources/models/tokenizer" \
+     ./native/local-inference/.build/arm64-apple-macosx/release/LocalInference &
+   # confirm it is listening before continuing — the tests skip, not fail, if it is not
+   ls -la /tmp/liminis-inference.sock
+   ```
+
+   Then run, from a worktree, and paste the reported figures into the release PR:
+
+   ```sh
+   cargo test --release --test real_corpus_replay_perf -- --ignored --nocapture \
+     measure_cold_vs_warm_cache_replay_over_real_corpus_wal
+   cargo test --release --test real_corpus_replay_perf -- --ignored --nocapture \
+     validate_recompute_matches_stored_vectors_for_real_corpus_wal
+   ```
+
+   What to check, with the figures measured on `29eafe2` (0.14.0 development) as the baseline:
+
+   - **Cold vs warm replay cost** — cold 153.0s / 4,106 real embedder calls, warm 49.1s / 0 calls.
+     A cold figure that has grown materially, or a warm figure that no longer matches the
+     no-recompute baseline (~49.9s), means the content-addressed cache has stopped doing its job.
+   - **Recompute drift** — `mean_cosine` and `min_cosine` were `1.000000` for all three vector kinds
+     (1,506 `name_embedding`, 2,392 `fact_embedding`, 228 `content_embedding`). Anything below 1.0
+     on the **minimum** means same-model recompute is no longer exact, which the WAL no longer
+     carries vectors to fall back on (#526).
+
+   Neither is expected to fail. The point is that "unlikely to fail" and "verified" are different
+   claims, and only one of them belongs in a release. If a sidecar genuinely cannot be run for a
+   given release, say so in the release PR rather than leaving the omission silent — the same
+   standard step 0 applies to a red non-gating workflow.
+
+   Background: both tests skipped through every stage of #526 — Specify, Implement and Validate —
+   so its SC-001 and SC-005 success criteria shipped unmeasured. #460 was the same failure shape
+   from the other direction: an acceptance test that no CI job invoked.
+
 1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
    `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
    `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
