@@ -46,7 +46,7 @@ Where:
 | Record type | Collection key |
 |-------------|----------------|
 | Entity nodes | `nodes` |
-| Relationship/edge records (semantic search, list) | `facts` |
+| Relationship/edge records (semantic search, list) | `edges` [^524] |
 | Edge records (structural fetches by group or UUID) | `edges` |
 | Episode records | `episodes` |
 | Passage records | `passages` |
