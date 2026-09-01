@@ -74,14 +74,14 @@ omit the collection key.
 | Method | Collection key | Shape |
 |--------|----------------|-------|
 | `knowledge_find_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_find_relationships` | `facts` [^524] | `{facts, edges, count}` |
+| `knowledge_find_relationships` | `edges` [^524] | `{edges, facts, count}` |
 | `knowledge_get_episodes` | `episodes` | `{episodes, count}` |
 | `knowledge_get_nodes_by_group` | `nodes` | `{nodes, count}` |
 | `knowledge_get_edges_by_group` | `edges` [^524] | `{edges, facts, count}` |
 | `knowledge_get_edges_by_uuids` | `edges` | `{edges, count}` |
 | `knowledge_search_passages` | `passages` | `{passages, count}` |
 | `knowledge_list_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_list_relationships` | `facts` [^524] | `{facts, edges, count}` |
+| `knowledge_list_relationships` | `edges` [^524] | `{edges, facts, count}` |
 | `knowledge_get_entity_neighbors` | `nodes` (primary) | `{center_uuid, nodes, edges, count, node_count, edge_count}` |
 | `knowledge_get_entities_by_source` | `nodes` | `{source, nodes, count}` |
 
