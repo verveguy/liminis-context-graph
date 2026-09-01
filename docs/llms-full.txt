@@ -2157,6 +2157,18 @@ on `knowledge_rebuild_status`'s `result` for the background-job path) for the sp
 that produced it; it is omitted from dry-run rebuild results, since a dry run never touches
 indices.
 
+**`lookup_key_backfill_ok`** (boolean, issue #491) — appears alongside `indices_built` on the
+same two rebuild result shapes (`knowledge_rebuild_from_wal`'s result and
+`knowledge_rebuild_status`'s `result`), also omitted on dry-run for the same reason. It reports
+whether *that specific rebuild's* `Entity.lookup_key` backfill succeeded — independently of
+`indices_built`, which tracks only the FTS/HNSW index build and never reflects a backfill
+failure (see `name_index_trusted` below for why that scoping is deliberate). A rebuild can report
+`indices_built: true` and `lookup_key_backfill_ok: false` in the same result: the index build and
+the backfill are separate steps, and one can succeed while the other fails. Use this field to
+learn a given rebuild's backfill outcome directly from its own result, without a follow-up
+`knowledge_status` call; use `name_index_trusted` (below) for the current global/cumulative
+backfill health, independent of any specific rebuild.
+
 **`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — field names
 kept for wire compatibility, but re-backed by the `Entity.lookup_key` secondary ART index
 ([ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md), which supersedes the
