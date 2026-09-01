@@ -1072,19 +1072,30 @@ fn zero_vector_json(dim: usize) -> serde_json::Value {
 /// a `MERGE ... SET` template that also sets other real properties (name, summary, fact, ...) has
 /// at least one assignment that isn't a recognized vector param — both cases return `false` here,
 /// since the row must still be executed to avoid losing the rest of what it creates.
+///
+/// Slices and matches entirely within the uppercased copy's own byte-offset space — never the
+/// original `cypher`'s (a review finding on this issue's own PR). `set_idx`, found in `upper`, is
+/// only a valid slice boundary in `upper`: `str::to_uppercase()` is not guaranteed to preserve
+/// byte length (e.g. `ǰ` U+01F0, 2 bytes, uppercases to `J̌` = `J` + combining caron, 3 bytes), so
+/// a literal string value elsewhere in `cypher` (e.g. an external, non-lcg-authored WAL row's raw
+/// Cypher text, not a bound param) could shift `upper`'s byte offsets out of step with `cypher`'s —
+/// slicing `cypher` at `upper`'s offset could then land mid-character and panic. Every substring
+/// this function searches for (`vec_key`, `$`, `SET`) is ASCII, so matching stays correct when both
+/// sides of every comparison are uppercased consistently.
 fn is_vector_only_set(cypher: &str, vec_key: &str) -> bool {
     let upper = cypher.to_uppercase();
     let Some(set_idx) = find_word(&upper, "SET") else {
         return false;
     };
-    let set_clause = &cypher[set_idx + 3..];
-    if !set_clause.contains(&format!("${vec_key}")) {
+    let set_clause = &upper[set_idx + 3..];
+    let vec_key_upper = vec_key.to_uppercase();
+    if !set_clause.contains(&format!("${vec_key_upper}")) {
         return false;
     }
     set_clause.split(',').all(|assignment| {
         crate::wal::VECTOR_PARAM_KEYS
             .iter()
-            .any(|k| assignment.contains(&format!("${k}")))
+            .any(|k| assignment.contains(&format!("${}", k.to_uppercase())))
     })
 }
 
@@ -2038,6 +2049,23 @@ mod replay_tests {
                        n.summary_embedding = $summary_embedding";
         assert!(is_vector_only_set(cypher, "name_embedding"));
         assert!(is_vector_only_set(cypher, "summary_embedding"));
+    }
+
+    /// A review finding on this issue's own PR: `set_idx` is found in the uppercased copy of
+    /// `cypher` but was previously used to slice the *original* `cypher` — unsound whenever
+    /// `str::to_uppercase()` doesn't preserve byte length. `ǰ` (U+01F0, 2 bytes) uppercases to a
+    /// `J` plus a combining caron (3 bytes total), a 1-byte expansion; placed ahead of `SET`, it
+    /// shifts the uppercased copy's byte offsets 1 past the original string's. The `é` (2 bytes)
+    /// immediately after `SET` is exactly where that 1-byte shift lands: slicing the *original*
+    /// `cypher` at the *uppercased* copy's offset for `SET`'s end used to split `é`'s two bytes,
+    /// panicking with "byte index 34 is not a char boundary" (confirmed against the pre-fix
+    /// code). Slicing `upper` throughout, as the fixed code does, can never do this — `upper`'s
+    /// own offsets are always valid within `upper`, regardless of any Unicode expansion in
+    /// `cypher`.
+    #[test]
+    fn is_vector_only_set_does_not_panic_on_byte_length_expanding_uppercase() {
+        let cypher = "MATCH (n:Entity {uuid: 'ǰ'}) SETé n.content_embedding = $content_embedding";
+        assert!(is_vector_only_set(cypher, "content_embedding"));
     }
 
     /// FR-008/SC-003: a wholly-unrecognised WAL (`total` driven entirely by
