@@ -469,6 +469,13 @@ async fn llm_router_records_per_leaf_and_replays_flat() {
 
 // ── (d) User Story 3 / SC-003: no credential material reaches the cassette ──
 
+/// Covers `AnthropicExtractor`'s `x-api-key` header only — the LLM extractor never sends an
+/// `Authorization` header, so the `!raw_str.to_lowercase().contains("authorization")`
+/// assertion below has, prior to #509, never actually been exercised against a code path that
+/// could produce one. The only current source of an `Authorization` header is the embedder's
+/// HTTP transport (`Authorization: Bearer <key>`, added by #497/#506) — see
+/// `embedder_http_cassette_never_leaks_authorization_or_key` in
+/// `crates/core/tests/embedder_transport.rs` for that coverage (#509 FR-001/SC-003).
 #[tokio::test]
 async fn recorded_cassette_contains_no_credential_material() {
     const FAKE_API_KEY: &str = "sk-ant-super-secret-do-not-leak-4f8c9a1b";
