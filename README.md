@@ -172,7 +172,7 @@ specs/                   # feature specifications
 
 | Crate | Version | Role |
 |-------|---------|------|
-| `lbug` | `=0.20.1` | LadybugDB Rust bindings (pinned) |
+| `lbug` | `=0.20.2` | LadybugDB Rust bindings (pinned) |
 | `thiserror` | `2` | Error type generation |
 
 No ML-runtime dependencies (`tch`, `candle`, `onnxruntime`) are permitted — embeddings are produced out-of-process.

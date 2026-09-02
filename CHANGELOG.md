@@ -25,22 +25,27 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   break, making this the cheapest point to close out the inconsistency rather than carrying it
   forward as a permanent dual-key alias. See [ADR-0020](docs/adr/0020-ipc-collection-envelope-contract.md). (#524)
 
-- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.20.1`, moving both the crate pin in
+- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.20.2`, moving both the crate pin in
   `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together, in a
   single hop rather than staging through the intermediate `0.19.1`. Picks up upstream's
   buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint lock-file cleanup
   fixes (0.19.0), batched detached-node relationship deletes, WAL group commits, stats-aware query
-  planning, HNSW scalar quantization, plus three further correctness fixes on paths this project
+  planning, HNSW scalar quantization, plus several further correctness fixes on paths this project
   actively exercises: a heap-corruption fix in the FTS query path when scans race committing
   writers (`ladybug#845` — this project runs `CREATE_FTS_INDEX` on `Entity` and queries it
   concurrently as a live service), an alignment fix between primary-key-lookup rows and the input
-  chunk selection (`ladybug#837`), and a fix for silent row loss when `LOAD FROM`/`UNWIND` feeds a
+  chunk selection (`ladybug#837`), a fix for silent row loss when `LOAD FROM`/`UNWIND` feeds a
   `MATCH` primary-key predicate (`ladybug#864`) — the latter two both touch the
-  `Entity.lookup_key` ART-index lookup path. No IPC or MCP tool schema, response shape, or
-  dispatch method changes.
+  `Entity.lookup_key` ART-index lookup path — and, in the follow-up `0.20.2` release, a fix for
+  re-executed parameterized queries returning stale rows on the cached-plan fast path
+  (`ladybug#877`/`#878` — this project's `query_params`/`exec_params` calls in
+  `crates/core/src/db.rs` are exactly this pattern: essentially every read and write re-executes a
+  parameterized Cypher string within a session), further planner fixes (`ladybug#894`), and an
+  `ArrowResultCollector` downcast fix (`ladybug#884`). No IPC or MCP tool schema, response shape,
+  or dispatch method changes.
 
   **Upgrading is one-way for the database — but not for your data.** A database created under
-  `0.17.0` (storage version 41) opens directly under `0.20.1`: no migration step, no
+  `0.17.0` (storage version 41) opens directly under `0.20.2`: no migration step, no
   export/reimport. The first checkpoint under the new binary then rewrites it to storage version
   47, after which **an older `liminis-context-graph` binary will not open it again**.
 
