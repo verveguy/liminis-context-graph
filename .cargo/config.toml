@@ -21,7 +21,7 @@
 # The bundle stopped being *fully* self-contained in 0.18.0: OpenSSL moved out
 # of the archive (LadybugDB/ladybug#590, "Link against OpenSSL3"). lbug's
 # build.rs emits `cargo:rustc-link-lib=dylib=ssl` and `=crypto`
-# unconditionally. As of 0.20.2, build.rs checks OPENSSL_DIR / OPENSSL_ROOT_DIR
+# unconditionally. As of 0.20.1, build.rs checks OPENSSL_DIR / OPENSSL_ROOT_DIR
 # first and uses that directory directly if either is set; this repo sets
 # neither, so it falls through to `pkg-config --variable=libdir openssl` (then,
 # if that fails, a vcpkg lookup and hardcoded Homebrew fallback paths — see
