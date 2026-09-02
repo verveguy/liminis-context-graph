@@ -982,19 +982,30 @@ impl<'db> Conn<'db> {
     }
 
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
-    /// source_file + ":", scoped to the given group_ids. Returns the UUIDs of deleted episodes.
+    /// source_file + ":", scoped to the given group_ids. Returns the UUIDs of deleted episodes
+    /// alongside a [`GroupedMutations`] bucketing the deletion mutations by the `group_id` each
+    /// one actually removed data from (issue #402).
     ///
     /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
     /// query is not representable here; callers must resolve a group scope before calling.
     /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
     /// caller bypassing the handler-layer validation.
     ///
+    /// Runs one match+delete per `group_id`, wrapped in `BEGIN TRANSACTION`/`COMMIT` (mirroring
+    /// `group_purge::purge_groups`'s per-group loop): a single `WHERE group_id IN [...]` call
+    /// spanning several groups can't be split back apart into per-group WAL attribution after
+    /// the fact, so each group gets its own singleton-slice query and is drained immediately
+    /// after (issue #402, following ADR-0385's precedent for `handle_delete_by_group`). The
+    /// transaction wrapping is new relative to the pre-#402 single-query form, which was atomic
+    /// for free — splitting into N queries needs the same explicit guard so a failure partway
+    /// through doesn't leave a partial cross-group delete.
+    ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
         group_ids: &[&str],
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<(Vec<String>, GroupedMutations), Error> {
         if group_ids.is_empty() {
             return Err(Error::Ipc(
                 "remove_episodes_by_source requires a non-empty group_ids".to_string(),
@@ -1004,23 +1015,47 @@ impl<'db> Conn<'db> {
         let match_sql = "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
              OR ep.source_description STARTS WITH $prefix) AND ep.group_id IN $gids \
              RETURN ep.uuid";
-        let params = serde_json::json!({ "src": source_file, "prefix": prefix, "gids": group_ids });
-        let uuids: Vec<String> = self
-            .query_params(match_sql, params)?
-            .into_iter()
-            .map(|row| value_as_string(&row[0]))
-            .collect();
-        if !uuids.is_empty() {
-            self.exec_params(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
-                serde_json::json!({ "uuids": uuids }),
-            )?;
+
+        self.exec_transaction_control("BEGIN TRANSACTION")?;
+        let mut grouped: GroupedMutations = GroupedMutations::new();
+        let mut all_uuids: Vec<String> = Vec::new();
+        let mutate_result = (|| -> Result<(), Error> {
+            for gid in group_ids {
+                let single = [*gid];
+                let params =
+                    serde_json::json!({ "src": source_file, "prefix": prefix, "gids": single });
+                let uuids: Vec<String> = self
+                    .query_params(match_sql, params)?
+                    .into_iter()
+                    .map(|row| value_as_string(&row[0]))
+                    .collect();
+                if !uuids.is_empty() {
+                    self.exec_params(
+                        "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+                        serde_json::json!({ "uuids": uuids }),
+                    )?;
+                    self.drain_mutations_into(&mut grouped, gid);
+                    all_uuids.extend(uuids);
+                }
+            }
+            Ok(())
+        })();
+
+        match mutate_result {
+            Ok(()) => self.exec_transaction_control("COMMIT")?,
+            Err(e) => {
+                let _ = self.exec_transaction_control("ROLLBACK");
+                return Err(e);
+            }
         }
-        Ok(uuids)
+
+        Ok((all_uuids, grouped))
     }
 
     /// Deletes all Episodic nodes whose name (chunk identifier) matches chunk_id, scoped to the
-    /// given group_ids. Returns the UUIDs of deleted episodes.
+    /// given group_ids. Returns the UUIDs of deleted episodes alongside a [`GroupedMutations`]
+    /// bucketing the deletion mutations by the `group_id` each one actually removed data from
+    /// (issue #402).
     ///
     /// Matches on ep.name (which always stores chunk_id) rather than source_description.
     /// Orphaned entities connected only to the deleted episodes are NOT removed — callers
@@ -1031,12 +1066,15 @@ impl<'db> Conn<'db> {
     /// Returns `Error::Ipc` if `group_ids` is empty, as defense in depth against a future
     /// caller bypassing the handler-layer validation.
     ///
+    /// Runs one match+delete per `group_id`, wrapped in `BEGIN TRANSACTION`/`COMMIT` — see
+    /// `remove_episodes_by_source`'s doc comment above for the full rationale (issue #402).
+    ///
     /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
         group_ids: &[&str],
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<(Vec<String>, GroupedMutations), Error> {
         if group_ids.is_empty() {
             return Err(Error::Ipc(
                 "remove_episodes_by_chunk_id requires a non-empty group_ids".to_string(),
@@ -1044,19 +1082,40 @@ impl<'db> Conn<'db> {
         }
         let match_sql =
             "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id IN $gids RETURN ep.uuid";
-        let params = serde_json::json!({ "name": chunk_id, "gids": group_ids });
-        let uuids: Vec<String> = self
-            .query_params(match_sql, params)?
-            .into_iter()
-            .map(|row| value_as_string(&row[0]))
-            .collect();
-        if !uuids.is_empty() {
-            self.exec_params(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
-                serde_json::json!({ "uuids": uuids }),
-            )?;
+
+        self.exec_transaction_control("BEGIN TRANSACTION")?;
+        let mut grouped: GroupedMutations = GroupedMutations::new();
+        let mut all_uuids: Vec<String> = Vec::new();
+        let mutate_result = (|| -> Result<(), Error> {
+            for gid in group_ids {
+                let single = [*gid];
+                let params = serde_json::json!({ "name": chunk_id, "gids": single });
+                let uuids: Vec<String> = self
+                    .query_params(match_sql, params)?
+                    .into_iter()
+                    .map(|row| value_as_string(&row[0]))
+                    .collect();
+                if !uuids.is_empty() {
+                    self.exec_params(
+                        "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+                        serde_json::json!({ "uuids": uuids }),
+                    )?;
+                    self.drain_mutations_into(&mut grouped, gid);
+                    all_uuids.extend(uuids);
+                }
+            }
+            Ok(())
+        })();
+
+        match mutate_result {
+            Ok(()) => self.exec_transaction_control("COMMIT")?,
+            Err(e) => {
+                let _ = self.exec_transaction_control("ROLLBACK");
+                return Err(e);
+            }
         }
-        Ok(uuids)
+
+        Ok((all_uuids, grouped))
     }
 
     // ── Group-scoped purge (issue #361) ─────────────────────────────────────────
