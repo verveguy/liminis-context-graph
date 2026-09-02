@@ -1,6 +1,6 @@
 // User Story 3 / FR-003 (issue #529): a pre-existing database at storage version 41 (created
 // under lbug 0.17.0, before #398 bumped the pin to 0.19.1) must open under the current
-// lbug-0.20.1-pinned binary, migrate in place (41 -> 47), and serve correct reads, with no
+// lbug-0.20.2-pinned binary, migrate in place (41 -> 47), and serve correct reads, with no
 // manual operator step.
 //
 // The fixture (crates/core/tests/fixtures/storage_v41_db/t.db.tar.gz) was generated once by
@@ -46,7 +46,7 @@ fn storage_v41_database_opens_and_migrates_with_correct_reads() {
         "expected t.db to be present after extracting the storage-v41 fixture"
     );
 
-    // Opening a storage-v41 database under the current (0.20.1-pinned) binary must succeed with
+    // Opening a storage-v41 database under the current (0.20.2-pinned) binary must succeed with
     // no manual operator step. The on-disk rewrite to the current storage version happens at the
     // first checkpoint (see CHANGELOG.md), not necessarily at open — this test doesn't force a
     // checkpoint or assert the storage version, only that open is automatic and reads are correct.
