@@ -218,6 +218,7 @@ async fn cancel_during_phase_a_returns_cancelled() {
             "grp",
             SourceType::Text,
             None,
+            "",
         )
         .await
     });
@@ -263,6 +264,7 @@ async fn cancel_before_episode_returns_cancelled() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await;
 
@@ -294,6 +296,7 @@ async fn no_cancel_completes_normally() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await;
 
@@ -329,6 +332,7 @@ async fn cancel_during_phase_a_batch_embed_returns_cancelled() {
             "grp",
             SourceType::Text,
             None,
+            "",
         )
         .await
     });

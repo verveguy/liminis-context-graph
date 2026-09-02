@@ -90,7 +90,9 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Hybrid (full-text + vector) search for relationships (facts) \
                            matching a query. Returned edges' `episode_uuids` is always \
                            empty on this read path (not populated). The response returns \
-                           the relationship list under the `edges` key.",
+                           the relationship list under the `edges` key. Does not include \
+                           episode `attributes` (issue #528) — this path returns edges, \
+                           never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -110,7 +112,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_episodes",
             description: "Retrieve the most recent episodes (ingested source documents) for \
-                           a group.",
+                           a group. Each returned episode includes its `attributes` (issue \
+                           #528), the caller-supplied structured metadata set via \
+                           `knowledge_process_chunk`/`knowledge_add_episode`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -144,7 +148,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_get_edges_by_group",
             description: "List all relationship edges belonging to the given group IDs, or \
                            every group's edges when group_ids is omitted. Returned edges' \
-                           `episode_uuids` is always empty on this read path (not populated).",
+                           `episode_uuids` is always empty on this read path (not populated). \
+                           Does not include episode `attributes` (issue #528) — this path \
+                           returns edges, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -156,7 +162,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_edges_by_uuids",
             description: "Fetch relationship edges by their UUIDs. Returned edges' \
-                           `episode_uuids` is always empty on this read path (not populated).",
+                           `episode_uuids` is always empty on this read path (not populated). \
+                           Does not include episode `attributes` (issue #528) — this path \
+                           returns edges, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -174,7 +182,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_search_passages",
             description: "Semantic passage search over ingested episode text, returning \
-                           scored text snippets.",
+                           scored text snippets. Each result includes the `attributes` (issue \
+                           #528) of the episode it belongs to — no separate per-episode fetch \
+                           is needed to obtain them.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -198,7 +208,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_list_entities",
             description: "List entity nodes, optionally scoped to specific group IDs, with \
-                           episode provenance attached.",
+                           episode provenance attached. Does not include episode `attributes` \
+                           (issue #528) — this path surfaces only entity-scoped provenance, \
+                           never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -219,7 +231,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            group IDs. Each edge's `episode_uuids` lists episodes that mention \
                            its source or target entity (either-endpoint co-occurrence), not \
                            evidence for that specific relationship. The response returns the \
-                           relationship list under the `edges` key.",
+                           relationship list under the `edges` key. Does not include episode \
+                           `attributes` (issue #528) — this path returns edges, never a full \
+                           episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -239,7 +253,9 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Get the immediate graph neighborhood (connected edges and nodes) \
                            of an entity. Each returned edge's `episode_uuids` lists episodes \
                            that mention its source or target entity (either-endpoint \
-                           co-occurrence), not evidence for that specific relationship.",
+                           co-occurrence), not evidence for that specific relationship. Does \
+                           not include episode `attributes` (issue #528) — this path returns \
+                           edges and nodes, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -258,7 +274,9 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_entities_by_source",
-            description: "List entities that were extracted from a given source document.",
+            description: "List entities that were extracted from a given source document. \
+                           Does not include episode `attributes` (issue #528) — this path \
+                           surfaces only entity-scoped provenance, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -317,7 +335,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            Splitting oversized input into multiple `knowledge_process_chunk` \
                            calls is the caller's responsibility; this call still succeeds above \
                            the threshold, but the result gains a `warning` field naming the \
-                           actual size and the recommended maximum.",
+                           actual size and the recommended maximum. \
+                           `attributes` (issue #528) is written directly to the resulting \
+                           episode node — structured metadata co-located with, but independent \
+                           of, the facts extracted from the chunk's prose (reachable from the \
+                           episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
+                           `knowledge_search_passages`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -330,7 +353,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "reference_time": {
                             "type": "string", "format": "date-time",
                             "description": "ISO 8601 timestamp; defaults to now."
-                        }
+                        },
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -339,7 +363,11 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_add_episode",
             description: "Add an episode (a piece of source content) to the graph, extracting \
-                           entities and relationships from it.",
+                           entities and relationships from it. `attributes` (issue #528) is \
+                           written directly to the resulting episode node — structured metadata \
+                           co-located with, but independent of, the facts extracted from the \
+                           episode's body (reachable from the episode via a MENTIONS hop). \
+                           Returned by `knowledge_get_episodes` and `knowledge_search_passages`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -350,7 +378,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "source": {"type": "string", "default": "text", "description": "Source type (e.g. \"text\", \"json\")."},
                         "source_description": {"type": "string"},
                         "reference_time": {"type": "string", "format": "date-time"},
-                        "group_id": {"type": "string", "default": "liminis"}
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
                     },
                     "required": ["name", "episode_body"]
                 })
@@ -1309,6 +1338,63 @@ mod tests {
         // knowledge_list_entities is entity-scoped and out of scope for issue #410:
         // "episode provenance" is accurate there and must remain untouched.
         assert!(desc_of("knowledge_list_entities").contains("episode provenance attached"));
+    }
+
+    /// SC-006 (issue #528): every episode-derived MCP tool's description must accurately state
+    /// whether `attributes` is included in that tool's response, mirroring the discipline
+    /// `edge_tool_descriptions_state_episode_uuids_semantics_accurately` enforces for
+    /// `episode_uuids` (issue #410).
+    #[test]
+    fn tool_descriptions_state_attributes_inclusion_accurately() {
+        let r = registry();
+        let desc_of = |name: &str| {
+            r.iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool {name} must remain registered"))
+                .description
+        };
+
+        // The two episode-creation entry points write attributes onto the resulting episode
+        // (FR-003) and must say so.
+        for name in ["knowledge_process_chunk", "knowledge_add_episode"] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("attributes") && desc.contains("528"),
+                "{name} description must state attributes are written to the episode, got: {desc}"
+            );
+        }
+
+        // The two full-episode read paths must state attributes ARE included (FR-006/FR-010).
+        for name in ["knowledge_get_episodes", "knowledge_search_passages"] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("attributes") && desc.contains("528"),
+                "{name} description must state attributes are included in the response, got: {desc}"
+            );
+            assert!(
+                !desc.to_lowercase().contains("does not include"),
+                "{name} description must claim inclusion, not exclusion, of attributes, got: {desc}"
+            );
+        }
+
+        // Every other episode-adjacent read path surfaces only partial provenance
+        // (episode_uuids/source_descriptions), never a full Episodic object, and must say so
+        // explicitly per FR-011 rather than leaving the omission implicit.
+        for name in [
+            "knowledge_find_relationships",
+            "knowledge_get_edges_by_group",
+            "knowledge_get_edges_by_uuids",
+            "knowledge_list_relationships",
+            "knowledge_get_entity_neighbors",
+            "knowledge_list_entities",
+            "knowledge_get_entities_by_source",
+        ] {
+            let desc = desc_of(name);
+            assert!(
+                desc.contains("Does not include episode `attributes`") && desc.contains("528"),
+                "{name} description must explicitly state it does not include episode attributes, got: {desc}"
+            );
+        }
     }
 
     #[test]

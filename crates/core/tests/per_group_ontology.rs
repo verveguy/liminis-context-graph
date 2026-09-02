@@ -132,6 +132,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
         "catalog",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -146,6 +147,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
         "content",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -256,6 +258,7 @@ async fn group_with_neither_ontology_extracts_free_form() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -370,6 +373,7 @@ async fn add_episode_writes_published_ontology_sidecar_for_the_extracting_group(
         "catalog",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -392,6 +396,7 @@ async fn add_episode_writes_published_ontology_sidecar_for_the_extracting_group(
         "content",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -420,6 +425,7 @@ async fn add_episode_succeeds_without_wal_root_configured() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -677,6 +683,7 @@ async fn group_with_prior_data_and_no_recorded_sidecar_reports_drift() {
         "legacy",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -757,6 +764,7 @@ async fn drift_clears_after_add_episode_reingest_for_that_group_only() {
         "group-a",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();

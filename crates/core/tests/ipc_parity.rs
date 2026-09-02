@@ -1387,6 +1387,180 @@ async fn test_knowledge_process_chunk_ok() {
     );
 }
 
+// ── issue #528: Episodic.attributes ──────────────────────────────────────────
+
+/// Acceptance Scenario 1/5, SC-001/SC-005, FR-006/FR-007/FR-010: a chunk ingested with
+/// `attributes` stores them on the resulting episode, and both `knowledge_get_episodes` and
+/// `knowledge_search_passages` return those attributes directly — with `knowledge_get_episodes`
+/// also still reaching the MENTIONS-linked entities extracted from the chunk's body (FR-007
+/// non-regression), all without a second per-episode fetch.
+#[tokio::test]
+async fn test_knowledge_process_chunk_attributes_roundtrip_via_get_episodes_and_search_passages() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let attrs = json!({"originating_system": "orac", "ingestion_batch": "batch-7"});
+    let v = dispatch_val(
+        30,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "test-chunk-attrs",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+            "attributes": attrs,
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 30);
+    let episode_uuid = v["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+    // knowledge_get_episodes: attributes present (FR-006), MENTIONS-linked entities still
+    // reachable via entity_edges (FR-007 non-regression — MockExtractor extracts 2 entities).
+    let episodes_v = dispatch_val(
+        31,
+        "knowledge_get_episodes",
+        json!({"last_n": 10}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&episodes_v, 31);
+    let episode = episodes_v["result"]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["uuid"] == episode_uuid)
+        .expect("ingested episode must be present in knowledge_get_episodes");
+    let stored_attrs: Value = serde_json::from_str(episode["attributes"].as_str().unwrap())
+        .expect("attributes must be valid JSON");
+    assert_eq!(
+        stored_attrs, attrs,
+        "attributes must round-trip verbatim: {episodes_v}"
+    );
+    assert_eq!(
+        episode["entity_edges"].as_array().map(|a| a.len()),
+        Some(2),
+        "MENTIONS-linked entities must remain reachable via entity_edges: {episodes_v}"
+    );
+
+    // knowledge_search_passages: attributes present on the passage result too (FR-010/SC-005),
+    // with no separate per-episode fetch.
+    let passages_v = dispatch_val(
+        32,
+        "knowledge_search_passages",
+        json!({"query": "Alice works at Acme Corp.", "num_results": 5, "min_score": 0.0}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&passages_v, 32);
+    let passage = passages_v["result"]["passages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["uuid"] == episode_uuid)
+        .expect("ingested episode's passage must be present in knowledge_search_passages");
+    let passage_attrs: Value = serde_json::from_str(passage["attributes"].as_str().unwrap())
+        .expect("attributes must be valid JSON");
+    assert_eq!(
+        passage_attrs, attrs,
+        "knowledge_search_passages must return the episode's attributes: {passages_v}"
+    );
+}
+
+/// Acceptance Scenario 4: `knowledge_add_episode` with `attributes` behaves identically to
+/// `knowledge_process_chunk` with the same `attributes` — both entry points expose the field on
+/// the same terms (both share the underlying `episode::add_episode` path).
+#[tokio::test]
+async fn test_knowledge_add_episode_attributes_matches_process_chunk() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let attrs = json!({"originating_system": "orac"});
+    let v = dispatch_val(
+        30,
+        "knowledge_add_episode",
+        json!({
+            "name": "ep-via-add-episode",
+            "episode_body": "Alice works at Acme Corp.",
+            "source": "test",
+            "source_description": "test source",
+            "reference_time": "2024-06-01T12:00:00Z",
+            "attributes": attrs,
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 30);
+    let episode_uuid = v["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+    let episodes_v = dispatch_val(31, "knowledge_get_episodes", json!({"last_n": 10}), state).await;
+    assert_ok_resp(&episodes_v, 31);
+    let episode = episodes_v["result"]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["uuid"] == episode_uuid)
+        .expect("episode created via knowledge_add_episode must be present");
+    let stored_attrs: Value = serde_json::from_str(episode["attributes"].as_str().unwrap())
+        .expect("attributes must be valid JSON");
+    assert_eq!(
+        stored_attrs, attrs,
+        "knowledge_add_episode's attributes must round-trip identically to \
+         knowledge_process_chunk's: {episodes_v}"
+    );
+}
+
+/// FR-004/FR-005, SC-002: omitting `attributes`, or supplying a non-object value (string,
+/// number, array, null), must default to `{}` — the same convention `knowledge_assert_entity`/
+/// `knowledge_assert_relationship` already use — and must not otherwise change the response.
+#[tokio::test]
+async fn test_knowledge_process_chunk_attributes_omitted_or_non_object_defaults_to_empty_object() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    for (id, chunk_id, attrs_param) in [
+        (30, "chunk-omitted", None),
+        (31, "chunk-string", Some(json!("not an object"))),
+        (32, "chunk-number", Some(json!(42))),
+        (33, "chunk-array", Some(json!([1, 2, 3]))),
+        (34, "chunk-null", Some(Value::Null)),
+    ] {
+        let mut params = json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": chunk_id,
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        });
+        if let Some(attrs) = attrs_param {
+            params["attributes"] = attrs;
+        }
+        let v = dispatch_val(id, "knowledge_process_chunk", params, Arc::clone(&state)).await;
+        assert_ok_resp(&v, id);
+        assert_eq!(
+            v["result"]["nodes_extracted"], 2,
+            "attributes handling must not affect entity extraction: {v}"
+        );
+        let episode_uuid = v["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+        let episodes_v = dispatch_val(
+            id + 100,
+            "knowledge_get_episodes",
+            json!({"last_n": 20}),
+            Arc::clone(&state),
+        )
+        .await;
+        let episode = episodes_v["result"]["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["uuid"] == episode_uuid)
+            .expect("episode must be present");
+        assert_eq!(
+            episode["attributes"], "{}",
+            "non-object/omitted attributes must default to {{}} for {chunk_id}: {episodes_v}"
+        );
+    }
+}
+
 // ── #342 US1 AS4 / SC-004: one malformed item must not sink a multi-chunk ingest ────
 
 /// Test extractor whose `extract()` reports a malformed-item drop for chunks whose

@@ -19,7 +19,7 @@ use lcg_core::{
     replay::WalReplayer,
     schema,
     telemetry::{NoopSink, TelemetrySink},
-    EntityRow, WalWriter,
+    EntityRow, EpisodicRow, WalWriter,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -702,5 +702,88 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
         after, &expected,
         "summary_embedding must be recomputed from the dumped summary text (FR-002), not left \
          NULL or zero-filled — before dump: {before:?}, after replay: {after:?}"
+    );
+}
+
+/// FR-008 (issue #528): an episode's `attributes` must survive being dumped and replayed during
+/// WAL compaction, the same as every other `Episodic` column — mirrors
+/// `test_dump_wal_preserves_entity_summary_embedding`'s shape, but `attributes` is opaque
+/// caller-supplied data (no recompute step), so the dumped and replayed value must match
+/// verbatim.
+#[tokio::test]
+async fn test_dump_wal_preserves_episodic_attributes() {
+    let dir = TempDir::new().unwrap();
+
+    let db1_path = dir.path().join("db1-attrs.db");
+    let db1 = open_db(&db1_path);
+    const UUID: &str = "attrs-episode-1";
+    let attrs = r#"{"originating_system":"orac","ingestion_batch":"batch-7"}"#;
+    {
+        let conn = db1.connect().unwrap();
+        conn.insert_episodic(&EpisodicRow {
+            uuid: UUID.to_string(),
+            name: "Test episode".to_string(),
+            group_id: "attrs-group".to_string(),
+            created_at: "2026-01-01 00:00:00".to_string(),
+            source: "text".to_string(),
+            source_description: "test source".to_string(),
+            content: "Alice is a person.".to_string(),
+            content_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            valid_at: "2026-01-01 00:00:00".to_string(),
+            entity_edges: vec![],
+            attributes: attrs.to_string(),
+        })
+        .unwrap();
+    }
+
+    let before_rows = db1
+        .connect()
+        .unwrap()
+        .cypher_query(&format!(
+            "MATCH (n:Episodic {{uuid: '{UUID}'}}) RETURN n.attributes"
+        ))
+        .unwrap();
+    assert_eq!(before_rows.len(), 1);
+    assert_eq!(
+        before_rows[0][0], attrs,
+        "precondition: seeded episode must carry the attributes it was created with"
+    );
+
+    let dump_dir = dir.path().join("dump-attrs");
+    let state1 = make_state(Arc::clone(&db1), db1_path.to_str().unwrap());
+    let dump_v = dispatch(
+        11,
+        "knowledge_dump_wal",
+        json!({ "target_dir": dump_dir.to_str().unwrap() }),
+        state1,
+    )
+    .await;
+    assert_eq!(
+        dump_v["result"]["success"], true,
+        "dump must succeed: {dump_v}"
+    );
+
+    let db2_path = dir.path().join("db2-attrs.db");
+    let db2 = open_db(&db2_path);
+    {
+        let conn = db2.connect().unwrap();
+        let stats = WalReplayer::new(&dump_dir)
+            .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+            .expect("dump replay must succeed");
+        assert_eq!(stats.failed_lines, 0, "zero replay failures");
+    }
+
+    let after_rows = db2
+        .connect()
+        .unwrap()
+        .cypher_query(&format!(
+            "MATCH (n:Episodic {{uuid: '{UUID}'}}) RETURN n.attributes"
+        ))
+        .unwrap();
+    assert_eq!(after_rows.len(), 1);
+    assert_eq!(
+        after_rows[0][0], attrs,
+        "attributes must survive dump→replay verbatim (FR-008) — before: {:?}, after: {:?}",
+        before_rows[0][0], after_rows[0][0]
     );
 }

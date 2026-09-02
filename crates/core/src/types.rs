@@ -56,6 +56,16 @@ pub struct EpisodicRow {
     pub content_embedding: Vec<f32>,
     pub valid_at: String,
     pub entity_edges: Vec<String>,
+    /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
+    /// The write path (`episode::add_episode`) and the migration/WAL-rebuild zero-fill
+    /// (`schema::zero_fill_null_episodic_attributes`) both maintain the invariant that this is a
+    /// parseable JSON object string defaulting to `"{}"`, never absent or non-JSON — see
+    /// ADR-0528. That zero-fill is best-effort and non-fatal on failure (deliberately, per
+    /// ADR-0528 Decision 3 — no `SchemaState` retry marker, unlike `Entity.lookup_key`), so a row
+    /// that survived a failed zero-fill attempt could still read back as `NULL` → `""` via
+    /// `value_as_string`; callers parsing this field should tolerate that rather than assume the
+    /// invariant is enforced unconditionally.
+    pub attributes: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -231,6 +241,9 @@ pub struct PassageResult {
     pub created_at: String,
     pub valid_at: Option<String>,
     pub score: f64,
+    /// The originating episode's structured metadata (issue #528, FR-010) — a JSON object
+    /// serialized as a string, sourced from `Episodic.attributes`. See ADR-0528.
+    pub attributes: String,
 }
 
 #[cfg(test)]

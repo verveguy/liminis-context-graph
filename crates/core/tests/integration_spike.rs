@@ -47,6 +47,7 @@ fn round_trip_entity_and_episodic() {
         content_embedding: embedding.clone(),
         valid_at: ts.to_string(),
         entity_edges: vec![],
+        attributes: "{}".to_string(),
     })
     .expect("insert episodic");
 

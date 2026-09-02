@@ -121,6 +121,15 @@ fn entity_wal_line(seq: u64, uuid: &str) -> String {
     )
 }
 
+/// A pre-#528-style raw WAL recording: `Episodic`'s `CREATE` never mentions `attributes` at all
+/// (it was recorded, in spirit, before that column existed) — used to verify a replayed row
+/// comes back zero-filled to `"{}"`, not left `NULL`, per `schema::zero_fill_null_episodic_attributes`.
+fn episodic_wal_line_without_attributes(seq: u64, uuid: &str) -> String {
+    format!(
+        r#"{{"seq":{seq},"ts":"2026-05-22T00:00:00.000000+00:00","db":"","cypher":"CREATE (:Episodic {{uuid: '{uuid}', name: '{uuid}', group_id: 'liminis', created_at: timestamp('2026-05-22 00:00:00'), source: 'text', source_description: 's', content: 'c', valid_at: timestamp('2026-05-22 00:00:00'), entity_edges: []}})","params":{{}}}}"#
+    )
+}
+
 /// A standalone `RelatesToNode_` WAL line (param-bound, mirroring the
 /// `timestamps_in_params.jsonl` fixture shape). Search queries these nodes directly by
 /// property (no two-hop `RELATES_TO` connectivity required), so this is sufficient to
@@ -1725,6 +1734,87 @@ async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embe
     assert!(
         !rows[0][0].is_empty(),
         "summary_embedding must be zero-filled, not NULL, after replaying a pre-#470 WAL \
+         recording via force_clear: {:?}",
+        rows[0][0]
+    );
+}
+
+/// Mirrors the `summary_embedding` test above for issue #528: `episodic_wal_line_without_attributes`
+/// is a pre-#528-style raw WAL recording whose Episodic `CREATE` never mentions `attributes` at
+/// all. Unlike the `FLOAT[dim]` ARRAY case, a plain `STRING` column genuinely comes back `NULL`
+/// when a `CREATE` never sets it — replaying via `force_clear: true` must not leave it that way:
+/// `zero_fill_null_episodic_attributes` (called from every WAL-rebuild call site, including this
+/// one) must zero-fill it to `"{}"` before the job completes (Acceptance Scenario 3, SC-003).
+#[tokio::test]
+async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_episodic_attributes() {
+    let (db, _dir, db_path) = make_db_with_path(4);
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260701_000000_iii999_0000.jsonl"),
+        episodic_wal_line_without_attributes(0, "legacy-episode-no-attributes") + "\n",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal_and_path(db, wal_dir.path().to_path_buf(), db_path);
+
+    let v = dispatch(
+        33,
+        "knowledge_rebuild_from_wal",
+        json!({"force_clear": true}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(
+        v["result"]["success"], true,
+        "force_clear:true must allow the rebuild to proceed: {v}"
+    );
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            34,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        let status = status_v["result"]["status"].as_str().unwrap_or("?");
+        match status {
+            "completed" => break,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "rebuild job did not complete within 5s: {status_v}"
+                );
+            }
+        }
+    }
+
+    let db_after = state
+        .db
+        .load_full()
+        .expect("db must be present after clear+rebuild");
+    let conn = db_after.connect().unwrap();
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:Episodic {uuid: 'legacy-episode-no-attributes'}) RETURN n.attributes",
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1, "the legacy episode must exist after rebuild");
+    assert_eq!(
+        rows[0][0], "{}",
+        "attributes must be zero-filled to \"{{}}\", not NULL, after replaying a pre-#528 WAL \
          recording via force_clear: {:?}",
         rows[0][0]
     );

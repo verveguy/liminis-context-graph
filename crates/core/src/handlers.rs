@@ -177,6 +177,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .as_str()
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
+    let attributes = attributes_param_to_string(&p["attributes"]);
 
     let source_type = SourceType::from_str_lossy(&source);
     let result = episode::add_episode(
@@ -189,6 +190,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         &group_id,
         source_type,
         None,
+        &attributes,
     )
     .await?;
 
@@ -908,6 +910,7 @@ async fn handle_knowledge_process_chunk(
         .as_str()
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
+    let attributes = attributes_param_to_string(&p["attributes"]);
 
     let ref_time = match p["reference_time"].as_str() {
         Some(s) => {
@@ -941,6 +944,7 @@ async fn handle_knowledge_process_chunk(
         &group_id,
         source_type,
         None,
+        &attributes,
     )
     .await?;
 
@@ -2491,6 +2495,10 @@ async fn handle_rebuild_from_wal(
                     ) {
                         eprintln!("liminis-context-graph: reload: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
                     }
+                    // Same rationale as above, for Episodic.attributes (issue #528).
+                    if let Err(e) = crate::schema::zero_fill_null_episodic_attributes(&conn) {
+                        eprintln!("liminis-context-graph: reload: zero-fill Episodic.attributes failed (non-fatal): {e}");
+                    }
                     // Replay bypassed insert_entity/update_entity_created_at — every replayed
                     // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
@@ -2966,6 +2974,10 @@ async fn handle_rebuild_from_wal(
                         bg_state.embedder.dim(),
                     ) {
                         eprintln!("liminis-context-graph: reload(bg): zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+                    }
+                    // Same rationale as above, for Episodic.attributes (issue #528).
+                    if let Err(e) = crate::schema::zero_fill_null_episodic_attributes(&conn) {
+                        eprintln!("liminis-context-graph: reload(bg): zero-fill Episodic.attributes failed (non-fatal): {e}");
                     }
                     // Replay bypassed insert_entity/update_entity_created_at — every replayed
                     // row's lookup_key is NULL — so backfill it before build_indices_and_constraints
@@ -4890,6 +4902,10 @@ async fn recover_rebuild_from_workspace_wal(
                 crate::schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim)
             {
                 eprintln!("liminis-context-graph: rebuild_from_workspace_wal: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
+            }
+            // Same rationale as above, for Episodic.attributes (issue #528).
+            if let Err(e) = crate::schema::zero_fill_null_episodic_attributes(&conn) {
+                eprintln!("liminis-context-graph: rebuild_from_workspace_wal: zero-fill Episodic.attributes failed (non-fatal): {e}");
             }
             // WAL replay above bypassed insert_entity/update_entity_created_at — every
             // replayed row's lookup_key is NULL — so backfill it before

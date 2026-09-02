@@ -187,6 +187,7 @@ pub async fn add_episode(
     group_id: &str,
     source_type: SourceType,
     custom_instructions: Option<&str>,
+    attributes: &str,
 ) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
@@ -699,6 +700,16 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    // `attributes` is expected to already be a serialized JSON object (handlers.rs's
+    // `attributes_param_to_string` guarantees this for the two IPC entry points), but
+    // `add_episode` is a public library function — an internal/library caller passing `""` or
+    // other non-JSON-object text would otherwise violate `EpisodicRow.attributes`'s documented
+    // invariant of always being a parseable JSON object string. Normalize here so the invariant
+    // holds regardless of caller (Copilot review, issue #528).
+    let attributes_owned = match serde_json::from_str::<serde_json::Value>(attributes.trim()) {
+        Ok(serde_json::Value::Object(_)) => attributes.to_string(),
+        _ => "{}".to_string(),
+    };
     let db_c = state.db.load_full().ok_or_else(|| {
         let reason = state
             .degraded_reason
@@ -885,6 +896,7 @@ pub async fn add_episode(
             content_embedding,
             valid_at: ref_time_owned.clone(),
             entity_edges: entity_uuids.clone(),
+            attributes: attributes_owned.clone(),
         })?;
 
         // Insert MENTIONS edges

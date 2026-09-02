@@ -52,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             content_embedding: embedding.clone(),
             valid_at: ts.to_string(),
             entity_edges: vec![],
+            attributes: "{}".to_string(),
         })?;
 
         conn.create_vector_indexes()?;

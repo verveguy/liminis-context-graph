@@ -106,6 +106,7 @@ async fn test_identical_name_two_episodes_one_node() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -120,6 +121,7 @@ async fn test_identical_name_two_episodes_one_node() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -148,6 +150,7 @@ async fn test_identical_name_cross_session_durability() {
             GROUP,
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -167,6 +170,7 @@ async fn test_identical_name_cross_session_durability() {
             GROUP,
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -198,6 +202,7 @@ async fn test_case_insensitive_name_match() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -212,6 +217,7 @@ async fn test_case_insensitive_name_match() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -250,6 +256,7 @@ async fn test_empty_name_entity_skipped() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -289,6 +296,7 @@ async fn test_embedding_based_dedup_variant_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -303,6 +311,7 @@ async fn test_embedding_based_dedup_variant_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -344,6 +353,7 @@ async fn test_no_false_collapse_dissimilar_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -358,6 +368,7 @@ async fn test_no_false_collapse_dissimilar_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -368,4 +379,76 @@ async fn test_no_false_collapse_dissimilar_names() {
         count, 2,
         "no-false-collapse: expected two distinct entity nodes, got {count}"
     );
+}
+
+// ── issue #528: `add_episode` normalizes non-JSON-object `attributes` for library callers ──
+
+/// `episode::add_episode` is a public library function, not reachable only through the IPC
+/// handlers that pre-normalize via `attributes_param_to_string`. A direct caller passing `""`
+/// (as every pre-existing test/bench call site in this repo does) or another non-JSON-object
+/// string must still get `EpisodicRow.attributes`'s documented invariant of always being a
+/// parseable JSON object string — not the literal `""`/garbage passed in (Copilot review finding
+/// on PR #544).
+#[tokio::test]
+async fn test_add_episode_normalizes_non_object_attributes_for_library_callers() {
+    let (db, _dir) = make_db();
+    let ext = ConfigurableExtractor::new(vec![one_entity("Dana")]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+
+    for (label, raw) in [
+        ("empty string", ""),
+        ("whitespace only", "   "),
+        ("non-JSON garbage", "not json"),
+        ("JSON array", "[1,2,3]"),
+        ("JSON string", "\"hello\""),
+    ] {
+        let uuid = format!("ep-{label}").replace(' ', "-");
+        episode::add_episode(
+            Arc::clone(&state),
+            &uuid,
+            "Dana joined the call.",
+            "test",
+            "test source",
+            REF_TIME,
+            GROUP,
+            SourceType::Text,
+            None,
+            raw,
+        )
+        .await
+        .unwrap();
+
+        let conn = db.connect().unwrap();
+        let rows = conn
+            .cypher_query(&format!(
+                "MATCH (n:Episodic {{name: '{uuid}'}}) RETURN n.attributes"
+            ))
+            .unwrap();
+        assert_eq!(
+            rows[0][0], "{}",
+            "{label}: non-JSON-object attributes {raw:?} must normalize to \"{{}}\", got {:?}",
+            rows[0][0]
+        );
+    }
+
+    // A genuine JSON object must survive unchanged.
+    episode::add_episode(
+        Arc::clone(&state),
+        "ep-valid-object",
+        "Dana joined the call.",
+        "test",
+        "test source",
+        REF_TIME,
+        GROUP,
+        SourceType::Text,
+        None,
+        r#"{"k":"v"}"#,
+    )
+    .await
+    .unwrap();
+    let conn = db.connect().unwrap();
+    let rows = conn
+        .cypher_query("MATCH (n:Episodic {name: 'ep-valid-object'}) RETURN n.attributes")
+        .unwrap();
+    assert_eq!(rows[0][0], r#"{"k":"v"}"#);
 }

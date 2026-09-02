@@ -413,6 +413,7 @@ async fn self_referential_edge_is_dropped() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -445,6 +446,7 @@ async fn edge_with_unresolvable_target_is_dropped() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -487,6 +489,7 @@ async fn edges_have_screaming_snake_case_relation_type() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
