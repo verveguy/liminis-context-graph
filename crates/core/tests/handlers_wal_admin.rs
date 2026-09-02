@@ -980,9 +980,9 @@ async fn test_reload_builds_all_indexes() {
     let rv = serde_json::to_value(find_rel_resp).unwrap();
 
     assert!(rv.get("error").is_none(), "no error after reload: {rv}");
-    let facts = rv["result"]["facts"]
+    let facts = rv["result"]["edges"]
         .as_array()
-        .expect("facts must be an array");
+        .expect("edges must be an array");
     assert!(
         !facts.is_empty(),
         "knowledge_find_relationships must return non-empty results after reload: {rv}"
@@ -1184,7 +1184,7 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
     let find_rel_resp = handlers::dispatch(find_rel_req, Arc::clone(&state), None).await;
     let rv = serde_json::to_value(find_rel_resp).unwrap();
     assert!(rv.get("error").is_none(), "no error: {rv}");
-    let facts = rv["result"]["facts"].as_array().expect("facts array");
+    let facts = rv["result"]["edges"].as_array().expect("edges array");
     assert!(
         !facts.is_empty(),
         "knowledge_find_relationships must return results at production scale: {rv}"

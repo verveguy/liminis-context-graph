@@ -361,19 +361,17 @@ async fn parity_get_edges_by_group_empty() {
     assert_ok_resp(&v, 4);
     assert!(v["result"].is_object(), "expected object envelope: {v}");
     assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
-    assert!(v["result"]["facts"].is_array(), "expected facts array: {v}");
-    assert_eq!(
-        v["result"]["edges"], v["result"]["facts"],
-        "edges and facts must be identical: {v}"
+    assert!(
+        v["result"].get("facts").is_none(),
+        "expected no facts key: {v}"
     );
     assert_eq!(v["result"]["count"], 0);
 }
 
-/// Issue #524 SC-001: same dual-key equality check as the empty-case test above, but with a
-/// seeded relationship — proves the two keys reference the actual list, not two independent
-/// (possibly diverging) empty defaults.
+/// Issue #524: `knowledge_get_edges_by_group` has always used `edges`; confirms it still does
+/// and gained no `facts` key, with a seeded relationship (not just the empty-case above).
 #[tokio::test]
-async fn parity_get_edges_by_group_dual_key_nonempty() {
+async fn parity_get_edges_by_group_nonempty() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);
 
@@ -395,11 +393,7 @@ async fn parity_get_edges_by_group_dual_key_nonempty() {
     assert_ok_resp(&v, 4002);
     let result = &v["result"];
     assert!(result["edges"].is_array(), "expected edges array: {v}");
-    assert!(result["facts"].is_array(), "expected facts array: {v}");
-    assert_eq!(
-        result["edges"], result["facts"],
-        "edges and facts must be identical: {v}"
-    );
+    assert!(result.get("facts").is_none(), "expected no facts key: {v}");
     let count = result["count"].as_u64().unwrap();
     assert_eq!(count, 1, "expected 1 relationship: {v}");
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
@@ -513,11 +507,11 @@ async fn parity_find_relationships_requires_embedder() {
     );
 }
 
-/// Issue #524 SC-001: a populated `knowledge_find_relationships` response must carry the
-/// same relationship list under both `edges` and `facts` — an empty-only test can't catch a
-/// bug that aliases one key to `[]` instead of the real list.
+/// Issue #524: `knowledge_find_relationships` was renamed from `facts` to `edges` (breaking
+/// change, not a dual-key alias); confirms a populated response carries the list under `edges`
+/// and never reintroduces `facts`.
 #[tokio::test]
-async fn parity_find_relationships_dual_key_nonempty() {
+async fn parity_find_relationships_nonempty() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);
 
@@ -545,11 +539,7 @@ async fn parity_find_relationships_dual_key_nonempty() {
     assert_ok_resp(&v, 461);
     let result = &v["result"];
     assert!(result["edges"].is_array(), "expected edges array: {v}");
-    assert!(result["facts"].is_array(), "expected facts array: {v}");
-    assert_eq!(
-        result["edges"], result["facts"],
-        "edges and facts must be identical: {v}"
-    );
+    assert!(result.get("facts").is_none(), "expected no facts key: {v}");
     let count = result["count"].as_u64().unwrap();
     assert_eq!(count, 1, "expected 1 relationship: {v}");
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
@@ -1906,20 +1896,19 @@ async fn parity_list_relationships_empty() {
     let state = make_state(db);
     let v = dispatch_val(44, "knowledge_list_relationships", json!({}), state).await;
     assert_ok_resp(&v, 44);
-    assert!(v["result"]["facts"].is_array(), "expected facts array: {v}");
     assert!(v["result"]["edges"].is_array(), "expected edges array: {v}");
-    assert_eq!(
-        v["result"]["edges"], v["result"]["facts"],
-        "edges and facts must be identical: {v}"
+    assert!(
+        v["result"].get("facts").is_none(),
+        "expected no facts key: {v}"
     );
     assert_eq!(v["result"]["count"], 0, "empty db: {v}");
 }
 
-/// Issue #524 SC-001: same dual-key equality check as the empty-case test above, but with a
-/// seeded relationship — proves the two keys reference the actual list, not two independent
-/// (possibly diverging) empty defaults.
+/// Issue #524: `knowledge_list_relationships` was renamed from `facts` to `edges` (breaking
+/// change, not a dual-key alias); confirms a populated response carries the list under `edges`
+/// and never reintroduces `facts`.
 #[tokio::test]
-async fn parity_list_relationships_dual_key_nonempty() {
+async fn parity_list_relationships_nonempty() {
     let (db, _dir) = make_db(4);
     let state = make_state_with_mock_embed(db);
 
@@ -1940,12 +1929,8 @@ async fn parity_list_relationships_dual_key_nonempty() {
     let v = dispatch_val(4402, "knowledge_list_relationships", json!({}), state).await;
     assert_ok_resp(&v, 4402);
     let result = &v["result"];
-    assert!(result["facts"].is_array(), "expected facts array: {v}");
     assert!(result["edges"].is_array(), "expected edges array: {v}");
-    assert_eq!(
-        result["edges"], result["facts"],
-        "edges and facts must be identical: {v}"
-    );
+    assert!(result.get("facts").is_none(), "expected no facts key: {v}");
     let count = result["count"].as_u64().unwrap();
     assert_eq!(count, 1, "expected 1 relationship: {v}");
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
@@ -2181,9 +2166,9 @@ async fn test_list_relationships_after_ingest() {
     )
     .await;
     assert_ok_resp(&v, 61);
-    let facts = v["result"]["facts"]
+    let facts = v["result"]["edges"]
         .as_array()
-        .expect("expected facts array");
+        .expect("expected edges array");
     assert!(
         !facts.is_empty(),
         "expected ≥1 relationship after ingest, got 0 — two-hop write/read may be broken: {v}"
@@ -2234,9 +2219,9 @@ async fn test_get_entity_neighbors_after_ingest() {
     )
     .await;
     assert_ok_resp(&lr, 63);
-    let facts = lr["result"]["facts"]
+    let facts = lr["result"]["edges"]
         .as_array()
-        .expect("expected facts array");
+        .expect("expected edges array");
     assert!(!facts.is_empty(), "expected ≥1 relationship: {lr}");
     let src_uuid = facts[0]["source_node_uuid"]
         .as_str()
@@ -2359,9 +2344,9 @@ async fn test_source_info_enrichment_list_relationships() {
     )
     .await;
     assert_ok_resp(&v, 73);
-    let facts = v["result"]["facts"]
+    let facts = v["result"]["edges"]
         .as_array()
-        .expect("expected facts array");
+        .expect("expected edges array");
     assert!(
         !facts.is_empty(),
         "expected ≥1 relationship after ingest: {v}"
@@ -2428,7 +2413,7 @@ async fn test_source_info_enrichment_get_entity_neighbors() {
     )
     .await;
     assert_ok_resp(&lr, 75);
-    let facts = lr["result"]["facts"].as_array().expect("expected facts");
+    let facts = lr["result"]["edges"].as_array().expect("expected edges");
     assert!(!facts.is_empty(), "expected ≥1 relationship: {lr}");
     let src_uuid = facts[0]["source_node_uuid"]
         .as_str()
@@ -2721,9 +2706,9 @@ async fn list_relationships_includes_relation_type() {
     .await;
     assert_ok_resp(&v, 201);
 
-    let facts = v["result"]["facts"]
+    let facts = v["result"]["edges"]
         .as_array()
-        .expect("expected facts array");
+        .expect("expected edges array");
     assert!(
         !facts.is_empty(),
         "expected ≥1 relationship after ingest: {v}"
@@ -6518,8 +6503,8 @@ async fn omitted_group_ids_find_relationships_matches_explicit_all_groups() {
 
     assert_ok_resp(&omitted, 504);
     assert_ok_resp(&explicit, 505);
-    let omitted_uuids = extract_uuids(&omitted, "facts");
-    let explicit_uuids = extract_uuids(&explicit, "facts");
+    let omitted_uuids = extract_uuids(&omitted, "edges");
+    let explicit_uuids = extract_uuids(&explicit, "edges");
     assert_eq!(
         omitted_uuids, explicit_uuids,
         "omitted group_ids must match explicit all-groups: omitted={omitted}, explicit={explicit}"
@@ -6666,8 +6651,8 @@ async fn omitted_group_ids_list_relationships_matches_explicit_all_groups() {
 
     assert_ok_resp(&omitted, 512);
     assert_ok_resp(&explicit, 513);
-    let omitted_uuids = extract_uuids(&omitted, "facts");
-    let explicit_uuids = extract_uuids(&explicit, "facts");
+    let omitted_uuids = extract_uuids(&omitted, "edges");
+    let explicit_uuids = extract_uuids(&explicit, "edges");
     assert_eq!(
         omitted_uuids, explicit_uuids,
         "omitted group_ids must match explicit all-groups: omitted={omitted}, explicit={explicit}"
@@ -6851,7 +6836,7 @@ async fn explicit_null_group_ids_matches_omitted_all_groups() {
     .await;
     assert_ok_resp(&find_relationships, 537);
     assert_eq!(
-        extract_uuids(&find_relationships, "facts"),
+        extract_uuids(&find_relationships, "edges"),
         vec!["413-ra1", "413-rb1"],
         "explicit null group_ids must match omitted (all groups): {find_relationships}"
     );

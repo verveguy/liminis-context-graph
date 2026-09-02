@@ -464,7 +464,7 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
             &state,
         )
         .await;
-        let facts = result["facts"].as_array().unwrap();
+        let facts = result["edges"].as_array().unwrap();
         assert!(
             !facts.is_empty(),
             "query {query:?} returned no relationships: {result}"
@@ -569,7 +569,7 @@ async fn rebuild_and_assert_all_non_determinism_expectations() {
         &state,
     )
     .await;
-    let by_uuid: HashMap<String, Value> = all["facts"]
+    let by_uuid: HashMap<String, Value> = all["edges"]
         .as_array()
         .unwrap()
         .iter()

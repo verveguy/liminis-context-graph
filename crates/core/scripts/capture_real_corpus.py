@@ -653,7 +653,7 @@ def build_expected_results(
             "knowledge_find_relationships",
             {"query": query, "group_ids": [group_id], "num_results": 10},
         )
-        facts = result.get("facts", [])
+        facts = result.get("edges", [])
         golden_relationship_queries.append(
             {
                 "query": query,
@@ -693,11 +693,12 @@ def build_expected_results(
     relationships = client.call(
         "knowledge_list_relationships", {"group_ids": [group_id], "num_results": 1000}
     )
-    # handle_list_relationships (handlers.rs) returns {"facts": [...], "count": ...} — not
-    # "edges". Reading the wrong key silently produced an empty relation_type_samples in the
-    # #217 capture run (see the committed fixture's derive_relation_type_samples_from_wal
-    # fallback), so a future capture must read "facts" here.
-    edges = relationships.get("facts", [])
+    # handle_list_relationships (handlers.rs) returned {"facts": [...], "count": ...} before
+    # issue #524 renamed the key to "edges" (a breaking change, not an alias). Reading the
+    # wrong key silently produced an empty relation_type_samples in the #217 capture run (see
+    # the committed fixture's derive_relation_type_samples_from_wal fallback) — a future
+    # capture must read "edges" here, matching the current response shape.
+    edges = relationships.get("edges", [])
     relation_type_samples = [
         {
             "uuid": e.get("uuid"),
@@ -817,12 +818,16 @@ def derive_relation_type_samples_from_wal(wal_dir: str, sample_size: int = 50) -
     already-captured WAL directory's `CREATE (:RelatesToNode_ {...})` records, with zero
     network/service calls.
 
-    One-off backfill: `build_expected_results` read `knowledge_list_relationships`'s response
-    under the wrong key (`"edges"` instead of the actual `"facts"`, see `handle_list_relationships`
-    in `handlers.rs`), so the #217 capture's `expected_results.json` recorded an empty
-    `relation_type_samples` despite the graph having 2,392 real relationships. Fixed for future
-    captures (`build_expected_results` now reads `"facts"`); this function recovers the samples
-    for the already-captured WAL without re-running the capture.
+    One-off backfill: at the time of the #217 capture, `build_expected_results` read
+    `knowledge_list_relationships`'s response under the wrong key (`"edges"` instead of the
+    then-actual `"facts"`, see `handle_list_relationships` in `handlers.rs`), so the #217
+    capture's `expected_results.json` recorded an empty `relation_type_samples` despite the
+    graph having 2,392 real relationships. Fixed for that generation of captures
+    (`build_expected_results` read `"facts"`); this function recovers the samples for the
+    already-captured WAL without re-running the capture. Issue #524 later renamed the response
+    key back to `"edges"` (a breaking change, not a revert of this fix) — `build_expected_results`
+    reads `"edges"` again as of that issue, so this docstring's key names describe the
+    #217-era shape, not the current one.
     """
     samples = []
     files = sorted(f for f in os.listdir(wal_dir) if f.endswith(".jsonl"))
