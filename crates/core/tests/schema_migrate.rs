@@ -137,6 +137,58 @@ fn migrate_adds_and_zero_fills_entity_summary_embedding_on_existing_db() {
     );
 }
 
+/// Simulates a pre-#528 DB (`Episodic` has no `attributes` column, with an existing row), runs
+/// the real `schema::migrate`, and asserts: the column is added, the pre-existing row is
+/// zero-filled to `"{}"` (not left NULL, and not the different, non-JSON `""` `value_as_string`
+/// would otherwise produce), and a second migrate is a no-op that leaves the value untouched
+/// (Acceptance Scenario 3, SC-003).
+#[test]
+fn migrate_adds_and_zero_fills_episodic_attributes_on_existing_db() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+
+    // Pre-#528 Episodic schema: no attributes column.
+    conn.run_cypher("CREATE NODE TABLE Episodic (uuid STRING PRIMARY KEY, name STRING)")
+        .unwrap();
+    conn.run_cypher("CREATE (:Episodic {uuid:'ep1', name:'e'})")
+        .unwrap();
+
+    // Precondition: Episodic.attributes is absent (binder error on the probe).
+    assert!(
+        conn.run_cypher("MATCH (n:Episodic) RETURN n.attributes LIMIT 0")
+            .is_err(),
+        "precondition: Episodic.attributes must be absent before migrate"
+    );
+
+    schema::migrate(&conn, 4);
+
+    // The column now binds.
+    conn.run_cypher("MATCH (n:Episodic) RETURN n.attributes LIMIT 0")
+        .expect("Episodic.attributes must bind after migrate");
+
+    // The pre-existing row is zero-filled to "{}", not left NULL.
+    let rows = conn
+        .cypher_query("MATCH (n:Episodic {uuid:'ep1'}) RETURN n.attributes")
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0], "{}",
+        "pre-existing row's attributes must be zero-filled to \"{{}}\", not NULL; got: {:?}",
+        rows[0][0]
+    );
+
+    // Idempotent: a second migrate is a clean no-op and does not disturb the value.
+    schema::migrate(&conn, 4);
+    let rows_again = conn
+        .cypher_query("MATCH (n:Episodic {uuid:'ep1'}) RETURN n.attributes")
+        .unwrap();
+    assert_eq!(
+        rows[0][0], rows_again[0][0],
+        "a second migrate must not change an already-migrated row's attributes"
+    );
+}
+
 /// Simulates a pre-#221 DB (`Entity` has no `lookup_key` column, with existing rows), runs the
 /// real `schema::migrate`, and asserts: the column is added, every pre-existing row is
 /// backfilled with the correct composite key (not left NULL), `get_entity_by_name_ci` resolves
