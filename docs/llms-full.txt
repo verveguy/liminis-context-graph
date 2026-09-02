@@ -10,7 +10,7 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This page documents **v0.13.3**, built directly from that release tag's `docs/`
+This page documents **v0.14.0**, built directly from that release tag's `docs/`
 tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
 here; use the version switcher in the footer to browse other published releases.
 
