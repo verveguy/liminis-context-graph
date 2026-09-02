@@ -39,6 +39,12 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          lookup_key STRING\
          )"
     ))?;
+    // `attributes` (issue #528) is a deliberate divergence from graphiti's kuzu_driver.py
+    // schema-parity rule, like `Entity.summary_embedding`/`Entity.lookup_key` above: it holds
+    // caller-supplied structured metadata (a JSON object serialized to a string, matching
+    // `Entity.attributes`/`RelatesToNode_.attributes`) directly on the episode node, co-located
+    // with the facts extracted from that episode's prose (reachable via the existing MENTIONS
+    // edge to Entity). See ADR-0528.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
@@ -50,7 +56,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          content STRING, \
          content_embedding FLOAT[{dim}], \
          valid_at TIMESTAMP, \
-         entity_edges STRING[]\
+         entity_edges STRING[], \
+         attributes STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -324,6 +331,24 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
     // below for how the persisted marker closes that gap without reintroducing an O(N) `Entity`
     // scan on the clean (already-migrated) startup path.
     ensure_lookup_key_backfill(conn);
+    // Episodic gained `attributes` (issue #528) to hold caller-supplied structured metadata
+    // directly on the episode node. Probe first: a fresh DB already has the column from
+    // `create_node_tables`, so the ALTER only runs against pre-existing workspaces. Unlike
+    // `summary_embedding`, no index is ever built over this column, so the zero-fill below is
+    // not forced by an indexing constraint — it's done anyway so a migrated pre-existing episode
+    // reads back the same empty-JSON-object string (`"{}"`) as a freshly-created episode that
+    // omitted `attributes`, rather than the different (and non-JSON) `""` that `value_as_string`
+    // produces for a NULL column. See ADR-0528.
+    if conn
+        .raw_query("MATCH (n:Episodic) WHERE n.uuid = '_probe_' RETURN n.attributes LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE Episodic ADD attributes STRING") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE Episodic ADD attributes STRING: {e} (non-fatal)");
+        } else if let Err(e) = zero_fill_null_episodic_attributes(conn) {
+            eprintln!("liminis-context-graph: schema migrate: zero-fill Episodic.attributes: {e} (non-fatal)");
+        }
+    }
 }
 
 /// Zero-fills any `Entity` row whose `summary_embedding` is `NULL` (issue #470). Idempotent — a
@@ -344,6 +369,24 @@ pub fn zero_fill_null_entity_summary_embeddings(conn: &Conn<'_>, dim: usize) -> 
     conn.exec_params(
         "MATCH (n:Entity) WHERE n.summary_embedding IS NULL SET n.summary_embedding = $zero",
         serde_json::json!({ "zero": vec![0.0f32; dim] }),
+    )
+}
+
+/// Zero-fills any `Episodic` row whose `attributes` is `NULL` (issue #528) to the empty-JSON-
+/// object string `"{}"`. Idempotent — a no-op when no row is `NULL`. Mirrors
+/// `zero_fill_null_entity_summary_embeddings`'s dual-call-site shape: `migrate`'s `ALTER` branch
+/// only reaches rows already present in the DB at migration time; it does NOT cover a row created
+/// afterward by replaying a pre-#528 WAL recording verbatim, since `WalReplayer` executes raw
+/// recorded Cypher and a `MERGE ... ON CREATE SET` that never mentions `attributes` (because it
+/// was logged before that column existed) leaves the column `NULL` on the newly-created row.
+/// Callers that rebuild a DB from WAL (`Db::open_or_rebuild`, `handle_rebuild_from_wal`, the
+/// `knowledge_recover*` family) must call this after replay, so every episode's `attributes`
+/// column is always a parseable JSON string, never the non-JSON `""` a NULL column would
+/// otherwise read back as via `value_as_string`.
+pub fn zero_fill_null_episodic_attributes(conn: &Conn<'_>) -> Result<(), Error> {
+    conn.exec_params(
+        "MATCH (n:Episodic) WHERE n.attributes IS NULL SET n.attributes = $empty",
+        serde_json::json!({ "empty": "{}" }),
     )
 }
 

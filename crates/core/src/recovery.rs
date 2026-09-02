@@ -421,6 +421,10 @@ pub fn run_full_recovery_sequence(
         if let Err(e) = schema::zero_fill_null_entity_summary_embeddings(&conn, embedding_dim) {
             eprintln!("liminis-context-graph: run_full_recovery_sequence: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
         }
+        // Same rationale as above, for Episodic.attributes (issue #528).
+        if let Err(e) = schema::zero_fill_null_episodic_attributes(&conn) {
+            eprintln!("liminis-context-graph: run_full_recovery_sequence: zero-fill Episodic.attributes failed (non-fatal): {e}");
+        }
         // WAL replay above bypassed insert_entity/update_entity_created_at — every replayed
         // row's lookup_key is NULL — so backfill it before build_indices_and_constraints below
         // ever builds entity_lookup_key_idx over the column (issue #221 FR-006). Persists the

@@ -184,6 +184,12 @@ impl Db {
             {
                 eprintln!("liminis-context-graph: open_or_rebuild: zero-fill Entity.summary_embedding failed (non-fatal): {e}");
             }
+            // Same rationale as above, for Episodic.attributes (issue #528): a pre-#528 WAL
+            // recording's Episodic CREATE never mentions attributes, so replaying it verbatim
+            // leaves that column NULL.
+            if let Err(e) = crate::schema::zero_fill_null_episodic_attributes(&conn) {
+                eprintln!("liminis-context-graph: open_or_rebuild: zero-fill Episodic.attributes failed (non-fatal): {e}");
+            }
             // WAL replay executes raw recorded Cypher templates, bypassing insert_entity's
             // lookup_key write — backfill any row replay left with a NULL lookup_key before
             // the caller's own build_indices_and_constraints() builds the ART index over the
@@ -523,7 +529,7 @@ impl<'db> Conn<'db> {
             "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, source: $source, source_description: $source_description, \
              content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
-             entity_edges: $entity_edges})",
+             entity_edges: $entity_edges, attributes: $attributes})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -535,6 +541,7 @@ impl<'db> Conn<'db> {
                 "content_embedding": row.content_embedding,
                 "valid_at": row.valid_at,
                 "entity_edges": row.entity_edges,
+                "attributes": row.attributes,
             }),
         )
     }
@@ -930,7 +937,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
-             ep.source_description, ep.content, ep.valid_at, ep.entity_edges \
+             ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes \
              ORDER BY ep.created_at DESC LIMIT $limit",
             serde_json::json!({ "gid": group_id, "limit": last_n as i64 }),
         )?;
@@ -946,6 +953,7 @@ impl<'db> Conn<'db> {
                 content: value_as_string(&row[6]),
                 valid_at: value_as_timestamp_str(&row[7]),
                 entity_edges: value_as_str_list(&row[8]),
+                attributes: value_as_string(&row[9]),
                 ..Default::default()
             });
         }
@@ -1447,7 +1455,7 @@ impl<'db> Conn<'db> {
             "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', $emb, $limit) \
              WITH node, distance {gid_filter} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
-             node.group_id, node.created_at, node.valid_at, distance \
+             node.group_id, node.created_at, node.valid_at, node.attributes, distance \
              ORDER BY distance ASC LIMIT $limit"
         );
         let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
@@ -1471,7 +1479,8 @@ impl<'db> Conn<'db> {
                 group_id: value_as_string(&row[4]),
                 created_at: value_as_timestamp_str(&row[5]),
                 valid_at,
-                score: value_as_f64(&row[7]),
+                attributes: value_as_string(&row[7]),
+                score: value_as_f64(&row[8]),
             });
         }
         Ok(rows)
@@ -2801,7 +2810,7 @@ impl<'db> Conn<'db> {
 
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
-    ///            content_embedding, valid_at, entity_edges]
+    ///            content_embedding, valid_at, entity_edges, attributes]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -2812,7 +2821,8 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Episodic) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
-                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges \
+                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
+                 n.attributes \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2820,7 +2830,8 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Episodic) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
-                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges \
+                 n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
+                 n.attributes \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )

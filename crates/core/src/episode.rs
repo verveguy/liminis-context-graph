@@ -187,6 +187,7 @@ pub async fn add_episode(
     group_id: &str,
     source_type: SourceType,
     custom_instructions: Option<&str>,
+    attributes: &str,
 ) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
@@ -699,6 +700,7 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    let attributes_owned = attributes.to_string();
     let db_c = state.db.load_full().ok_or_else(|| {
         let reason = state
             .degraded_reason
@@ -885,6 +887,7 @@ pub async fn add_episode(
             content_embedding,
             valid_at: ref_time_owned.clone(),
             entity_edges: entity_uuids.clone(),
+            attributes: attributes_owned.clone(),
         })?;
 
         // Insert MENTIONS edges

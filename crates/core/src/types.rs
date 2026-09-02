@@ -56,6 +56,10 @@ pub struct EpisodicRow {
     pub content_embedding: Vec<f32>,
     pub valid_at: String,
     pub entity_edges: Vec<String>,
+    /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
+    /// Always a parseable JSON string (defaults to `"{}"`), never absent or non-JSON — see
+    /// `schema::zero_fill_null_episodic_attributes` and ADR-0528.
+    pub attributes: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -231,6 +235,9 @@ pub struct PassageResult {
     pub created_at: String,
     pub valid_at: Option<String>,
     pub score: f64,
+    /// The originating episode's structured metadata (issue #528, FR-010) — a JSON object
+    /// serialized as a string, sourced from `Episodic.attributes`. See ADR-0528.
+    pub attributes: String,
 }
 
 #[cfg(test)]

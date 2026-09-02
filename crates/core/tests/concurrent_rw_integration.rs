@@ -165,6 +165,7 @@ async fn concurrent_add_episode_no_write_conflict() {
             "grp",
             SourceType::Text,
             None,
+            "",
         )
         .await
     });
@@ -179,6 +180,7 @@ async fn concurrent_add_episode_no_write_conflict() {
             "grp",
             SourceType::Text,
             None,
+            "",
         )
         .await
     });

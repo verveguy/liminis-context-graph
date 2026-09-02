@@ -194,6 +194,7 @@ async fn concurrent_ingest_past_hybrid_threshold_auto_heals() {
             "load-test-group",
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap_or_else(|e| panic!("sequential seed ingest {i} failed: {e}"));
@@ -223,6 +224,7 @@ async fn concurrent_ingest_past_hybrid_threshold_auto_heals() {
                 "load-test-group",
                 SourceType::Text,
                 None,
+                "",
             )
             .await
         }));
@@ -272,6 +274,7 @@ async fn post_clear_all_ingest_past_threshold_succeeds() {
             "clear-test-group",
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap_or_else(|e| panic!("first-pass ingest {i} failed: {e}"));
@@ -308,6 +311,7 @@ async fn post_clear_all_ingest_past_threshold_succeeds() {
             "clear-test-group",
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap_or_else(|e| panic!("post-clear ingest {i} failed: {e}"));
@@ -364,6 +368,7 @@ async fn stale_indices_built_flag_maps_to_user_message_without_rebuilding() {
         "stale-flag-group",
         SourceType::Text,
         None,
+        "",
     )
     .await;
 

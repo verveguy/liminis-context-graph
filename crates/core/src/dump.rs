@@ -36,7 +36,7 @@ const EPISODIC_CYPHER: &str = "\
     n.source_description = $source_description, n.content = $content, \
     n.content_embedding = $content_embedding, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
-    n.entity_edges = $entity_edges";
+    n.entity_edges = $entity_edges, n.attributes = $attributes";
 
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
@@ -214,7 +214,7 @@ fn dump_episodic_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
-                    //         content, content_embedding, valid_at, entity_edges]
+                    //         content, content_embedding, valid_at, entity_edges, attributes]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -225,6 +225,7 @@ fn dump_episodic_nodes(
                     let embedding = value_as_float_array(&row[7]);
                     let valid_at = dump_opt_ts_json(&row[8]);
                     let entity_edges = value_as_str_list(&row[9]);
+                    let attributes = value_as_string(&row[10]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -236,6 +237,7 @@ fn dump_episodic_nodes(
                         "content_embedding": float_slice_to_json(&embedding),
                         "valid_at": valid_at,
                         "entity_edges": entity_edges,
+                        "attributes": attributes,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }

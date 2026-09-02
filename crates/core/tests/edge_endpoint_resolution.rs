@@ -121,6 +121,7 @@ async fn run_episode(
         group_id,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap()

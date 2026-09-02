@@ -106,6 +106,7 @@ async fn test_identical_name_two_episodes_one_node() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -120,6 +121,7 @@ async fn test_identical_name_two_episodes_one_node() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -148,6 +150,7 @@ async fn test_identical_name_cross_session_durability() {
             GROUP,
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -167,6 +170,7 @@ async fn test_identical_name_cross_session_durability() {
             GROUP,
             SourceType::Text,
             None,
+            "",
         )
         .await
         .unwrap();
@@ -198,6 +202,7 @@ async fn test_case_insensitive_name_match() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -212,6 +217,7 @@ async fn test_case_insensitive_name_match() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -250,6 +256,7 @@ async fn test_empty_name_entity_skipped() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -289,6 +296,7 @@ async fn test_embedding_based_dedup_variant_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -303,6 +311,7 @@ async fn test_embedding_based_dedup_variant_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -344,6 +353,7 @@ async fn test_no_false_collapse_dissimilar_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -358,6 +368,7 @@ async fn test_no_false_collapse_dissimilar_names() {
         GROUP,
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();

@@ -174,6 +174,7 @@ async fn no_ontology_all_entities_pass() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -214,6 +215,7 @@ async fn strict_mode_entity_filtering_reclassifies_out_of_vocab() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -251,6 +253,7 @@ async fn open_mode_no_filtering() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -398,6 +401,7 @@ async fn strict_mode_relation_type_reclassifies_non_matching_edges_to_unclassifi
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -502,6 +506,7 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -597,6 +602,7 @@ async fn strict_mode_alias_case_variant_recognized() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -659,6 +665,7 @@ async fn strict_mode_no_aliases_declared_canonical_edge_unchanged() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -772,6 +779,7 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -852,6 +860,7 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -936,6 +945,7 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1016,6 +1026,7 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1081,6 +1092,7 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1189,6 +1201,7 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_entities() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1212,6 +1225,7 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_entities() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1277,6 +1291,7 @@ async fn strict_mode_edge_survives_when_endpoint_entity_is_reclassified() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1343,6 +1358,7 @@ async fn strict_mode_empty_entity_type_resolves_as_plain_entity() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1421,6 +1437,7 @@ async fn strict_mode_reclassified_entity_dedups_against_declared_type() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1435,6 +1452,7 @@ async fn strict_mode_reclassified_entity_dedups_against_declared_type() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1507,6 +1525,7 @@ async fn strict_mode_empty_name_out_of_vocab_entity_not_counted_in_tally() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1561,6 +1580,7 @@ async fn strict_mode_entity_type_case_variant_of_entity_not_leaked_into_labels()
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1625,6 +1645,7 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
         "grp",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -1940,6 +1961,7 @@ async fn workspace_ontology_hash_json_unchanged_when_group_drift_is_also_tracked
         "g1",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();
@@ -2012,6 +2034,7 @@ async fn knowledge_status_group_ontology_drift_empty_until_a_group_is_used() {
         "g1",
         SourceType::Text,
         None,
+        "",
     )
     .await
     .unwrap();

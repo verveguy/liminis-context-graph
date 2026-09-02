@@ -125,6 +125,7 @@ fn bench_concurrent_rw(c: &mut Criterion) {
                                     "bench",
                                     SourceType::Text,
                                     None,
+                                    "",
                                 )
                                 .await;
                             })
