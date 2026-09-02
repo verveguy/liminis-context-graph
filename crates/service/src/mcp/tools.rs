@@ -90,7 +90,9 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Hybrid (full-text + vector) search for relationships (facts) \
                            matching a query. Returned edges' `episode_uuids` is always \
                            empty on this read path (not populated). The response returns \
-                           the relationship list under the `edges` key.",
+                           the relationship list under the `edges` key. Does not include \
+                           episode `attributes` (issue #528) — this path surfaces only \
+                           edge-scoped provenance, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -110,7 +112,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_episodes",
             description: "Retrieve the most recent episodes (ingested source documents) for \
-                           a group.",
+                           a group. Each returned episode includes its `attributes` (issue \
+                           #528), the caller-supplied structured metadata set via \
+                           `knowledge_process_chunk`/`knowledge_add_episode`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -144,7 +148,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_get_edges_by_group",
             description: "List all relationship edges belonging to the given group IDs, or \
                            every group's edges when group_ids is omitted. Returned edges' \
-                           `episode_uuids` is always empty on this read path (not populated).",
+                           `episode_uuids` is always empty on this read path (not populated). \
+                           Does not include episode `attributes` (issue #528) — this path \
+                           surfaces only edge-scoped provenance, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -156,7 +162,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_edges_by_uuids",
             description: "Fetch relationship edges by their UUIDs. Returned edges' \
-                           `episode_uuids` is always empty on this read path (not populated).",
+                           `episode_uuids` is always empty on this read path (not populated). \
+                           Does not include episode `attributes` (issue #528) — this path \
+                           surfaces only edge-scoped provenance, never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -174,7 +182,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_search_passages",
             description: "Semantic passage search over ingested episode text, returning \
-                           scored text snippets.",
+                           scored text snippets. Each result includes the `attributes` (issue \
+                           #528) of the episode it belongs to — no separate per-episode fetch \
+                           is needed to obtain them.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -317,7 +327,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            Splitting oversized input into multiple `knowledge_process_chunk` \
                            calls is the caller's responsibility; this call still succeeds above \
                            the threshold, but the result gains a `warning` field naming the \
-                           actual size and the recommended maximum.",
+                           actual size and the recommended maximum. \
+                           `attributes` (issue #528) is written directly to the resulting \
+                           episode node — structured metadata co-located with, but independent \
+                           of, the facts extracted from the chunk's prose (reachable from the \
+                           episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
+                           `knowledge_search_passages`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -330,7 +345,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "reference_time": {
                             "type": "string", "format": "date-time",
                             "description": "ISO 8601 timestamp; defaults to now."
-                        }
+                        },
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -339,7 +355,11 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_add_episode",
             description: "Add an episode (a piece of source content) to the graph, extracting \
-                           entities and relationships from it.",
+                           entities and relationships from it. `attributes` (issue #528) is \
+                           written directly to the resulting episode node — structured metadata \
+                           co-located with, but independent of, the facts extracted from the \
+                           episode's body (reachable from the episode via a MENTIONS hop). \
+                           Returned by `knowledge_get_episodes` and `knowledge_search_passages`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -350,7 +370,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "source": {"type": "string", "default": "text", "description": "Source type (e.g. \"text\", \"json\")."},
                         "source_description": {"type": "string"},
                         "reference_time": {"type": "string", "format": "date-time"},
-                        "group_id": {"type": "string", "default": "liminis"}
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
                     },
                     "required": ["name", "episode_body"]
                 })
