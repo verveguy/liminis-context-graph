@@ -63,7 +63,13 @@ async fn connect_live_embedder() -> Option<OaiEmbedder> {
     let embedder = if Path::new(DEFAULT_UDS_PATH).exists() {
         cfg_if_uds(DEFAULT_UDS_PATH)
     } else if let Ok(url) = std::env::var("LCG_EMBEDDING_URL") {
-        OaiEmbedder::new_http(url, FIXTURE_EMBEDDING_MODEL, embedding_dim())
+        match OaiEmbedder::new_http(url, FIXTURE_EMBEDDING_MODEL, embedding_dim()) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[SKIP] invalid embedder config: {e}");
+                return None;
+            }
+        }
     } else {
         eprintln!(
             "[SKIP] no embedding sidecar reachable ({DEFAULT_UDS_PATH} absent, \
@@ -103,6 +109,7 @@ fn cfg_if_uds(_path: &str) -> OaiEmbedder {
         FIXTURE_EMBEDDING_MODEL,
         embedding_dim(),
     )
+    .expect("valid embedder config")
 }
 
 /// Cosine similarity between two equal-length vectors. Returns 0.0 for a zero-magnitude input
@@ -266,14 +273,17 @@ async fn measure_cold_vs_warm_cache_replay_over_real_corpus_wal() {
         cache: Arc::clone(&cache),
     };
 
-    // Cold: the cache starts empty, so every recognized vector is a genuine cache miss.
+    // Cold: the cache starts empty, so every recognized vector is a genuine cache miss. Real
+    // round-trips now go through `embed_batch` (issue #486), not single-text `embed` — so
+    // `batch_call_count()` is the count that reflects genuine embedder round-trips;
+    // `call_count()` would read 0 under the batched recompute path even on a real cache miss.
     let (cold_stats, cold_elapsed) = replay_once(&ctx, dim, "cold").await;
-    let cold_real_calls = counting_embedder.call_count();
+    let cold_real_calls = counting_embedder.batch_call_count();
 
     // Warm: same `ctx` (same cache, already populated from the cold pass above), fresh DB —
     // every text in this fixture was already seen, so every recompute should resolve from cache.
     let (warm_stats, warm_elapsed) = replay_once(&ctx, dim, "warm").await;
-    let warm_real_calls = counting_embedder.call_count() - cold_real_calls;
+    let warm_real_calls = counting_embedder.batch_call_count() - cold_real_calls;
 
     println!(
         "[SC-005] real_corpus_wal replay cost — cold cache: {:.3}s, {} lines_replayed, \

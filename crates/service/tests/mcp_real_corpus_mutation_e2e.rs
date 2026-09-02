@@ -195,7 +195,7 @@ fn mcp_write_path_over_real_corpus_fixture() {
             json!({"group_ids": [group_id.clone()], "num_results": base_relationship_count + 100}),
         );
         let edges_result = structured(edges_resp, "list_relationships (stats)");
-        let edge_facts = edges_result["facts"].as_array().unwrap().clone();
+        let edge_facts = edges_result["edges"].as_array().unwrap().clone();
 
         let mut entity_label_counts: HashMap<String, i64> = HashMap::new();
         let mut untyped_entities: Vec<&Value> = Vec::new();

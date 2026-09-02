@@ -147,7 +147,7 @@ async fn fresh_wal_dump_has_no_vector_params_and_is_dramatically_smaller() {
     // all-zero one.
     let embedder = HashEmbedder::new(dim);
     let embed_fn: lcg_core::RecomputeEmbedFn =
-        Box::new(move |text: &str| futures::executor::block_on(embedder.embed(text)));
+        Box::new(move |texts: &[&str]| futures::executor::block_on(embedder.embed_batch(texts)));
     {
         let conn = db.connect().unwrap();
         let stats = WalReplayer::new(original_wal_dir())

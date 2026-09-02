@@ -264,8 +264,10 @@ async fn resolve_and_probe_embedder(
     // caller's retry loop can distinguish "not up yet" from "never will be" (issue #499).
     let probe_embedder = match &resolved {
         ResolvedTransport::Http(url) => {
-            OaiEmbedder::new_http(url.clone(), embedder_model.to_string(), 1)
-                .with_api_key(embedding_api_key.clone())
+            match OaiEmbedder::new_http(url.clone(), embedder_model.to_string(), 1) {
+                Ok(e) => e.with_api_key(embedding_api_key.clone()),
+                Err(e) => return ProbeOutcome::Fatal(format!("invalid embedder config: {e}")),
+            }
         }
         #[cfg(unix)]
         ResolvedTransport::Uds(path) => {
@@ -506,7 +508,7 @@ async fn bootstrap_app_state(
     // Build the final embedder with the correct probed dim
     let embedder: Arc<dyn Embedder> = match &resolved {
         ResolvedTransport::Http(url) => Arc::new(
-            OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)
+            OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)?
                 .with_api_key(embedding_api_key.clone()),
         ),
         #[cfg(unix)]

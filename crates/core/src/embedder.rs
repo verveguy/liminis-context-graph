@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{env::lcg_env_var, error::Error};
 
+/// Default whole-request timeout for `OaiEmbedder`'s HTTP transport (FR-001/FR-004). Generous
+/// enough to cover one chunked batch call of up to 256 texts (`LCG_EMBED_BATCH_SIZE`'s max)
+/// under normal backend latency, with margin for a cold-starting local sidecar (#510).
+const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
+
+/// Default connect-phase timeout for `OaiEmbedder`'s HTTP transport (FR-002), independent of
+/// the whole-request timeout above (#510).
+const DEFAULT_EMBEDDING_CONNECT_TIMEOUT_MS: u64 = 5_000;
+
 // ── OpenAI-compatible wire types ──────────────────────────────────────────────
 
 /// `input` accepts either a single string or an array of strings per the OpenAI-compatible
@@ -251,16 +260,38 @@ pub struct OaiEmbedder {
 
 impl OaiEmbedder {
     /// Constructs an HTTP-transport embedder pointing at the given URL.
-    pub fn new_http(url: impl Into<String>, model: impl Into<String>, dim: usize) -> Self {
-        Self {
+    ///
+    /// Builds the shared `reqwest::Client` with a bounded whole-request timeout
+    /// (`LCG_EMBEDDING_TIMEOUT_MS`, default [`DEFAULT_EMBEDDING_TIMEOUT_MS`]) and a bounded
+    /// connect timeout (`LCG_EMBEDDING_CONNECT_TIMEOUT_MS`, default
+    /// [`DEFAULT_EMBEDDING_CONNECT_TIMEOUT_MS`]) — see #510. This client is reused for every
+    /// call (`probe`, single embed, and each batch chunk), so this is the single choke point
+    /// that covers all of them; no call-site changes are needed elsewhere.
+    pub fn new_http(
+        url: impl Into<String>,
+        model: impl Into<String>,
+        dim: usize,
+    ) -> Result<Self, Error> {
+        let timeout =
+            resolve_embedding_timeout_ms("LCG_EMBEDDING_TIMEOUT_MS", DEFAULT_EMBEDDING_TIMEOUT_MS)?;
+        let connect_timeout = resolve_embedding_timeout_ms(
+            "LCG_EMBEDDING_CONNECT_TIMEOUT_MS",
+            DEFAULT_EMBEDDING_CONNECT_TIMEOUT_MS,
+        )?;
+        let client = Client::builder()
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
+            .build()
+            .map_err(|e| Error::Config(format!("failed to build embedder HTTP client: {e}")))?;
+        Ok(Self {
             transport: EmbedTransport::Http {
-                client: Client::new(),
+                client,
                 url: url.into(),
                 api_key: None,
             },
             model: model.into(),
             dim,
-        }
+        })
     }
 
     /// Attaches a Bearer-token API key to be sent as `Authorization: Bearer <key>` on every
@@ -292,7 +323,9 @@ impl OaiEmbedder {
     /// - `LCG_EMBEDDING_MODEL` (default `bge-base-en-v1.5`)
     /// - `LCG_EMBEDDING_DIM` (default `768`)
     /// - `LCG_EMBEDDING_API_KEY` / `GRAPHITI_EMBEDDING_API_KEY` / `OPENAI_API_KEY` (optional)
-    pub fn from_env() -> Self {
+    /// - `LCG_EMBEDDING_TIMEOUT_MS` / `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (optional, see
+    ///   [`Self::new_http`])
+    pub fn from_env() -> Result<Self, Error> {
         let url = lcg_env_var("LCG_EMBEDDING_URL", "GRAPHITI_EMBEDDING_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8765/v1/embeddings".to_string());
         let model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
@@ -302,7 +335,7 @@ impl OaiEmbedder {
             .and_then(|s| s.parse().ok())
             .unwrap_or(768usize);
         let api_key = resolve_embedding_api_key(&url);
-        Self::new_http(url, model, dim).with_api_key(api_key)
+        Ok(Self::new_http(url, model, dim)?.with_api_key(api_key))
     }
 
     /// Returns `("uds"|"http", endpoint_string)` for the startup log line. The HTTP endpoint has
@@ -651,6 +684,36 @@ fn extract_embeddings_ordered(
         .enumerate()
         .map(|(i, v)| v.ok_or_else(|| Error::Ipc(format!("embedding response: missing index {i}"))))
         .collect()
+}
+
+/// Resolves a millisecond-valued timeout from `env_var`, falling back to `default_ms` when
+/// unset. Strict validation (FR-006): an unparseable or zero value is rejected with
+/// `Error::Config` naming the offending var, mirroring `resolve_embed_batch_size`'s shape —
+/// deliberately *not* the silent-fallback-to-default convention used by this codebase's other
+/// timeout env vars (`LCG_ATTACHED_CALL_TIMEOUT_MS`, `LCG_SHUTDOWN_TIMEOUT_MS`), since the spec
+/// requires an invalid override to fail clearly rather than be silently ignored (#510). A
+/// negative value is rejected naturally: `u64::parse` fails on a leading `-`.
+fn resolve_embedding_timeout_ms(
+    env_var: &str,
+    default_ms: u64,
+) -> Result<std::time::Duration, Error> {
+    let ms = std::env::var(env_var)
+        .ok()
+        .map(|v| {
+            v.parse::<u64>().map_err(|_| {
+                Error::Config(format!(
+                    "{env_var}={v:?} is not a valid positive integer (milliseconds)"
+                ))
+            })
+        })
+        .transpose()?
+        .unwrap_or(default_ms);
+    if ms == 0 {
+        return Err(Error::Config(format!(
+            "{env_var}=0 is invalid; timeout must be a positive number of milliseconds"
+        )));
+    }
+    Ok(std::time::Duration::from_millis(ms))
 }
 
 /// Resolves the chunk size for `OaiEmbedder::embed_batch` from the `LCG_EMBED_BATCH_SIZE` env

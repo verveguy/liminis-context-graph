@@ -46,7 +46,7 @@ Where:
 | Record type | Collection key |
 |-------------|----------------|
 | Entity nodes | `nodes` |
-| Relationship/edge records (semantic search, list) | `facts` |
+| Relationship/edge records (semantic search, list) | `edges` |
 | Edge records (structural fetches by group or UUID) | `edges` |
 | Episode records | `episodes` |
 | Passage records | `passages` |
@@ -69,21 +69,31 @@ I'm giving you right now."
 An empty collection returns `{"<key>": [], "count": 0}`. Never return `{}`, `null`, or
 omit the collection key.
 
-## Audit table (as of 2026-05-26)
+## Audit table (as of 2026-05-26; `facts`→`edges` rename per issue #524, 2026-09-01)
 
 | Method | Collection key | Shape |
 |--------|----------------|-------|
 | `knowledge_find_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_find_relationships` | `facts` | `{facts, count}` |
+| `knowledge_find_relationships` | `edges` | `{edges, count}` |
 | `knowledge_get_episodes` | `episodes` | `{episodes, count}` |
 | `knowledge_get_nodes_by_group` | `nodes` | `{nodes, count}` |
 | `knowledge_get_edges_by_group` | `edges` | `{edges, count}` |
 | `knowledge_get_edges_by_uuids` | `edges` | `{edges, count}` |
 | `knowledge_search_passages` | `passages` | `{passages, count}` |
 | `knowledge_list_entities` | `nodes` | `{nodes, count}` |
-| `knowledge_list_relationships` | `facts` | `{facts, count}` |
+| `knowledge_list_relationships` | `edges` | `{edges, count}` |
 | `knowledge_get_entity_neighbors` | `nodes` (primary) | `{center_uuid, nodes, edges, count, node_count, edge_count}` |
 | `knowledge_get_entities_by_source` | `nodes` | `{source, nodes, count}` |
+
+**Issue #524 (2026-09-01):** `knowledge_find_relationships` and `knowledge_list_relationships`
+previously returned the relationship list under `facts`, while `knowledge_get_edges_by_group`
+already used `edges` — an inconsistency that let a client parsing the wrong key silently get an
+empty list instead of an error. Rather than add a second alias key (which would have permanently
+enshrined the inconsistency and doubled response payload size), both methods were renamed to
+return `edges`, matching the one-key-per-record-type convention above. This is a breaking change,
+released in the same 0.14.0 release as the storage-format migration (lbug 0.17.0 → 0.20.1,
+storage v41 → v47) specifically because that release already carries a one-way break — see the
+CHANGELOG entry for the client-facing migration note.
 
 Single-record and scalar responses are out of scope: `knowledge_status`, `health_check`,
 `knowledge_close`, and single-entity getters return records directly.

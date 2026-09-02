@@ -2626,12 +2626,13 @@ fn test_vecf32_inline_array_strips_correctly() {
     )
     .unwrap();
 
-    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(|text: &str| {
+    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(|texts: &[&str]| {
         assert_eq!(
-            text, "inline test",
+            texts,
+            ["inline test"],
             "recompute must use the co-located content text"
         );
-        Ok(vec![9.0, 8.0, 7.0, 6.0])
+        Ok(vec![vec![9.0, 8.0, 7.0, 6.0]])
     });
     let stats = WalReplayer::new(wal_dir.path())
         .replay(&conn, embed_fn, 4)
@@ -3365,6 +3366,7 @@ fn throughput_half2_vs_half1_flat() {
                 progress_fn: Some(progress_fn),
                 failure_sample_cap: None,
                 batch_size: None,
+                embed_window_size: None,
                 log_interval_override: None,
                 progress_log_fn: None,
                 recompute_embed_fn: lcg_core::zero_vector_embed_fn(4),

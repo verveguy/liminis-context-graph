@@ -65,11 +65,10 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
 fn make_state_failing_embedder(db: Arc<Db>) -> Arc<AppState> {
     make_state_with(
         db,
-        Arc::new(OaiEmbedder::new_http(
-            "http://127.0.0.1:1/v1/embeddings",
-            "unused-model",
-            DIM,
-        )),
+        Arc::new(
+            OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "unused-model", DIM)
+                .expect("valid embedder config"),
+        ),
         None,
         "test.db".to_string(),
     )

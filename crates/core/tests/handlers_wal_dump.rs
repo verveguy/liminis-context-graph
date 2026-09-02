@@ -659,11 +659,16 @@ async fn test_dump_wal_preserves_entity_summary_embedding() {
         "a pump manufacturer".to_string(),
         recomputed_summary_vec.clone(),
     );
-    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(move |text: &str| {
-        Ok(text_to_vec
-            .get(text)
-            .cloned()
-            .unwrap_or_else(|| vec![0.0; 4]))
+    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
+        Ok(texts
+            .iter()
+            .map(|text| {
+                text_to_vec
+                    .get(*text)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0.0; 4])
+            })
+            .collect())
     });
 
     let db2_path = dir.path().join("db2-se.db");

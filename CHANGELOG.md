@@ -11,6 +11,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Changed
 
+- **BREAKING: `knowledge_find_relationships` and `knowledge_list_relationships` now return the
+  relationship list under `edges`, not `facts`.** (`knowledge_get_edges_by_group` is unaffected —
+  it already used `edges`.) The two methods' response shape changes from `{"facts": [...],
+  "count": N}` to `{"edges": [...], "count": N}` on both the IPC and MCP surfaces; no other field
+  changes. If your client reads `facts` from either method's response, switch it to `edges` before
+  upgrading — a client that keeps reading `facts` will silently receive an empty list on every
+  call instead of an error, which is exactly the failure mode this rename exists to close off (a
+  downstream reader had already hit the equivalent bug the other way around, reading `edges` on
+  `knowledge_find_relationships` and silently getting `[]`). Known integrators of these methods,
+  including orac/GES, must update their key before taking this release. Shipped in the same
+  release as the lbug/storage-format bump below because that release already carries a one-way
+  break, making this the cheapest point to close out the inconsistency rather than carrying it
+  forward as a permanent dual-key alias. See [ADR-0020](docs/adr/0020-ipc-collection-envelope-contract.md). (#524)
+
 - Bumped the `lbug` graph-engine pin from `0.17.0` to `0.20.1`, moving both the crate pin in
   `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together, in a
   single hop rather than staging through the intermediate `0.19.1`. Picks up upstream's

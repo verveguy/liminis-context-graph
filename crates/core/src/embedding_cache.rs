@@ -50,14 +50,15 @@ impl EmbedderContext {
         (self.model.clone(), self.embedder.dim() as i64)
     }
 
-    /// Builds a synchronous `RecomputeEmbedFn` (issue #440) bridging this context's embedder via
-    /// `Handle::current().block_on` — documented-safe from inside `tokio::task::spawn_blocking`
-    /// (not an async worker thread), per `replay::RecomputeEmbedFn`'s "each caller bridges its
-    /// own runtime context" design. Shared by `recovery::run_full_recovery_sequence`,
-    /// `handlers::handle_rebuild_from_wal`, and `handlers::recover_rebuild_from_workspace_wal` —
-    /// the three replay call sites that always run inside `spawn_blocking`; `Db::open_or_rebuild`'s
-    /// bare-sync call site builds its own dedicated runtime instead (see that function), since it
-    /// has no ambient one to bridge through.
+    /// Builds a synchronous, batch-shaped `RecomputeEmbedFn` (issue #486, formerly single-text —
+    /// issue #440) bridging this context's embedder via `Handle::current().block_on` —
+    /// documented-safe from inside `tokio::task::spawn_blocking` (not an async worker thread),
+    /// per `replay::RecomputeEmbedFn`'s "each caller bridges its own runtime context" design.
+    /// Shared by `recovery::run_full_recovery_sequence`, `handlers::handle_rebuild_from_wal`, and
+    /// `handlers::recover_rebuild_from_workspace_wal` — the three replay call sites that always
+    /// run inside `spawn_blocking`; `Db::open_or_rebuild`'s bare-sync call site builds its own
+    /// dedicated runtime instead (see that function), since it has no ambient one to bridge
+    /// through.
     ///
     /// Panics (via `Handle::current()`) if called with no ambient tokio runtime — reserved for
     /// those three call sites, never for a bare-sync or test caller.
@@ -66,8 +67,10 @@ impl EmbedderContext {
         let embedder = Arc::clone(&self.embedder);
         let cache = Arc::clone(&self.cache);
         let (model, dim) = self.identity();
-        Box::new(move |text: &str| {
-            cache.get_or_compute(&model, dim, text, || handle.block_on(embedder.embed(text)))
+        Box::new(move |texts: &[&str]| {
+            cache.get_or_compute_batch(&model, dim, texts, |miss_texts| {
+                handle.block_on(embedder.embed_batch(miss_texts))
+            })
         })
     }
 }
@@ -115,13 +118,7 @@ impl EmbeddingCache {
         text: &str,
         compute: impl FnOnce() -> Result<Vec<f32>, Error>,
     ) -> Result<Vec<f32>, Error> {
-        let mut hasher = Sha256::new();
-        hasher.update(model.as_bytes());
-        hasher.update(b"\0");
-        hasher.update(dim.to_le_bytes());
-        hasher.update(b"\0");
-        hasher.update(text.as_bytes());
-        let key: [u8; 32] = hasher.finalize().into();
+        let key = Self::cache_key(model, dim, text);
 
         if let Some(cached) = self
             .entries
@@ -138,6 +135,98 @@ impl EmbeddingCache {
             .unwrap_or_else(|e| e.into_inner())
             .insert(key, vector.clone());
         Ok(vector)
+    }
+
+    /// Batched counterpart to [`Self::get_or_compute`] (issue #486, FR-006): resolves `texts` in
+    /// order, serving every cache hit directly and issuing `compute_batch` at most once for the
+    /// remaining distinct (deduplicated, first-occurrence-ordered) misses — so a text repeated
+    /// within a single call costs exactly one entry in the `compute_batch` request, not one per
+    /// occurrence. `compute_batch` receives only the distinct miss texts and must return exactly
+    /// one vector per element, in the same order; a length mismatch is treated as an error and
+    /// nothing from this call is cached (mirroring `get_or_compute`'s "compute error is not
+    /// cached" behavior). Returns an empty `Vec` without calling `compute_batch` at all when
+    /// `texts` is empty.
+    pub fn get_or_compute_batch(
+        &self,
+        model: &str,
+        dim: i64,
+        texts: &[&str],
+        compute_batch: impl FnOnce(&[&str]) -> Result<Vec<Vec<f32>>, Error>,
+    ) -> Result<Vec<Vec<f32>>, Error> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let keys: Vec<[u8; 32]> = texts
+            .iter()
+            .map(|text| Self::cache_key(model, dim, text))
+            .collect();
+        let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+
+        {
+            let guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+            for (i, key) in keys.iter().enumerate() {
+                if let Some(cached) = guard.get(key) {
+                    results[i] = Some(cached.clone());
+                }
+            }
+        }
+
+        // Distinct cache-miss texts, in first-occurrence order — a duplicate text within this
+        // call must cost exactly one slot in the `compute_batch` request (FR-006).
+        let mut miss_texts: Vec<&str> = Vec::new();
+        let mut miss_key_pos: HashMap<[u8; 32], usize> = HashMap::new();
+        for (i, key) in keys.iter().enumerate() {
+            if results[i].is_some() {
+                continue;
+            }
+            miss_key_pos.entry(*key).or_insert_with(|| {
+                miss_texts.push(texts[i]);
+                miss_texts.len() - 1
+            });
+        }
+
+        if !miss_texts.is_empty() {
+            let computed = compute_batch(&miss_texts)?;
+            if computed.len() != miss_texts.len() {
+                return Err(Error::Ipc(format!(
+                    "embed batch computed {} vectors for {} requested distinct texts",
+                    computed.len(),
+                    miss_texts.len()
+                )));
+            }
+
+            {
+                let mut guard = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+                for (&key, &pos) in &miss_key_pos {
+                    guard.insert(key, computed[pos].clone());
+                }
+            }
+
+            for (i, key) in keys.iter().enumerate() {
+                if results[i].is_none() {
+                    let pos = miss_key_pos[key];
+                    results[i] = Some(computed[pos].clone());
+                }
+            }
+        }
+
+        Ok(results
+            .into_iter()
+            .map(|v| v.expect("every text is resolved either from cache or from compute_batch"))
+            .collect())
+    }
+
+    /// Content-address key for `(model, dim, text)` — see [`Self::get_or_compute`]'s doc comment
+    /// for the collision-resistance caveat this key construction inherits.
+    fn cache_key(model: &str, dim: i64, text: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(model.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(dim.to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(text.as_bytes());
+        hasher.finalize().into()
     }
 
     /// Number of distinct texts currently cached. Test/diagnostic use.
@@ -289,18 +378,158 @@ mod tests {
         let (va, vb) = tokio::task::spawn_blocking(move || {
             let fn_a = ctx_a.recompute_fn_via_handle();
             let fn_b = ctx_b.recompute_fn_via_handle();
-            let va = fn_a("shared text").unwrap();
-            let vb = fn_b("shared text").unwrap();
+            let va = fn_a(&["shared text"]).unwrap();
+            let vb = fn_b(&["shared text"]).unwrap();
             (va, vb)
         })
         .await
         .unwrap();
 
-        assert_eq!(va, vec![1.0, 0.0]);
+        assert_eq!(va, vec![vec![1.0, 0.0]]);
         assert_eq!(
             vb,
-            vec![0.0, 1.0],
+            vec![vec![0.0, 1.0]],
             "ctx_b must not observe ctx_a's cached vector for the same text"
         );
+    }
+
+    // ── get_or_compute_batch (issue #486, FR-006) ───────────────────────────────────────────
+
+    #[test]
+    fn batch_empty_input_returns_empty_without_calling_compute() {
+        let cache = EmbeddingCache::new();
+        let result = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, &[], |_| {
+                panic!("compute_batch must not be called for empty input")
+            })
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn batch_cache_hit_avoids_calling_compute_batch() {
+        let cache = EmbeddingCache::new();
+        cache
+            .get_or_compute(MODEL_A, DIM_A, "hello", || Ok(vec![1.0, 2.0]))
+            .unwrap();
+
+        let result = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, &["hello"], |_| {
+                panic!("compute_batch must not be called when every text is already cached")
+            })
+            .unwrap();
+        assert_eq!(result, vec![vec![1.0, 2.0]]);
+    }
+
+    #[test]
+    fn batch_distinct_texts_resolve_in_request_order() {
+        let cache = EmbeddingCache::new();
+        let result = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, &["a", "b", "c"], |texts| {
+                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+            })
+            .unwrap();
+        assert_eq!(result, vec![vec![1.0], vec![1.0], vec![1.0]]);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn batch_duplicate_text_within_one_call_costs_one_compute_slot() {
+        let cache = EmbeddingCache::new();
+        let calls = AtomicUsize::new(0);
+        let result = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, &["x", "y", "x"], |texts| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    texts.len(),
+                    2,
+                    "the repeated text must be deduplicated before reaching compute_batch"
+                );
+                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+            })
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result[0], result[2],
+            "both occurrences resolve to the same vector"
+        );
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn batch_whole_call_error_propagates_without_partial_caching() {
+        let cache = EmbeddingCache::new();
+        let result = cache.get_or_compute_batch(MODEL_A, DIM_A, &["x", "y"], |_| {
+            Err(Error::Config("boom".to_string()))
+        });
+        assert!(result.is_err());
+        assert!(cache.is_empty(), "a failed batch must not cache anything");
+    }
+
+    #[test]
+    fn batch_length_mismatch_from_compute_batch_is_an_error_and_caches_nothing() {
+        let cache = EmbeddingCache::new();
+        let result =
+            cache.get_or_compute_batch(MODEL_A, DIM_A, &["x", "y"], |_| Ok(vec![vec![1.0]]));
+        assert!(result.is_err());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn batch_different_model_identity_does_not_collide_on_same_text() {
+        let cache = EmbeddingCache::new();
+        let a = cache
+            .get_or_compute_batch("model-a", 768, &["shared text"], |t| {
+                Ok(t.iter().map(|_| vec![1.0, 0.0]).collect())
+            })
+            .unwrap();
+        let b = cache
+            .get_or_compute_batch("model-b", 768, &["shared text"], |t| {
+                Ok(t.iter().map(|_| vec![0.0, 1.0]).collect())
+            })
+            .unwrap();
+        assert_eq!(a, vec![vec![1.0, 0.0]]);
+        assert_eq!(
+            b,
+            vec![vec![0.0, 1.0]],
+            "model-b must not reuse model-a's cached entry for the same text"
+        );
+    }
+
+    #[test]
+    fn batch_different_dim_does_not_collide_on_same_text_and_model() {
+        let cache = EmbeddingCache::new();
+        let a = cache
+            .get_or_compute_batch(MODEL_A, 768, &["shared text"], |t| {
+                Ok(t.iter().map(|_| vec![1.0]).collect())
+            })
+            .unwrap();
+        let b = cache
+            .get_or_compute_batch(MODEL_A, 1024, &["shared text"], |t| {
+                Ok(t.iter().map(|_| vec![2.0]).collect())
+            })
+            .unwrap();
+        assert_eq!(a, vec![vec![1.0]]);
+        assert_eq!(
+            b,
+            vec![vec![2.0]],
+            "a 1024-dim lookup must not reuse the 768-dim cached entry"
+        );
+    }
+
+    #[test]
+    fn batch_mixed_cache_hit_and_miss_preserves_order() {
+        let cache = EmbeddingCache::new();
+        cache
+            .get_or_compute(MODEL_A, DIM_A, "cached", || Ok(vec![9.0]))
+            .unwrap();
+
+        let result = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, &["fresh1", "cached", "fresh2"], |texts| {
+                assert_eq!(texts, ["fresh1", "fresh2"]);
+                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+            })
+            .unwrap();
+        assert_eq!(result, vec![vec![6.0], vec![9.0], vec![6.0]]);
     }
 }

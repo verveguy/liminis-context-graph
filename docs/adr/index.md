@@ -112,12 +112,14 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0451](0451-per-group-ontology-drift-cache-and-clear-scope.md) | Per-Group Ontology Drift — Cache Placement and Clear Scope | 2026-08-23 |
 | [0470](0470-entity-summary-embedding.md) | Entity Summary Embedding for Semantic Search | 2026-08-22 |
 | [0477](0477-tag-based-versioned-docs-publishing.md) | Tag-Based, Versioned Docs Publishing via a `gh-pages` Accumulator Branch | 2026-08-23 |
+| [0486](0486-batch-wal-replay-embedding-recompute.md) | Batch WAL-Replay Embedding Recompute — An Independent, Unaligned Window Upstream of the Cypher Batch | 2026-09-01 |
 | [0495](0495-resolve-ontology-insert-if-absent.md) | Close the `resolve_ontology` Stale-Drift-Insert Race via Insert-If-Absent | 2026-09-01 |
 | [0497](0497-embedder-http-bearer-auth.md) | Bearer-Token Authentication for the Embedder HTTP Transport | 2026-08-25 |
 | [0499](0499-embedder-unreachable-retry-and-mcp-stdio-degrade.md) | Bounded Embedder-Probe Retry and Degrade-Without-Opening-DB for Standalone `--mcp-stdio` | 2026-08-25 |
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
 | [0502](0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md) | Pin an Explicit `macos-26` Runner for Swift Sidecar CI, Not Yet a Required Check | 2026-08-25 |
 | [0503](0503-swift-sidecar-source-of-truth.md) | `liminis-context-graph` Is the Sole Source of Truth for the Swift Sidecar | 2026-08-25 |
+| [0510](0510-oaiembedder-http-timeouts.md) | Bounded Request/Connect Timeouts for `OaiEmbedder`'s HTTP Transport | 2026-09-01 |
 | [0526](0526-vectors-are-a-local-cache.md) | Vectors Are a Local Cache — Stop Writing Them to the WAL, Ignore Them on Replay | 2026-09-01 |
 
 ## Historical numbering
