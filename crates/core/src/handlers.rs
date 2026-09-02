@@ -2406,10 +2406,12 @@ async fn handle_rebuild_from_wal(
             bg_indices_built.store(false, Ordering::Release);
         }
         let generation_for_replay = current_generation.clone();
-        let (stats, indices_built, cross_group_rebind) = tokio::task::spawn_blocking(
+        let (stats, indices_built, lookup_key_backfill_ok, cross_group_rebind) =
+            tokio::task::spawn_blocking(
             move || -> Result<
                 (
                     crate::replay::ReplayStats,
+                    bool,
                     bool,
                     Option<crate::cross_group::RebindCounts>,
                 ),
@@ -2482,6 +2484,7 @@ async fn handle_rebuild_from_wal(
                 // real outcome is captured and returned so the caller can observe it (FR-004/006)
                 // rather than have it silently swallowed.
                 let mut build_ok = false;
+                let mut lookup_key_backfill_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
                     // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
@@ -2499,6 +2502,19 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // Snapshot this rebuild's own backfill outcome now, synchronously and on the
+                    // same thread, before build_indices_and_constraints (or anything else) can
+                    // touch the same in-process flag (issue #491 FR-002).
+                    lookup_key_backfill_ok = conn.lookup_key_migrated();
+                    // issue #491 FR-001/FR-004: `build_ok`/`indices_built` is scoped to
+                    // build_indices_and_constraints's own outcome only — deliberately independent
+                    // of the backfill above. state.indices_built also gates the search auto-heal
+                    // path (handlers.rs handle_find_entities/handle_find_relationships), which
+                    // retries build_indices_once() on a missing-index search error; folding a
+                    // backfill-only failure into this signal would make that path spuriously
+                    // re-run an index build that can never fix a backfill problem. This rebuild's
+                    // backfill outcome is reported instead via `lookup_key_backfill_ok` above/below
+                    // (per-rebuild) and `knowledge_status`'s `name_index_trusted` (global).
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -2587,7 +2603,7 @@ async fn handle_rebuild_from_wal(
                         }
                     }
                 }
-                Ok((stats, build_ok, rebind_counts))
+                Ok((stats, build_ok, lookup_key_backfill_ok, rebind_counts))
             },
         )
         .await??;
@@ -2644,7 +2660,7 @@ async fn handle_rebuild_from_wal(
                         group_id, e
                     );
                 } else {
-                    state.clear_group_drift(&group_id);
+                    state.clear_group_drift(&group_id, group_ontology);
                 }
             }
         }
@@ -2706,6 +2722,10 @@ async fn handle_rebuild_from_wal(
             result["dry_run"] = json!(true);
         } else {
             result["indices_built"] = json!(indices_built);
+            // issue #491 FR-002: this rebuild's own Entity.lookup_key backfill outcome, distinct
+            // from and independent of `indices_built` above. Omitted on dry run for the same
+            // reason `indices_built` is (edge case: dry run touches neither backfill nor build).
+            result["lookup_key_backfill_ok"] = json!(lookup_key_backfill_ok);
         }
         // FR-005: MUST clearly indicate when a reset-triggered full replay occurred, so an
         // operator or automated caller can tell this apart from an ordinary incremental replay
@@ -2878,6 +2898,7 @@ async fn handle_rebuild_from_wal(
                 (
                     crate::replay::ReplayStats,
                     bool,
+                    bool,
                     Option<crate::cross_group::RebindCounts>,
                 ),
                 Error,
@@ -2939,6 +2960,7 @@ async fn handle_rebuild_from_wal(
                 // Non-fatal to the replay outcome; the real outcome is captured and returned
                 // (FR-004/006) instead of being silently swallowed.
                 let mut build_ok = false;
+                let mut lookup_key_backfill_ok = false;
                 let mut rebind_counts = None;
                 if !dry_run {
                     // A pre-#470 WAL recording's Entity CREATE never mentions summary_embedding,
@@ -2956,6 +2978,19 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // Snapshot this rebuild's own backfill outcome now, synchronously and on the
+                    // same thread, before build_indices_and_constraints (or anything else) can
+                    // touch the same in-process flag (issue #491 FR-002).
+                    lookup_key_backfill_ok = conn.lookup_key_migrated();
+                    // issue #491 FR-001/FR-004: `build_ok`/`indices_built` is scoped to
+                    // build_indices_and_constraints's own outcome only — deliberately independent
+                    // of the backfill above. state.indices_built also gates the search auto-heal
+                    // path (handlers.rs handle_find_entities/handle_find_relationships), which
+                    // retries build_indices_once() on a missing-index search error; folding a
+                    // backfill-only failure into this signal would make that path spuriously
+                    // re-run an index build that can never fix a backfill problem. This rebuild's
+                    // backfill outcome is reported instead via `lookup_key_backfill_ok` above/below
+                    // (per-rebuild) and `knowledge_status`'s `name_index_trusted` (global).
                     match conn.build_indices_and_constraints() {
                         Ok(()) => build_ok = true,
                         Err(e) => {
@@ -3030,7 +3065,7 @@ async fn handle_rebuild_from_wal(
                         }
                     }
                 }
-                Ok((stats, build_ok, rebind_counts))
+                Ok((stats, build_ok, lookup_key_backfill_ok, rebind_counts))
             },
         )
         .await;
@@ -3038,7 +3073,7 @@ async fn handle_rebuild_from_wal(
         // Unconditional store of the real outcome (FR-006), mirroring the streaming path. Stored
         // while the write lock is still held so a concurrent search never observes a stale value
         // in the gap between the build outcome landing and the lock being released.
-        if let Ok(Ok((_, build_ok, _))) = &result {
+        if let Ok(Ok((_, build_ok, _, _))) = &result {
             if !dry_run {
                 ib.store(*build_ok, Ordering::Release);
             }
@@ -3049,7 +3084,7 @@ async fn handle_rebuild_from_wal(
         if let Ok(mut jobs) = rebuild_jobs.lock() {
             if let Some(job) = jobs.get_mut(&job_id_task) {
                 match result {
-                    Ok(Ok((stats, indices_built, cross_group_rebind))) => {
+                    Ok(Ok((stats, indices_built, lookup_key_backfill_ok, cross_group_rebind))) => {
                         job.status = JobStatus::Completed;
                         job.mutations_replayed = stats.lines_replayed;
                         job.wal_files_processed = stats.files_read;
@@ -3087,6 +3122,11 @@ async fn handle_rebuild_from_wal(
                         // Dry-run never touches indices (FR-007) — omit the field.
                         if !dry_run {
                             job_result["indices_built"] = json!(indices_built);
+                            // issue #491 FR-002: mirrors the streaming path's field — this
+                            // rebuild's own Entity.lookup_key backfill outcome, distinct from and
+                            // independent of `indices_built` above, omitted on dry run for the
+                            // same reason.
+                            job_result["lookup_key_backfill_ok"] = json!(lookup_key_backfill_ok);
                         }
                         // FR-005: MUST clearly indicate when a reset-triggered full replay
                         // occurred, mirroring the streaming path's response shape.
@@ -3127,7 +3167,8 @@ async fn handle_rebuild_from_wal(
                                         bg_gid_for_result, e
                                     );
                                 } else {
-                                    bg_state_for_result.clear_group_drift(&bg_gid_for_result);
+                                    bg_state_for_result
+                                        .clear_group_drift(&bg_gid_for_result, group_ontology);
                                 }
                             }
                         }

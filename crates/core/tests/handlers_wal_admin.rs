@@ -1281,6 +1281,154 @@ async fn test_rebuild_reports_indices_built_false_on_genuine_build_failure() {
     );
 }
 
+// ── issue #491: lookup_key backfill failure must not be masked by indices_built ────────────────
+
+/// Forces the opposite failure combination from
+/// `test_rebuild_reports_indices_built_false_on_genuine_build_failure`: the `lookup_key`
+/// backfill's own query fails (it selects `uuid`/`name`/`group_id`), while every column
+/// `build_indices_and_constraints` touches (`lookup_key`, `name`/`summary`,
+/// `name_embedding`/`summary_embedding`, `RelatesToNode_.fact_embedding`) is left untouched.
+///
+/// Uses `ALTER TABLE ... RENAME`, not `DROP` (unlike `schema_migrate.rs`'s
+/// `migrate_retries_lookup_key_backfill_after_a_prior_failure`, which never calls
+/// `build_indices_and_constraints` in the same test and so never observes this): dropping
+/// `Entity.group_id` reproducibly corrupts lbug's catalog cache for *any* later index build on
+/// `Entity` (a "Miss cached column, which should never happen" runtime error, or a SIGSEGV when
+/// an index was already built pre-drop) — a genuine engine limitation, not specific to the
+/// dropped column. Renaming the column produces the same "Cannot find property group_id for n."
+/// binder exception the backfill's query needs, without touching column storage, so the later
+/// index build is unaffected. The WAL is left empty so replay is a no-op and never re-references
+/// the renamed `group_id` column (unlike `entity_wal_line`'s template, which sets `n.group_id`
+/// on every replayed line).
+#[tokio::test]
+async fn test_rebuild_reports_lookup_key_backfill_failure_streaming() {
+    let (db, _db_dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // Bypasses insert_entity — lookup_key stays NULL, giving the backfill a row to act on.
+        conn.run_cypher("CREATE (:Entity {uuid: 'issue491-entity-streaming', group_id: 'g'})")
+            .unwrap();
+        conn.run_cypher("ALTER TABLE Entity RENAME group_id TO group_id_renamed")
+            .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    // An empty (0-line) WAL file: replay is a no-op but the rebuild still requires at least one
+    // WAL file to be present under the group directory.
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_issue491.jsonl"),
+        "",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(80),
+        method: "knowledge_rebuild_from_wal".to_string(),
+        params: json!({}),
+    };
+    let resp = handlers::dispatch(req, Arc::clone(&state), Some(tx)).await;
+    while rx.try_recv().is_ok() {}
+    let v = serde_json::to_value(resp).unwrap();
+
+    assert_eq!(v["result"]["success"], true, "{v}");
+    // FR-001: index build itself is unaffected by the backfill failure.
+    assert_eq!(
+        v["result"]["indices_built"], true,
+        "index build must still succeed even though the backfill failed: {v}"
+    );
+    // FR-002/SC-001: this rebuild's own backfill outcome must be independently, unambiguously
+    // observable from the same result payload.
+    assert_eq!(
+        v["result"]["lookup_key_backfill_ok"], false,
+        "rebuild result must report lookup_key_backfill_ok: false when the backfill failed: {v}"
+    );
+}
+
+/// Mirrors `test_rebuild_reports_lookup_key_backfill_failure_streaming` via the background-job
+/// path (FR-005: the two arms must behave identically for the same outcome combination).
+#[tokio::test]
+async fn test_rebuild_reports_lookup_key_backfill_failure_background() {
+    let (db, _db_dir) = make_db(4);
+    {
+        let conn = db.connect().unwrap();
+        // Bypasses insert_entity — lookup_key stays NULL, giving the backfill a row to act on.
+        conn.run_cypher("CREATE (:Entity {uuid: 'issue491-entity-background', group_id: 'g'})")
+            .unwrap();
+        // RENAME, not DROP — see test_rebuild_reports_lookup_key_backfill_failure_streaming's
+        // doc comment for why DROP is unsafe here (lbug catalog corruption on Entity).
+        conn.run_cypher("ALTER TABLE Entity RENAME group_id TO group_id_renamed")
+            .unwrap();
+    }
+
+    let wal_dir = TempDir::new().unwrap();
+    std::fs::create_dir_all(wal_dir.path().join("liminis")).unwrap();
+    // An empty (0-line) WAL file: replay is a no-op but the rebuild still requires at least one
+    // WAL file to be present under the group directory.
+    std::fs::write(
+        wal_dir
+            .path()
+            .join("liminis")
+            .join("20260522_000000_issue491.jsonl"),
+        "",
+    )
+    .unwrap();
+
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf());
+
+    // Non-streaming, non-dry-run always routes through the background-job path.
+    let v = dispatch(
+        90,
+        "knowledge_rebuild_from_wal",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["success"], true, "{v}");
+    let job_id = v["result"]["job_id"]
+        .as_str()
+        .expect("expected job_id")
+        .to_string();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status_v = loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let status_v = dispatch(
+            91,
+            "knowledge_rebuild_status",
+            json!({"job_id": job_id.as_str()}),
+            Arc::clone(&state),
+        )
+        .await;
+        match status_v["result"]["status"].as_str().unwrap_or("?") {
+            "completed" => break status_v,
+            "failed" => panic!("rebuild job failed: {status_v}"),
+            "running" => {
+                if std::time::Instant::now() > deadline {
+                    panic!("rebuild did not complete within 30s: {status_v}");
+                }
+            }
+            other => panic!("unexpected status: {other}: {status_v}"),
+        }
+    };
+
+    assert_eq!(
+        status_v["result"]["result"]["indices_built"], true,
+        "job result must report indices_built: true: {status_v}"
+    );
+    assert_eq!(
+        status_v["result"]["result"]["lookup_key_backfill_ok"], false,
+        "job result must report lookup_key_backfill_ok: false: {status_v}"
+    );
+}
+
 // ── FR-005: non-empty-database guard for from_seq: 0 rebuilds (issue #239) ────────────────────
 
 /// Like `make_db`, but also returns the real on-disk DB path so `clear_db_for_rebuild` (invoked
