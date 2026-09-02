@@ -91,8 +91,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            matching a query. Returned edges' `episode_uuids` is always \
                            empty on this read path (not populated). The response returns \
                            the relationship list under the `edges` key. Does not include \
-                           episode `attributes` (issue #528) — this path surfaces only \
-                           edge-scoped provenance, never a full episode object.",
+                           episode `attributes` (issue #528) — this path returns edges, \
+                           never a full episode object.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
