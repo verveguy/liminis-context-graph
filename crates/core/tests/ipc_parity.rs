@@ -97,7 +97,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
-        embedder: Arc::new(OaiEmbedder::from_env()),
+        embedder: Arc::new(OaiEmbedder::from_env().expect("valid embedder env config")),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
@@ -247,7 +247,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
     Arc::new(AppState {
         db: ArcSwapOption::from(None),
         degraded_reason: Arc::new(Mutex::new(Some(reason.to_string()))),
-        embedder: Arc::new(OaiEmbedder::from_env()),
+        embedder: Arc::new(OaiEmbedder::from_env().expect("valid embedder env config")),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
@@ -541,7 +541,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
-        embedder: Arc::new(OaiEmbedder::from_env()),
+        embedder: Arc::new(OaiEmbedder::from_env().expect("valid embedder env config")),
         extractor: Arc::new(MockExtractor),
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),

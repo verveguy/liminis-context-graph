@@ -63,7 +63,13 @@ async fn connect_live_embedder() -> Option<OaiEmbedder> {
     let embedder = if Path::new(DEFAULT_UDS_PATH).exists() {
         cfg_if_uds(DEFAULT_UDS_PATH)
     } else if let Ok(url) = std::env::var("LCG_EMBEDDING_URL") {
-        OaiEmbedder::new_http(url, FIXTURE_EMBEDDING_MODEL, embedding_dim())
+        match OaiEmbedder::new_http(url, FIXTURE_EMBEDDING_MODEL, embedding_dim()) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("[SKIP] invalid embedder config: {e}");
+                return None;
+            }
+        }
     } else {
         eprintln!(
             "[SKIP] no embedding sidecar reachable ({DEFAULT_UDS_PATH} absent, \
@@ -103,6 +109,7 @@ fn cfg_if_uds(_path: &str) -> OaiEmbedder {
         FIXTURE_EMBEDDING_MODEL,
         embedding_dim(),
     )
+    .expect("valid embedder config")
 }
 
 /// Cosine similarity between two equal-length vectors. Returns 0.0 for a zero-magnitude input

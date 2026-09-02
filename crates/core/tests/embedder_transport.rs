@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use lcg_core::embedder::{Embedder, OaiEmbedder};
+use lcg_core::embedder::{is_transport_error, Embedder, OaiEmbedder};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 
@@ -40,6 +40,45 @@ impl EmbedBatchSizeEnvGuard {
 impl Drop for EmbedBatchSizeEnvGuard {
     fn drop(&mut self) {
         std::env::remove_var("LCG_EMBED_BATCH_SIZE");
+    }
+}
+
+/// `LCG_EMBEDDING_TIMEOUT_MS`/`LCG_EMBEDDING_CONNECT_TIMEOUT_MS` are read once, synchronously,
+/// at `OaiEmbedder::new_http` construction time (#510) — unlike `LCG_EMBED_BATCH_SIZE`, which is
+/// read on every `embed_batch` call, so *every* HTTP-transport test in this file constructs via
+/// `new_http` and could in principle observe an override left dangling by another test. This
+/// guard serializes the small number of tests below that actually set an override (holding the
+/// write lock for the guard's whole lifetime, construction included) rather than requiring every
+/// other HTTP test in this file to take a matching read guard: none of those tests' correctness
+/// depends on the *exact* default duration (only on it being "long enough" for a local,
+/// non-artificially-delayed loopback round-trip), and every override used below remains generous
+/// enough that a concurrently-running unrelated test would still complete well within it even if
+/// it raced past this guard's window.
+static EMBEDDING_TIMEOUT_ENV_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+struct EmbeddingTimeoutEnvGuard {
+    _lock: std::sync::RwLockWriteGuard<'static, ()>,
+}
+
+impl EmbeddingTimeoutEnvGuard {
+    fn set(request_ms: &str, connect_ms: &str) -> Self {
+        let lock = EMBEDDING_TIMEOUT_ENV_LOCK.write().unwrap();
+        std::env::set_var("LCG_EMBEDDING_TIMEOUT_MS", request_ms);
+        std::env::set_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS", connect_ms);
+        Self { _lock: lock }
+    }
+
+    fn set_request_only(request_ms: &str) -> Self {
+        let lock = EMBEDDING_TIMEOUT_ENV_LOCK.write().unwrap();
+        std::env::set_var("LCG_EMBEDDING_TIMEOUT_MS", request_ms);
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for EmbeddingTimeoutEnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var("LCG_EMBEDDING_TIMEOUT_MS");
+        std::env::remove_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS");
     }
 }
 
@@ -174,6 +213,68 @@ async fn spawn_stub_http_batch_echo_server(
     });
 
     (addr, handle, request_count)
+}
+
+/// Like `spawn_stub_http_batch_echo_server`, but sleeps `per_request_delay` before writing the
+/// response — used to simulate normal (non-hung) backend latency on a batch call (SC-003), as
+/// opposed to `spawn_stub_http_hang_server`'s never-respond hang.
+async fn spawn_stub_http_batch_echo_server_delayed(
+    dim: usize,
+    per_request_delay: std::time::Duration,
+) -> (SocketAddr, JoinHandle<()>) {
+    use tokio::io::BufReader;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let delay = per_request_delay;
+            tokio::spawn(async move {
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let request_body = read_http_request_body(&mut reader).await;
+                assert_oai_request_body(&request_body);
+                let n = input_len_from_request(&request_body);
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                let body = oai_batch_response_json_shuffled(dim, n);
+                write_http_response(&mut write_half, &body).await;
+            });
+        }
+    });
+
+    (addr, handle)
+}
+
+/// Spawns a stub HTTP server that accepts the TCP connection and then never reads or writes
+/// anything — simulating a hung backend that is still "connected" (this issue's core scenario,
+/// #510). The accepted connection is held open (not dropped) for the server's lifetime so the
+/// client genuinely blocks on the response rather than seeing a connection-reset.
+async fn spawn_stub_http_hang_server() -> (SocketAddr, JoinHandle<()>) {
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let _stream = stream;
+                std::future::pending::<()>().await;
+            });
+        }
+    });
+
+    (addr, handle)
 }
 
 /// Spawns a stub HTTP server that always returns a response with `fixed_count` entries,
@@ -563,7 +664,7 @@ async fn http_transport_embed_roundtrip() {
     let dim = 16;
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
     let result = embedder.embed("hello world").await.unwrap();
     assert_eq!(result.len(), dim, "embedding dim should match stub");
 }
@@ -573,7 +674,7 @@ async fn http_transport_probe_returns_dim_and_model() {
     let dim = 32;
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", 1);
+    let embedder = OaiEmbedder::new_http(url, "test-model", 1).expect("valid embedder config");
     let (probed_dim, probed_model) = embedder.probe().await.unwrap();
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
@@ -723,8 +824,9 @@ async fn http_transport_sends_bearer_header_when_key_configured() {
     let dim = 16;
     let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder =
-        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim)
+        .expect("valid embedder config")
+        .with_api_key(Some("sekret-key".to_string()));
 
     embedder.embed("hello world").await.unwrap();
     embedder.probe().await.unwrap();
@@ -747,7 +849,7 @@ async fn http_transport_no_authorization_header_when_key_unset() {
     let dim = 16;
     let (addr, _server, captured) = spawn_stub_http_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     embedder.embed("hello world").await.unwrap();
 
@@ -806,8 +908,9 @@ async fn http_transport_embed_batch_sends_bearer_header_when_key_configured() {
     let dim = 4;
     let (addr, _server, captured) = spawn_stub_http_batch_server_capturing_headers(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder =
-        OaiEmbedder::new_http(url, "test-model", dim).with_api_key(Some("sekret-key".to_string()));
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim)
+        .expect("valid embedder config")
+        .with_api_key(Some("sekret-key".to_string()));
 
     let texts = ["one", "two", "three"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -845,7 +948,7 @@ async fn http_transport_embed_batch_single_request_and_correct_order() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three", "four", "five"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -874,7 +977,7 @@ async fn http_transport_embed_batch_chunks_oversized_batch() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["a", "b", "c", "d", "e"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -894,7 +997,7 @@ async fn http_transport_embed_batch_empty_input_issues_no_request() {
     let dim = 4;
     let (addr, _server, request_count) = spawn_stub_http_batch_echo_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts: [&str; 0] = [];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -917,7 +1020,7 @@ async fn http_transport_embed_batch_mismatched_response_errors() {
     let dim = 4;
     let (addr, _server) = spawn_stub_http_fixed_count_server(dim, 2).await;
     let url = format!("http://{addr}/v1/embeddings");
-    let embedder = OaiEmbedder::new_http(url, "test-model", dim);
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three"];
     let err = embedder.embed_batch(&texts).await.unwrap_err();
@@ -1043,6 +1146,7 @@ async fn embedder_http_cassette_never_leaks_authorization_or_key() {
     let url = format!("http://{addr}/v1/embeddings");
     let inner: Arc<dyn Embedder> = Arc::new(
         OaiEmbedder::new_http(url, "test-model", dim)
+            .expect("valid embedder config")
             .with_api_key(Some(SENTINEL_API_KEY.to_string())),
     );
 
@@ -1085,4 +1189,213 @@ async fn embedder_http_cassette_never_leaks_authorization_or_key() {
         !raw_str.to_lowercase().contains("authorization"),
         "embedder cassette must never contain the string \"authorization\" anywhere"
     );
+}
+// ── HTTP transport timeout tests (#510) ─────────────────────────────────────
+
+/// FR-001/SC-001: a backend that accepts the connection and never responds fails within the
+/// configured whole-request timeout bound (overridden small here so the test itself stays
+/// fast), rather than hanging indefinitely — and is classified as a transport error, so
+/// `main.rs`'s fatal-vs-bypass startup logic and issue #499's `--mcp-stdio` retry loop keep
+/// working unmodified (FR-005). `state.write_lock` release itself is exercised separately in
+/// `concurrent_rw_integration.rs`.
+#[tokio::test]
+async fn http_transport_hung_backend_times_out_on_embed() {
+    let (addr, _server) = spawn_stub_http_hang_server().await;
+    let url = format!("http://{addr}/v1/embeddings");
+    // Scoped so the blocking env-var guard is dropped before the `.await` below: the timeout
+    // env vars are only read during `new_http` construction, so holding the guard any longer
+    // would needlessly block a tokio worker thread across an await point.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.embed("hello world").await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms request timeout to bound the call, took {elapsed:?}"
+    );
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+}
+
+/// Same as above but through `probe()` (Acceptance Scenario 1 covers `probe()` alongside
+/// `embed()`/`embed_batch()` — the startup probe is the same code path via `do_embed_raw`).
+#[tokio::test]
+async fn http_transport_hung_backend_times_out_on_probe() {
+    let (addr, _server) = spawn_stub_http_hang_server().await;
+    let url = format!("http://{addr}/v1/embeddings");
+    // See `http_transport_hung_backend_times_out_on_embed`'s comment: the guard is scoped to
+    // construction only, so it's dropped before the `.await` below.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.probe().await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms request timeout to bound the probe, took {elapsed:?}"
+    );
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+}
+
+/// FR-002/SC-002: a backend that never completes the TCP handshake fails within the configured
+/// connect timeout, independently of the (here, much larger) whole-request timeout — proving
+/// the two bounds are separately reachable, not just that "some" timeout eventually fires.
+///
+/// Reliably stalling *before* a handshake completes needs a real unroutable network target
+/// (`192.0.2.1`, RFC 5737 TEST-NET-1) rather than a local stub server, which can only simulate
+/// "accepts connection, never responds" (the whole-request-timeout case exercised above). That
+/// makes this test's outcome depend on the network sandbox actually blackholing the address
+/// rather than e.g. returning ICMP unreachable instantly or routing it somewhere that responds
+/// — behavior this repo's CI/sandbox environment cannot guarantee. `#[ignore]`d for the same
+/// reason `real_corpus_replay_perf.rs`'s live-embedder tests are: run explicitly
+/// (`cargo test -- --ignored http_transport_connect_timeout`), not in the default gate.
+#[tokio::test]
+#[ignore = "network-environment-dependent: requires 192.0.2.1 (RFC 5737 TEST-NET-1) to be an \
+            unroutable blackhole in the current network sandbox, which is not guaranteed on \
+            every CI runner"]
+async fn http_transport_connect_timeout_independent_of_request_timeout() {
+    let url = "http://192.0.2.1:9/v1/embeddings".to_string();
+    // See `http_transport_hung_backend_times_out_on_embed`'s comment: the guard is scoped to
+    // construction only, so it's dropped before the `.await` below.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("30000", "300");
+        OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.embed("hello world").await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms connect timeout to fire well before the 30s whole-request timeout, \
+         took {elapsed:?}"
+    );
+}
+
+/// FR-004/SC-003: a default-sized (64-text) batch call under normal (non-hung) backend latency
+/// completes successfully without hitting the default whole-request timeout — the default must
+/// remain batch-compatible per #445.
+// See `http_transport_embed_batch_single_request_and_correct_order`'s comment for why holding
+// the std `RwLockReadGuard` across `.await` is safe under `flavor = "current_thread"` — this
+// test calls `embed_batch` with a non-empty slice, so it reads `LCG_EMBED_BATCH_SIZE` and must
+// take the same guard as every other test that does.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn http_transport_default_batch_size_succeeds_under_normal_latency() {
+    let _batch_env_guard = EMBED_BATCH_SIZE_ENV_LOCK.read().unwrap();
+    let dim = 4;
+    let (addr, _server) =
+        spawn_stub_http_batch_echo_server_delayed(dim, std::time::Duration::from_millis(200)).await;
+    let url = format!("http://{addr}/v1/embeddings");
+    let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
+
+    // 64 texts at the default LCG_EMBED_BATCH_SIZE (64) is exactly one chunk/one request.
+    let texts: Vec<String> = (0..64).map(|i| format!("text-{i}")).collect();
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let results = embedder.embed_batch(&text_refs).await.unwrap();
+
+    assert_eq!(results.len(), text_refs.len());
+}
+
+/// FR-006: an unparseable override for either timeout env var is rejected with a clear
+/// `Error::Config`, not silently ignored or a panic.
+#[tokio::test]
+async fn new_http_rejects_unparseable_timeout_override() {
+    let _guard = EmbeddingTimeoutEnvGuard::set_request_only("not-a-number");
+    let err = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+        .err()
+        .expect("unparseable LCG_EMBEDDING_TIMEOUT_MS should be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("LCG_EMBEDDING_TIMEOUT_MS"),
+        "expected error to name the offending var, got: {msg}"
+    );
+}
+
+/// FR-006: a zero override is rejected — zero would mean "no timeout at all", the exact hazard
+/// this issue exists to close.
+#[tokio::test]
+async fn new_http_rejects_zero_timeout_override() {
+    let _guard = EmbeddingTimeoutEnvGuard::set_request_only("0");
+    let err = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+        .err()
+        .expect("zero LCG_EMBEDDING_TIMEOUT_MS should be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("LCG_EMBEDDING_TIMEOUT_MS"),
+        "expected error to name the offending var, got: {msg}"
+    );
+}
+
+/// FR-006: a negative override is rejected (fails `u64` parsing, surfacing the same
+/// unparseable-value error path as a non-numeric string).
+#[tokio::test]
+async fn new_http_rejects_negative_timeout_override() {
+    let _guard = EmbeddingTimeoutEnvGuard::set_request_only("-5");
+    let err = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+        .err()
+        .expect("negative LCG_EMBEDDING_TIMEOUT_MS should be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("LCG_EMBEDDING_TIMEOUT_MS"),
+        "expected error to name the offending var, got: {msg}"
+    );
+}
+
+/// FR-006: an invalid connect-timeout override is rejected the same way as an invalid
+/// whole-request override.
+#[tokio::test]
+async fn new_http_rejects_invalid_connect_timeout_override() {
+    let _guard = EmbeddingTimeoutEnvGuard::set("30000", "0");
+    let err = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+        .err()
+        .expect("zero LCG_EMBEDDING_CONNECT_TIMEOUT_MS should be rejected");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("LCG_EMBEDDING_CONNECT_TIMEOUT_MS"),
+        "expected error to name the offending var, got: {msg}"
+    );
+}
+
+/// FR-003/SC-004: setting both timeout env vars to distinct valid values allows successful
+/// construction — proving both are independently overridable via environment, taking effect
+/// without a code change.
+#[tokio::test]
+async fn new_http_accepts_distinct_valid_timeout_overrides() {
+    let (addr, _server) = spawn_stub_http_server(4).await;
+    // Scoped so the blocking env-var guard is dropped before the `.await` below: the timeout
+    // env vars are only read during `new_http` construction, so holding the guard any longer
+    // would needlessly block a tokio worker thread across an await point.
+    let embedder2 = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("15000", "2500");
+        let embedder = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "test-model", 4)
+            .expect("distinct valid timeout overrides should construct successfully");
+        // Constructing successfully is the assertion (SC-004); exercise it against a live stub
+        // too, to confirm the resulting client is actually usable end-to-end with overrides
+        // applied.
+        drop(embedder);
+        OaiEmbedder::new_http(format!("http://{addr}/v1/embeddings"), "test-model", 4)
+            .expect("valid embedder config")
+    };
+    let result = embedder2.embed("hello world").await.unwrap();
+    assert_eq!(result.len(), 4);
 }

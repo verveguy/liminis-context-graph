@@ -118,6 +118,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0500](0500-unified-pre-bootstrap-signal-handling.md) | Unified Pre-Bootstrap Signal Handling Across All `CliMode`s | 2026-08-25 |
 | [0502](0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md) | Pin an Explicit `macos-26` Runner for Swift Sidecar CI, Not Yet a Required Check | 2026-08-25 |
 | [0503](0503-swift-sidecar-source-of-truth.md) | `liminis-context-graph` Is the Sole Source of Truth for the Swift Sidecar | 2026-08-25 |
+| [0510](0510-oaiembedder-http-timeouts.md) | Bounded Request/Connect Timeouts for `OaiEmbedder`'s HTTP Transport | 2026-09-01 |
 | [0526](0526-vectors-are-a-local-cache.md) | Vectors Are a Local Cache — Stop Writing Them to the WAL, Ignore Them on Replay | 2026-09-01 |
 
 ## Historical numbering
