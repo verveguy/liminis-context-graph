@@ -123,11 +123,15 @@ recorded in `expected_results.json.skipped_articles`), captured 2026-07-25, real
   `corpus_prose.jsonl` fresh, not replaying a cassette.
 - **`build_expected_results` bug, fixed after this capture**: `capture_real_corpus.py`'s
   `build_expected_results` originally read `knowledge_list_relationships`'s response under
-  the key `"edges"`, but `handle_list_relationships` (`handlers.rs`) actually returns
-  `{"facts": [...], "count": ...}` — so this fixture's *original* `expected_results.json`
-  had an empty `relation_type_samples` despite the graph having 2,392 real relationships.
-  Fixed in the script for future captures; this fixture's `relation_type_samples` were
-  backfilled from the WAL directly (see above) rather than by re-running the capture.
+  the key `"edges"`, but `handle_list_relationships` (`handlers.rs`) at the time actually
+  returned `{"facts": [...], "count": ...}` — so this fixture's *original*
+  `expected_results.json` had an empty `relation_type_samples` despite the graph having 2,392
+  real relationships. Fixed in the script for future captures; this fixture's
+  `relation_type_samples` were backfilled from the WAL directly (see above) rather than by
+  re-running the capture. Issue #524 later renamed the response key back to `"edges"` (a
+  breaking change, not a revert of this fix) — the script reads `"edges"` again as of that
+  issue, so the key name above describes the shape at the time of this fixture, not the
+  current one.
 - **Two-phase staging code is present but unexercised by this fixture.** The
   `--stage-only`/`--ingest-only` split in `capture_real_corpus.py` exists to make the *next*
   capture robust (see below) — this fixture predates it and was captured single-phase.

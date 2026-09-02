@@ -188,7 +188,7 @@ fn mcp_read_path_over_real_corpus_fixture() {
             json!({"query": query, "group_ids": [group_id.clone()], "num_results": top_n}),
         );
         let result = structured(&resp, "knowledge_find_relationships");
-        let facts = result["facts"].as_array().unwrap();
+        let facts = result["edges"].as_array().unwrap();
         assert!(
             !facts.is_empty(),
             "query {query:?} returned no relationships: {result}"
@@ -341,7 +341,7 @@ fn mcp_read_path_over_real_corpus_fixture() {
         structured(&list_relationships_resp, "knowledge_list_relationships");
     assert_exact_uuid_enumeration(
         list_relationships_result,
-        "facts",
+        "edges",
         relationship_total,
         "knowledge_list_relationships",
     );

@@ -115,6 +115,17 @@ async fn shape_find_entities() {
     assert_envelope(&v, 1, "nodes");
 }
 
+// Asserts the response has no lingering `facts` key (issue #524 renamed
+// `facts` to `edges` as a breaking change rather than adding a dual-key alias;
+// a partial revert that reintroduces `facts` must fail this).
+fn assert_facts_absent(v: &Value) {
+    let result = &v["result"];
+    assert!(
+        result.get("facts").is_none(),
+        "result must not have a 'facts' key (renamed to 'edges' by issue #524): {result}"
+    );
+}
+
 #[tokio::test]
 async fn shape_find_relationships() {
     let (db, _dir) = make_db(4);
@@ -126,7 +137,8 @@ async fn shape_find_relationships() {
         state,
     )
     .await;
-    assert_envelope(&v, 2, "facts");
+    assert_envelope(&v, 2, "edges");
+    assert_facts_absent(&v);
 }
 
 #[tokio::test]
@@ -169,6 +181,7 @@ async fn shape_get_edges_by_group() {
     )
     .await;
     assert_envelope(&v, 5, "edges");
+    assert_facts_absent(&v);
 }
 
 #[tokio::test]
@@ -224,7 +237,8 @@ async fn shape_list_relationships() {
         state,
     )
     .await;
-    assert_envelope(&v, 9, "facts");
+    assert_envelope(&v, 9, "edges");
+    assert_facts_absent(&v);
 }
 
 #[tokio::test]

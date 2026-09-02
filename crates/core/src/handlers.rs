@@ -1075,7 +1075,7 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     };
 
     let count = edges.len();
-    Ok(json!({"facts": edges, "count": count}))
+    Ok(json!({"edges": edges, "count": count}))
 }
 
 // ── Other read handlers — hold shared read guard across spawn_blocking ────────
@@ -1383,7 +1383,7 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     drop(_guard);
 
     let count = facts.len();
-    Ok(json!({ "facts": facts, "count": count }))
+    Ok(json!({ "edges": facts, "count": count }))
 }
 
 async fn handle_get_entity_neighbors(
