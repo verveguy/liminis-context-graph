@@ -100,6 +100,16 @@ ln -s "$libdir/libcrypto.a" "$staging_dir/libcrypto.a"
 #
 # lbug only reads `--variable=libdir`, but a well-formed .pc keeps this usable
 # for anything else that consults it.
+# pkg-config must exist: lbug's build.rs discovers these archives *through* it
+# (`pkg-config --variable=libdir openssl`). If it is missing, build.rs silently
+# falls through to its hardcoded macOS probe paths and links OpenSSL
+# dynamically with no error — the failure mode that blocked the first v0.14.0
+# release attempt (issue #550). Fail loudly here instead.
+command -v pkg-config >/dev/null 2>&1 || die "pkg-config not found on PATH.
+  lbug's build.rs resolves the staged static archives via pkg-config; without it
+  the build silently links OpenSSL dynamically. Install it (brew install
+  pkg-config / apt-get install pkg-config) and re-run."
+
 version="$(pkg-config --modversion openssl 2>/dev/null || echo "3")"
 cat > "$staging_dir/pkgconfig/openssl.pc" <<EOF
 prefix=$staging_dir
@@ -114,6 +124,18 @@ Cflags: -I\${includedir}
 EOF
 
 new_path="$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+# Verify the staged .pc is what pkg-config will actually hand lbug's build.rs.
+# A silent mismatch here is indistinguishable, at build time, from a correct
+# static link — it only surfaces later as a dynamic dependency in the shipped
+# artifact (issue #550).
+resolved="$(PKG_CONFIG_PATH="$new_path" pkg-config --variable=libdir openssl 2>/dev/null || true)"
+if [[ "$resolved" != "$staging_dir" ]]; then
+  die "pkg-config resolves openssl libdir to '${resolved:-<nothing>}', not the
+  staging directory '$staging_dir'. lbug's build.rs would link against that
+  path instead of the staged archives."
+fi
+echo "stage-openssl-static.sh: verified pkg-config resolves openssl libdir -> $staging_dir" >&2
 
 echo "stage-openssl-static.sh: staged libssl.a + libcrypto.a from $libdir ($source_desc)" >&2
 echo "stage-openssl-static.sh: -> $staging_dir" >&2

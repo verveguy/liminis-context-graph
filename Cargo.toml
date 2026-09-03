@@ -72,6 +72,14 @@ libssl-dev = "*"
 # whatever the runner image happens to ship. The staging step runs immediately
 # after that install in release.yml — see ADR-0398.
 "openssl@3" = "*"
+# pkg-config is how lbug's build.rs discovers the staged static archives
+# (scripts/stage-openssl-static.sh publishes a .pc whose libdir points at an
+# archives-only directory). Declared rather than assumed: if pkg-config is
+# absent, lbug 0.20.1's build.rs falls through to its hardcoded macOS probe
+# paths (/opt/homebrew/opt/openssl/lib) and links OpenSSL *dynamically* with
+# no error — which is what blocked the first v0.14.0 release attempt. See
+# ADR-0398 and issue #550.
+"pkg-config" = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
