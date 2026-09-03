@@ -59,6 +59,13 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-contex
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release. If macOS blocks the binary, clear the quarantine attribute: `xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph`.
 
+> **OpenSSL 3 is required at runtime.** lcg links it dynamically so your package manager's security updates reach it — we do not bundle it, and neither does LadybugDB upstream ([ladybug#681](https://github.com/LadybugDB/ladybug/issues/681)). Most systems already have it.
+>
+> - **macOS:** `brew install openssl@3` (Homebrew, Apple Silicon or Intel) or `sudo port install openssl3` (MacPorts).
+> - **Debian/Ubuntu:** `apt install libssl3` — normally present already.
+>
+> If it is missing, the binary fails at launch with `Library not loaded: @rpath/libssl.3.dylib` (macOS) or `error while loading shared libraries: libssl.so.3` (Linux). See [Troubleshooting](#troubleshooting). Design rationale: [ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md).
+
 > **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://v3rv.com/liminis-context-graph/configuration#embedder-sidecar).
 
 ### Run it
@@ -116,7 +123,7 @@ Or run it as a native MCP server instead — add to your client's MCP config:
 
 Requires [Rust/Cargo](https://rustup.rs/), a C++20 compiler, and OpenSSL 3. The first build downloads a prebuilt lbug bundle (LadybugDB bindings), so the graph engine itself is never compiled — no `cmake` build step and no C++ dependency tree. lbug's `build.rs` does still compile its own small cxx FFI bridge locally at `-std=c++2a`, which is why a C++20 compiler is needed (GCC 13+ / a recent Clang; Ubuntu 22.04's GCC 11 is too old, as it lacks `<format>`). The bundle statically ships its other third-party dependencies, but since lbug 0.18.0 it links OpenSSL externally, so you also need `openssl@3` (macOS: `brew install openssl@3`; Debian/Ubuntu: `apt install libssl-dev`).
 
-This applies to building from source only. Released binaries link OpenSSL statically and require nothing installed — see [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md):
+Released binaries need OpenSSL 3 too — they link it dynamically rather than bundling it, so the same `openssl@3` / `libssl3` requirement applies at runtime as well as at build time. See [ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md).
 
 ```bash
 cargo build --release                         # build both crates
@@ -126,6 +133,40 @@ cargo run -p lcg-service                      # run the service binary
 ```
 
 See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) for downstream-app bundling and pinned-release tarball URLs.
+
+## Troubleshooting
+
+### `Library not loaded: @rpath/libssl.3.dylib` (macOS)
+
+### `error while loading shared libraries: libssl.so.3` (Linux)
+
+lcg links OpenSSL 3 dynamically rather than bundling it, so that your package
+manager's security updates reach it — see
+[ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md) for why, and
+[ladybug#681](https://github.com/LadybugDB/ladybug/issues/681) for upstream's
+matching position. Both errors mean OpenSSL 3 is not installed where the binary
+looks for it.
+
+```sh
+# macOS, Homebrew (Apple Silicon or Intel)
+brew install openssl@3
+
+# macOS, MacPorts
+sudo port install openssl3
+
+# Debian / Ubuntu
+sudo apt install libssl3
+```
+
+On macOS the binary searches, in order:
+`/opt/homebrew/opt/openssl@3/lib`, `/usr/local/opt/openssl@3/lib`, `/opt/local/lib`.
+Check what it actually resolves with `otool -L $(which liminis-context-graph)` —
+the OpenSSL entries should read `@rpath/libssl.3.dylib`, never an absolute path.
+
+This surfaces most confusingly under an MCP client, which usually reports only
+"server failed to start" and discards the underlying dyld message. If an MCP
+server fails to start with no explanation, run the binary directly from a
+terminal first — the real error appears there.
 
 ## Scope
 

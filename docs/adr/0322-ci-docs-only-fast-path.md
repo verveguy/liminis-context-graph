@@ -80,7 +80,7 @@ classified.
 | `Cargo\.toml$`, `Cargo\.lock$` (any depth) | code | manifests/lockfile — covers `crates/*/Cargo.toml` and `spikes/**/Cargo.toml` |
 | `^\.cargo/` | code | build config (e.g. the `LBUG_VERSION` pin) |
 | `^\.github/workflows/` | code | CI/build files — also satisfies "editing `ci.yml` itself must run the full suite" |
-| `^scripts/` | code | since #398, `build-release` executes `stage-openssl-static.sh` and `assert-static-openssl.sh` directly — see the amendment below |
+| `^scripts/` | code | since #398, `build-release` executes `stage-openssl-rpath.sh` and `assert-openssl-linkage.sh` directly — see the amendment below |
 | `^crates/eval/scripts/` | code | `crates/eval/scripts/test-scripts.sh` is invoked directly by the `test` job's "eval script guards" step, so a change here can break CI even though it isn't `.rs` |
 | everything else | docs/non-code | default |
 
@@ -189,8 +189,8 @@ the top-level `scripts/` directory as docs.
 
 The original reasoning was sound for the facts at the time: `scripts/` held only
 docs-generation tooling (#295/PR #320) that no CI job executed. #398 changed those facts by
-adding `scripts/stage-openssl-static.sh` — which forces the static OpenSSL link that keeps
-release artifacts self-contained — and `scripts/assert-static-openssl.sh`, the guard that
+adding `scripts/stage-openssl-rpath.sh` — which fixes the OpenSSL linkage that keeps
+release artifacts self-contained — and `scripts/assert-openssl-linkage.sh`, the guard that
 catches its absence (see [ADR-0398](0398-openssl-linkage-for-release-artifacts.md)). Both
 are executed directly by `ci.yml`'s `build-release` job.
 
@@ -219,7 +219,7 @@ was classified code-touching and ran the full Rust suite — around forty minute
 compiling test binaries for a change no Rust file could observe.
 
 **This reverses the accepted cost recorded on 2026-08-16.** That amendment classified
-`^scripts/` as code to protect `stage-openssl-static.sh` and `assert-static-openssl.sh`,
+`^scripts/` as code to protect `stage-openssl-rpath.sh` and `assert-openssl-linkage.sh`,
 and accepted, in as many words, that `scripts/generate-docs-llms-full.sh` would be swept
 up with them and run the full Rust suite unnecessarily. That trade was correct when the
 directory held three scripts and one of them was the odd one out. It is no longer: five
@@ -227,8 +227,8 @@ scripts now live there, three of them documentation-only, and the exception has 
 the rule. `generate-docs-llms-full.sh` is therefore reclassified as documentation, and
 the earlier amendment's "Cost" paragraph no longer describes current behaviour.
 
-The protection that amendment was written for is untouched: `stage-openssl-static.sh`
-and `assert-static-openssl.sh` are not exempted, and a pull request editing only those
+The protection that amendment was written for is untouched: `stage-openssl-rpath.sh`
+and `assert-openssl-linkage.sh` are not exempted, and a pull request editing only those
 still runs `build-release`.
 
 `DOCS_ONLY_PATTERN` removes those paths from the candidate list before the deny-list is
@@ -238,7 +238,7 @@ applied. Three properties are deliberate:
   to code-touching. The exceptions are named individually, never by prefix, so nothing
   new is exempted by accident.
 - **Each exception is a file the Rust jobs demonstrably never invoke.** `ci.yml` runs
-  `stage-openssl-static.sh`, `assert-static-openssl.sh` and
+  `stage-openssl-rpath.sh`, `assert-openssl-linkage.sh` and
   `crates/eval/scripts/test-scripts.sh`, and nothing else under `scripts/`;
   `docs-drift.yml` and `docs-publish.yml` are separate workflows that `ci.yml` neither
   calls nor shares a job with.

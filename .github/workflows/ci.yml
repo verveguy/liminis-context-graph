@@ -184,9 +184,9 @@ jobs:
       # `pkg-config --variable=libdir openssl` alone. The script points that at a
       # directory holding only libssl.a/libcrypto.a and exports PKG_CONFIG_PATH via
       # $GITHUB_ENV, so the steps below inherit it. Mirrors what the release build
-      # does via .github/build-setup.yml. See ADR-0398.
-      - name: Stage static OpenSSL for a self-contained link
-        run: bash scripts/stage-openssl-static.sh
+      # does via .github/build-setup.yml. See ADR-0550.
+      - name: Stage @rpath OpenSSL so the binary names no machine-specific path
+        run: bash scripts/stage-openssl-rpath.sh
 
       # The one and only `cargo build --release` in the whole CI run (#341/FR-001).
       # Builds the `liminis-context-graph` service binary the five e2e jobs need.
@@ -204,9 +204,9 @@ jobs:
       # above builds every workspace member, and lcg-eval ships its own tarballs and
       # installer on all three targets while reaching lbug through lcg-core, so it
       # links OpenSSL on identical terms. See ADR-0398 and release.yml's equivalent.
-      - name: Assert the release binaries have no dynamic OpenSSL dependency
+      - name: Assert the release binaries hardcode no OpenSSL path
         run: |
-          bash scripts/assert-static-openssl.sh \
+          bash scripts/assert-openssl-linkage.sh \
             target/release/liminis-context-graph \
             target/release/lcg-eval
 

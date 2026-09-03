@@ -174,8 +174,8 @@ jobs:
       # fragment, which cargo-dist places above `Install dependencies`) the script dies
       # with "libssl.a not found" on any runner that does not happen to preinstall it.
       # This is why the step lives here rather than in .github/build-setup.yml.
-      - name: "Stage static OpenSSL for a self-contained link"
-        run: "bash scripts/stage-openssl-static.sh"
+      - name: "Stage @rpath OpenSSL so the binary names no machine-specific path"
+        run: "bash scripts/stage-openssl-rpath.sh"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
@@ -192,7 +192,7 @@ jobs:
           set -eu
           # `dist build` writes each target's binary under target/<triple>/dist/.
           # No mapfile/arrays here: the macOS runner's /bin/bash is 3.2.
-          # -print0/-0 throughout, for the same reason scripts/stage-openssl-static.sh
+          # -print0/-0 throughout, for the same reason scripts/stage-openssl-rpath.sh
           # escapes its export line: a checkout path containing a space must not be
           # split into fragments. Whitespace-splitting here would hand the assertion
           # nonexistent paths, and it reports a missing file as a failure, so this
@@ -234,7 +234,7 @@ jobs:
                 ;;
             esac
           done
-          find_bins | xargs -0 bash scripts/assert-static-openssl.sh
+          find_bins | xargs -0 bash scripts/assert-openssl-linkage.sh
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up

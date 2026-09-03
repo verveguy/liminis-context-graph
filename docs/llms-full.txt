@@ -3740,6 +3740,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0510](0510-oaiembedder-http-timeouts.md) | Bounded Request/Connect Timeouts for `OaiEmbedder`'s HTTP Transport | 2026-09-01 |
 | [0526](0526-vectors-are-a-local-cache.md) | Vectors Are a Local Cache — Stop Writing Them to the WAL, Ignore Them on Replay | 2026-09-01 |
 | [0528](0528-episodic-attributes.md) | Structured Attributes on Episodes (`Episodic.attributes`) | 2026-09-02 |
+| [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 
 ## Historical numbering
 

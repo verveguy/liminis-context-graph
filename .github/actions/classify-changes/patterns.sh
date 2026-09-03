@@ -14,7 +14,7 @@ CODE_PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^\.githu
 # way: a script or workflow added tomorrow must default to code-touching. These
 # exceptions are named individually, never by prefix, so nothing new is exempted
 # by accident. Each is a file the Rust build and test jobs demonstrably never
-# invoke — ci.yml runs stage-openssl-static.sh, assert-static-openssl.sh and
+# invoke — ci.yml runs stage-openssl-rpath.sh, assert-openssl-linkage.sh and
 # crates/eval/scripts/test-scripts.sh, and nothing else under scripts/;
 # docs-drift.yml and docs-publish.yml are separate workflows that ci.yml neither
 # calls nor shares a job with.
