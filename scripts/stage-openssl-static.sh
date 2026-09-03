@@ -20,7 +20,9 @@
 #
 #     pkg-config --variable=libdir openssl
 #
-# The published 0.19.1 crate reads neither OPENSSL_DIR nor OPENSSL_ROOT_DIR, so
+# NOTE: this was true of the published 0.19.1 crate, which read neither
+# OPENSSL_DIR nor OPENSSL_ROOT_DIR. As of 0.20.1 build.rs reads both and returns
+# early on them, which is now the mechanism this script relies on (see below). So
 # PKG_CONFIG_PATH is the only lever available without patching lbug.
 #
 # Left alone, the release binary picks up a dynamic libssl/libcrypto. On macOS
@@ -125,6 +127,28 @@ EOF
 
 new_path="$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
+# OPENSSL_DIR is the lever that actually works; PKG_CONFIG_PATH alone is not
+# sufficient. lbug 0.20.1's build.rs link_openssl() resolves in this order:
+#
+#   1. OPENSSL_DIR / OPENSSL_ROOT_DIR  -> emit -L and *return*
+#   2. vcpkg                           -> return if found
+#   3. pkg-config --variable=libdir    -> emit -L, but DOES NOT return
+#   4. macOS fallback                  -> also emit -L /opt/homebrew/opt/openssl/lib
+#   5. non-Windows fallback            -> also emit -L /usr/lib, /usr/local/lib
+#
+# Because step 3 falls through, the Homebrew keg (which holds .dylib as well as
+# .a) is added to the search path alongside our archives-only directory, and the
+# dynamic libraries win. Only step 1 returns early, leaving the staged directory
+# as the sole OpenSSL search path. build.rs uses "$dir/lib" when that exists and
+# "$dir" otherwise, so pointing it at the staging directory works as-is.
+# macOS only. On Linux, PKG_CONFIG_PATH alone already produces a static link —
+# both Linux targets pass the guard — and OPENSSL_DIR there would break the
+# build outright: openssl-sys reads the same variable and requires
+# "$OPENSSL_DIR/include", which this archives-only directory deliberately does
+# not have. (openssl-sys is absent from the macOS dependency tree because
+# native-tls uses Security.framework there, which is why this only bites on
+# Linux.) See ADR-0398 and issue #550.
+
 # Verify the staged .pc is what pkg-config will actually hand lbug's build.rs.
 # A silent mismatch here is indistinguishable, at build time, from a correct
 # static link — it only surfaces later as a dynamic dependency in the shipped
@@ -144,6 +168,9 @@ if [[ -n "${GITHUB_ENV:-}" ]]; then
   # $GITHUB_ENV is parsed as literal KEY=VALUE, not by a shell, so it must NOT be
   # quoted or escaped — Actions would treat the quotes as part of the value.
   echo "PKG_CONFIG_PATH=$new_path" >> "$GITHUB_ENV"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "OPENSSL_DIR=$staging_dir" >> "$GITHUB_ENV"
+  fi
   echo "stage-openssl-static.sh: appended PKG_CONFIG_PATH to \$GITHUB_ENV" >&2
 else
   # This line is meant to be consumed by `eval`, so it must survive word splitting.
@@ -151,4 +178,7 @@ else
   # deep under a user-chosen directory) would otherwise be split mid-path and set
   # PKG_CONFIG_PATH to a truncated value, silently reintroducing a dynamic link.
   printf 'export PKG_CONFIG_PATH=%q\n' "$new_path"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    printf 'export OPENSSL_DIR=%q\n' "$staging_dir"
+  fi
 fi
