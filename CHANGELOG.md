@@ -10,200 +10,109 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 ## [0.14.0] - 2026-09-02
 
 The graph engine moves onto lbug 0.20.1, and the entity-name lookup that ADR-0038 kept in process
-memory is now served by a database-native index. Around that, the embedder became something you
-can actually point at a hosted provider, WAL replay stopped carrying 90% dead weight, and episodes
-gained structured metadata. **This release carries a one-way database migration and one breaking
-API change — read Upgrading first.**
+memory is now served by a database-native index. Around that, the embedder became something you can
+point at a hosted provider, WAL replay stopped carrying 90% dead weight, and episodes gained
+structured metadata. **This release carries a one-way database migration and one breaking API
+change — read Upgrading first.**
 
 ### Upgrading
 
-Four things to know before taking this release. Details are in the entries below.
-
-1. **The database migrates one way.** A `0.13.x` database (storage version 41) opens directly
-   under this release — no export, no reimport, and the WAL is untouched. But the first checkpoint
-   rewrites it to storage version 47, after which **an older binary will not open it again**. To
-   roll back: stop the service, move `.lcg/db/` aside, start the old binary; it rebuilds from the
-   WAL.
-2. **First start does real work on a large graph.** The new `Entity.lookup_key` ART index is
-   built by a one-shot backfill that scans every entity and **blocks** while it runs. This is not
-   a no-op upgrade step; budget for it proportional to entity count.
-3. **Run `knowledge_backfill_summary_embeddings` after upgrading.** Existing entities get a
-   zero vector for the new `summary_embedding` column, so summary semantic search returns nothing
-   useful until the backfill has run. It is an explicit admin call, not automatic.
+1. **The database migrates one way.** A 0.13.x database (storage version 41) opens directly — no
+   export, no reimport, WAL untouched. The first checkpoint rewrites it to storage version 47,
+   after which **an older binary will not open it again**. To roll back: stop the service, move
+   `.lcg/db/` aside, start the old binary; it rebuilds from the WAL.
+2. **First start does real work on a large graph.** The new `Entity.lookup_key` ART index is built
+   by a one-shot backfill that scans every entity and **blocks** while it runs. Budget for it
+   proportional to entity count.
+3. **Run `knowledge_backfill_summary_embeddings` after upgrading.** Existing entities get a zero
+   vector for the new `summary_embedding` column, so summary semantic search returns nothing useful
+   until the backfill runs. It is an explicit admin call, not automatic.
 4. **BREAKING — `facts` is now `edges`.** `knowledge_find_relationships` and
-   `knowledge_list_relationships` changed their response key. A client still reading `facts` gets
-   a **silently empty list**, not an error. Update integrators before upgrading.
+   `knowledge_list_relationships` changed their response key. A client still reading `facts` gets a
+   **silently empty list**, not an error. Update integrators before upgrading.
 
 ### Added
 
 - **Episodes carry structured metadata.** `knowledge_process_chunk` and `knowledge_add_episode`
   both accept an optional `attributes` map, stored on a new `Episodic.attributes` column and
-  returned by `knowledge_get_episodes` and `knowledge_search_passages`. A document's own
-  structured metadata now sits on the same node the facts extracted from its prose already anchor
-  to — and since `MENTIONS` already runs Episodic → Entity, both halves are reachable in a single
-  traversal without a new edge type. Attributes survive a WAL dump → replay round trip. Reported
-  from the orac project (#525); see [ADR-0528](docs/adr/0528-episodic-attributes.md). (#528)
-
-- **The embedder accepts an API key**, so "point it at an OpenAI-compatible endpoint" now includes
-  hosted providers rather than only unauthenticated local servers. Resolved from
-  `LCG_EMBEDDING_API_KEY`, then `GRAPHITI_EMBEDDING_API_KEY`, then `OPENAI_API_KEY`; sent as a
-  Bearer token on the HTTP transport only (UDS is a local socket and never carries a credential).
-  The key is kept out of logs, telemetry and recorded cassettes, and any Basic-auth userinfo in
-  the endpoint URL is redacted before that URL appears in a log line or error. Falling back to
-  `OPENAI_API_KEY` prints a notice naming the endpoint it will be sent to, since that endpoint may
-  not be OpenAI's own. (#497, #509)
-
-- **Entity summaries are semantically searchable.** New `Entity.summary_embedding` column and
-  vector index, so meaning-based retrieval over an entity's summary no longer degrades to
-  name-only matching. Existing entities are zero-filled at migration — run
-  `knowledge_backfill_summary_embeddings` to populate them. (#470)
-
-- **`knowledge_status` reports per-group ontology drift** via `group_ontology_drift`, an array of
-  `{group_id, drifted, drift_summary}` for every group this process has resolved. A group not yet
-  used is absent rather than reported as "not drifted", so the field is never a false all-clear.
-  (forward-ported from 0.13.4, #451)
-
+  returned by `knowledge_get_episodes` and `knowledge_search_passages`. Since `MENTIONS` already
+  runs Episodic → Entity, a document's metadata and the facts extracted from its prose are now
+  reachable in one traversal. Survives a WAL dump → replay round trip. Reported from the orac
+  project (#525). See ADR-0528. (#528)
+- **The embedder accepts an API key**, so hosted providers work, not just unauthenticated local
+  servers. Resolved from `LCG_EMBEDDING_API_KEY`, then `GRAPHITI_EMBEDDING_API_KEY`, then
+  `OPENAI_API_KEY`; sent as a Bearer token on the HTTP transport only. Kept out of logs, telemetry
+  and recorded cassettes; URL userinfo is redacted before any URL is logged. (#497, #509)
+- **Entity summaries are semantically searchable** via a new `Entity.summary_embedding` column and
+  vector index. Existing entities are zero-filled at migration — see Upgrading step 3. (#470)
+- **`knowledge_status` reports per-group ontology drift** via `group_ontology_drift`. A group not
+  yet used is absent rather than reported as "not drifted", so the field is never a false
+  all-clear. (forward-ported from 0.13.4, #451)
 - **MCP client configuration recipes** for pointing the embedder at Ollama, LM Studio, a hosted
-  provider, or an explicit UDS path — including the resolution order, the fact that a running
-  sidecar silently wins over `LCG_EMBEDDING_URL`, and that changing embedding dimension against an
-  existing database is a re-ingest rather than a config change. (#498)
-
+  provider, or an explicit UDS path — including the resolution order and the fact that a running
+  sidecar silently wins over `LCG_EMBEDDING_URL`. (#498)
 - **The docs site publishes from release tags** rather than `main`, keeping every released version
-  available instead of only the tip. (#477)
+  available. (#477)
 
 ### Changed
 
-- **The in-process entity-name lookup map is gone, replaced by a database-native ART index.**
-  ADR-0038's `NameIndex` — a `HashMap<(group_id, name_lower), BTreeSet<uuid>>` the host had to
-  invalidate on every mutation path — is replaced by a materialized `Entity.lookup_key` column
-  (`group_id + '\x1f' + lower(name)`, computed host-side) and a secondary ART index over it, now
-  that lbug supports non-PK secondary indexes. This removes the invalidation surface, the
-  full-`Entity` startup scan, and a duplicated copy of database state. Resolution semantics are
-  unchanged, including resolving *through* `Merged` tombstones (ADR-0283), and the endpoint-
-  authority call site keeps an equivalent guarantee via a scan fallback that self-heals a stale
-  key. `knowledge_status` keeps `name_index_trusted` and `name_index_fallback_scans` on the wire
-  with remapped meanings. **Migration builds the index by scanning every entity and blocks while
-  it does.** See [ADR-0221](docs/adr/0221-secondary-art-index-for-entity-name-lookup.md). (#221)
-
-- **Embedding vectors are no longer written to the WAL.** They are a local cache of the database,
-  not content of the log: on the reference corpus they were **89.9% of WAL bytes** (66.9 MB of
-  74.4 MB), because each `f32` becomes a JSON decimal literal — a `name_embedding` cost 958× the
-  name it came from. The writer no longer emits them, replay always recomputes from co-located
-  source text through a content-addressed cache, and a vector found in an older WAL is ignored.
-  (#526, #440)
-
-- **Embedding calls are batched.** The `Embedder` trait gained a batch API, and every batchable
-  ingest-side loop plus the WAL-replay recompute path now uses it instead of one round trip per
-  text. This matters more since the change above made replay recompute unconditional. (#445, #486)
-
-- **BREAKING: `knowledge_find_relationships` and `knowledge_list_relationships` now return the
-  relationship list under `edges`, not `facts`.** (`knowledge_get_edges_by_group` is unaffected —
-  it already used `edges`.) The two methods' response shape changes from `{"facts": [...],
-  "count": N}` to `{"edges": [...], "count": N}` on both the IPC and MCP surfaces; no other field
-  changes. If your client reads `facts` from either method's response, switch it to `edges` before
-  upgrading — a client that keeps reading `facts` will silently receive an empty list on every
-  call instead of an error, which is exactly the failure mode this rename exists to close off (a
-  downstream reader had already hit the equivalent bug the other way around, reading `edges` on
-  `knowledge_find_relationships` and silently getting `[]`). Known integrators of these methods,
-  including orac/GES, must update their key before taking this release. Shipped in the same
-  release as the lbug/storage-format bump below because that release already carries a one-way
-  break, making this the cheapest point to close out the inconsistency rather than carrying it
-  forward as a permanent dual-key alias. See [ADR-0020](docs/adr/0020-ipc-collection-envelope-contract.md). (#524)
-
-- Bumped the `lbug` graph-engine pin from `0.17.0` to `0.20.1`, moving both the crate pin in
-  `Cargo.toml` and the native-bundle pin (`LBUG_VERSION`) in `.cargo/config.toml` together, in a
-  single hop rather than staging through the intermediate `0.19.1`. Picks up upstream's
-  buffer-manager fix for hung processes on SIGSEGV (0.18.1), the checkpoint lock-file cleanup
-  fixes (0.19.0), batched detached-node relationship deletes, WAL group commits, stats-aware query
-  planning, HNSW scalar quantization, plus three further correctness fixes on paths this project
-  actively exercises: a heap-corruption fix in the FTS query path when scans race committing
-  writers (`ladybug#845` — this project runs `CREATE_FTS_INDEX` on `Entity` and queries it
-  concurrently as a live service), an alignment fix between primary-key-lookup rows and the input
-  chunk selection (`ladybug#837`), and a fix for silent row loss when `LOAD FROM`/`UNWIND` feeds a
-  `MATCH` primary-key predicate (`ladybug#864`) — the latter two both touch the
-  `Entity.lookup_key` ART-index lookup path. No IPC or MCP tool schema, response shape, or
-  dispatch method changes.
-
-  **Upgrading is one-way for the database — but not for your data.** A database created under
-  `0.17.0` (storage version 41) opens directly under `0.20.1`: no migration step, no
-  export/reimport. The first checkpoint under the new binary then rewrites it to storage version
-  47, after which **an older `liminis-context-graph` binary will not open it again**.
-
-  This affects only `.lcg/db/`, which is a derived index. The WAL under `.lcg/wal/` is the source
-  of truth and is plain JSONL owned by this project — its format is independent of lbug's storage
-  version, so the bump does not touch it. **To roll back to an older binary: stop the service,
-  delete (or move aside) `.lcg/db/`, and start the older binary — it rebuilds the graph from the
-  WAL on startup.** No database backup is required for this path.
-
-  If you would rather keep a restorable snapshot than rebuild, back up `.lcg/db/` **and**
-  `.lcg/wal/` together before upgrading, copying the WAL directories whole — dot-namespace
-  included (`cp -R`/`rsync -a`, never a `*.jsonl` glob), since `.wal-generation.json` is
-  load-bearing. See `docs/operations.md`. (#398, #529 — superseding the earlier staged-upgrade
-  issues #190 and #220, both closed in favour of the single hop taken here.)
+- **The in-process entity-name lookup map is replaced by a database-native ART index.** ADR-0038's
+  `NameIndex` — which the host had to invalidate on every mutation path — gives way to a
+  materialized `Entity.lookup_key` column and a secondary ART index over it. Removes the
+  invalidation surface, the full-`Entity` startup scan, and a duplicated copy of database state.
+  Resolution semantics are unchanged, including resolving through `Merged` tombstones (ADR-0283).
+  `knowledge_status` keeps `name_index_trusted` and `name_index_fallback_scans` with remapped
+  meanings. See ADR-0221 and Upgrading step 2. (#221)
+- **Embedding vectors are no longer written to the WAL.** They were **89.9% of WAL bytes** on the
+  reference corpus (66.9 MB of 74.4 MB), since each `f32` becomes a JSON decimal literal. Replay
+  now always recomputes from co-located source text through a content-addressed cache, and a vector
+  found in an older WAL is ignored. (#526, #440)
+- **Embedding calls are batched** across ingest and the WAL-replay recompute path, rather than one
+  round trip per text. (#445, #486)
+- **BREAKING: the relationship list is returned under `edges`, not `facts`**, on
+  `knowledge_find_relationships` and `knowledge_list_relationships`
+  (`knowledge_get_edges_by_group` already used `edges`). See Upgrading step 4 and ADR-0020. (#524)
+- **lbug 0.17.0 → 0.20.1**, moving the crate pin and the native-bundle pin (`LBUG_VERSION`)
+  together in a single hop. Picks up upstream's hung-process and checkpoint lock-file fixes, WAL
+  group commits, stats-aware planning, plus fixes on paths this project exercises: FTS heap
+  corruption when scans race committing writers (`ladybug#845`), primary-key-lookup row alignment
+  (`ladybug#837`), and silent row loss on `MATCH` primary-key predicates (`ladybug#864`). No IPC or
+  MCP schema, response shape, or dispatch changes. See Upgrading step 1.
+  (#398, #529 — superseding #190 and #220.)
 
 ### Fixed
 
-- **A hung embedder can no longer stall the service indefinitely.** `OaiEmbedder`'s HTTP client
-  was built with no request or connect timeout, so an endpoint that accepted a connection and then
-  never responded hung the calling task forever — and since the assert handlers were reordered to
-  resolve existence before embedding, that hang held the instance-wide write lock for its
-  duration. Both timeouts are now bounded at client construction and configurable via
-  `LCG_EMBEDDING_TIMEOUT_MS` (default 30s) and `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (default 5s).
-  The UDS transport has the same class of hazard and is tracked separately (#541). (#510)
-
-- **An unreachable embedder no longer kills a `--mcp-stdio` launch outright.** The startup probe
-  now retries with bounded backoff (5s ceiling), covering the common race where an MCP client
-  starts the sidecar and this service simultaneously. If the window is exhausted in standalone
-  `--mcp-stdio` mode, the service starts **degraded** and reports why through `knowledge_status`
-  rather than exiting with a diagnostic nobody reads — a GUI client typically discards stderr and
-  shows only "server failed to start". The hand-started socket service keeps fail-fast behaviour.
-  An authentication failure (401/403) is always fatal and never retried. (#499)
-
-- **`knowledge_assert_entity`/`assert_relationship` no longer embed before checking existence**,
-  so an update that discards the computed vector no longer pays for it. (#444)
-
-- **Legacy WAL migration files its stream under the right group** instead of the default one.
-  (#467)
-
-- **Streaming WAL rebuild reports its own `lookup_key` backfill outcome** as
-  `lookup_key_backfill_ok`, distinct from `indices_built`. Folding a backfill failure into the
-  index-build signal would have made the search auto-heal path re-run an index build that cannot
-  fix a backfill problem. (#491)
-
+- **A hung embedder can no longer stall the service indefinitely.** `OaiEmbedder`'s HTTP client had
+  no request or connect timeout, so an endpoint that accepted a connection and never responded hung
+  the caller — holding the instance-wide write lock. Both are now bounded and configurable via
+  `LCG_EMBEDDING_TIMEOUT_MS` (30s) and `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (5s). The UDS transport
+  has the same hazard, tracked in #541. (#510)
+- **An unreachable embedder no longer kills a `--mcp-stdio` launch.** The startup probe retries with
+  bounded backoff (5s), and if exhausted in standalone `--mcp-stdio` mode the service starts
+  degraded and reports why through `knowledge_status` rather than exiting with a diagnostic a GUI
+  client discards. Hand-started socket mode keeps fail-fast. Auth failures (401/403) are always
+  fatal. (#499)
+- **Assert handlers no longer embed before checking existence**, so an update that discards the
+  vector no longer pays for it. (#444)
+- **Legacy WAL migration files its stream under the right group.** (#467)
+- **Streaming WAL rebuild reports its own backfill outcome** as `lookup_key_backfill_ok`, distinct
+  from `indices_built`. (#491)
 - **A concurrent remediation's ontology-drift clear is no longer overwritten** by a stale
-  first-resolution insert, which could leave a group falsely reported as drifted — and print a
-  spurious "recommend Recreate + re-ingest" warning — until it was next used. (#495)
-
-- **Cross-group episode deletes are attributed to the right WAL stream.** A single delete spanning
-  several groups cannot be split back apart into per-group attribution after the fact, so the
-  delete now runs one scoped query per group inside an explicit transaction, preserving the
-  atomicity the single-query form had for free. (#402)
-
-- Release binaries no longer carry a dynamic OpenSSL dependency. `lbug 0.18.0` moved OpenSSL out
-  of the prebuilt bundle, which by default made the shipped binary require `libssl`/`libcrypto` on
-  the user's machine — and on macOS bake in Homebrew's absolute install path, so it would fail to
-  load for anyone without `openssl@3` at exactly `/opt/homebrew/opt/openssl@3`. OpenSSL is now
-  linked statically into release artifacts, preserving the self-contained single-binary install.
-  See [ADR-0398](docs/adr/0398-openssl-linkage-for-release-artifacts.md).
-
-  Building *from source* now requires OpenSSL 3 development files (`brew install openssl@3` on
-  macOS, `apt install libssl-dev` on Debian/Ubuntu). Installing a released binary requires nothing.
-
-- Forward-ported from the 0.13 maintenance line: the edge `episode_uuids` documentation
-  correction (#410) and per-group ontology drift detection (#451), both released in 0.13.4. They
-  are listed under [0.13.4] below and are called out here because the maintenance branch was cut
-  from `v0.13.3` — a later version number does **not** by itself imply it contains an earlier
-  patch release's fixes. (#494)
+  first-resolution insert. (#495)
+- **Cross-group episode deletes are attributed to the right WAL stream**, via one scoped query per
+  group inside an explicit transaction. (#402)
+- **Release binaries carry no dynamic OpenSSL dependency.** OpenSSL is linked statically, so the
+  single-binary install stays self-contained. Building from source needs OpenSSL 3 development
+  files; installing a released binary needs nothing. See ADR-0398.
+- Forward-ported from the 0.13 maintenance line: the edge `episode_uuids` documentation correction
+  (#410) and per-group ontology drift detection (#451), both released in 0.13.4. Called out because
+  the maintenance branch was cut from `v0.13.3` — a higher version number does **not** by itself
+  imply it contains an earlier patch release's fixes. (#494)
 
 ### Internal
 
-- Cassette recordings are covered by the embedder API-key leak tests, closing the gap where the
-  "cassette must never contain an `Authorization` header" assertion guarded a header no code path
-  could yet produce. (#509)
-
-- Swift sidecar test fixtures ship their missing `weight.bin`, so the output-schema validation
-  suite runs instead of failing hidden behind disabled CI. (#518)
-
+- Cassette recordings are covered by the embedder API-key leak tests. (#509)
+- Swift sidecar test fixtures ship their missing `weight.bin`. (#518)
 
 ## [0.13.4] - 2026-08-24
 
