@@ -84,6 +84,14 @@ for lib in libssl.3.dylib libcrypto.3.dylib; do
   chmod u+w "$staging_dir/$lib"
   # The install_name the *linker copies into our binary*. This is the whole point.
   install_name_tool -id "@rpath/$lib" "$staging_dir/$lib"
+  # install_name_tool invalidates the dylib's existing code signature (it says so
+  # on stderr). An invalidly-signed dylib can be rejected by the linker, which
+  # then silently resolves -lssl elsewhere and bakes in that machine's absolute
+  # path — the exact failure this script exists to prevent, and one that shows up
+  # only on runners whose toolchain enforces it. Re-sign ad-hoc, as upstream does
+  # for the same rewrite (LadybugDB/ladybug#682).
+  codesign --force --sign - "$staging_dir/$lib" 2>/dev/null ||
+    die "codesign failed for $lib — install_name_tool invalidated its signature and it could not be re-signed"
 done
 
 # -lssl / -lcrypto resolve through the unversioned symlinks.
