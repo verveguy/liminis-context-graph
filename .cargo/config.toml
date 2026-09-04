@@ -46,4 +46,4 @@
 # in lockstep across dev, CI, and release.
 [env]
 RUST_TEST_THREADS = "4"
-LBUG_VERSION = "0.20.1"
+LBUG_VERSION = "0.18.1"

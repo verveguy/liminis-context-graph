@@ -9,14 +9,14 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [0.14.0] - 2026-09-02
 
-lbug 0.17.0 → 0.20.1, the entity-name lookup moved from process memory to a database-native ART
+lbug 0.17.0 → 0.18.1, the entity-name lookup moved from process memory to a database-native ART
 index, embedder API keys, and structured metadata on episodes. **One-way database migration and one
 breaking API change — read Upgrading.** Full detail: [docs/releases/0.14.0.md](docs/releases/0.14.0.md).
 
 ### Upgrading
 
 1. **One-way migration.** A 0.13.x database (storage 41) opens directly — no export, WAL untouched.
-   The first checkpoint rewrites it to storage 47, after which an older binary will not open it.
+   The first checkpoint rewrites it to storage 42, after which an older binary will not open it.
    Roll back by stopping the service, moving `.lcg/db/` aside, and starting the old binary; it
    rebuilds from the WAL.
 2. **First start blocks on a large graph** while the new `Entity.lookup_key` ART index is built by a
@@ -43,7 +43,9 @@ breaking API change — read Upgrading.** Full detail: [docs/releases/0.14.0.md]
 - Embedding vectors no longer written to the WAL — they were 89.9% of WAL bytes (#526, #440)
 - Embedding calls batched across ingest and WAL replay (#445, #486)
 - **BREAKING:** relationship lists returned under `edges`, not `facts` (#524)
-- lbug 0.17.0 → 0.20.1 (#398, #529, superseding #190/#220)
+- lbug 0.17.0 → 0.18.1, which is what enables the ART index above (`ladybug#582`). 0.19.x/0.20.x
+  were evaluated and rejected: 0.20.1 deadlocks under concurrent use (`ladybug#911`) and 0.20.2 ships
+  no working extensions (`ladybug#903`). (#398, #529, #556, superseding #190/#220)
 
 ### Fixed
 
