@@ -60,25 +60,23 @@ ninja-build = "*"
 # (LadybugDB/ladybug#590), so liblbug.a now needs libssl/libcrypto at link
 # time. Declared rather than assumed present, for the same determinism reason
 # cmake and ninja-build are. libssl-dev also supplies the libssl.a/libcrypto.a
-# archives that scripts/stage-openssl-static.sh links against to keep the
-# release artifact free of a dynamic OpenSSL dependency — see ADR-0398.
+# headers and libraries lbug's build.rs links against. OpenSSL is linked
+# dynamically and supplied by the user at runtime — see ADR-0550.
 libssl-dev = "*"
 
 [workspace.metadata.dist.dependencies.homebrew]
-# The macOS half of the same requirement. scripts/stage-openssl-static.sh
-# resolves its libdir via `brew --prefix openssl@3` on Darwin and needs that
-# keg's libssl.a/libcrypto.a; declaring it here means cargo-dist's "Install
-# dependencies" step guarantees the keg rather than the step depending on
-# whatever the runner image happens to ship. The staging step runs immediately
-# after that install in release.yml — see ADR-0398.
+# The macOS half of the same requirement. scripts/stage-openssl-rpath.sh
+# resolves the keg via `brew --prefix openssl@3` and copies its dylibs to
+# rewrite their install_name to @rpath; declaring it here means cargo-dist's
+# "Install dependencies" step guarantees the keg rather than depending on
+# whatever the runner image ships. The staging step runs immediately after that
+# install in release.yml — see ADR-0550.
 "openssl@3" = "*"
 # pkg-config is how lbug's build.rs discovers the staged static archives
-# (scripts/stage-openssl-static.sh publishes a .pc whose libdir points at an
-# archives-only directory). Declared rather than assumed: if pkg-config is
-# absent, lbug 0.20.1's build.rs falls through to its hardcoded macOS probe
-# paths (/opt/homebrew/opt/openssl/lib) and links OpenSSL *dynamically* with
-# no error — which is what blocked the first v0.14.0 release attempt. See
-# ADR-0398 and issue #550.
+# (scripts/stage-openssl-rpath.sh publishes a .pc pointing at the @rpath-staged
+# dylibs). Declared rather than assumed: if pkg-config is absent, lbug 0.20.1's
+# build.rs falls through to its hardcoded macOS probe paths and bakes the build
+# runner's absolute Homebrew path into the binary. See ADR-0550 and issue #550.
 "pkg-config" = "*"
 
 [workspace.dependencies]

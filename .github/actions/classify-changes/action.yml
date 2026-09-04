@@ -115,9 +115,9 @@ runs:
         # (which lives outside ^\.github/workflows/) would skip the very suites it
         # exists to gate.
         # ^scripts/ is included because the top-level scripts/ directory holds build and
-        # release logic the Rust jobs depend on — stage-openssl-static.sh, which forces
-        # the static OpenSSL link, and assert-static-openssl.sh, which is the guard that
-        # catches its absence (ADR-0398). Both run inside `build-release`, so without
+        # release logic the Rust jobs depend on — stage-openssl-rpath.sh, which forces
+        # the @rpath OpenSSL linkage, and assert-openssl-linkage.sh, which is the guard that
+        # catches its absence (ADR-0550). Both run inside `build-release`, so without
         # this pattern a PR editing only those scripts would be classified docs-only and
         # skip the very job that exercises them.
         # Patterns live in patterns.sh so the test suite exercises the same strings

@@ -1,5 +1,16 @@
 # ADR-0398: Link OpenSSL Statically So Release Artifacts Stay Self-Contained
 
+> **Superseded by [ADR-0550](0550-openssl-dynamic-linkage-via-rpath.md) (2026-09-03).**
+> The decision below — force a *static* OpenSSL link so released binaries are
+> self-contained — was reversed. It was never exercised by a release (every tag
+> through v0.13.4 pinned lbug 0.17.0, which still bundled OpenSSL), it could not
+> be made to work through `dist build` on macOS, and upstream has since stated an
+> explicit position against bundling OpenSSL on CVE-maintenance grounds
+> (LadybugDB/ladybug#681). lcg now links OpenSSL dynamically and resolves it
+> through `@rpath` on macOS. Retained for the history and for its analysis of
+> lbug's `build.rs` resolution order, which remains accurate.
+
+
 **Status**: Accepted
 **Date**: 2026-08-15
 **Issues**: #398

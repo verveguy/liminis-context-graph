@@ -22,19 +22,22 @@
 # of the archive (LadybugDB/ladybug#590, "Link against OpenSSL3"). lbug's
 # build.rs emits `cargo:rustc-link-lib=dylib=ssl` and `=crypto`
 # unconditionally. As of 0.20.1, build.rs checks OPENSSL_DIR / OPENSSL_ROOT_DIR
-# first and uses that directory directly if either is set; this repo sets
-# neither, so it falls through to `pkg-config --variable=libdir openssl` (then,
-# if that fails, a vcpkg lookup and hardcoded Homebrew fallback paths — see
-# ADR-0398's amendment). PKG_CONFIG_PATH remains the effective lever in
-# practice. Everything else listed above is still statically bundled.
+# first and returns immediately if either is set; otherwise it tries a vcpkg
+# lookup, then `pkg-config --variable=libdir openssl` — and that branch does NOT
+# return, so it falls through to hardcoded Homebrew probe paths as well.
+# Everything else listed above is still statically bundled.
 #
-# Release artifacts must not inherit a dynamic libssl/libcrypto dependency —
-# that would break the self-contained single-binary install story the shell
-# installer promises. CI and the release build therefore run
-# scripts/stage-openssl-static.sh, which points PKG_CONFIG_PATH at a directory
-# holding only libssl.a/libcrypto.a so the linker resolves -lssl/-lcrypto to the
-# archives. See ADR-0398. A plain `cargo build` without that script links
-# dynamically, which is fine for local development.
+# OpenSSL is linked *dynamically* and supplied by the user's package manager, so
+# their security updates reach it rather than requiring an lcg release per CVE —
+# upstream states the same position in LadybugDB/ladybug#681. What must never
+# ship is a binary naming a specific machine's OpenSSL: on macOS a Mach-O records
+# the absolute install_name of whatever dylib it linked against. CI and the
+# release build therefore run scripts/stage-openssl-rpath.sh, which links against
+# dylib copies whose install_name has been rewritten to @rpath and embeds the
+# Homebrew ARM / Homebrew Intel / MacPorts roots as LC_RPATH.
+# scripts/assert-openssl-linkage.sh enforces it. See ADR-0550. A plain
+# `cargo build` without that script bakes in the local Homebrew path, which is
+# fine for local development.
 #
 # LBUG_VERSION pins the prebuilt lbug native bundle to match the `lbug` crate
 # (=0.20.1). Without it, lbug's build.rs downloads the *floating* `latest`

@@ -3,22 +3,22 @@
 # duplicate-symbol linker errors. See LadybugDB/ladybug-rust#18.
 #
 # The bundle is no longer *fully* self-contained: 0.18.0 moved OpenSSL out of
-# it (LadybugDB/ladybug#590), so release artifacts have to force a static
-# OpenSSL link via scripts/stage-openssl-static.sh. See ADR-0398.
+# it (LadybugDB/ladybug#590), so builds must run scripts/stage-openssl-rpath.sh
+# so the binary names no machine-specific OpenSSL path. See ADR-0550.
 #
 # That step deliberately does NOT live in this fragment. cargo-dist inlines
 # build-setup.yml *above* its own "Install dependencies" step, which is what
-# applies `[workspace.metadata.dist.dependencies.apt]` — and libssl-dev, the
-# package supplying the libssl.a/libcrypto.a archives the script requires, comes
-# from exactly there on the Linux runners. Staged from here, the script would run
-# before its own dependency was installed and die with "libssl.a not found" on
-# any runner that does not happen to preinstall it.
+# applies `[workspace.metadata.dist.dependencies.*]` — and openssl@3, whose keg
+# the script copies its dylibs from, comes from exactly there. Staged from here,
+# the script would run before its own dependency was installed and die with
+# "could not locate an openssl@3 keg".
 #
 # The step therefore lives in .github/workflows/release.yml, between "Install
 # dependencies" and "Build artifacts". `allow-dirty = ["ci"]` preserves it there.
 # If you ever regenerate release.yml, re-add it in that position by hand — a
-# regenerated workflow without it builds and ships a binary with a dynamic
-# OpenSSL dependency, and nothing on the release path catches that.
+# regenerated workflow without it builds and ships a macOS binary that hardcodes
+# the build runner's Homebrew path, and only scripts/assert-openssl-linkage.sh
+# catches that.
 
 - name: Get rustc version for lbug cache key
   id: rustc-ver
