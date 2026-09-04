@@ -24,6 +24,16 @@ strip = "debuginfo"
 cargo-dist-version = "0.32.0"
 ci = ["github"]
 installers = ["shell"]
+# Build the platform artifacts on pull requests, not only on tags. Without this,
+# `build-local-artifacts` is gated off for PRs and the release path is exercised
+# for the first time by the tag itself — which is exactly how ADR-0398's static
+# OpenSSL link shipped unverified (no release before v0.14.0 ever ran either
+# OpenSSL script, because every tag through v0.13.4 pinned lbug 0.17.0 with
+# OpenSSL still bundled), and how four separate macOS linkage defects each cost a
+# tag-and-delete cycle to discover. ci.yml cannot cover this: it is ubuntu-only,
+# and scripts/stage-openssl-rpath.sh is a no-op on Linux. Costs three extra
+# platform builds per code-touching PR; cheap against a failed release.
+pr-run-mode = "upload"
 targets = [
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
