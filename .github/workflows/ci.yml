@@ -345,6 +345,26 @@ jobs:
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
       # assert that was actually true.
+      # lbug's `INSTALL vector` / `INSTALL fts` download extension artifacts from
+      # extension.ladybugdb.com into ~/.lbdb/extension/<version>/<platform>/, and
+      # Db::open performs that download *while holding a process-global OPEN_LOCK*
+      # (crates/core/src/db.rs) with no timeout. On a fresh runner every test that
+      # opens a database therefore queues behind one network fetch; if that fetch
+      # stalls, the whole suite hangs until the job is cancelled. That is issue #555 —
+      # it blocked several merges before the cause was found, and it never reproduced
+      # locally precisely because a developer machine already has this directory
+      # populated. Caching it removes the download from the common path.
+      #
+      # Keyed on the lbug version because artifacts are published per *minor*
+      # (v0.20.0 serves 0.20.x; v0.20.1/v0.20.2 return 404), so the contents change
+      # only when that pin moves. Restore-only would be pointless here — the first
+      # run on a new key must save what it fetched.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: cargo test --release (restored build; captured for recompile-regression check)
         run: cargo test --release 2>&1 | tee /tmp/build.log
 
@@ -483,6 +503,15 @@ jobs:
       # to this same binary. RUST_TEST_THREADS=4 replicates .cargo/config.toml's
       # workspace-wide `[env]` setting, which only applies when cargo itself spawns the
       # process — invoking the binary directly bypasses that, so it's set explicitly here.
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
@@ -528,6 +557,15 @@ jobs:
       - name: Mark binaries executable
         run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
 
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: wal_root_migration -- --ignored
         env:
           RUST_TEST_THREADS: "4"
@@ -567,6 +605,15 @@ jobs:
       # MCP read-path e2e suite (#234): seeds a workspace from the same golden real-corpus WAL
       # fixture consumed by real_corpus_e2e above, then spawns the real compiled binary over
       # MCP-over-stdio against it.
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: mcp_real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
@@ -606,6 +653,15 @@ jobs:
       # MCP write/mutation-path e2e suite (#235): the sibling of mcp_real_corpus_e2e above,
       # covering the mutation surface (deletes, merges/corrections, entity/relation retyping,
       # ingest into the pre-populated graph, knowledge_clear_all).
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: mcp_real_corpus_mutation_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
@@ -645,6 +701,15 @@ jobs:
       # MCP admin/lifecycle e2e suite, data-plane half (#236): dump→rebuild round-trips
       # (including group_id scoping), full rebuild with progress notifications, checkpoint
       # coherence, and index rebuild on an index-less graph.
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: mcp_real_corpus_admin_data_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
@@ -685,6 +750,15 @@ jobs:
       # recovery (ADR-0009, the direct regression guard for #207), knowledge_close checkpoint
       # semantics (ADR-0017) and attached-mode --allow-remote-close gating, and admin-scope
       # tool-visibility gating.
+      # See the note in the `test` job: Db::open downloads lbug extensions inside a
+      # process-global lock with no timeout (issue #555). Cache them so a stalled
+      # fetch cannot hang the job.
+      - name: Cache lbug extension downloads (~/.lbdb)
+        uses: actions/cache@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
+
       - name: mcp_real_corpus_admin_lifecycle_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
