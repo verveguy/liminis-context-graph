@@ -241,6 +241,25 @@ jobs:
             esac
           done
           find_bins | xargs -0 bash scripts/assert-openssl-linkage.sh
+      # Runs only when the guard above fails. Build-script output is the ground
+      # truth for which -L search paths reached the linker and which crate emitted
+      # them, so this names the culprit directly instead of inviting another
+      # hypothesis. See #550 for the ones already disproven.
+      - name: "Why did the linkage guard fail?"
+        if: failure() && runner.os == 'macOS'
+        run: |
+          echo "--- -L search paths and -l libs, by build script ---"
+          for out in target/*/dist/build/*/output; do
+            hits=$(grep -aE "rustc-link-(search|lib).*(ssl|crypto)" "$out" 2>/dev/null || true)
+            [ -n "$hits" ] && { echo "== ${out}"; echo "$hits"; }
+          done
+          echo "--- is the staged prefix intact after dist build? ---"
+          ls -la .openssl-rpath/lib .openssl-rpath/include/ 2>&1 | head -20
+          otool -D .openssl-rpath/lib/libssl.3.dylib 2>&1 || true
+          echo "--- what the build scripts were told ---"
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+          echo "OPENSSL_DIR=$OPENSSL_DIR"
+          pkg-config --libs openssl 2>&1 || true
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
