@@ -359,14 +359,27 @@ jobs:
       # (v0.20.0 serves 0.20.x; v0.20.1/v0.20.2 return 404), so the contents change
       # only when that pin moves. Restore-only would be pointless here — the first
       # run on a new key must save what it fetched.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
 
       - name: cargo test --release (restored build; captured for recompile-regression check)
         run: cargo test --release 2>&1 | tee /tmp/build.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
@@ -506,8 +519,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -516,6 +530,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -560,8 +586,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -570,6 +597,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/wal_root_migration --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -608,8 +647,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -618,6 +658,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/mcp_real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -656,8 +708,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -666,6 +719,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/mcp_real_corpus_mutation_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -704,8 +769,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -714,6 +780,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_data_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -753,8 +831,9 @@ jobs:
       # See the note in the `test` job: Db::open downloads lbug extensions inside a
       # process-global lock with no timeout (issue #555). Cache them so a stalled
       # fetch cannot hang the job.
-      - name: Cache lbug extension downloads (~/.lbdb)
-        uses: actions/cache@v6
+      - name: Restore lbug extension downloads (~/.lbdb)
+        id: lbdb-cache
+        uses: actions/cache/restore@v6
         with:
           key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           path: ~/.lbdb/extension
@@ -763,6 +842,18 @@ jobs:
         env:
           RUST_TEST_THREADS: "4"
         run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
+
+      # Saved with `if: always()` on purpose. actions/cache's own post-step does
+      # not run when the job fails — so a job that fails *because* the download
+      # was slow could never populate the cache that would prevent it, and the
+      # first failure would repeat forever. Saving unconditionally breaks that
+      # cycle: one run pays the download, every later run hits.
+      - name: Save lbug extension downloads (~/.lbdb)
+        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
