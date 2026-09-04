@@ -53,6 +53,21 @@ explicitly *not* by static linking or bundling.
   The staged dylibs are a **link-time fixture only**. They are never shipped; at
   runtime the loader resolves `@rpath` against the user's own installation.
 
+  **The staging directory is `.openssl-rpath/` at the workspace root, and
+  `PKG_CONFIG_PATH` is set in `.cargo/config.toml`'s `[env]` block with
+  `relative = true` — not merely exported by the script.** This is load-bearing.
+  `dist build` does not propagate the ambient environment to build scripts the
+  way a plain `cargo build` does. On a CI runner the two were run seconds apart
+  in a single step, with `PKG_CONFIG_PATH`, `OPENSSL_DIR` and `RUSTFLAGS` all
+  verified present and `pkg-config --libs openssl` resolving to the staging
+  directory: `cargo build --target aarch64-apple-darwin` produced
+  `@rpath/libssl.3.dylib`, and `dist build` immediately after baked in
+  `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`. Cargo applies `[env]`
+  itself, so `dist` cannot drop it; `relative = true` keeps it machine-agnostic.
+  This also forces the staging directory into the workspace, since a relative
+  entry cannot reach `$RUNNER_TEMP` — but not under `target/`, which `dist`
+  manages and may clear between staging and the link.
+
 - **Linux.** Nothing to do. ELF records a SONAME (`libssl.so.3`) which `ld.so`
   resolves from the system search path, so the binary is already relocatable and
   distro security updates reach it. The staging script is a no-op there.

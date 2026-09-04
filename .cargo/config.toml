@@ -49,4 +49,17 @@
 # in lockstep across dev, CI, and release.
 [env]
 RUST_TEST_THREADS = "4"
+# PKG_CONFIG_PATH must be set HERE, not only exported by
+# scripts/stage-openssl-rpath.sh, because `dist build` does not propagate the
+# shell environment to build scripts the way a plain `cargo build` does. On a CI
+# runner, `cargo build --target aarch64-apple-darwin` produced the correct
+# @rpath linkage and `dist build` seconds later — same step, same env vars
+# present — baked in the runner's absolute Homebrew path (issue #550). Cargo
+# applies this block itself, so dist cannot drop it.
+#
+# `relative = true` resolves against the workspace root, so this works on any
+# machine without knowing the checkout path. The directory is created by
+# stage-openssl-rpath.sh; when it does not exist pkg-config simply finds nothing
+# here and falls through, which is the correct behaviour for a plain local build.
+PKG_CONFIG_PATH = { value = ".openssl-rpath/pkgconfig", relative = true }
 LBUG_VERSION = "0.18.1"

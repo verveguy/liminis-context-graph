@@ -67,14 +67,18 @@ keg="$(brew --prefix openssl@3 2>/dev/null || true)"
   the shipped binary resolves OpenSSL from the user's own installation."
 libdir="$keg/lib"
 
-# Deliberately NOT under target/: `dist build` manages that tree and can clear it
-# between the staging step and the link, which would leave pkg-config pointing at
-# a directory whose dylibs no longer exist. lbug 0.18.1's build.rs emits
-# `-L <pkg-config libdir>` and then `-lssl` with no fallback, so a vanished
-# staging directory does not fail loudly — the linker simply resolves -lssl
-# elsewhere and bakes in that machine's absolute path, which is the bug this
-# script exists to prevent. Kept on the same filesystem/run as the build.
-staging_dir="${LCG_OPENSSL_STAGING_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lcg-openssl-rpath}"
+# Staged inside the workspace, at a fixed relative path, because that is the only
+# location .cargo/config.toml's [env] block can point at with `relative = true` —
+# and that block is the only way to get PKG_CONFIG_PATH to lbug's build.rs
+# reliably. Exporting it from this script is not enough: `dist build` does not
+# propagate it the way a plain `cargo build` does. Proven on a CI runner, where
+# `cargo build --target aarch64-apple-darwin` produced @rpath correctly and
+# `dist build` seconds later, same step and same environment, baked in the
+# Homebrew path (issue #550).
+#
+# NOT under target/: `dist build` manages that tree and can clear it between this
+# step and the link.
+staging_dir="${LCG_OPENSSL_STAGING_DIR:-$(pwd)/.openssl-rpath}"
 rm -rf "$staging_dir"
 mkdir -p "$staging_dir/pkgconfig"
 

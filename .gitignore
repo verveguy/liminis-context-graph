@@ -22,3 +22,4 @@ site/.astro/
 site/src/content/docs/
 site/public/llms.txt
 site/public/llms-full.txt
+.openssl-rpath/
