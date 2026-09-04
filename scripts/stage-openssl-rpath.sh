@@ -95,9 +95,12 @@ Libs: -L\${libdir} -lssl -lcrypto
 Cflags: -I\${includedir}
 EOF
 
-# lbug's build.rs resolves OPENSSL_DIR first and *returns*; its pkg-config
-# branch falls through to hardcoded Homebrew paths, which would put the real
-# keg (absolute install_names and all) back on the search path. Set both.
+# Which lever matters depends on the pinned lbug (see ADR-0550's table):
+# 0.18.1's build.rs reads only pkg-config and has no Homebrew fallback, so
+# PKG_CONFIG_PATH alone suffices and OPENSSL_DIR is inert. 0.20.1 checks
+# OPENSSL_DIR first and *returns*, while its pkg-config branch falls through to
+# hardcoded Homebrew paths — putting the real keg, absolute install_names and
+# all, back on the search path. Set both, so this is correct either way.
 pkg_path="$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 rpath_flags=""

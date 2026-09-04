@@ -62,6 +62,31 @@ explicitly *not* by static linking or bundling.
   names a filesystem path rather than `@rpath` (macOS) or a bare SONAME (Linux),
   and on macOS additionally fails an `@rpath` reference with no `LC_RPATH`.
 
+### How lbug's `build.rs` finds OpenSSL, per version
+
+This differs across the versions we have pinned, and the difference decides which
+lever actually works:
+
+| | 0.18.1 (current pin) | 0.20.1 |
+|---|---|---|
+| `OPENSSL_DIR` / `OPENSSL_ROOT_DIR` | **not read** | checked first, returns immediately |
+| vcpkg | not used | tried, returns if found |
+| `pkg-config --variable=libdir` | used | used, but **falls through** |
+| hardcoded macOS probe paths | **none** | `/opt/homebrew/opt/openssl/lib`, `/usr/local/opt/openssl/lib` |
+| link kind emitted | `dylib=ssl` / `dylib=crypto` | same |
+
+On **0.18.1** `PKG_CONFIG_PATH` alone is sufficient and `OPENSSL_DIR` is inert:
+there is no fallback to pollute the search path, so pointing pkg-config at the
+staged directory is enough. `stage-openssl-rpath.sh` still exports `OPENSSL_DIR`,
+which is harmless here and correct if the pin moves forward again.
+
+On **0.20.1** the pkg-config branch does *not* return, so the Homebrew keg — with
+its `.dylib` files and absolute install names — is added to the search path
+alongside the staged directory, and satisfying pkg-config is not enough on its
+own. Only the `OPENSSL_DIR` branch returns early. That version is not currently
+pinned (see #556: 0.20.1 deadlocks, `ladybug#911`), but the mechanism is recorded
+here so the next upgrade does not have to rediscover it.
+
 ### Why link time, not post-build
 
 `dist build` builds *and packages* in one step. Running `install_name_tool` on
