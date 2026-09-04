@@ -176,6 +176,36 @@ jobs:
       # This is why the step lives here rather than in .github/build-setup.yml.
       - name: "Stage @rpath OpenSSL so the binary names no machine-specific path"
         run: "bash scripts/stage-openssl-rpath.sh"
+      # TEMPORARY diagnostic (#550): four hypotheses for why macOS links the
+      # Homebrew keg instead of the staged @rpath dylibs have each been disproven,
+      # and the exact same `dist build` command produces correct output locally.
+      # Dump what the runner actually sees, so the next attempt is informed.
+      - name: "DIAGNOSTIC: what does the runner see at link time?"
+        if: runner.os == 'macOS'
+        run: |
+          set -x
+          echo "--- pkg-config resolution (this is what build.rs uses) ---"
+          which pkg-config || echo "NO PKG-CONFIG"
+          pkg-config --variable=libdir openssl || echo "pkg-config FAILED"
+          pkg-config --libs openssl || true
+          echo "--- staging directory contents ---"
+          ls -la "${RUNNER_TEMP}/lcg-openssl-rpath" || true
+          ls -la "${RUNNER_TEMP}/lcg-openssl-rpath/pkgconfig" || true
+          cat "${RUNNER_TEMP}/lcg-openssl-rpath/pkgconfig/openssl.pc" || true
+          echo "--- install_name of the staged dylibs (must be @rpath/...) ---"
+          otool -D "${RUNNER_TEMP}/lcg-openssl-rpath/libssl.3.dylib" || true
+          otool -D "${RUNNER_TEMP}/lcg-openssl-rpath/libcrypto.3.dylib" || true
+          echo "--- did the ad-hoc re-sign take? ---"
+          codesign -dv "${RUNNER_TEMP}/lcg-openssl-rpath/libssl.3.dylib" 2>&1 || true
+          echo "--- env the build will see ---"
+          echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+          echo "OPENSSL_DIR=$OPENSSL_DIR"
+          echo "RUSTFLAGS=$RUSTFLAGS"
+          echo "--- what -L flags actually reach the linker ---"
+          cargo build --release --target aarch64-apple-darwin --bin liminis-context-graph -v 2>&1 \
+            | grep -aoE "\-L[^ ]*(openssl|lcg-openssl-rpath)[^ ]*|-l(ssl|crypto)" | sort -u | head -20 || true
+          echo "--- and what did that build link? ---"
+          otool -L target/aarch64-apple-darwin/release/liminis-context-graph | grep -iE "ssl|crypto" || true
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot
