@@ -67,7 +67,14 @@ keg="$(brew --prefix openssl@3 2>/dev/null || true)"
   the shipped binary resolves OpenSSL from the user's own installation."
 libdir="$keg/lib"
 
-staging_dir="$(pwd)/target/openssl-rpath"
+# Deliberately NOT under target/: `dist build` manages that tree and can clear it
+# between the staging step and the link, which would leave pkg-config pointing at
+# a directory whose dylibs no longer exist. lbug 0.18.1's build.rs emits
+# `-L <pkg-config libdir>` and then `-lssl` with no fallback, so a vanished
+# staging directory does not fail loudly — the linker simply resolves -lssl
+# elsewhere and bakes in that machine's absolute path, which is the bug this
+# script exists to prevent. Kept on the same filesystem/run as the build.
+staging_dir="${LCG_OPENSSL_STAGING_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lcg-openssl-rpath}"
 rm -rf "$staging_dir"
 mkdir -p "$staging_dir/pkgconfig"
 
@@ -108,6 +115,10 @@ for root in "${RPATH_ROOTS[@]}"; do
   rpath_flags="$rpath_flags -C link-arg=-Wl,-rpath,$root"
 done
 rustflags="${RUSTFLAGS:+$RUSTFLAGS}$rpath_flags"
+
+for lib in libssl.3.dylib libcrypto.3.dylib libssl.dylib libcrypto.dylib; do
+  [[ -e "$staging_dir/$lib" ]] || die "staged $lib missing from '$staging_dir' immediately after staging"
+done
 
 note "staged @rpath dylibs from $libdir -> $staging_dir"
 note "rpath roots: ${RPATH_ROOTS[*]}"
