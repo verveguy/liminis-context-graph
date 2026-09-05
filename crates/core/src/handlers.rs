@@ -3603,6 +3603,7 @@ fn attributes_param_to_string(p: &Value) -> String {
 /// `entity_uuid` is only ever `Some` on the first (pre-embed) pass — `resolve_entity_by_uuid`
 /// either finds the row or hard-errors, so a uuid-addressed call never reaches the "not found,
 /// go create one" branch and therefore never needs a second, post-embed pass.
+#[allow(clippy::too_many_arguments)]
 fn resolve_and_update_entity(
     conn: &db::Conn<'_>,
     state: &AppState,
@@ -3860,6 +3861,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
 /// `(source_uuid, target_uuid, predicate, group_id)`, not whether either endpoint entity was
 /// itself renamed or merged during the dropped-lock window — that is a pre-existing, unrelated
 /// hazard around endpoint mutation this issue does not introduce or claim to fix.
+#[allow(clippy::too_many_arguments)]
 fn resolve_and_update_edge(
     conn: &db::Conn<'_>,
     state: &AppState,
