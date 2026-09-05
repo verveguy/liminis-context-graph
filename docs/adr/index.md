@@ -123,6 +123,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0526](0526-vectors-are-a-local-cache.md) | Vectors Are a Local Cache — Stop Writing Them to the WAL, Ignore Them on Replay | 2026-09-01 |
 | [0528](0528-episodic-attributes.md) | Structured Attributes on Episodes (`Episodic.attributes`) | 2026-09-02 |
 | [0541](0541-uds-embedder-transport-timeouts.md) | Bounded Timeouts for `OaiEmbedder`'s UDS Transport | 2026-09-05 |
+| [0543](0543-narrow-write-lock-around-embedder-round-trip.md) | Narrow `state.write_lock`'s Critical Section Around the Embedder Round Trip | 2026-09-05 |
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 
 ## Historical numbering
