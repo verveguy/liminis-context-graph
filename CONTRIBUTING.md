@@ -119,7 +119,58 @@ never commit release prep directly to `main` — then tag the merge commit.
    it isn't, either fix the underlying failure first or record in the release PR why the release
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
    `v0.11.0` did (#298).
-1. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
+1. **Run the sidecar-gated tests, and record their output in the release PR.** Two tests in
+   `crates/core/tests/real_corpus_replay_perf.rs` need a live embedding sidecar and **skip silently
+   when one is absent** — they print `[SKIP]` and *pass*, so a green board says nothing about
+   whether they ran. They are the only checks that measure recompute cost and validate that
+   recomputed vectors match what was previously stored; since #526 removed vectors from the WAL,
+   there is no stored vector left to fall back on if same-model recompute ever stops being exact.
+
+   Build and start the sidecar per [`native/local-inference/README.md`](native/local-inference/README.md),
+   which covers first-time setup including generating the `.mlpackage` (~400 MB, not committed):
+
+   ```sh
+   cd native/local-inference && swift build -c release
+   LOCAL_INFERENCE_HF_CACHE="$PWD/../../resources/models/tokenizer" \
+     .build/release/LocalInference &
+   ```
+
+   Then run both, from a worktree, and paste the reported figures into the release PR:
+
+   ```sh
+   cargo test --release --test real_corpus_replay_perf -- --ignored --nocapture \
+     measure_cold_vs_warm_cache_replay_over_real_corpus_wal
+   cargo test --release --test real_corpus_replay_perf -- --ignored --nocapture \
+     validate_recompute_matches_stored_vectors_for_real_corpus_wal
+   ```
+
+   **Confirm neither printed `[SKIP]`.** Do not verify the sidecar by checking that
+   `/tmp/liminis-inference.sock` exists — a stale socket file left by a crashed sidecar still passes
+   that check, while `connect_live_embedder()` probes the connection and skips when the probe fails.
+   The test output is the only reliable signal that they actually ran.
+
+   What to check, against the figures measured on `29eafe2` (0.14.0 development):
+
+   - **Cold vs warm replay cost** — cold 153.0s / 4,106 real embedder calls, warm 49.1s / 0 calls.
+     The warm figure should land near the no-recompute baseline of ~49.9s, measured by this file's
+     third test, `measure_replay_throughput_over_real_corpus_wal` (which needs no sidecar and can be
+     run alongside for comparison). A warm figure well above it means the content-addressed cache has
+     stopped doing its job; a materially larger cold figure means recompute itself has got more
+     expensive.
+   - **Recompute drift** — `mean_cosine` and `min_cosine` were both `1.000000` for all three vector
+     kinds (1,506 `name_embedding`, 2,392 `fact_embedding`, 228 `content_embedding`). Anything below
+     1.0 on the **minimum** means same-model recompute is no longer exact.
+
+   Neither is expected to fail. The point is that "unlikely to fail" and "verified" are different
+   claims, and only one of them belongs in a release. If a sidecar genuinely cannot be run for a given
+   release, record that in the release PR rather than leaving the omission silent — the same standard
+   step 0 applies to a red non-gating workflow.
+
+   Background: both tests skipped through every stage of #526 — Specify, Implement and Validate — so
+   its SC-001 and SC-005 success criteria shipped unmeasured. #460 was the same failure shape from the
+   other direction: an acceptance test that no CI job invoked.
+
+2. **Bump the version.** In a worktree off `main`, set `version` under `[workspace.package]` in
    `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
    `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
    Add any newly-introduced workspace member to that command — a crate left out keeps a stale version
@@ -127,26 +178,26 @@ never commit release prep directly to `main` — then tag the merge commit.
    `docs/llms-full.txt` — the docs-drift CI check fails the PR if it is left stale (see
    [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)). There is no
    second version to update any more: the docs site reads `Cargo.toml` directly.
-2. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
+3. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
    `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
    tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
-3. **Open a PR and merge it** to `main` once CI is green.
-4. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+4. **Open a PR and merge it** to `main` once CI is green.
+5. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
-5. The release workflow builds all three platforms and publishes the GitHub Release
+6. The release workflow builds all three platforms and publishes the GitHub Release
    automatically (~5–10 min in practice; `v0.12.0` took under six). Publishing that
    GitHub Release also triggers `.github/workflows/docs-publish.yml`, which rebuilds
    the docs site from this tag's `docs/` tree and promotes it to the site root (see
    [`docs/release-process.md`](docs/release-process.md#docs-publishing) for what to
    check afterward and how to republish a correction without cutting a new release).
-6. **Announce it.** Post to the repository's **Announcements** discussion category once the
+7. **Announce it.** Post to the repository's **Announcements** discussion category once the
    release has published. cargo-dist creates the GitHub Release; nothing posts a discussion.
    Lead with what changed for a user rather than the issue list, and carry the CHANGELOG's
    upgrade note across if there is one. Precedent to match:
    [v0.10.0](https://github.com/verveguy/liminis-context-graph/discussions/200),
    [v0.11.0](https://github.com/verveguy/liminis-context-graph/discussions/338),
    [v0.12.0](https://github.com/verveguy/liminis-context-graph/discussions/337).
-7. **Confirm the previous release was announced too.** `v0.11.0` shipped with no announcement
+8. **Confirm the previous release was announced too.** `v0.11.0` shipped with no announcement
    and the gap went unnoticed for five days — nothing checks, and the release workflow is
    green either way. Before posting, list the Announcements category and confirm the prior
    tag has an entry; if it doesn't, backfill it and say so in the post rather than quietly
@@ -157,7 +208,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    gh api graphql -f query='query { repository(owner:"verveguy",name:"liminis-context-graph"){
      discussions(first:20){ nodes { title category{name} createdAt } } } }'
    ```
-8. **Close the community reports the release resolves.** Comment on each with what shipped and
+9. **Close the community reports the release resolves.** Comment on each with what shipped and
    a concrete reopen condition, then move it to **Shipped** on the OSS triage board (see the
    two-board note above). A report left open after its fix ships reads as unresolved to the
    person who filed it.
