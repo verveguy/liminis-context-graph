@@ -444,13 +444,16 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
 
     // The decisive assertion (tightened by issue #543): since the create path no longer holds
     // `write_lock` across the embed call at all, the concurrent update must complete well before
-    // the hung embedder's ~300ms timeout even fires — not merely "bounded by" it, which was the
-    // best pre-#543 code could promise.
+    // the hung embedder's sequential name+summary timeouts (~600ms total) even finish — not
+    // merely "bounded by" them, which was the best pre-#543 code could promise. 500ms leaves CI
+    // scheduling headroom while still clearly separating "lock never held across embed" from the
+    // pre-#543 regression this test would otherwise fail to catch (review feedback: 250ms was
+    // too tight relative to CI variance).
     assert!(
-        update_elapsed < std::time::Duration::from_millis(250),
-        "concurrent update took {update_elapsed:?} — expected it to complete before the hung \
-         embedder's ~300ms timeout fires at all, since write_lock is never held across the \
-         embed call after issue #543"
+        update_elapsed < std::time::Duration::from_millis(500),
+        "concurrent update took {update_elapsed:?} — expected it to complete well before the \
+         hung embedder's sequential ~600ms of timeouts, since write_lock is never held across \
+         the embed call after issue #543"
     );
 }
 
@@ -618,17 +621,23 @@ impl Embedder for BarrierEmbedder {
 
 /// Test embedder whose `embed()` sleeps for a fixed, configurable delay before succeeding —
 /// unlike the hung-forever stub server above, this always completes; it models a slow but
-/// healthy embedder (FR-012/SC-001), not a degraded one.
+/// healthy embedder (FR-012/SC-001), not a degraded one. Signals `started` the instant it's
+/// entered so a test can deterministically wait for the create call to have reached its
+/// lock-free embed phase (Pass 1 already resolved and dropped the guard) instead of guessing
+/// with a fixed sleep, which review feedback flagged as a source of CI flakiness under load.
 struct DelayEmbedder {
     dim: usize,
     delay: Duration,
+    started: Arc<tokio::sync::Notify>,
 }
 
 impl Embedder for DelayEmbedder {
     fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let dim = self.dim;
         let delay = self.delay;
+        let started = Arc::clone(&self.started);
         Box::pin(async move {
+            started.notify_one();
             tokio::time::sleep(delay).await;
             Ok(vec![0.0f32; dim])
         })
@@ -851,9 +860,11 @@ async fn assert_entity_unrelated_write_not_gated_by_slow_embedder() {
         .unwrap();
     }
 
+    let started = Arc::new(tokio::sync::Notify::new());
     let embedder: Arc<dyn Embedder> = Arc::new(DelayEmbedder {
         dim,
         delay: Duration::from_millis(500),
+        started: Arc::clone(&started),
     });
     let state = make_state_with_embedder(db, embedder);
 
@@ -875,9 +886,10 @@ async fn assert_entity_unrelated_write_not_gated_by_slow_embedder() {
         .await
     });
 
-    // Give the create call a brief head start so it acquires (and drops) the lock for Pass 1
-    // first, entering its slow embed call before the update below starts.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait for the create call to have acquired (and dropped) the lock for Pass 1 and entered
+    // its slow embed call, rather than guessing with a fixed sleep (review feedback: a fixed
+    // delay can still race under CI load).
+    started.notified().await;
 
     let state_update = Arc::clone(&state);
     let start_update = std::time::Instant::now();
@@ -925,8 +937,11 @@ async fn assert_entity_unrelated_write_not_gated_by_slow_embedder() {
     );
     assert_eq!(create_val["result"]["created"], true);
 
+    // 350ms leaves CI scheduling headroom (review feedback: 200ms was too tight) while still
+    // clearly separating "not gated at all" from the 500ms-embed regression this test guards
+    // against.
     assert!(
-        update_elapsed < Duration::from_millis(200),
+        update_elapsed < Duration::from_millis(350),
         "concurrent update took {update_elapsed:?} — expected it to complete well before the \
          delayed embedder call (500ms) returns, demonstrating it is not ordered after it"
     );
