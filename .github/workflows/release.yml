@@ -260,6 +260,18 @@ jobs:
           echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
           echo "OPENSSL_DIR=$OPENSSL_DIR"
           pkg-config --libs openssl 2>&1 || true
+          echo "--- LC_RPATH actually embedded in the failing binary ---"
+          otool -l target/aarch64-apple-darwin/dist/liminis-context-graph \
+            | grep -A2 LC_RPATH | grep "path " || echo "NO LC_RPATH"
+          echo "--- binary timestamps: is dist/ what this link produced? ---"
+          ls -la --time-style=full-iso target/aarch64-apple-darwin/dist/liminis-context-graph 2>/dev/null \
+            || stat -f "%Sm %N" -t "%F %T" target/aarch64-apple-darwin/dist/liminis-context-graph
+          stat -f "%Sm %N" -t "%F %T" target/aarch64-apple-darwin/dist/deps/liminis_context_graph* 2>/dev/null | head -5
+          echo "--- rebuild that exact profile/target by hand, and see what IT links ---"
+          cargo build --profile dist --target aarch64-apple-darwin --bin liminis-context-graph -v 2>&1 \
+            | grep -aoE "\-L[^ \"]*" | sort -u | head -20 || true
+          echo "--- otool of the hand-rebuilt binary ---"
+          otool -L target/aarch64-apple-darwin/dist/liminis-context-graph | grep -iE "ssl|crypto" || true
       - id: cargo-dist
         name: Post-build
         # We force bash here just because github makes it really hard to get values up
