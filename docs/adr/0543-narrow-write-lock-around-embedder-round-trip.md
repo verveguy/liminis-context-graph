@@ -78,16 +78,33 @@ to only one of the two call sites, reopening the exact race this ADR closes.
 hard-errors, so a uuid-addressed call never resolves "not found" and therefore never reaches Pass
 2 at all (confirmed during Research). Pass 2's entity re-check is always by name.
 
-### Edge Pass 2 re-checks by already-resolved endpoint UUIDs, not by re-resolving names
+### Edge Pass 2 re-canonicalizes endpoint UUIDs, but does not re-resolve by name
 
 `handle_assert_relationship`'s Pass 2 calls `resolve_and_update_edge` with the `source_uuid`/
 `target_uuid` already resolved in Pass 1 — it does not re-run `resolve_entity_by_name` for either
-endpoint. The spec's FR-004 and Acceptance Scenario 2 only require re-checking the edge identity
-tuple `(source_uuid, target_uuid, predicate, group_id)`; whether an endpoint entity was itself
-renamed or merged during the dropped-lock window is a separate, pre-existing hazard around
-endpoint mutation that this issue does not introduce and does not claim to fix. Re-resolving both
-endpoint names by string on every create would be unnecessary work for a race this issue's
-acceptance criteria don't test.
+endpoint. A rename (a plain `update_entity_core` name change) is a non-issue either way, since
+edges are addressed by uuid and a rename never changes an entity's uuid.
+
+A *merge*, however, is not a non-issue: `knowledge_merge_entities` also takes `write_lock`, so
+pre-#543 — when `write_lock` was held continuously from endpoint resolution through the edge
+insert — a merge of either endpoint mid-operation was structurally impossible. Narrowing the
+critical section opened a real window, the width of the embedder round trip, in which a merge can
+land: `corrections::merge_entities` only adds the `Merged` label and a `merged_into` pointer to
+the alias row, it does not delete it, and `insert_relates_to_edge`'s
+`MATCH (src:Entity {uuid: $src})` does not filter out `Merged` nodes — so without a corrective
+step, a newly created edge could silently attach to a stale, tombstoned endpoint instead of being
+forwarded to the canonical entity the way every other by-name/by-uuid resolution path in this
+codebase behaves (`assert::resolve_entity_by_name`/`resolve_entity_by_uuid`, both via
+`cross_group::follow_merged_into_chain`). An initial version of this ADR/PR characterized this as
+"a separate, pre-existing hazard" — that framing was wrong: the hazard's window is newly created
+by this exact change, not pre-existing. `resolve_and_update_edge` was corrected to re-resolve
+`source_uuid`/`target_uuid` through `assert::resolve_entity_by_uuid` before checking for an
+existing edge — a no-op unless a merge happened in the dropped-lock window, in which case it
+forwards to the canonical uuid, exactly like the entity path's full by-name re-resolution does.
+This is cheaper than re-resolving both endpoints by name (an uncontested `resolve_entity_by_uuid`
+is a single indexed lookup with no scan fallback), while closing the same class of gap.
+`assert_relationship_endpoint_merged_during_embed_attaches_to_canonical` in
+`concurrent_rw_integration.rs` is the regression test for this fix.
 
 ### The race loser's response is indistinguishable from an ordinary update
 
@@ -118,8 +135,9 @@ its result is thrown away when the update path is taken instead.
 - Any change to embedder timeout values or configuration (ADR-0510).
 - Retry-on-embedder-failure behavior — unchanged from the existing zero-vector-embedding fallback
   with a warning.
-- Re-resolving relationship endpoint names on Pass 2 (see Decision above) — endpoint
-  rename/merge races are a pre-existing, unrelated hazard.
+- Re-resolving relationship endpoint *names* on Pass 2 (see Decision above) — a rename is a
+  non-issue (edges are addressed by uuid), and a mid-race *merge* is handled by re-canonicalizing
+  the already-resolved endpoint uuids instead, which is cheaper than a full by-name re-resolution.
 - Any embedder call site that does not currently hold `state.write_lock` across the call
   (episode/batch ingestion, cross-group edge creation, search, dedup/canonicalization) — Research
   confirmed none of these share this hazard.

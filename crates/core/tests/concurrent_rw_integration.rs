@@ -11,6 +11,7 @@ use arc_swap::ArcSwapOption;
 use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
+    corrections::{self, MergeEntitiesParams},
     db::Db,
     dedup_adapter::{DedupAdapter, PassthroughDedupAdapter},
     embedder::{MockEmbedder, OaiEmbedder},
@@ -1034,5 +1035,124 @@ async fn assert_entity_during_embed_collision_takes_update_path_not_duplicate_in
     assert_eq!(
         count, 1,
         "expected no duplicate row from the paused call's insert"
+    );
+}
+
+/// Review finding on the initial version of this PR: pre-#543, `write_lock` was held
+/// continuously from endpoint resolution through the edge insert, so a concurrent
+/// `knowledge_merge_entities` call (which also takes `write_lock`) could never tombstone an
+/// endpoint mid-operation — that window was zero-width. Narrowing the critical section opened a
+/// real window (the embedder round trip) in which a merge can land: this test pauses a create
+/// call mid-embed, merges its *source* endpoint into a different canonical entity during that
+/// window, and confirms the resulting edge attaches to the canonical entity — never to the
+/// now-tombstoned alias — exactly as a fresh by-name resolution would.
+#[tokio::test]
+async fn assert_relationship_endpoint_merged_during_embed_attaches_to_canonical() {
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    let db_check = Arc::clone(&db);
+    {
+        let conn = db.connect().unwrap();
+        for (uuid, name) in [
+            ("alias-uuid", "Alias Source"),
+            ("canonical-uuid", "Canonical Source"),
+            ("target-uuid", "Target Entity"),
+        ] {
+            conn.insert_entity(&EntityRow {
+                uuid: uuid.to_string(),
+                name: name.to_string(),
+                group_id: "grp".to_string(),
+                labels: vec!["Entity".to_string()],
+                created_at: "2026-01-01 00:00:00".to_string(),
+                name_embedding: vec![0.0; dim],
+                summary: "seed".to_string(),
+                attributes: "{}".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let proceed = Arc::new(tokio::sync::Notify::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(PausableEmbedder {
+        dim,
+        started: Arc::clone(&started),
+        proceed: Arc::clone(&proceed),
+    });
+    let state = make_state_with_embedder(db, embedder);
+
+    let state_create = Arc::clone(&state);
+    let create_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                1,
+                "knowledge_assert_relationship",
+                json!({
+                    "source_name": "Alias Source",
+                    "target_name": "Target Entity",
+                    "predicate": "RELATES_TO_TEST",
+                    "group_id": "grp",
+                }),
+            ),
+            state_create,
+            None,
+        )
+        .await
+    });
+
+    // Wait until Pass 1 has resolved both endpoints, found no existing edge, dropped the lock,
+    // and entered the embed call — exactly the window this test targets.
+    started.notified().await;
+
+    // Merge the source endpoint into a different canonical entity while the create call's lock
+    // is dropped for its embed call.
+    {
+        let conn = db_check.connect().unwrap();
+        let params = MergeEntitiesParams {
+            canonical_uuid: Some("canonical-uuid".to_string()),
+            alias_uuids: vec!["alias-uuid".to_string()],
+            group_id: "grp".to_string(),
+            ..Default::default()
+        };
+        let ts = chrono::Utc::now().to_rfc3339();
+        let result = corrections::merge_entities(&conn, &params, &ts);
+        assert!(result.success, "merge should succeed: {result:?}");
+    }
+
+    proceed.notify_one();
+
+    let create_resp = tokio::time::timeout(Duration::from_secs(10), create_task)
+        .await
+        .expect("create call must not hang indefinitely")
+        .unwrap();
+    let create_val = serde_json::to_value(create_resp).unwrap();
+    assert!(
+        create_val.get("result").is_some(),
+        "call should succeed: {create_val}"
+    );
+    assert_eq!(create_val["result"]["created"], true);
+
+    let conn = db_check.connect().unwrap();
+    let canonical_edges = conn.get_full_edges_for_entity("canonical-uuid").unwrap();
+    let matching = canonical_edges
+        .iter()
+        .filter(|e| {
+            e.name == "RELATES_TO_TEST"
+                && e.target_node_uuid == "target-uuid"
+                && e.invalid_at.is_none()
+        })
+        .count();
+    assert_eq!(
+        matching, 1,
+        "expected the new edge to attach to the canonical (post-merge) entity: {canonical_edges:?}"
+    );
+
+    let alias_edges = conn.get_full_edges_for_entity("alias-uuid").unwrap();
+    assert!(
+        alias_edges
+            .iter()
+            .all(|e| e.invalid_at.is_some() || e.name != "RELATES_TO_TEST"),
+        "the new edge must not remain attached to the tombstoned alias entity: {alias_edges:?}"
     );
 }

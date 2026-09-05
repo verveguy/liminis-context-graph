@@ -3849,18 +3849,30 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
     }))
 }
 
-/// Resolves the target edge for `knowledge_assert_relationship` by its already-resolved
-/// endpoint UUIDs and, if found, updates it in place (`update_relates_to_core` + WAL flush).
-/// Shared verbatim by both the pre-embed and post-embed resolution passes (issue #543
-/// FR-003/FR-004) so the two call sites can never drift apart. Returns `Some(uuid)` when an
-/// active matching edge was resolved (and updated); `None` when no matching edge exists and the
-/// caller must create one.
+/// Resolves the target edge for `knowledge_assert_relationship` by its endpoint UUIDs and, if
+/// found, updates it in place (`update_relates_to_core` + WAL flush). Shared verbatim by both
+/// the pre-embed and post-embed resolution passes (issue #543 FR-003/FR-004) so the two call
+/// sites can never drift apart.
 ///
-/// Takes already-resolved `source_uuid`/`target_uuid` rather than re-resolving
-/// `source_name`/`target_name`: the post-embed pass only re-checks the edge identity tuple
-/// `(source_uuid, target_uuid, predicate, group_id)`, not whether either endpoint entity was
-/// itself renamed or merged during the dropped-lock window — that is a pre-existing, unrelated
-/// hazard around endpoint mutation this issue does not introduce or claim to fix.
+/// Before checking for an existing edge, re-resolves `source_uuid`/`target_uuid` through
+/// `assert::resolve_entity_by_uuid` — a no-op unless an endpoint has since been merged into
+/// another entity (`knowledge_merge_entities`, which also takes `write_lock`), in which case it
+/// forwards through the `Merged` chain to the current canonical uuid, exactly like every other
+/// by-name/by-uuid resolution path in this codebase. This matters specifically on the post-embed
+/// pass: pre-#543, `write_lock` was held continuously from endpoint resolution through the
+/// insert, so a concurrent merge of an endpoint was structurally impossible (`merge_entities`
+/// itself needs the same lock). Narrowing the critical section opened a real window — the width
+/// of the embedder round trip — in which a merge can tombstone an endpoint (add the `Merged`
+/// label; the row and its uuid are not deleted) before this pass re-acquires the lock.
+/// `insert_relates_to_edge`'s `MATCH (src:Entity {uuid: $src})` does not filter out `Merged`
+/// nodes, so without this re-resolution step a newly created edge could silently attach to a
+/// stale, tombstoned endpoint instead of the canonical entity a caller resolving the same name
+/// fresh would land on (review finding on the initial version of this PR).
+///
+/// Returns `(existing_edge_uuid, canonical_source_uuid, canonical_target_uuid)` — `Some(uuid)`
+/// when an active matching edge was resolved (and updated) against the *canonical* endpoints;
+/// `None` when no matching edge exists and the caller must create one, using the returned
+/// canonical uuids rather than the ones originally passed in.
 #[allow(clippy::too_many_arguments)]
 fn resolve_and_update_edge(
     conn: &db::Conn<'_>,
@@ -3874,16 +3886,18 @@ fn resolve_and_update_edge(
     valid_at: Option<&str>,
     relation_type: Option<&str>,
     attributes: &str,
-) -> Result<Option<String>, Error> {
+) -> Result<(Option<String>, String, String), Error> {
+    let source_uuid = assert::resolve_entity_by_uuid(conn, group_id, source_uuid)?.uuid;
+    let target_uuid = assert::resolve_entity_by_uuid(conn, group_id, target_uuid)?.uuid;
     let Some(uuid) =
-        conn.find_active_relates_to_uuid(source_uuid, target_uuid, predicate, group_id)?
+        conn.find_active_relates_to_uuid(&source_uuid, &target_uuid, predicate, group_id)?
     else {
-        return Ok(None);
+        return Ok((None, source_uuid, target_uuid));
     };
     conn.update_relates_to_core(&uuid, fact, valid_at, relation_type, attributes)?;
     let seq = wal_exec::wal_flush_ungrouped(state, gid_wal, conn.drain_mutations());
     wal_exec::advance_wal_position(conn, gid_wal, seq, state);
-    Ok(Some(uuid))
+    Ok((Some(uuid), source_uuid, target_uuid))
 }
 
 /// `knowledge_assert_relationship` (issue #379): creates or updates a single directed edge
@@ -3902,11 +3916,13 @@ fn resolve_and_update_edge(
 /// `handle_assert_entity`: `write_lock` is held only for the pre-embed endpoint
 /// resolution/edge-lookup and, symmetrically, only for the post-embed resolve-and-insert —
 /// never across the intervening `state.embedder.embed(&fact).await` call. The post-embed pass
-/// re-runs `resolve_and_update_edge` (using the endpoint UUIDs already resolved in Pass 1) under
-/// a freshly-acquired guard immediately before the insert: if a concurrent writer created this
-/// exact edge while this call's lock was dropped for the embed, this call takes the update path
-/// against that row instead of inserting a duplicate (FR-003/FR-004/FR-006), discarding the
-/// just-computed embedding (FR-005).
+/// re-runs `resolve_and_update_edge` under a freshly-acquired guard immediately before the
+/// insert, using the endpoint UUIDs resolved in Pass 1 as a starting point but re-canonicalizing
+/// them (see that function's doc comment) in case either endpoint was merged into another entity
+/// while the lock was dropped: if a concurrent writer created this exact edge (against the
+/// canonical endpoints) while this call's lock was dropped for the embed, this call takes the
+/// update path against that row instead of inserting a duplicate (FR-003/FR-004/FR-006),
+/// discarding the just-computed embedding (FR-005).
 async fn handle_assert_relationship(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -3992,7 +4008,7 @@ async fn handle_assert_relationship(
             let source = resolve_or_err(&source_name1)?;
             let target = resolve_or_err(&target_name1)?;
 
-            if let Some(uuid) = resolve_and_update_edge(
+            let (existing, source_uuid, target_uuid) = resolve_and_update_edge(
                 &conn,
                 &state1,
                 &group_id1,
@@ -4004,14 +4020,15 @@ async fn handle_assert_relationship(
                 valid_at1.as_deref(),
                 relation_type1.as_deref(),
                 &attributes1,
-            )? {
+            )?;
+            if let Some(uuid) = existing {
                 return Ok::<_, Error>(Ok(uuid));
             }
             // Nothing was mutated on this branch, so there is nothing to flush — the embedder
             // (async) runs next, then a second, freshly-guarded pass re-checks and inserts.
             Ok(Err(ToCreate {
-                source_uuid: source.uuid,
-                target_uuid: target.uuid,
+                source_uuid,
+                target_uuid,
                 predicate: predicate1,
                 group_id: group_id1,
                 fact: fact1,
@@ -4045,8 +4062,11 @@ async fn handle_assert_relationship(
             };
 
             // Pass 2: re-acquire the lock and re-check the edge identity tuple (FR-003) using
-            // the endpoint UUIDs already resolved in Pass 1 — a concurrent writer may have
-            // created this exact edge while the lock was dropped for the embed above.
+            // the endpoint UUIDs resolved in Pass 1 — a concurrent writer may have created this
+            // exact edge, or merged one of its endpoints into another entity, while the lock was
+            // dropped for the embed above. `resolve_and_update_edge` re-canonicalizes both
+            // endpoints before checking, so a mid-race merge is forwarded correctly rather than
+            // silently attaching the new edge to a tombstoned entity.
             let _guard = state.write_lock.write().await;
             let db2 = Arc::clone(&db);
             let state2 = Arc::clone(&state);
@@ -4061,7 +4081,7 @@ async fn handle_assert_relationship(
             let target_uuid2 = target_uuid.clone();
             let (uuid, race_created) = tokio::task::spawn_blocking(move || {
                 let conn = db2.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-                if let Some(uuid) = resolve_and_update_edge(
+                let (existing, source_uuid2, target_uuid2) = resolve_and_update_edge(
                     &conn,
                     &state2,
                     &group_id2,
@@ -4073,10 +4093,12 @@ async fn handle_assert_relationship(
                     valid_at2.as_deref(),
                     relation_type2.as_deref(),
                     &attributes2,
-                )? {
-                    // Lost the race: a concurrent writer created this edge while this call's
-                    // lock was dropped for the embed. Take the update path against it
-                    // (FR-004/FR-006) — the just-computed embedding above is discarded.
+                )?;
+                if let Some(uuid) = existing {
+                    // Lost the race: a concurrent writer created this edge (against the
+                    // canonical endpoints) while this call's lock was dropped for the embed.
+                    // Take the update path against it (FR-004/FR-006) — the just-computed
+                    // embedding above is discarded.
                     return Ok::<_, Error>((uuid, false));
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
