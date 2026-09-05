@@ -61,5 +61,13 @@ RUST_TEST_THREADS = "4"
 # machine without knowing the checkout path. The directory is created by
 # stage-openssl-rpath.sh; when it does not exist pkg-config simply finds nothing
 # here and falls through, which is the correct behaviour for a plain local build.
-PKG_CONFIG_PATH = { value = ".openssl-rpath/lib/pkgconfig", relative = true }
+# `force = true` is load-bearing. Without it a [env] entry is a *default*: it
+# applies only when the variable is unset, and loses to whatever the caller
+# already exported. That is why setting it here first changed nothing. The build
+# script demonstrably sees a different PKG_CONFIG_PATH than the surrounding
+# shell does under `dist build` — lbug's build.rs emitted
+# `-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib` in the same step where
+# `pkg-config --libs openssl` returned the staged directory (#550). force makes
+# cargo's value authoritative regardless of what dist passes down.
+PKG_CONFIG_PATH = { value = ".openssl-rpath/lib/pkgconfig", relative = true, force = true }
 LBUG_VERSION = "0.18.1"
