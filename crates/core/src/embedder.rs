@@ -56,7 +56,17 @@ enum EmbedTransport {
         api_key: Option<String>,
     },
     #[cfg(unix)]
-    Uds { path: String, pool: UdsPool },
+    Uds {
+        path: String,
+        pool: UdsPool,
+        /// Whole-request bound for one send/read attempt (FR-001), shared by name and default
+        /// with the HTTP transport's `LCG_EMBEDDING_TIMEOUT_MS` (#541).
+        request_timeout: std::time::Duration,
+        /// Bound on acquiring a usable connection — waiting for a pool slot's mutex and, if the
+        /// slot is empty, dialing a fresh connection — shared by name and default with the HTTP
+        /// transport's `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (FR-003, #541).
+        connect_timeout: std::time::Duration,
+    },
 }
 
 // ── UDS connection pool ───────────────────────────────────────────────────────
@@ -214,6 +224,77 @@ impl Drop for PoisonGuard<'_> {
     }
 }
 
+/// Acquires `slot_mutex`'s guard and ensures it holds a usable connection — dialing a fresh one
+/// if the slot is empty — bounded by a single combined `connect_timeout` budget covering both the
+/// mutex wait and the dial (FR-003, #541). A deliberate choice over two independently-timed
+/// phases: it bounds worst-case per-attempt acquisition latency to `connect_timeout` rather than
+/// `2×connect_timeout`, matching FR-003's wording, which groups "dialing...and/or waiting for a
+/// pool slot" as one phase.
+///
+/// Cancellation safety (FR-007): if the timeout fires while dialing, `tokio::time::timeout` drops
+/// the inner future before `*slot` is ever assigned `Some(...)` — the slot is left exactly as it
+/// was (`None`, or an untouched existing connection), which is already safe to reuse or redial.
+/// No new poisoning logic is needed for this phase.
+///
+/// The timeout error reuses the existing `"UDS connect"` prefix `is_transport_error` already
+/// recognizes (FR-005) — no code change to that function is needed for this failure shape.
+#[cfg(unix)]
+async fn acquire_uds_slot<'a>(
+    path: &str,
+    slot_mutex: &'a tokio::sync::Mutex<Option<UdsSender>>,
+    connect_timeout: std::time::Duration,
+) -> Result<tokio::sync::MutexGuard<'a, Option<UdsSender>>, Error> {
+    tokio::time::timeout(connect_timeout, async {
+        let mut slot = slot_mutex.lock().await;
+        if slot.is_none() {
+            *slot = Some(dial_uds(path).await?);
+        }
+        Ok(slot)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(Error::Ipc(format!(
+            "UDS connect: pool slot acquisition timed out after {}ms",
+            connect_timeout.as_millis()
+        )))
+    })
+}
+
+/// Wraps one `send_and_read_uds` span in a whole-request timeout (FR-001). On elapse, produces
+/// `UdsAttemptError::Other` — deliberately *not* `ConnectionBroken` — so a timeout never triggers
+/// the existing single-retry-on-broken-connection behavior (spec's explicit exclusion of
+/// retry-on-timeout).
+///
+/// Cancellation safety (FR-007): `tokio::time::timeout` drops the inner future (including the
+/// `PoisonGuard`) before `disarm()` runs when it elapses, so the guard's existing `Drop` impl
+/// clears the slot — the identical mechanism already used for a mid-flight-cancelled call. No new
+/// poisoning logic is needed for this phase either.
+///
+/// The timeout error reuses the existing `"UDS send request"` prefix `is_transport_error` already
+/// recognizes (FR-005).
+#[cfg(unix)]
+async fn attempt_uds_send(
+    slot: &mut Option<UdsSender>,
+    body_bytes: hyper::body::Bytes,
+    request_timeout: std::time::Duration,
+) -> Result<OaiEmbedResponse, UdsAttemptError> {
+    let attempt = async {
+        let mut guard = PoisonGuard::new(slot);
+        let result = send_and_read_uds(guard.sender_mut(), body_bytes).await;
+        // The span completed (successfully or with a definite, fully-read error) rather than
+        // being dropped mid-flight — safe to disarm regardless of outcome.
+        guard.disarm();
+        result
+    };
+    match tokio::time::timeout(request_timeout, attempt).await {
+        Ok(result) => result,
+        Err(_) => Err(UdsAttemptError::Other(Error::Ipc(format!(
+            "UDS send request: timed out after {}ms",
+            request_timeout.as_millis()
+        )))),
+    }
+}
+
 // ── Embedder trait ────────────────────────────────────────────────────────────
 
 pub trait Embedder: Send + Sync {
@@ -305,16 +386,34 @@ impl OaiEmbedder {
     }
 
     /// Constructs a UDS-transport embedder pointing at the given socket path.
+    ///
+    /// Resolves the same two timeout env vars `new_http` does — `LCG_EMBEDDING_TIMEOUT_MS`
+    /// (whole-request bound per attempt) and `LCG_EMBEDDING_CONNECT_TIMEOUT_MS` (bound on
+    /// acquiring a usable pooled connection: mutex wait + dial) — with the same defaults and
+    /// strict validation, so a hung UDS backend or an exhausted connection pool fails fast
+    /// instead of hanging indefinitely (#541, mirroring #510's HTTP-side fix).
     #[cfg(unix)]
-    pub fn new_uds(path: impl Into<String>, model: impl Into<String>, dim: usize) -> Self {
-        Self {
+    pub fn new_uds(
+        path: impl Into<String>,
+        model: impl Into<String>,
+        dim: usize,
+    ) -> Result<Self, Error> {
+        let request_timeout =
+            resolve_embedding_timeout_ms("LCG_EMBEDDING_TIMEOUT_MS", DEFAULT_EMBEDDING_TIMEOUT_MS)?;
+        let connect_timeout = resolve_embedding_timeout_ms(
+            "LCG_EMBEDDING_CONNECT_TIMEOUT_MS",
+            DEFAULT_EMBEDDING_CONNECT_TIMEOUT_MS,
+        )?;
+        Ok(Self {
             transport: EmbedTransport::Uds {
                 path: path.into(),
                 pool: UdsPool::new(),
+                request_timeout,
+                connect_timeout,
             },
             model: model.into(),
             dim,
-        }
+        })
     }
 
     /// Constructs from environment variables — HTTP transport, same env vars as before.
@@ -413,7 +512,15 @@ impl OaiEmbedder {
                     .await
             }
             #[cfg(unix)]
-            EmbedTransport::Uds { path, pool } => self.do_embed_uds_raw(path, pool, input).await,
+            EmbedTransport::Uds {
+                path,
+                pool,
+                request_timeout,
+                connect_timeout,
+            } => {
+                self.do_embed_uds_raw(path, pool, *request_timeout, *connect_timeout, input)
+                    .await
+            }
         }
     }
 
@@ -440,18 +547,25 @@ impl OaiEmbedder {
     /// round-robin, lazily dials it if empty, and on a broken-connection
     /// failure (the sidecar restarted, idle-closed the socket, etc.) clears
     /// the slot and retries exactly once against a freshly-dialed connection.
+    ///
+    /// Every phase is bounded (#541): acquiring the slot (mutex wait + lazy dial) by
+    /// `connect_timeout` via [`acquire_uds_slot`], and each send/read attempt — the initial one
+    /// and the broken-connection retry — by `request_timeout` via [`attempt_uds_send`]. The
+    /// retry's redial is independently bounded by its own `connect_timeout` window, matching the
+    /// spec's "two attempts, two independent budgets" assumption.
     #[cfg(unix)]
     async fn do_embed_uds_raw(
         &self,
         path: &str,
         pool: &UdsPool,
+        request_timeout: std::time::Duration,
+        connect_timeout: std::time::Duration,
         input: OaiEmbedInput<'_>,
     ) -> Result<OaiEmbedResponse, Error> {
         let idx = pool
             .cursor
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % pool.slots.len();
-        let mut slot = pool.slots[idx].lock().await;
 
         let body_bytes = hyper::body::Bytes::from(
             serde_json::to_vec(&OaiEmbedRequest {
@@ -461,31 +575,26 @@ impl OaiEmbedder {
             .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?,
         );
 
-        if slot.is_none() {
-            *slot = Some(dial_uds(path).await?);
-        }
+        let mut slot = acquire_uds_slot(path, &pool.slots[idx], connect_timeout).await?;
 
-        let first = {
-            let mut guard = PoisonGuard::new(&mut slot);
-            let result = send_and_read_uds(guard.sender_mut(), body_bytes.clone()).await;
-            // The span completed (successfully or with a definite, fully-read
-            // error) rather than being dropped mid-flight — safe to disarm
-            // regardless of outcome; a ConnectionBroken outcome is handled
-            // explicitly below by clearing the slot before redialing.
-            guard.disarm();
-            result
-        };
+        let first = attempt_uds_send(&mut slot, body_bytes.clone(), request_timeout).await;
 
         match first {
             Ok(resp) => Ok(resp),
             Err(UdsAttemptError::Other(e)) => Err(e),
             Err(UdsAttemptError::ConnectionBroken(_)) => {
                 *slot = None;
-                *slot = Some(dial_uds(path).await?);
-                let mut guard = PoisonGuard::new(&mut slot);
-                let result = send_and_read_uds(guard.sender_mut(), body_bytes).await;
-                guard.disarm();
-                drop(guard);
+                *slot = Some(
+                    tokio::time::timeout(connect_timeout, dial_uds(path))
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(Error::Ipc(format!(
+                                "UDS connect: redial timed out after {}ms",
+                                connect_timeout.as_millis()
+                            )))
+                        })?,
+                );
+                let result = attempt_uds_send(&mut slot, body_bytes, request_timeout).await;
                 match result {
                     Ok(resp) => Ok(resp),
                     Err(UdsAttemptError::Other(e)) => Err(e),
@@ -981,6 +1090,28 @@ mod tests {
     fn is_transport_error_rejects_other_ipc_errors() {
         let e = Error::Ipc("UDS embedder returned status 500".to_string());
         assert!(!is_transport_error(&e));
+    }
+
+    // #541/FR-005/SC-005: the three new UDS timeout message shapes reuse `is_transport_error`'s
+    // existing `"UDS connect"`/`"UDS send request"` prefixes rather than adding new ones — pinned
+    // here so a future rewording can't silently regress classification without a code change to
+    // this function (which these tests would then also require).
+    #[test]
+    fn is_transport_error_recognizes_uds_slot_acquisition_timeout() {
+        let e = Error::Ipc("UDS connect: pool slot acquisition timed out after 300ms".to_string());
+        assert!(is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_transport_error_recognizes_uds_redial_timeout() {
+        let e = Error::Ipc("UDS connect: redial timed out after 300ms".to_string());
+        assert!(is_transport_error(&e));
+    }
+
+    #[test]
+    fn is_transport_error_recognizes_uds_send_request_timeout() {
+        let e = Error::Ipc("UDS send request: timed out after 300ms".to_string());
+        assert!(is_transport_error(&e));
     }
 
     /// #499: reqwest/hyper can surface a "connection was not ready" pool-cancellation error

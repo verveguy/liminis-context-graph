@@ -271,7 +271,10 @@ async fn resolve_and_probe_embedder(
         }
         #[cfg(unix)]
         ResolvedTransport::Uds(path) => {
-            OaiEmbedder::new_uds(path.clone(), embedder_model.to_string(), 1)
+            match OaiEmbedder::new_uds(path.clone(), embedder_model.to_string(), 1) {
+                Ok(e) => e,
+                Err(e) => return ProbeOutcome::Fatal(format!("invalid embedder config: {e}")),
+            }
         }
     };
 
@@ -516,7 +519,7 @@ async fn bootstrap_app_state(
             path.clone(),
             embedding_model_probed.clone(),
             embedding_dim,
-        )),
+        )?),
     };
 
     // Content-addressed embedding cache (issue #440, FR-003) — constructed once, right after the
