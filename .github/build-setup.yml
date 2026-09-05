@@ -36,3 +36,28 @@
       target/release/build/lbug-*
       target/release/.fingerprint/lbug-*
       target/release/deps/liblbug-*
+
+# Issue #559 / ADR-0559: bundle the lbug vector/fts extension binaries into the release
+# archive so a fresh install never has to download them from extension.ladybugdb.com at
+# startup. Unlike scripts/stage-openssl-rpath.sh this has no dependency on a package
+# cargo-dist's own "Install dependencies" step provides, so — unlike that script — it runs
+# here, inlined above that step, rather than being hand-added to release.yml. Stages into
+# .lbdb/ at the workspace root, which Cargo.toml's `[workspace.metadata.dist] include` then
+# packages into this job's archive alongside LICENSE/README.md/CHANGELOG.md.
+#
+# Maps the Rust target triple to lbug's own extension-directory platform string. Must stay in
+# lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th release
+# target needs both updated together.
+- name: Stage lbug vector/fts extensions for this target
+  run: |
+    set -euo pipefail
+    case "${{ join(matrix.targets, '') }}" in
+      aarch64-apple-darwin) platform=osx_arm64 ;;
+      x86_64-unknown-linux-gnu) platform=linux_amd64 ;;
+      aarch64-unknown-linux-gnu) platform=linux_arm64 ;;
+      *)
+        echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml and crates/core/src/lbug_extension_home.rs together" >&2
+        exit 1
+        ;;
+    esac
+    bash scripts/stage-lbug-extensions.sh "$platform" "$(pwd)"
