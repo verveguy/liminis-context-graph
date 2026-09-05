@@ -23,3 +23,6 @@ site/src/content/docs/
 site/public/llms.txt
 site/public/llms-full.txt
 .openssl-rpath/
+# Staged by scripts/stage-lbug-extensions.sh (issue #559) at the workspace root before `dist
+# build`/CI package it into a release archive — never checked in, mirrors .openssl-rpath/ above.
+.lbdb/
