@@ -364,6 +364,28 @@ async fn spawn_stub_uds_server(path: &std::path::Path, dim: usize) -> JoinHandle
     })
 }
 
+/// UDS counterpart of `spawn_stub_http_hang_server`: accepts a connection and never reads or
+/// writes anything — a backend that hangs while still holding its connection open (#541's core
+/// repro scenario, mirroring #510's HTTP-side test).
+#[cfg(unix)]
+async fn spawn_stub_uds_hang_server(path: &std::path::Path) -> JoinHandle<()> {
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(path).unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let _stream = stream;
+                std::future::pending::<()>().await;
+            });
+        }
+    })
+}
+
 /// UDS counterpart of `spawn_stub_http_batch_echo_server`: response size tracks the request's
 /// `input` length instead of being fixed, entries shuffled and correctly indexed.
 #[cfg(unix)]
@@ -1274,6 +1296,175 @@ async fn http_transport_connect_timeout_independent_of_request_timeout() {
     let embedder = {
         let _guard = EmbeddingTimeoutEnvGuard::set("30000", "300");
         OaiEmbedder::new_http(url, "test-model", 4).expect("valid embedder config")
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.embed("hello world").await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms connect timeout to fire well before the 30s whole-request timeout, \
+         took {elapsed:?}"
+    );
+}
+
+// ── UDS timeout tests (#541) ────────────────────────────────────────────────
+
+/// FR-001/SC-001: a UDS backend that accepts the connection and never responds fails within the
+/// configured whole-request timeout bound, rather than hanging indefinitely — and is classified
+/// as a transport error (FR-005). `state.write_lock` release itself is exercised separately in
+/// `concurrent_rw_integration.rs` (SC-003).
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_hung_backend_times_out_on_embed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("hang_embed_test.sock");
+    let _server = spawn_stub_uds_hang_server(&sock_path).await;
+    // Scoped so the blocking env-var guard is dropped before the `.await` below — see
+    // `http_transport_hung_backend_times_out_on_embed`'s comment for why.
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 4).unwrap()
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.embed("hello world").await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms request timeout to bound the call, took {elapsed:?}"
+    );
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+}
+
+/// Same as above but through `probe()` (Acceptance Scenario 1 covers `probe()` alongside
+/// `embed()`/`embed_batch()` — the startup probe is the same code path via `do_embed_raw`).
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_hung_backend_times_out_on_probe() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("hang_probe_test.sock");
+    let _server = spawn_stub_uds_hang_server(&sock_path).await;
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("300", "300");
+        OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 4).unwrap()
+    };
+
+    let start = std::time::Instant::now();
+    let err = embedder.probe().await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms request timeout to bound the probe, took {elapsed:?}"
+    );
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+}
+
+/// FR-003/SC-002/Story 2: every pool slot occupied by a call stuck against a hung backend causes
+/// a new caller to fail within the bounded `LCG_EMBEDDING_CONNECT_TIMEOUT_MS`-derived acquisition
+/// bound, rather than queuing forever for a slot to free up.
+///
+/// Uses a much larger request timeout than connect timeout so the 4 occupying calls stay parked
+/// in their send/read attempt (holding their pool slot's mutex) for the whole test — the 5th
+/// call's failure must come from *acquisition* timing out, not from an occupying call's own
+/// request timeout incidentally freeing a slot first.
+#[cfg(unix)]
+#[tokio::test]
+async fn uds_transport_pool_exhaustion_times_out_on_acquire() {
+    const UDS_POOL_SIZE: usize = 4;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("pool_exhaustion_test.sock");
+    let _server = spawn_stub_uds_hang_server(&sock_path).await;
+
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("5000", "300");
+        Arc::new(OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 4).unwrap())
+    };
+
+    // Round-robin cursor guarantees each of these lands on a distinct slot (0..UDS_POOL_SIZE),
+    // so after this loop every slot's mutex is held by a call parked in the hung send/read phase.
+    let mut occupying = Vec::new();
+    for _ in 0..UDS_POOL_SIZE {
+        let e = Arc::clone(&embedder);
+        occupying.push(tokio::spawn(async move {
+            let _ = e.embed("hello world").await;
+        }));
+    }
+
+    // Give the occupying calls time to dial and reach the send/read phase (holding their slot's
+    // mutex) before the next call races them for a slot.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let start = std::time::Instant::now();
+    let err = embedder.embed("hello world").await.unwrap_err();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "expected the 300ms connect timeout to bound pool-slot acquisition, took {elapsed:?}"
+    );
+    assert!(
+        is_transport_error(&err),
+        "expected a transport-classified error, got: {err}"
+    );
+
+    for task in occupying {
+        task.abort();
+    }
+}
+
+/// FR-003/SC-002 edge case: dialing (socket connect + HTTP/1.1 handshake) stalling is also bounded
+/// by `connect_timeout`, independently of `uds_transport_pool_exhaustion_times_out_on_acquire`'s
+/// mutex-contention path.
+///
+/// Reliably stalling a UDS `connect()` call itself (as opposed to accept-then-hang, exercised by
+/// the tests above) requires exhausting the OS's listen backlog with no task ever calling
+/// `accept()` — backlog size is an OS default not exposed by `tokio::net::UnixListener::bind`, so
+/// how many connections it takes to fill it (and whether the *next* `connect()` genuinely blocks
+/// rather than queuing) is not guaranteed portable or deterministic. `#[ignore]`d for the same
+/// reason `http_transport_connect_timeout_independent_of_request_timeout` is: run explicitly
+/// (`cargo test -- --ignored uds_transport_dial_timeout`), not in the default gate.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "environment-dependent: relies on exhausting the OS's default UDS listen backlog with \
+            no task ever accepting, which is not a portable or deterministic way to stall a \
+            connect() call across every CI runner"]
+async fn uds_transport_dial_timeout_independent_of_request_timeout() {
+    use tokio::net::{UnixListener, UnixStream};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let sock_path = dir.path().join("dial_stall_test.sock");
+    // Bound but never `.accept()`'d — kept alive for the whole test so the socket path stays
+    // valid to connect to (a dropped listener would make further connects fail fast with
+    // "connection refused" instead of stalling).
+    let _listener = UnixListener::bind(&sock_path).unwrap();
+    // Every connection opened here sits unaccepted in the kernel backlog, saturating it before
+    // the embedder's own connect() attempt below.
+    let mut backlog_fillers = Vec::new();
+    for _ in 0..256 {
+        match UnixStream::connect(&sock_path).await {
+            Ok(s) => backlog_fillers.push(s),
+            Err(_) => break,
+        }
+    }
+
+    let embedder = {
+        let _guard = EmbeddingTimeoutEnvGuard::set("30000", "300");
+        OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 4).unwrap()
     };
 
     let start = std::time::Instant::now();
