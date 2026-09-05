@@ -40,10 +40,19 @@
 # Issue #559 / ADR-0559: bundle the lbug vector/fts extension binaries into the release
 # archive so a fresh install never has to download them from extension.ladybugdb.com at
 # startup. Unlike scripts/stage-openssl-rpath.sh this has no dependency on a package
-# cargo-dist's own "Install dependencies" step provides, so — unlike that script — it runs
-# here, inlined above that step, rather than being hand-added to release.yml. Stages into
-# .lbdb/ at the workspace root, which Cargo.toml's `[workspace.metadata.dist] include` then
-# packages into this job's archive alongside LICENSE/README.md/CHANGELOG.md.
+# cargo-dist's own "Install dependencies" step provides, so it doesn't need to run after that
+# step.
+#
+# THIS COPY IS NOT LIVE. `allow-dirty = ["ci"]` (Cargo.toml) makes `dist generate` refuse to
+# run at all ("'ci' is marked as allow-dirty ... refusing to run"), so nothing ever inlines
+# this fragment into .github/workflows/release.yml automatically — the identical step is
+# hand-added there (in build-local-artifacts, right after "Restore lbug build artifacts from
+# cache"), the same way scripts/stage-openssl-rpath.sh's step is hand-added rather than living
+# in this file. Edit both places together; this file only documents the intended content, it
+# does not produce it.
+#
+# Stages into .lbdb/ at the workspace root, which Cargo.toml's `[workspace.metadata.dist]
+# include` then packages into this job's archive alongside LICENSE/README.md/CHANGELOG.md.
 #
 # Maps the Rust target triple to lbug's own extension-directory platform string. Must stay in
 # lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th release
@@ -56,7 +65,7 @@
       x86_64-unknown-linux-gnu) platform=linux_amd64 ;;
       aarch64-unknown-linux-gnu) platform=linux_arm64 ;;
       *)
-        echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml and crates/core/src/lbug_extension_home.rs together" >&2
+        echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml, .github/workflows/release.yml, and crates/core/src/lbug_extension_home.rs together" >&2
         exit 1
         ;;
     esac

@@ -136,6 +136,12 @@ binary's first run.
 - A future `lbug` pin bump that forgets to update `LBUG_EXTENSION_VERSION` fails a unit test
   instead of silently reintroducing the CDN dependency (SC-005) — but fixing that failure still
   requires a human to re-run the empirical probe; the test cannot compute the correct value.
+- `.github/build-setup.yml`'s staging step is a maintained template, not a live one:
+  `allow-dirty = ["ci"]` (Cargo.toml) makes `dist generate` refuse to run at all, so unlike a
+  normal cargo-dist project this fragment is never actually inlined into
+  `.github/workflows/release.yml`. The identical step is hand-added there, in
+  `build-local-artifacts`, the same way `scripts/stage-openssl-rpath.sh`'s step already was. A
+  future edit to the staging step must be applied to both files by hand.
 - `.github/build-setup.yml`'s target-triple → platform-string mapping must stay in lockstep with
   `lbug_extension_home.rs`'s `platform_string()`; both are commented to cross-reference each
   other, but a 4th release target needs both updated together.
