@@ -189,12 +189,22 @@ jobs:
 
       # Short retention, same rationale as the e2e-artifacts/release-build uploads below:
       # consumed only by sibling jobs in this same run.
+      #
+      # include-hidden-files: true is load-bearing, not decoration. Every file under
+      # lbug-extension-bundle/ lives inside .lbdb/, a dot-directory, and
+      # actions/upload-artifact@v7's default (include-hidden-files: false) excludes
+      # dot-prefixed path components from its glob search entirely — with the default, this
+      # step silently finds nothing under lbug-extension-bundle/ and fails with "No files
+      # were found with the provided path", even though the directory is populated and the
+      # cache save immediately above it (a plain tar, unaffected by this) succeeds. Confirmed
+      # against this exact failure in this PR's own CI runs.
       - name: Upload lbug extension bundle (same-run artifact)
         uses: actions/upload-artifact@v7
         with:
           name: lbug-extension-bundle
           path: lbug-extension-bundle/
           retention-days: 1
+          include-hidden-files: true
           if-no-files-found: error
 
       - uses: dtolnay/rust-toolchain@stable

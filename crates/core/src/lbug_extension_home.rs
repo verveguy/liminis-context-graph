@@ -19,6 +19,19 @@ use crate::error::Error;
 /// below for the tripwire this file's staleness trips.
 pub(crate) const LBUG_EXTENSION_VERSION: &str = include_str!("../../../LBUG_EXTENSION_VERSION");
 
+/// [`LBUG_EXTENSION_VERSION`], trimmed. `include_str!` embeds the repo-root file's bytes
+/// verbatim, and `str::trim` isn't `const`, so a stray trailing newline (e.g. a routine editor
+/// auto-newline on that single-line file) would silently make the *content* of this constant
+/// `"0.18.1\n"` while `scripts/stage-lbug-extensions.sh`'s `$(cat ...)` and `ci.yml`'s
+/// `$(cat LBUG_EXTENSION_VERSION)` both trim it via command substitution to `"0.18.1"` —
+/// `check_candidate` would then look for a directory literally named `0.18.1\n`, find it
+/// doesn't exist, and silently fall through both tiers to `None`, reverting to lbug's
+/// CDN-downloading default with no error and no test catching it. Always go through this
+/// accessor rather than the raw constant when building a path.
+fn extension_version() -> &'static str {
+    LBUG_EXTENSION_VERSION.trim()
+}
+
 /// The `lbug` crate version [`LBUG_EXTENSION_VERSION`] was last empirically verified against —
 /// deliberately a plain Rust literal, not read from the same file, and not required to equal
 /// [`LBUG_EXTENSION_VERSION`]. Those two values often *do* differ (see the module doc above), so
@@ -65,7 +78,7 @@ fn check_candidate(root: &Path, platform: &str) -> Result<bool, Error> {
     let versioned_dir = root
         .join(".lbdb")
         .join("extension")
-        .join(LBUG_EXTENSION_VERSION)
+        .join(extension_version())
         .join(platform);
     if !versioned_dir.is_dir() {
         return Ok(false);
@@ -132,7 +145,20 @@ pub(crate) fn resolve_extension_home() -> Result<Option<PathBuf>, Error> {
         return Ok(None);
     };
 
-    let env_root = std::env::var("LCG_LBUG_HOME").ok().map(PathBuf::from);
+    // `var` (not `var_os`) deliberately: an operator's explicit LCG_LBUG_HOME override that
+    // happens to contain non-UTF-8 bytes must fail loudly, the same way db.rs's non-UTF-8
+    // resolved-path check does downstream, rather than being silently treated as absent and
+    // falling through to a lower-precedence tier the operator didn't ask for.
+    let env_root = match std::env::var("LCG_LBUG_HOME") {
+        Ok(value) => Some(PathBuf::from(value)),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(Error::Config(format!(
+                "LCG_LBUG_HOME is set but is not valid UTF-8: {}",
+                PathBuf::from(value).display()
+            )));
+        }
+    };
     let exe_root = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));
@@ -162,8 +188,8 @@ mod tests {
     fn env_root_wins_over_exe_root_when_both_resolve() {
         let env_dir = tempfile::tempdir().unwrap();
         let exe_dir = tempfile::tempdir().unwrap();
-        write_stub_bundle(env_dir.path(), LBUG_EXTENSION_VERSION, "linux_amd64");
-        write_stub_bundle(exe_dir.path(), LBUG_EXTENSION_VERSION, "linux_amd64");
+        write_stub_bundle(env_dir.path(), extension_version(), "linux_amd64");
+        write_stub_bundle(exe_dir.path(), extension_version(), "linux_amd64");
 
         let resolved =
             resolve_from(Some(env_dir.path()), Some(exe_dir.path()), "linux_amd64").unwrap();
@@ -173,7 +199,7 @@ mod tests {
     #[test]
     fn exe_root_resolves_when_env_root_absent() {
         let exe_dir = tempfile::tempdir().unwrap();
-        write_stub_bundle(exe_dir.path(), LBUG_EXTENSION_VERSION, "linux_amd64");
+        write_stub_bundle(exe_dir.path(), extension_version(), "linux_amd64");
 
         let resolved = resolve_from(None, Some(exe_dir.path()), "linux_amd64").unwrap();
         assert_eq!(resolved, Some(exe_dir.path().to_path_buf()));
@@ -193,7 +219,7 @@ mod tests {
             .path()
             .join(".lbdb")
             .join("extension")
-            .join(LBUG_EXTENSION_VERSION)
+            .join(extension_version())
             .join("linux_amd64");
         let vector_dir = versioned_dir.join("vector");
         fs::create_dir_all(&vector_dir).unwrap();
@@ -243,5 +269,15 @@ mod tests {
              LBUG_CRATE_VERSION_VERIFIED_AGAINST to the new lbug::VERSION to record that you did. \
              See ADR-0559."
         );
+    }
+
+    /// A stray trailing newline in the repo-root `LBUG_EXTENSION_VERSION` file (e.g. a routine
+    /// editor auto-newline) must not change what directory name resolution looks for — otherwise
+    /// `check_candidate` would search for a directory literally named `"0.18.1\n"`, never find
+    /// it, and silently fall through to the network-downloading default.
+    #[test]
+    fn extension_version_is_trimmed_even_with_a_trailing_newline() {
+        assert_eq!(extension_version(), LBUG_EXTENSION_VERSION.trim());
+        assert!(!extension_version().contains('\n'));
     }
 }
