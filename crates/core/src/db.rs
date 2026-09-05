@@ -103,6 +103,54 @@ pub struct Conn<'db> {
 /// must not wedge every other open.
 static OPEN_LOCK: Mutex<()> = Mutex::new(());
 
+/// Escapes a path for interpolation into `CALL home_directory='<path>'` (issue #559).
+///
+/// This is a deliberate, narrow exception to ADR-0024's bound-parameter convention, not a
+/// reversion of it: lbug's `CALL name='literal'` pragma syntax for global settings does not
+/// accept bound parameters at all (confirmed empirically — `CALL home_directory=$home` fails to
+/// prepare with "PARAMETER but LITERAL was expected", and the function-call form
+/// `CALL home_directory($home)` fails with "function home_directory does not exist"), unlike
+/// the table-function `CALL FOO(...)` forms used elsewhere in this file. Reuses the exact
+/// backslash-then-quote convention ADR-0022 documented before ADR-0024 superseded it, since that
+/// is lbug's own escape sequence, verified independently of this one call site. See ADR-0559.
+fn escape_cypher_string_literal(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+#[cfg(test)]
+mod escape_cypher_string_literal_tests {
+    use super::*;
+
+    /// FR-006: a path containing a single quote (an operator-supplied `LCG_LBUG_HOME`, or an
+    /// unusual `current_exe()` install location) must not be able to break out of the
+    /// `CALL home_directory='<path>'` string literal.
+    #[test]
+    fn single_quote_does_not_break_out_of_the_string_literal() {
+        let escaped = escape_cypher_string_literal("/tmp/o'brien's extensions");
+        assert_eq!(escaped, "/tmp/o\\'brien\\'s extensions");
+        // Reassembled into the same statement shape db.rs uses, the escaped quotes must not
+        // terminate the literal early.
+        let statement = format!("CALL home_directory='{escaped}'");
+        assert_eq!(
+            statement.matches('\'').count(),
+            4,
+            "expected exactly the 2 delimiting quotes plus 2 escaped quotes, got: {statement}"
+        );
+    }
+
+    #[test]
+    fn backslash_is_escaped_before_quote_handling() {
+        let escaped = escape_cypher_string_literal(r"C:\staged\ext'ra");
+        assert_eq!(escaped, r"C:\\staged\\ext\'ra");
+    }
+
+    #[test]
+    fn plain_path_is_unchanged() {
+        let escaped = escape_cypher_string_literal("/opt/lcg/.lbdb");
+        assert_eq!(escaped, "/opt/lcg/.lbdb");
+    }
+}
+
 impl Db {
     pub fn open(path: &str) -> Result<Self, Error> {
         let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -113,6 +161,15 @@ impl Db {
         // — running them in connect() races concurrent callers. The OPEN_LOCK
         // above additionally serializes this block across Databases.
         let setup_conn = lbug::Connection::new(&inner)?;
+        // Issue #559: point lbug at a pre-staged extension bundle (release-bundled or
+        // operator-provided) before INSTALL/LOAD EXTENSION run, so those statements resolve
+        // locally instead of downloading from extension.ladybugdb.com. No-op (falls through to
+        // lbug's existing default behavior) when neither a bundle nor an override is found —
+        // see lbug_extension_home::resolve_extension_home for the precedence order.
+        if let Some(extension_home) = crate::lbug_extension_home::resolve_extension_home()? {
+            let escaped = escape_cypher_string_literal(&extension_home.to_string_lossy());
+            let _ = setup_conn.query(&format!("CALL home_directory='{escaped}'"))?;
+        }
         let _ = setup_conn.query("INSTALL vector")?;
         let _ = setup_conn.query("LOAD EXTENSION vector")?;
         let _ = setup_conn.query("INSTALL fts")?;
