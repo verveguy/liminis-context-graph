@@ -20,6 +20,7 @@ pub mod extractor;
 pub mod group_purge;
 pub mod handlers;
 pub mod ipc;
+pub(crate) mod lbug_extension_home;
 pub(crate) mod legacy_wal;
 pub mod llm_router;
 pub mod ontology;
