@@ -25,6 +25,8 @@ https://extension.ladybugdb.com/v0.18.0/linux_amd64/vector/libvector.lbug_extens
 
 **Correction to the version constraint**: the original report's constraints section was written against `lbug = "=0.18.1"` (extension directory `v0.18.0`). The workspace pin has since moved — `Cargo.toml` currently pins `lbug = "=0.20.1"` and `.cargo/config.toml` currently pins `LBUG_VERSION = "0.20.1"` to match. The general constraint still holds (the extension directory is keyed to the lbug *minor* version, not the crate's patch version, and moves whenever the pin moves) — only the concrete example values are stale. The Research stage must re-verify the exact `LBUG_EXTENSION_VERSION` directory name against the *current* pin, not assume it is still `v0.18.0` or extrapolate to `v0.20.0` without checking.
 
+**Post-Specify correction (Research stage, 2026-09-05)**: this note's own "currently pins" claim was already stale the moment it was written — `main` had rolled the pin back to `lbug = "=0.18.1"` on 2026-09-04 (issue #555, upstream `LadybugDB/ladybug#911` threading deadlock in 0.20.1), before this Specify stage ran. The pin Research and every later stage actually worked against is `0.18.1`, with `LBUG_EXTENSION_VERSION` resolving to `0.18.1` (exact match — see Research findings). This note is left as-written for the historical record of what Specify believed at the time; treat `0.18.1` as authoritative wherever this spec says `0.20.1`.
+
 ### Mechanism (from the original report, verified against the vendored lbug C++ source)
 
 `INSTALL` short-circuits when the file is already present — `src/extension/extension_installer.cpp`:

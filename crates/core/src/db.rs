@@ -167,7 +167,18 @@ impl Db {
         // lbug's existing default behavior) when neither a bundle nor an override is found —
         // see lbug_extension_home::resolve_extension_home for the precedence order.
         if let Some(extension_home) = crate::lbug_extension_home::resolve_extension_home()? {
-            let escaped = escape_cypher_string_literal(&extension_home.to_string_lossy());
+            // `to_string_lossy()` would silently replace invalid bytes, which could turn a
+            // non-UTF-8 path into a *different*, plausible-looking path that doesn't actually
+            // contain the staged bundle — pointing `home_directory` at the wrong place instead
+            // of failing loudly. The Cypher statement must be valid UTF-8 regardless, so reject
+            // up front instead of mangling.
+            let extension_home_str = extension_home.to_str().ok_or_else(|| {
+                Error::Config(format!(
+                    "resolved lbug extension home is not valid UTF-8: {}",
+                    extension_home.display()
+                ))
+            })?;
+            let escaped = escape_cypher_string_literal(extension_home_str);
             let _ = setup_conn.query(&format!("CALL home_directory='{escaped}'"))?;
         }
         let _ = setup_conn.query("INSTALL vector")?;

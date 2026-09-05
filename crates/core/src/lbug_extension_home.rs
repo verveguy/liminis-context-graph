@@ -15,9 +15,22 @@ use crate::error::Error;
 /// directory `0.19.0`, and `0.20.1`/`0.20.2` both resolved to `0.20.0` — so this must be
 /// re-verified empirically (probe a real `INSTALL vector` against the pinned version, or check
 /// `https://extension.ladybugdb.com/v<N>/...`) every time the `lbug` workspace dependency pin
-/// moves, and updated by hand. See ADR-0559 and the `extension_version_matches_lbug_crate_version`
-/// test below for the tripwire this file's staleness trips.
+/// moves, and updated by hand. See ADR-0559 and `extension_version_was_verified_against_current_lbug_pin`
+/// below for the tripwire this file's staleness trips.
 pub(crate) const LBUG_EXTENSION_VERSION: &str = include_str!("../../../LBUG_EXTENSION_VERSION");
+
+/// The `lbug` crate version [`LBUG_EXTENSION_VERSION`] was last empirically verified against —
+/// deliberately a plain Rust literal, not read from the same file, and not required to equal
+/// [`LBUG_EXTENSION_VERSION`]. Those two values often *do* differ (see the module doc above), so
+/// asserting them equal to each other (or either of them to `lbug::VERSION`) would make the
+/// FR-007 tripwire fail forever after the first pin bump onto a diverging mapping, even once a
+/// human has correctly re-verified and updated `LBUG_EXTENSION_VERSION` — permanently blocking
+/// every future lbug upgrade instead of catching only the "nobody looked" case. This constant
+/// exists solely so the tripwire test can compare it against the *live* `lbug::VERSION`: bump the
+/// `lbug` workspace pin, and this must be hand-updated to match it (independently of whatever
+/// `LBUG_EXTENSION_VERSION` ends up being set to), or the test fails.
+#[allow(dead_code)] // only read by the `#[cfg(test)]` tripwire below
+const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.18.1";
 
 const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 
@@ -206,23 +219,29 @@ mod tests {
         assert_eq!(resolved, None);
     }
 
-    /// FR-007/SC-005: fails loudly if the `lbug` crate pin moves without a matching update to
-    /// the `LBUG_EXTENSION_VERSION` file, so a future version bump cannot silently reintroduce
-    /// the CDN dependency this issue removes. Passes today because the current pin (`0.18.1`)
-    /// happens to resolve to the identically-named extension directory — see the module-level
-    /// doc comment for why that equality is not guaranteed to hold after the next bump, and why
-    /// this assertion is still the best available tripwire.
+    /// FR-007/SC-005: fails loudly if the `lbug` crate pin moves without a human re-verifying
+    /// `LBUG_EXTENSION_VERSION` against it, so a future version bump cannot silently reintroduce
+    /// the CDN dependency this issue removes. Deliberately does *not* assert
+    /// `LBUG_EXTENSION_VERSION == lbug::VERSION` — Research found that equality doesn't always
+    /// hold (a `0.19.1` pin resolved to extension directory `0.19.0`), so that assertion would
+    /// fail forever after the next diverging bump even once someone had correctly re-verified
+    /// and updated `LBUG_EXTENSION_VERSION`, permanently blocking every subsequent lbug upgrade
+    /// instead of catching only the "nobody looked" case. Comparing the crate version against
+    /// its own dedicated marker constant catches exactly that case and only that case.
     #[test]
-    fn extension_version_matches_lbug_crate_version() {
+    fn extension_version_was_verified_against_current_lbug_pin() {
         assert_eq!(
-            LBUG_EXTENSION_VERSION,
+            LBUG_CRATE_VERSION_VERIFIED_AGAINST,
             lbug::VERSION,
-            "LBUG_EXTENSION_VERSION (repo root) is out of sync with the pinned lbug crate \
-             version. If you just bumped the `lbug` workspace dependency pin, re-run the \
-             empirical probe from issue #559's Research (INSTALL vector against the new pin \
-             with an empty HOME, or check https://extension.ladybugdb.com/v<N>/...) to find the \
-             new extension-directory version — it is not always identical to the crate version \
-             — and update the LBUG_EXTENSION_VERSION file to match. See ADR-0559."
+            "LBUG_CRATE_VERSION_VERIFIED_AGAINST (crates/core/src/lbug_extension_home.rs) is out \
+             of sync with the pinned lbug crate version. If you just bumped the `lbug` workspace \
+             dependency pin, re-run the empirical probe from issue #559's Research (INSTALL \
+             vector against the new pin with an empty HOME, or check \
+             https://extension.ladybugdb.com/v<N>/...) to find the new extension-directory \
+             version — it is not always identical to the crate version — update the \
+             LBUG_EXTENSION_VERSION file (repo root) to match what you found, and update \
+             LBUG_CRATE_VERSION_VERIFIED_AGAINST to the new lbug::VERSION to record that you did. \
+             See ADR-0559."
         );
     }
 }
