@@ -67,33 +67,54 @@ keg="$(brew --prefix openssl@3 2>/dev/null || true)"
   the shipped binary resolves OpenSSL from the user's own installation."
 libdir="$keg/lib"
 
-# Deliberately NOT under target/: `dist build` manages that tree and can clear it
-# between the staging step and the link, which would leave pkg-config pointing at
-# a directory whose dylibs no longer exist. lbug 0.18.1's build.rs emits
-# `-L <pkg-config libdir>` and then `-lssl` with no fallback, so a vanished
-# staging directory does not fail loudly — the linker simply resolves -lssl
-# elsewhere and bakes in that machine's absolute path, which is the bug this
-# script exists to prevent. Kept on the same filesystem/run as the build.
-staging_dir="${LCG_OPENSSL_STAGING_DIR:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/lcg-openssl-rpath}"
+# Staged inside the workspace, at a fixed relative path, because that is the only
+# location .cargo/config.toml's [env] block can point at with `relative = true` —
+# and that block is the only way to get PKG_CONFIG_PATH to lbug's build.rs
+# reliably. Exporting it from this script is not enough: `dist build` does not
+# propagate it the way a plain `cargo build` does. Proven on a CI runner, where
+# `cargo build --target aarch64-apple-darwin` produced @rpath correctly and
+# `dist build` seconds later, same step and same environment, baked in the
+# Homebrew path (issue #550).
+#
+# NOT under target/: `dist build` manages that tree and can clear it between this
+# step and the link.
+staging_dir="${LCG_OPENSSL_STAGING_DIR:-$(pwd)/.openssl-rpath}"
 rm -rf "$staging_dir"
-mkdir -p "$staging_dir/pkgconfig"
+# A REAL OpenSSL prefix layout: $staging_dir/{lib,include}. Not a flat directory.
+# `OPENSSL_DIR` is a *prefix* to openssl-sys (0.9.116 is in our tree via
+# reqwest/native-tls), which appends `/lib` and `/include` to it and errors with
+# "OpenSSL include directory does not exist" when they are absent — the same
+# error a flat staging dir produced on Linux. A flat dir therefore leaves
+# openssl-sys to fall back to probing, which finds the Homebrew keg and its
+# absolute install_names, defeating the whole exercise even when lbug's own
+# pkg-config lookup is correct (#550).
+mkdir -p "$staging_dir/lib/pkgconfig"
+ln -sfn "$keg/include" "$staging_dir/include"
 
 for lib in libssl.3.dylib libcrypto.3.dylib; do
   [[ -f "$libdir/$lib" ]] || die "$lib not found in '$libdir'"
-  cp "$libdir/$lib" "$staging_dir/$lib"
-  chmod u+w "$staging_dir/$lib"
+  cp "$libdir/$lib" "$staging_dir/lib/$lib"
+  chmod u+w "$staging_dir/lib/$lib"
   # The install_name the *linker copies into our binary*. This is the whole point.
-  install_name_tool -id "@rpath/$lib" "$staging_dir/$lib"
+  install_name_tool -id "@rpath/$lib" "$staging_dir/lib/$lib"
+  # install_name_tool invalidates the dylib's existing code signature (it says so
+  # on stderr). An invalidly-signed dylib can be rejected by the linker, which
+  # then silently resolves -lssl elsewhere and bakes in that machine's absolute
+  # path — the exact failure this script exists to prevent, and one that shows up
+  # only on runners whose toolchain enforces it. Re-sign ad-hoc, as upstream does
+  # for the same rewrite (LadybugDB/ladybug#682).
+  codesign --force --sign - "$staging_dir/lib/$lib" 2>/dev/null ||
+    die "codesign failed for $lib — install_name_tool invalidated its signature and it could not be re-signed"
 done
 
 # -lssl / -lcrypto resolve through the unversioned symlinks.
-ln -sf libssl.3.dylib "$staging_dir/libssl.dylib"
-ln -sf libcrypto.3.dylib "$staging_dir/libcrypto.dylib"
+ln -sf libssl.3.dylib "$staging_dir/lib/libssl.dylib"
+ln -sf libcrypto.3.dylib "$staging_dir/lib/libcrypto.dylib"
 
-cat > "$staging_dir/pkgconfig/openssl.pc" <<EOF
+cat > "$staging_dir/lib/pkgconfig/openssl.pc" <<EOF
 prefix=$staging_dir
-libdir=$staging_dir
-includedir=$keg/include
+libdir=$staging_dir/lib
+includedir=$staging_dir/include
 
 Name: OpenSSL
 Description: OpenSSL dylibs staged with @rpath install names by scripts/stage-openssl-rpath.sh
@@ -108,7 +129,7 @@ EOF
 # OPENSSL_DIR first and *returns*, while its pkg-config branch falls through to
 # hardcoded Homebrew paths — putting the real keg, absolute install_names and
 # all, back on the search path. Set both, so this is correct either way.
-pkg_path="$staging_dir/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+pkg_path="$staging_dir/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 rpath_flags=""
 for root in "${RPATH_ROOTS[@]}"; do
@@ -117,7 +138,7 @@ done
 rustflags="${RUSTFLAGS:+$RUSTFLAGS}$rpath_flags"
 
 for lib in libssl.3.dylib libcrypto.3.dylib libssl.dylib libcrypto.dylib; do
-  [[ -e "$staging_dir/$lib" ]] || die "staged $lib missing from '$staging_dir' immediately after staging"
+  [[ -e "$staging_dir/lib/$lib" ]] || die "staged $lib missing from '$staging_dir/lib' immediately after staging"
 done
 
 note "staged @rpath dylibs from $libdir -> $staging_dir"

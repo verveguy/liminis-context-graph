@@ -53,6 +53,40 @@ explicitly *not* by static linking or bundling.
   The staged dylibs are a **link-time fixture only**. They are never shipped; at
   runtime the loader resolves `@rpath` against the user's own installation.
 
+  **The staging directory is `.openssl-rpath/` at the workspace root, and
+  `PKG_CONFIG_PATH` is set in `.cargo/config.toml`'s `[env]` block with
+  `relative = true` — not merely exported by the script.** This is load-bearing.
+  `dist build` does not propagate the ambient environment to build scripts the
+  way a plain `cargo build` does. On a CI runner the two were run seconds apart
+  in a single step, with `PKG_CONFIG_PATH`, `OPENSSL_DIR` and `RUSTFLAGS` all
+  verified present and `pkg-config --libs openssl` resolving to the staging
+  directory: `cargo build --target aarch64-apple-darwin` produced
+  `@rpath/libssl.3.dylib`, and `dist build` immediately after baked in
+  `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`. Cargo applies `[env]`
+  itself, so `dist` cannot drop it; `relative = true` keeps it machine-agnostic.
+  This also forces the staging directory into the workspace, since a relative
+  entry cannot reach `$RUNNER_TEMP` — but not under `target/`, which `dist`
+  manages and may clear between staging and the link.
+
+  **`force = true` on that entry is equally load-bearing.** Without it an
+  `[env]` entry is only a *default*: it applies when the variable is unset and
+  loses to any value the caller already exported. Adding the entry alone
+  therefore changed nothing. A failure-only probe settled it — in one step
+  lbug's `build.rs` emitted
+  `cargo:rustc-link-search=native=/opt/homebrew/Cellar/openssl@3/3.6.3/lib`
+  while `pkg-config --libs openssl` returned the staged directory; only a
+  differing `PKG_CONFIG_PATH` explains both. Reproduced locally, byte-identical
+  to CI, by building with a hostile ambient `PKG_CONFIG_PATH` pointing at the keg:
+
+  | `[env]` entry | lbug's build script emits | binary records |
+  | --- | --- | --- |
+  | without `force` | `-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib` | `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` |
+  | with `force = true` | `-L<workspace>/.openssl-rpath/lib` | `@rpath/libssl.3.dylib` |
+
+  The prefix layout and the forced entry are both necessary and neither is
+  sufficient: the prefix gives `openssl-sys` a valid `OPENSSL_DIR`, the forced
+  entry gives lbug's `build.rs` the right `PKG_CONFIG_PATH`.
+
 - **Linux.** Nothing to do. ELF records a SONAME (`libssl.so.3`) which `ld.so`
   resolves from the system search path, so the binary is already relocatable and
   distro security updates reach it. The staging script is a no-op there.
@@ -138,3 +172,31 @@ of this change.
   models means two failure modes, two guards, and an ADR that has to explain
   both. Linux dynamic linking also works the way the CVE argument intends,
   because distros patch `libssl.so.3`.
+
+## Amendment (2026-09-05): what 0.14.0 actually shipped
+
+`@rpath` is the decision above and is what a local `cargo build` or `dist build`
+produces. It is **not** what the release workflow produced on a GitHub runner:
+there the link resolves through `liblbug.a`'s own `LC_LINKER_OPTION` records —
+`ld` never opens the staged dylib, despite the staged prefix being the only
+`-L` any build script emits — and the binary names Homebrew's stable prefix,
+`/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`. Nine attempts did not close
+that gap; the remaining thread is those `LC_LINKER_OPTION` records. Tracked in
+[#550](https://github.com/verveguy/liminis-context-graph/issues/550).
+
+That binary is fine for the documented prerequisite. `brew install openssl@3` on
+Apple Silicon puts OpenSSL exactly there, and `/opt/homebrew/opt/openssl@3` is a
+symlink Homebrew maintains across patch upgrades, so the CVE-response property
+this ADR exists to protect still holds. What it loses is relocatability: MacPorts
+users, and anyone with Homebrew at a non-standard prefix, must build from source.
+
+`scripts/assert-openssl-linkage.sh` therefore accepts either `@rpath` or a
+package manager's *stable* prefix, and still rejects a versioned Cellar path
+such as `/opt/homebrew/Cellar/openssl@3/3.6.3/lib`, which breaks on the next
+openssl patch release even on the machine that built it.
+
+**The release was blocked for far longer than the defect warranted, by a guard
+stricter than the requirement.** The staging script and its `@rpath` machinery
+are kept — they work everywhere except this one path, and they are what #550
+will finish — but relocatability across all three prefixes is an enhancement,
+not a release blocker, and should not be treated as one again.
