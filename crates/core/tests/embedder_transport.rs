@@ -687,7 +687,7 @@ async fn uds_transport_embed_roundtrip() {
     let sock_path = dir.path().join("embed_test.sock");
     let dim = 16;
     let _server = spawn_stub_uds_server(&sock_path, dim).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
     let result = embedder.embed("hello world").await.unwrap();
     assert_eq!(result.len(), dim, "embedding dim should match stub");
 }
@@ -699,7 +699,7 @@ async fn uds_transport_probe_returns_dim_and_model() {
     let sock_path = dir.path().join("probe_test.sock");
     let dim = 32;
     let _server = spawn_stub_uds_server(&sock_path, dim).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 1);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 1).unwrap();
     let (probed_dim, probed_model) = embedder.probe().await.unwrap();
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
@@ -718,7 +718,7 @@ async fn uds_transport_connection_count_bounded() {
     let dim = 16;
     let (_server, accept_count) =
         spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     for _ in 0..20 {
         embedder.embed("hello world").await.unwrap();
@@ -753,7 +753,7 @@ async fn uds_transport_reconnects_after_restart() {
     let dim = 16;
     let (server1, _accept_count1) =
         spawn_stub_uds_keepalive_server(&sock_path, dim, std::time::Duration::ZERO).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     // Populate every pool slot with a held connection to the first server.
     for _ in 0..UDS_POOL_SIZE {
@@ -794,7 +794,7 @@ async fn uds_transport_concurrent_calls_not_fully_serialized() {
     let per_request_delay = std::time::Duration::from_millis(50);
     let (_server, _accept_count) =
         spawn_stub_uds_keepalive_server(&sock_path, dim, per_request_delay).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     let concurrent_calls = 8; // 2x pool size, so pool reuse is also exercised
     let start = std::time::Instant::now();
@@ -880,7 +880,7 @@ async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
     // OaiEmbedder::from_env() would resolve a key, but the UDS transport constructor never
     // accepts one, so there is nothing for a key to attach to.
     std::env::set_var("LCG_EMBEDDING_API_KEY", "should-never-be-used");
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
     let result = embedder.embed("hello world").await.unwrap();
     std::env::remove_var("LCG_EMBEDDING_API_KEY");
 
@@ -1041,7 +1041,7 @@ async fn uds_transport_embed_batch_roundtrip_and_order() {
     let sock_path = dir.path().join("embed_batch_test.sock");
     let dim = 4;
     let (_server, request_count) = spawn_stub_uds_batch_echo_server(&sock_path, dim).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     let texts = ["one", "two", "three"];
     let results = embedder.embed_batch(&texts).await.unwrap();
@@ -1069,7 +1069,7 @@ async fn uds_transport_embed_batch_chunks_oversized_batch() {
     let sock_path = dir.path().join("embed_batch_chunk_test.sock");
     let dim = 4;
     let (_server, request_count) = spawn_stub_uds_batch_echo_server(&sock_path, dim).await;
-    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim);
+    let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     let texts = ["a", "b", "c", "d", "e"];
     let results = embedder.embed_batch(&texts).await.unwrap();
