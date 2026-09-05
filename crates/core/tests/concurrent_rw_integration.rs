@@ -247,6 +247,27 @@ async fn spawn_stub_http_hang_server() -> std::net::SocketAddr {
     addr
 }
 
+/// UDS counterpart of `spawn_stub_http_hang_server` (#541): accepts a connection over a Unix
+/// domain socket and never reads or writes anything.
+#[cfg(unix)]
+async fn spawn_stub_uds_hang_server(path: &std::path::Path) -> tokio::task::JoinHandle<()> {
+    use tokio::net::UnixListener;
+
+    let listener = UnixListener::bind(path).unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let _stream = stream;
+                std::future::pending::<()>().await;
+            });
+        }
+    })
+}
+
 fn ipc_req(id: i64, method: &str, params: Value) -> IpcRequest {
     IpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -265,12 +286,18 @@ fn ipc_req(id: i64, method: &str, params: Value) -> IpcRequest {
 /// lock is released — so a concurrent write against a *different*, pre-existing entity on the
 /// same `AppState` is not blocked beyond that bound.
 ///
-/// No other test in this binary sets `LCG_EMBEDDING_TIMEOUT_MS`/`LCG_EMBEDDING_CONNECT_TIMEOUT_MS`
-/// (only `MockEmbedder` is used elsewhere in this file), so this test can set/clear them directly
-/// without a cross-test env-var lock — unlike `embedder_transport.rs`, which has many concurrent
-/// `OaiEmbedder::new_http` callers in the same binary. Cleanup is still RAII (`EnvVarGuard`,
-/// below), not a manual `remove_var` at the end of the test, so a panic on any assertion in
-/// between doesn't leak the override into the rest of this binary's process.
+/// This test and its UDS counterpart below
+/// (`hung_uds_embedder_on_create_path_releases_write_lock_for_concurrent_write`, #541) are the
+/// only two tests in this binary that set `LCG_EMBEDDING_TIMEOUT_MS`/
+/// `LCG_EMBEDDING_CONNECT_TIMEOUT_MS`; `EMBEDDING_TIMEOUT_ENV_LOCK` below serializes them against
+/// each other so cargo's default parallel test execution can't interleave one test's env-var
+/// cleanup with the other's read of it — unlike `embedder_transport.rs`, which has many more
+/// concurrent `OaiEmbedder` constructors in the same binary and needs a heavier-weight `RwLock`
+/// for that reason. Cleanup is still RAII (`EnvVarGuard`, below), not a manual `remove_var` at the
+/// end of the test, so a panic on any assertion in between doesn't leak the override into the
+/// rest of this binary's process.
+static EMBEDDING_TIMEOUT_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct EnvVarGuard {
     keys: &'static [&'static str],
 }
@@ -283,8 +310,13 @@ impl Drop for EnvVarGuard {
     }
 }
 
+// Held for this whole test's duration (a local binding, not a scoped block) so the two
+// env-var-setting tests in this file never interleave — see `EMBEDDING_TIMEOUT_ENV_LOCK`'s doc
+// comment above.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write() {
+    let _env_lock = EMBEDDING_TIMEOUT_ENV_LOCK.lock().unwrap();
     std::env::set_var("LCG_EMBEDDING_TIMEOUT_MS", "300");
     std::env::set_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS", "300");
     let _env_guard = EnvVarGuard {
@@ -402,6 +434,141 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
     // The decisive assertion: the update, which never touches the embedder, must complete
     // shortly after the create releases the lock (~300ms embed timeout + margin) — not after
     // some unbounded wait, which is what issue #510 describes.
+    assert!(
+        update_elapsed < std::time::Duration::from_secs(5),
+        "concurrent update took {update_elapsed:?} — write_lock was held far longer than the \
+         ~300ms embed timeout bound, suggesting it was not released promptly"
+    );
+}
+
+/// SC-003 (#541): UDS counterpart of
+/// `hung_embedder_on_create_path_releases_write_lock_for_concurrent_write` — the same
+/// write-lock-release guarantee must hold when the hung embedder is reached over the UDS
+/// transport (the *default* deployment path, per #541's issue body), not only over HTTP as #510
+/// verified.
+// See `hung_embedder_on_create_path_releases_write_lock_for_concurrent_write`'s comment on
+// `EMBEDDING_TIMEOUT_ENV_LOCK`: this is the second (and only other) test in this binary that sets
+// these env vars, and holding the lock for the whole test serializes the two against each other.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn hung_uds_embedder_on_create_path_releases_write_lock_for_concurrent_write() {
+    let _env_lock = EMBEDDING_TIMEOUT_ENV_LOCK.lock().unwrap();
+    std::env::set_var("LCG_EMBEDDING_TIMEOUT_MS", "300");
+    std::env::set_var("LCG_EMBEDDING_CONNECT_TIMEOUT_MS", "300");
+    let _env_guard = EnvVarGuard {
+        keys: &[
+            "LCG_EMBEDDING_TIMEOUT_MS",
+            "LCG_EMBEDDING_CONNECT_TIMEOUT_MS",
+        ],
+    };
+
+    let dim = 4;
+    let (db, _dir) = make_db(dim);
+    // Pre-seed an existing entity so the second, concurrent call resolves it via the update path
+    // — which never touches the embedder (issue #444) — proving the lock release rather than
+    // merely proving the hung embedder eventually times out on its own call.
+    {
+        let conn = db.connect().unwrap();
+        conn.insert_entity(&EntityRow {
+            uuid: "existing-uuid".to_string(),
+            name: "Existing Entity".to_string(),
+            group_id: "grp".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01 00:00:00".to_string(),
+            name_embedding: vec![0.0, 0.0, 0.0, 0.0],
+            summary: "seed".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    let sock_dir = TempDir::new().unwrap();
+    let sock_path = sock_dir.path().join("hang.sock");
+    let _server = spawn_stub_uds_hang_server(&sock_path).await;
+    let embedder: Arc<dyn lcg_core::Embedder> = Arc::new(
+        OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim)
+            .expect("valid embedder config"),
+    );
+    let state = make_state_with_embedder(db, embedder);
+
+    let state_create = Arc::clone(&state);
+    let create_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                1,
+                "knowledge_assert_entity",
+                json!({
+                    "name": "Brand New Entity",
+                    "group_id": "grp",
+                    "summary": "created while embedder is hung",
+                }),
+            ),
+            state_create,
+            None,
+        )
+        .await
+    });
+
+    // Give the create call a brief head start so it acquires `write_lock` first — otherwise the
+    // update below could race ahead and this test would prove nothing about lock contention.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let state_update = Arc::clone(&state);
+    let start_update = std::time::Instant::now();
+    let update_task = tokio::spawn(async move {
+        handlers::dispatch(
+            ipc_req(
+                2,
+                "knowledge_assert_entity",
+                json!({
+                    "name": "Existing Entity",
+                    "group_id": "grp",
+                    "summary": "updated concurrently with the hung create",
+                }),
+            ),
+            state_update,
+            None,
+        )
+        .await
+    });
+
+    // Neither call should ever hang indefinitely; this outer bound only guards the test itself
+    // against a true regression, not the feature's own bound.
+    let create_resp = tokio::time::timeout(std::time::Duration::from_secs(10), create_task)
+        .await
+        .expect("create call must not hang indefinitely — write_lock was not released")
+        .unwrap();
+    let update_resp = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
+        .await
+        .expect("concurrent update must not hang indefinitely — write_lock was not released")
+        .unwrap();
+    let update_elapsed = start_update.elapsed();
+
+    let create_val = serde_json::to_value(create_resp).unwrap();
+    assert!(
+        create_val.get("result").is_some(),
+        "create call should still succeed via the zero-vector embedder-unavailable fallback: \
+         {create_val}"
+    );
+    assert_eq!(create_val["result"]["created"], true);
+    assert!(
+        create_val["result"]["embedding_warning"].is_string(),
+        "expected embedding_warning to be populated by the timed-out embed call: {create_val}"
+    );
+
+    let update_val = serde_json::to_value(update_resp).unwrap();
+    assert!(
+        update_val.get("result").is_some(),
+        "concurrent update call should succeed: {update_val}"
+    );
+    assert_eq!(update_val["result"]["created"], false);
+    assert_eq!(update_val["result"]["entity_uuid"], "existing-uuid");
+
+    // The decisive assertion: the update, which never touches the embedder, must complete
+    // shortly after the create releases the lock (~300ms embed timeout + margin) — not after
+    // some unbounded wait, which is what this test (and #510's HTTP counterpart) exists to catch.
     assert!(
         update_elapsed < std::time::Duration::from_secs(5),
         "concurrent update took {update_elapsed:?} — write_lock was held far longer than the \
