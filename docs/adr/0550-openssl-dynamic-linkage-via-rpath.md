@@ -68,6 +68,25 @@ explicitly *not* by static linking or bundling.
   entry cannot reach `$RUNNER_TEMP` — but not under `target/`, which `dist`
   manages and may clear between staging and the link.
 
+  **`force = true` on that entry is equally load-bearing.** Without it an
+  `[env]` entry is only a *default*: it applies when the variable is unset and
+  loses to any value the caller already exported. Adding the entry alone
+  therefore changed nothing. A failure-only probe settled it — in one step
+  lbug's `build.rs` emitted
+  `cargo:rustc-link-search=native=/opt/homebrew/Cellar/openssl@3/3.6.3/lib`
+  while `pkg-config --libs openssl` returned the staged directory; only a
+  differing `PKG_CONFIG_PATH` explains both. Reproduced locally, byte-identical
+  to CI, by building with a hostile ambient `PKG_CONFIG_PATH` pointing at the keg:
+
+  | `[env]` entry | lbug's build script emits | binary records |
+  | --- | --- | --- |
+  | without `force` | `-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib` | `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` |
+  | with `force = true` | `-L<workspace>/.openssl-rpath/lib` | `@rpath/libssl.3.dylib` |
+
+  The prefix layout and the forced entry are both necessary and neither is
+  sufficient: the prefix gives `openssl-sys` a valid `OPENSSL_DIR`, the forced
+  entry gives lbug's `build.rs` the right `PKG_CONFIG_PATH`.
+
 - **Linux.** Nothing to do. ELF records a SONAME (`libssl.so.3`) which `ld.so`
   resolves from the system search path, so the binary is already relocatable and
   distro security updates reach it. The staging script is a no-op there.
