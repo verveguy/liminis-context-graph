@@ -20,28 +20,50 @@ mod common;
 use common::{binary_path, McpClient};
 
 /// Reserves an OS-assigned port and immediately releases it — nothing ever listens there unless
-/// a caller separately (re)binds it, so every connection attempt gets "connection refused"
-/// rather than a slow timeout. Used both for "never reachable" tests and as the pre-reserved
-/// port [`spawn_stub_embedder_after_delay`] rebinds later.
-fn reserve_unused_port() -> u16 {
+/// a caller separately (re)binds it. **This is a hint only, not a guarantee**: between the
+/// release and any later rebind, any other process on the machine can take the same port
+/// (TOCTOU). That race is accepted by design here — these callers need "nothing is listening" so
+/// every connection attempt gets "connection refused" rather than a slow timeout, and holding a
+/// live listener without ever accepting would turn that into "connection accepted then stalled,"
+/// changing the behavior under test. Used by the "never reachable" tests and as the pre-reserved
+/// port [`spawn_stub_embedder_after_delay`] rebinds later. Contrast with
+/// [`bind_ephemeral_listener`], which returns a live, held `TcpListener` with no such race.
+fn reserve_ephemeral_port_hint() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
 }
 
+/// Binds an OS-assigned ephemeral port and returns the live, held `TcpListener` together with
+/// its port number — race-free by construction, since the port is never released and reacquired
+/// by number. The caller must move the returned listener directly into whatever will accept
+/// connections on it. Contrast with [`reserve_ephemeral_port_hint`], which releases the port and
+/// carries an accepted TOCTOU race.
+fn bind_ephemeral_listener() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
 /// Spawns a stub OpenAI-compatible embedder that starts accepting connections only after
 /// `delay` — simulating the sidecar/lcg simultaneous-launch race issue #499's retry loop
-/// targets. The port is reserved up front (via [`reserve_unused_port`]) so the caller can build
-/// a URL before the delay elapses; every connection attempt before the delayed rebind gets
-/// "connection refused", exactly like a sidecar process that hasn't started listening yet.
+/// targets. The port is reserved up front (via [`reserve_ephemeral_port_hint`]) so the caller can
+/// build a URL before the delay elapses; every connection attempt before the delayed rebind gets
+/// "connection refused", exactly like a sidecar process that hasn't started listening yet. If
+/// something else takes the reserved port during the delay, the delayed bind fails loudly
+/// (rather than silently) so the failure is attributable to a lost port race, not to
+/// embedder-reachability logic.
 fn spawn_stub_embedder_after_delay(delay: Duration) -> u16 {
     use std::io::{Read, Write};
 
-    let port = reserve_unused_port();
+    let port = reserve_ephemeral_port_hint();
     std::thread::spawn(move || {
         std::thread::sleep(delay);
-        let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
-            return;
-        };
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|e| {
+            panic!(
+                "spawn_stub_embedder_after_delay: failed to bind reserved port {port} after \
+                 {delay:?} delay — likely lost a port race: {e}"
+            )
+        });
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
             // The request must be read before writing a response — mirrors
@@ -72,12 +94,13 @@ fn spawn_stub_embedder_after_delay(delay: Duration) -> u16 {
 /// produces. This is the exact failure shape the per-attempt `tokio::time::timeout` around
 /// `resolve_and_probe_embedder` (`main.rs`) exists to bound: neither transport client configures
 /// its own request timeout, so without that wrapper a single stalled attempt could hang
-/// indefinitely rather than failing within `EMBEDDER_RETRY_CEILING`.
+/// indefinitely rather than failing within `EMBEDDER_RETRY_CEILING`. Acquires its socket via
+/// [`bind_ephemeral_listener`] and moves the live listener directly into the spawned thread —
+/// never releases and rebinds a port number, so it cannot race another process for the port.
 fn spawn_stub_embedder_that_hangs() -> u16 {
     use std::io::Read;
 
-    let port = reserve_unused_port();
-    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let (listener, port) = bind_ephemeral_listener();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut s) = stream else { break };
@@ -126,7 +149,7 @@ fn base_cmd(dir: &TempDir, embedder_url: &str, mcp_stdio: bool) -> Command {
 #[test]
 fn mcp_stdio_degrades_when_embedder_never_reachable() {
     let dir = TempDir::new().unwrap();
-    let port = reserve_unused_port();
+    let port = reserve_ephemeral_port_hint();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
     let cmd = base_cmd(&dir, &url, true);
@@ -200,7 +223,7 @@ fn mcp_stdio_recovers_when_embedder_becomes_reachable_mid_retry() {
 #[test]
 fn socket_mode_still_fails_fast_on_unreachable_embedder() {
     let dir = TempDir::new().unwrap();
-    let port = reserve_unused_port();
+    let port = reserve_ephemeral_port_hint();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
     let mut cmd = base_cmd(&dir, &url, false);
@@ -270,7 +293,7 @@ fn mcp_stdio_degrades_when_embedder_accepts_but_never_responds() {
 #[test]
 fn knowledge_recover_rejected_while_embedder_unreachable_degraded() {
     let dir = TempDir::new().unwrap();
-    let port = reserve_unused_port();
+    let port = reserve_ephemeral_port_hint();
     let url = format!("http://127.0.0.1:{port}/v1/embeddings");
 
     let cmd = base_cmd(&dir, &url, true);
