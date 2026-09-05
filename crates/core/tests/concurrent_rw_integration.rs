@@ -256,14 +256,14 @@ fn ipc_req(id: i64, method: &str, params: Value) -> IpcRequest {
     }
 }
 
-/// Acceptance Scenario 1 / SC-001: `handle_assert_entity`'s create path calls `embed()` while
-/// holding `state.write_lock` (issue #487). Before #510's fix, an embedder that accepts a
-/// connection and never responds would hold that lock forever, wedging every other write on the
-/// instance. With the fix, the embed call fails within the configured timeout, the create
-/// falls back to a zero-vector embedding (existing embedder-unavailable behavior — the overall
-/// `knowledge_assert_entity` call still succeeds, with `embedding_warning` populated), and the
-/// lock is released — so a concurrent write against a *different*, pre-existing entity on the
-/// same `AppState` is not blocked beyond that bound.
+/// Acceptance Scenario 1 / SC-001: originally (#487) `handle_assert_entity`'s create path called
+/// `embed()` while holding `state.write_lock`, so an embedder that accepts a connection and
+/// never responds would hold that lock until the embed's configured timeout fired (#510) —
+/// bounding, but not eliminating, the stall. Issue #543 removed the hold entirely: the create
+/// path never holds `write_lock` across the embedder round trip at all (it re-acquires the lock
+/// and re-resolves immediately before the insert instead), so a concurrent write against a
+/// *different*, pre-existing entity on the same `AppState` now completes essentially immediately
+/// — not merely "within the ~300ms embed timeout bound" as it did pre-#543.
 ///
 /// No other test in this binary sets `LCG_EMBEDDING_TIMEOUT_MS`/`LCG_EMBEDDING_CONNECT_TIMEOUT_MS`
 /// (only `MockEmbedder` is used elsewhere in this file), so this test can set/clear them directly
@@ -367,17 +367,24 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
         .await
     });
 
+    // Await the concurrent update *first* and measure its elapsed time immediately — both tasks
+    // run independently in the background regardless of await order, but awaiting `create_task`
+    // first (which, post-#543, spends ~600ms sequentially timing out both the name and summary
+    // embeds) before measuring `update_elapsed` would fold that unrelated wait into the
+    // measurement and defeat the point of this assertion, even though the update itself finished
+    // long before the create call did.
+    let update_resp = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
+        .await
+        .expect("concurrent update must not hang indefinitely — write_lock was not released")
+        .unwrap();
+    let update_elapsed = start_update.elapsed();
+
     // Neither call should ever hang indefinitely; this outer bound only guards the test itself
     // against a true regression (the whole point being disproven), not the feature's own bound.
     let create_resp = tokio::time::timeout(std::time::Duration::from_secs(10), create_task)
         .await
         .expect("create call must not hang indefinitely — write_lock was not released")
         .unwrap();
-    let update_resp = tokio::time::timeout(std::time::Duration::from_secs(10), update_task)
-        .await
-        .expect("concurrent update must not hang indefinitely — write_lock was not released")
-        .unwrap();
-    let update_elapsed = start_update.elapsed();
 
     let create_val = serde_json::to_value(create_resp).unwrap();
     assert!(
@@ -399,12 +406,14 @@ async fn hung_embedder_on_create_path_releases_write_lock_for_concurrent_write()
     assert_eq!(update_val["result"]["created"], false);
     assert_eq!(update_val["result"]["entity_uuid"], "existing-uuid");
 
-    // The decisive assertion: the update, which never touches the embedder, must complete
-    // shortly after the create releases the lock (~300ms embed timeout + margin) — not after
-    // some unbounded wait, which is what issue #510 describes.
+    // The decisive assertion (tightened by issue #543): since the create path no longer holds
+    // `write_lock` across the embed call at all, the concurrent update must complete well before
+    // the hung embedder's ~300ms timeout even fires — not merely "bounded by" it, which was the
+    // best pre-#543 code could promise.
     assert!(
-        update_elapsed < std::time::Duration::from_secs(5),
-        "concurrent update took {update_elapsed:?} — write_lock was held far longer than the \
-         ~300ms embed timeout bound, suggesting it was not released promptly"
+        update_elapsed < std::time::Duration::from_millis(250),
+        "concurrent update took {update_elapsed:?} — expected it to complete before the hung \
+         embedder's ~300ms timeout fires at all, since write_lock is never held across the \
+         embed call after issue #543"
     );
 }
