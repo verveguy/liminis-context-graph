@@ -145,6 +145,48 @@ jobs:
       - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
+      # Issue #559 / ADR-0559: this is now the ONLY place in the whole CI run permitted to
+      # touch extension.ladybugdb.com, and only on a cache miss keyed by the
+      # LBUG_EXTENSION_VERSION file's content (not Cargo.lock — that file is the single
+      # source of truth Db::open's resolve_extension_home() also reads). It replaces the
+      # old per-job `~/.lbdb` cache-or-download pattern (issue #555) that every one of the 7
+      # downstream jobs used to run independently: `test` and all 6 e2e jobs below now only
+      # download this job's staged bundle as an artifact and point Db::open at it via
+      # LCG_LBUG_HOME (FR-001 tier 1) — they never call INSTALL against the network
+      # themselves, cache hit or miss. linux_amd64 only: every downstream job here runs on
+      # ubuntu-latest.
+      - name: Get lbug extension version for cache key
+        id: lbug-ext-version
+        run: echo "version=$(cat LBUG_EXTENSION_VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore lbug extension bundle from cache
+        id: lbug-ext-cache
+        uses: actions/cache/restore@v6
+        with:
+          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}
+          path: lbug-extension-bundle
+
+      - name: Stage lbug vector/fts extensions (linux_amd64)
+        if: steps.lbug-ext-cache.outputs.cache-hit != 'true'
+        run: bash scripts/stage-lbug-extensions.sh linux_amd64 lbug-extension-bundle
+
+      - name: Save lbug extension bundle to cache
+        if: always() && steps.lbug-ext-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}
+          path: lbug-extension-bundle
+
+      # Short retention, same rationale as the e2e-artifacts/release-build uploads below:
+      # consumed only by sibling jobs in this same run.
+      - name: Upload lbug extension bundle (same-run artifact)
+        uses: actions/upload-artifact@v7
+        with:
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle/
+          retention-days: 1
+          if-no-files-found: error
+
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Get rustc version for cache key
@@ -345,41 +387,26 @@ jobs:
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
       # assert that was actually true.
-      # lbug's `INSTALL vector` / `INSTALL fts` download extension artifacts from
-      # extension.ladybugdb.com into ~/.lbdb/extension/<version>/<platform>/, and
-      # Db::open performs that download *while holding a process-global OPEN_LOCK*
-      # (crates/core/src/db.rs) with no timeout. On a fresh runner every test that
-      # opens a database therefore queues behind one network fetch; if that fetch
-      # stalls, the whole suite hangs until the job is cancelled. That is issue #555 —
-      # it blocked several merges before the cause was found, and it never reproduced
-      # locally precisely because a developer machine already has this directory
-      # populated. Caching it removes the download from the common path.
-      #
-      # Keyed on the lbug version because artifacts are published per *minor*
-      # (v0.20.0 serves 0.20.x; v0.20.1/v0.20.2 return 404), so the contents change
-      # only when that pin moves. Restore-only would be pointless here — the first
-      # run on a new key must save what it fetched.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # lbug's `INSTALL vector` / `INSTALL fts` would otherwise download extension
+      # artifacts from extension.ladybugdb.com the first time any test opens a database,
+      # *while holding a process-global OPEN_LOCK* (crates/core/src/db.rs) with no
+      # timeout — every test that opens a database queues behind one network fetch, and a
+      # stalled fetch hangs the whole suite until the job is cancelled. That was issue
+      # #555's original diagnosis (the caching workaround it produced is what this step
+      # replaces). Issue #559 / ADR-0559 removes the network dependency entirely instead
+      # of just caching around it: this downloads build-release's pre-staged bundle and
+      # points Db::open at it via LCG_LBUG_HOME (FR-001 tier 1), so no job here ever
+      # reaches the CDN, cache hit or miss.
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: cargo test --release (restored build; captured for recompile-regression check)
+        env:
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: cargo test --release 2>&1 | tee /tmp/build.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
@@ -516,32 +543,21 @@ jobs:
       # to this same binary. RUST_TEST_THREADS=4 replicates .cargo/config.toml's
       # workspace-wide `[env]` setting, which only applies when cargo itself spawns the
       # process — invoking the binary directly bypasses that, so it's set explicitly here.
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -583,32 +599,21 @@ jobs:
       - name: Mark binaries executable
         run: chmod +x target/release/liminis-context-graph target/release/e2e-artifacts/*
 
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: wal_root_migration -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/wal_root_migration --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -644,32 +649,21 @@ jobs:
       # MCP read-path e2e suite (#234): seeds a workspace from the same golden real-corpus WAL
       # fixture consumed by real_corpus_e2e above, then spawns the real compiled binary over
       # MCP-over-stdio against it.
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: mcp_real_corpus_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/mcp_real_corpus_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -705,32 +699,21 @@ jobs:
       # MCP write/mutation-path e2e suite (#235): the sibling of mcp_real_corpus_e2e above,
       # covering the mutation surface (deletes, merges/corrections, entity/relation retyping,
       # ingest into the pre-populated graph, knowledge_clear_all).
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: mcp_real_corpus_mutation_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/mcp_real_corpus_mutation_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -766,32 +749,21 @@ jobs:
       # MCP admin/lifecycle e2e suite, data-plane half (#236): dump→rebuild round-trips
       # (including group_id scoping), full rebuild with progress notifications, checkpoint
       # coherence, and index rebuild on an index-less graph.
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: mcp_real_corpus_admin_data_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_data_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
@@ -828,32 +800,21 @@ jobs:
       # recovery (ADR-0009, the direct regression guard for #207), knowledge_close checkpoint
       # semantics (ADR-0017) and attached-mode --allow-remote-close gating, and admin-scope
       # tool-visibility gating.
-      # See the note in the `test` job: Db::open downloads lbug extensions inside a
-      # process-global lock with no timeout (issue #555). Cache them so a stalled
-      # fetch cannot hang the job.
-      - name: Restore lbug extension downloads (~/.lbdb)
-        id: lbdb-cache
-        uses: actions/cache/restore@v6
+      # Issue #559 / ADR-0559: Db::open no longer needs to reach
+      # extension.ladybugdb.com here at all (see the note in the `test` job for the
+      # original issue #555 diagnosis this replaces) — download build-release's
+      # pre-staged bundle and point Db::open at it via LCG_LBUG_HOME (FR-001 tier 1).
+      - name: Download lbug extension bundle (from build-release)
+        uses: actions/download-artifact@v8
         with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
+          name: lbug-extension-bundle
+          path: lbug-extension-bundle
 
       - name: mcp_real_corpus_admin_lifecycle_e2e -- --ignored
         env:
           RUST_TEST_THREADS: "4"
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: ./target/release/e2e-artifacts/mcp_real_corpus_admin_lifecycle_e2e --ignored 2>&1 | tee /tmp/e2e-run.log
-
-      # Saved with `if: always()` on purpose. actions/cache's own post-step does
-      # not run when the job fails — so a job that fails *because* the download
-      # was slow could never populate the cache that would prevent it, and the
-      # first failure would repeat forever. Saving unconditionally breaks that
-      # cycle: one run pays the download, every later run hits.
-      - name: Save lbug extension downloads (~/.lbdb)
-        if: always() && steps.lbdb-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          key: lbdb-extensions-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          path: ~/.lbdb/extension
 
       # #341/FR-006: same guard `test` uses, applied here because `ubuntu-latest` ships a
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
