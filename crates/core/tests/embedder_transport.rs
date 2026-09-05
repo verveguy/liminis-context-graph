@@ -1413,8 +1413,12 @@ async fn uds_transport_pool_exhaustion_times_out_on_acquire() {
     let err = embedder.embed("hello world").await.unwrap_err();
     let elapsed = start.elapsed();
 
+    // Deliberately tighter than the usual 5s test-suite margin: the 5000ms request timeout
+    // configured above is close enough to a 5s bound that a regression which fell through to
+    // waiting on the request timeout instead of the 300ms connect timeout could flakily pass.
+    // 2s comfortably clears the 300ms bound while reliably catching that failure mode.
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
+        elapsed < std::time::Duration::from_secs(2),
         "expected the 300ms connect timeout to bound pool-slot acquisition, took {elapsed:?}"
     );
     assert!(
