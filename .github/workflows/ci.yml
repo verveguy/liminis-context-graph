@@ -167,11 +167,21 @@ jobs:
           path: lbug-extension-bundle
 
       - name: Stage lbug vector/fts extensions (linux_amd64)
+        id: lbug-ext-stage
         if: steps.lbug-ext-cache.outputs.cache-hit != 'true'
         run: bash scripts/stage-lbug-extensions.sh linux_amd64 lbug-extension-bundle
 
+      # Deliberately NOT `if: always()`, unlike the `~/.lbdb` caches this replaced (see their
+      # own comment below): those saved unconditionally because the *download itself* had
+      # already fully succeeded by the point of save, even if a later, unrelated step in the
+      # same job then failed. Here the staging step immediately above is what can fail
+      # partway — stage-lbug-extensions.sh's loop can download `vector` successfully and then
+      # `die` on `fts`, leaving a half-populated `lbug-extension-bundle/` — and saving that
+      # unconditionally would cache-poison every future run sharing this key (cache-hit skips
+      # re-staging), handing every downstream job a partial bundle indefinitely. Save only on
+      # the staging step's own success.
       - name: Save lbug extension bundle to cache
-        if: always() && steps.lbug-ext-cache.outputs.cache-hit != 'true'
+        if: steps.lbug-ext-cache.outputs.cache-hit != 'true' && steps.lbug-ext-stage.outcome == 'success'
         uses: actions/cache/save@v6
         with:
           key: lbug-extension-bundle-linux_amd64-${{ steps.lbug-ext-version.outputs.version }}
