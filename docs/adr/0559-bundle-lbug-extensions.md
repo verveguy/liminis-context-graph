@@ -87,10 +87,20 @@ one place this value lives — read by `crates/core/src/lbug_extension_home.rs` 
 `include_str!`, and by `scripts/stage-lbug-extensions.sh` via `cat`. Two independently-maintained
 copies (one in Rust, one in shell/YAML) would only need to go stale in *one* place to silently
 reintroduce the CDN dependency this issue removes — exactly the failure mode this design exists
-to prevent, one layer down. A unit test (`extension_version_matches_lbug_crate_version`) asserts
-this file's content equals `lbug::VERSION`; it fails loudly if a pin bump doesn't update the
-file, but — because the mapping isn't always exact-match — it cannot verify the *new* value is
-correct, only that someone looked. That residual gap is inherent and accepted.
+to prevent, one layer down.
+
+The staleness tripwire does **not** assert `LBUG_EXTENSION_VERSION == lbug::VERSION` — that
+equality doesn't always hold (see above), so it would fail forever after the first diverging
+pin bump, even once a human had correctly re-verified and updated `LBUG_EXTENSION_VERSION`,
+permanently blocking every subsequent lbug upgrade instead of catching only the "nobody looked"
+case. Instead, a dedicated marker constant, `LBUG_CRATE_VERSION_VERIFIED_AGAINST` (a plain Rust
+literal, deliberately not read from the version file), records the `lbug` crate version the
+current `LBUG_EXTENSION_VERSION` was last empirically verified against. The unit test
+`extension_version_was_verified_against_current_lbug_pin` asserts that constant equals the live
+`lbug::VERSION`; it fails loudly if the crate pin moves without a human re-running the probe and
+updating both `LBUG_EXTENSION_VERSION` and `LBUG_CRATE_VERSION_VERIFIED_AGAINST` — but, because
+the mapping isn't always exact-match, it cannot verify the *new* value is correct, only that
+someone looked. That residual gap is inherent and accepted.
 
 ### A deliberate, narrow exception to ADR-0024's bound-parameter convention
 
