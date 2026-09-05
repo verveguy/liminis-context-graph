@@ -182,16 +182,6 @@ jobs:
       # `dist build`, only under a plain `cargo build` (#550).
       - name: "Stage @rpath OpenSSL so the binary names no machine-specific path"
         run: "bash scripts/stage-openssl-rpath.sh"
-      # TEMPORARY (#550): -Wl,-t makes ld print every file it actually opens, so
-      # the log names the libssl it resolved instead of leaving it to inference.
-      # On the runner, dist build records the Homebrew keg while the only -L any
-      # build script emits is the staged prefix, and a hand-run
-      # `cargo build --profile dist --target <same>` in the same job links
-      # @rpath correctly. Local `dist build` is also correct, so this is
-      # runner-specific. Trace it rather than guess a sixth time.
-      - name: "Trace which libssl the linker opens (macOS)"
-        if: runner.os == 'macOS'
-        run: echo "RUSTFLAGS=$RUSTFLAGS -C link-arg=-Wl,-t" >> "$GITHUB_ENV"
       - name: Build artifacts
         run: |
           # Actually do builds and make zips and whatnot

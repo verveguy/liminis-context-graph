@@ -56,7 +56,7 @@ breaking API change — read Upgrading.** Full detail: [docs/releases/0.14.0.md]
 - WAL rebuild reports its own backfill outcome separately (#491)
 - Ontology drift clears are no longer overwritten by a stale insert (#495)
 - Cross-group episode deletes attributed to the right WAL stream (#402)
-- Release binaries carry no dynamic OpenSSL dependency
+- OpenSSL 3 is now required at runtime: `brew install openssl@3` (macOS), `apt install libssl3` (Linux)
 - Forward-ported from 0.13.4: #410 and #451 (#494)
 
 ### Internal

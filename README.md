@@ -61,10 +61,10 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 
 > **OpenSSL 3 is required at runtime.** lcg links it dynamically so your package manager's security updates reach it — we do not bundle it, and neither does LadybugDB upstream ([ladybug#681](https://github.com/LadybugDB/ladybug/issues/681)). Most systems already have it.
 >
-> - **macOS:** `brew install openssl@3` (Homebrew, Apple Silicon or Intel) or `sudo port install openssl3` (MacPorts).
+> - **macOS:** `brew install openssl@3`. The published Apple Silicon binary resolves OpenSSL at Homebrew's prefix (`/opt/homebrew/opt/openssl@3/lib`), so **Homebrew specifically** is required — a MacPorts install at `/opt/local` will not satisfy it. Building from source works with either.
 > - **Debian/Ubuntu:** `apt install libssl3` — normally present already.
 >
-> If it is missing, the binary fails at launch with `Library not loaded: @rpath/libssl.3.dylib` (macOS) or `error while loading shared libraries: libssl.so.3` (Linux). See [Troubleshooting](#troubleshooting). Design rationale: [ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md).
+> If it is missing, the binary fails at launch with `Library not loaded: /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` (macOS) or `error while loading shared libraries: libssl.so.3` (Linux). See [Troubleshooting](#troubleshooting). Design rationale: [ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md).
 
 > **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://v3rv.com/liminis-context-graph/configuration#embedder-sidecar).
 
@@ -136,7 +136,7 @@ See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) fo
 
 ## Troubleshooting
 
-### `Library not loaded: @rpath/libssl.3.dylib` (macOS)
+### `Library not loaded: /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` (macOS)
 
 ### `error while loading shared libraries: libssl.so.3` (Linux)
 
@@ -148,20 +148,25 @@ matching position. Both errors mean OpenSSL 3 is not installed where the binary
 looks for it.
 
 ```sh
-# macOS, Homebrew (Apple Silicon or Intel)
+# macOS — Homebrew, required for the published Apple Silicon binary
 brew install openssl@3
-
-# macOS, MacPorts
-sudo port install openssl3
 
 # Debian / Ubuntu
 sudo apt install libssl3
 ```
 
-On macOS the binary searches, in order:
-`/opt/homebrew/opt/openssl@3/lib`, `/usr/local/opt/openssl@3/lib`, `/opt/local/lib`.
-Check what it actually resolves with `otool -L $(which liminis-context-graph)` —
-the OpenSSL entries should read `@rpath/libssl.3.dylib`, never an absolute path.
+Check what the binary actually wants with
+`otool -L $(which liminis-context-graph)`. The published Apple Silicon binary
+names Homebrew's stable prefix, `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`
+— that path is a symlink Homebrew maintains across `openssl@3` patch upgrades,
+so it keeps working as OpenSSL is updated.
+
+**MacPorts, or Homebrew somewhere non-standard?** The published binary will not
+find OpenSSL there. Either symlink it into place, or build from source
+(`cargo install --path crates/service`), which links against whatever your
+package manager provides. Making the published binary relocatable across all
+three prefixes is tracked in
+[#550](https://github.com/verveguy/liminis-context-graph/issues/550).
 
 This surfaces most confusingly under an MCP client, which usually reports only
 "server failed to start" and discards the underlying dyld message. If an MCP

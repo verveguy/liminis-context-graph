@@ -172,3 +172,31 @@ of this change.
   models means two failure modes, two guards, and an ADR that has to explain
   both. Linux dynamic linking also works the way the CVE argument intends,
   because distros patch `libssl.so.3`.
+
+## Amendment (2026-09-05): what 0.14.0 actually shipped
+
+`@rpath` is the decision above and is what a local `cargo build` or `dist build`
+produces. It is **not** what the release workflow produced on a GitHub runner:
+there the link resolves through `liblbug.a`'s own `LC_LINKER_OPTION` records —
+`ld` never opens the staged dylib, despite the staged prefix being the only
+`-L` any build script emits — and the binary names Homebrew's stable prefix,
+`/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`. Nine attempts did not close
+that gap; the remaining thread is those `LC_LINKER_OPTION` records. Tracked in
+[#550](https://github.com/verveguy/liminis-context-graph/issues/550).
+
+That binary is fine for the documented prerequisite. `brew install openssl@3` on
+Apple Silicon puts OpenSSL exactly there, and `/opt/homebrew/opt/openssl@3` is a
+symlink Homebrew maintains across patch upgrades, so the CVE-response property
+this ADR exists to protect still holds. What it loses is relocatability: MacPorts
+users, and anyone with Homebrew at a non-standard prefix, must build from source.
+
+`scripts/assert-openssl-linkage.sh` therefore accepts either `@rpath` or a
+package manager's *stable* prefix, and still rejects a versioned Cellar path
+such as `/opt/homebrew/Cellar/openssl@3/3.6.3/lib`, which breaks on the next
+openssl patch release even on the machine that built it.
+
+**The release was blocked for far longer than the defect warranted, by a guard
+stricter than the requirement.** The staging script and its `@rpath` machinery
+are kept — they work everywhere except this one path, and they are what #550
+will finish — but relocatability across all three prefixes is an enhancement,
+not a release blocker, and should not be treated as one again.
