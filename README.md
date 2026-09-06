@@ -138,16 +138,16 @@ See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) fo
 
 ### Offline / air-gapped startup
 
-Every `Db::open` runs `INSTALL vector` / `INSTALL fts`. On a machine that has never run lcg
-before, lbug would otherwise download those extensions from `extension.ladybugdb.com` at
-startup — a problem on an air-gapped host, behind an egress-restricted proxy, or during a CDN
-outage. The published release archive bundles both extension binaries for its target platform,
-so a fresh install never needs that download:
+On a machine that has never run lcg before, `Db::open` would otherwise run `INSTALL vector` /
+`INSTALL fts`, which lbug resolves by downloading those extensions from
+`extension.ladybugdb.com` — a problem on an air-gapped host, behind an egress-restricted proxy,
+or during a CDN outage. The published release archive bundles both extension binaries for its
+target platform, so a fresh install never needs that download:
 
 - **Default (bundled)**: the release archive ships a `.lbdb/extension/<version>/<platform>/`
   directory alongside the binary. `Db::open` finds it automatically (resolved relative to the
-  running executable's own location) and points lbug at it before `INSTALL` runs — no network
-  call, no configuration needed.
+  running executable's own location) and loads each extension directly by its absolute path
+  (`LOAD EXTENSION '<path>'`) — no `INSTALL`, no network call, no configuration needed.
 - **`LCG_LBUG_HOME`**: set this environment variable to a directory containing your own
   `.lbdb/extension/<version>/<platform>/{vector,fts}/lib{vector,fts}.lbug_extension` tree to
   override the bundled location — useful for a custom packaging layout, a shared read-only
@@ -156,7 +156,7 @@ so a fresh install never needs that download:
 - **Neither available**: if `LCG_LBUG_HOME` is unset and no bundled directory is found relative
   to the running executable (e.g. running from a `cargo build` dev binary, or a release archive
   that wasn't extracted intact), behavior is unchanged from before this feature: lbug installs
-  the extensions via its own default download path, which requires network access to
+  the extensions via its own default `INSTALL`/download path, which requires network access to
   `extension.ladybugdb.com` on first use.
 
 A partial bundle or override directory (one of the two extension files present, the other

@@ -10,19 +10,23 @@
 #               platform_string(), which must stay in lockstep with this script).
 #   <dest-dir>  directory to stage into. This script creates
 #               <dest-dir>/.lbdb/extension/<LBUG_EXTENSION_VERSION>/<platform>/{vector,fts}/ —
-#               the exact layout Db::open's resolve_extension_home() (crates/core) looks for,
+#               the exact layout Db::open's resolve_extension_files() (crates/core) looks for,
 #               and the layout cargo-dist's `include` packages into each release archive.
 #
 # WHY THIS EXISTS
 #
-# Every Db::open runs INSTALL vector / INSTALL fts, which lbug resolves by checking
-# <home_directory>/.lbdb/extension/<version>/<platform>/<name>/lib<name>.lbug_extension and
-# only downloading from the CDN if that file is absent. Pre-staging the file at a location
-# Db::open then points `home_directory` at (LCG_LBUG_HOME, or a directory derived from the
-# running binary's own path) means the download never happens. This script is the one place
-# that performs the download — at release-build or CI-build time, not at a user's startup —
-# shared by .github/build-setup.yml (per-target release packaging) and ci.yml's build-release
-# job (a single linux_amd64 fetch, cached and reused by every other CI job via LCG_LBUG_HOME).
+# Without a pre-staged bundle, Db::open runs INSTALL vector / INSTALL fts, which lbug resolves
+# by checking <home_directory>/.lbdb/extension/<version>/<platform>/<name>/lib<name>.lbug_extension
+# and downloading from the CDN if that file is absent. This script pre-stages the file at a
+# location Db::open then finds (LCG_LBUG_HOME, or a directory derived from the running binary's
+# own path) and loads directly via LOAD EXTENSION '<absolute path>', bypassing INSTALL (and
+# home_directory) entirely — an earlier version of this mechanism instead redirected
+# home_directory before letting INSTALL/LOAD EXTENSION resolve locally, but that was abandoned
+# after it was found to cause silent row loss in an unrelated query path (see ADR-0559). Either
+# way, this script is the one place that performs the download — at release-build or CI-build
+# time, not at a user's startup — shared by .github/build-setup.yml (per-target release
+# packaging) and ci.yml's build-release job (a single linux_amd64 fetch, cached and reused by
+# every other CI job via LCG_LBUG_HOME).
 #
 # Reads the version from the repo-root LBUG_EXTENSION_VERSION file — the same file
 # crates/core/src/lbug_extension_home.rs reads via include_str!() — so the version segment can

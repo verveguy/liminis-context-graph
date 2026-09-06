@@ -148,7 +148,7 @@ jobs:
       # Issue #559 / ADR-0559: this is now the ONLY place in the whole CI run permitted to
       # touch extension.ladybugdb.com, and only on a cache miss keyed by the
       # LBUG_EXTENSION_VERSION file's content (not Cargo.lock — that file is the single
-      # source of truth Db::open's resolve_extension_home() also reads). It replaces the
+      # source of truth Db::open's resolve_extension_files() also reads). It replaces the
       # old per-job `~/.lbdb` cache-or-download pattern (issue #555) that every one of the 7
       # downstream jobs used to run independently: `test` and all 6 e2e jobs below now only
       # download this job's staged bundle as an artifact and point Db::open at it via
